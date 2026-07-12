@@ -61,9 +61,7 @@ function StayLocalButton({ onLocal }: { onLocal: () => void }) {
 function CloudHero({ subtitle }: { subtitle?: string }) {
   return (
     <div className="flex flex-col items-center text-center gap-2">
-      <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#7c3aed]/10">
-        <img src="/LU-monogram-bw.png" alt="LU" width={28} height={28} draggable={false} className="pointer-events-none select-none dark:invert-0 invert" />
-      </span>
+      <img src="/LU-monogram-bw.png" alt="LU" width={48} height={48} draggable={false} className="pointer-events-none select-none dark:invert-0 invert" />
       <h2 className="text-xl font-semibold text-gray-900 dark:text-white">LU Cloud</h2>
       {subtitle && (
         <p className="text-[0.75rem] leading-relaxed text-gray-600 dark:text-gray-400 max-w-xs">{subtitle}</p>

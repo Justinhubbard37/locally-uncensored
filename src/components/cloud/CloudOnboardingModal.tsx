@@ -3,14 +3,14 @@
 // walkthrough, then the switch flips and cloudOnboardingSeen persists so it
 // never shows again. "Not now" leaves everything on Local.
 
-import { Cloud, Coins, Shield } from 'lucide-react'
+import { Coins, Shield, type LucideIcon } from 'lucide-react'
 import { Modal } from '../ui/Modal'
 import { useUIStore } from '../../stores/uiStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 
-const POINTS = [
+const POINTS: { icon?: LucideIcon; img?: string; title: string; body: string }[] = [
   {
-    icon: Cloud,
+    img: '/LU-monogram-bw.png',
     title: 'Hosted models everywhere',
     body: "Chat, image and video switch to LU's hosted GPU fleet — the full cloud catalog, no downloads, no VRAM limits. The Create tab gains the cloud-only ops (edit, animate, upscale, erase, enhance).",
   },
@@ -39,10 +39,12 @@ export function CloudOnboardingModal() {
   return (
     <Modal open={open} onClose={() => setOpen(false)} title="Welcome to LU Cloud">
       <div className="space-y-4">
-        {POINTS.map(({ icon: Icon, title, body }) => (
+        {POINTS.map(({ icon: Icon, img, title, body }) => (
           <div key={title} className="flex items-start gap-3">
-            <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[#7c3aed]/10 text-[#7c3aed] dark:text-[#a78bfa]">
-              <Icon size={14} />
+            <span className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[#7c3aed] dark:text-[#a78bfa] ${img ? '' : 'bg-[#7c3aed]/10'}`}>
+              {img
+                ? <img src={img} alt="" width={24} height={24} draggable={false} className="pointer-events-none select-none dark:invert-0 invert" />
+                : Icon ? <Icon size={14} /> : null}
             </span>
             <div className="space-y-0.5">
               <p className="text-[0.75rem] font-medium text-gray-900 dark:text-gray-100">{title}</p>
