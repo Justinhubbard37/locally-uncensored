@@ -9,6 +9,7 @@ import { useProviderStore } from '../../stores/providerStore'
 import { UpdateBadge } from './UpdateBadge'
 import { DownloadBadge } from './DownloadBadge'
 import { CloudSwitch } from '../cloud/CloudSwitch'
+import { isCloudOnly } from '../../api/backend'
 import { loadModel } from '../../api/ollama'
 import { getProviderIdFromModel } from '../../api/providers'
 import { ModelLoadError } from '../../lib/ollama-errors'
@@ -32,6 +33,9 @@ export function Header() {
   const markHealthFresh = useModelHealthStore((s) => s.markFresh)
   const [showMoreMenu, setShowMoreMenu] = useState(false)
   const isCreateView = currentView === 'create'
+  // macOS launch build is Cloud-only: no Local/Cloud switch, no local model
+  // downloads badge (David 2026-07-11). Windows/Linux keep both.
+  const cloudOnly = isCloudOnly()
 
   // App-level model bootstrap. This used to ride on the header ModelSelector,
   // which sat here always-mounted; the picker has moved into the composer
@@ -255,9 +259,10 @@ export function Header() {
         {/* Purple Cloud light-switch (David 2026-07-10): left of Downloads,
             purple like the website. Gated: flipping ON without a usable
             account opens the CloudGateModal; the first successful flip runs
-            the one-time cloud onboarding. */}
-        <CloudSwitch />
-        <DownloadBadge />
+            the one-time cloud onboarding. Hidden on the macOS Cloud-only build
+            (no switch, no local model downloads — David 2026-07-11). */}
+        {!cloudOnly && <CloudSwitch />}
+        {!cloudOnly && <DownloadBadge />}
 
         <button
           onClick={toggleTheme}

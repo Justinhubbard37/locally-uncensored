@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Minus, Square, Copy, X } from 'lucide-react'
+import { isMacOS } from '../../api/backend'
 
 const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__
 
@@ -44,6 +45,22 @@ export function Titlebar() {
 
   const btnBase = 'inline-flex items-center justify-center w-[46px] h-8 transition-colors'
 
+  // macOS uses the OS-native traffic lights (close/minimize/zoom) rendered on
+  // the LEFT by titleBarStyle:"Overlay" (tauri.macos.conf.json). So on mac we
+  // draw NO custom window buttons — we just reserve space on the left for the
+  // native lights and move the LU logo to the RIGHT (David 2026-07-11). The
+  // whole strip stays a drag region.
+  if (isMacOS()) {
+    return (
+      <div
+        data-tauri-drag-region
+        className="h-8 flex items-center justify-end bg-gray-100 dark:bg-[#141414] select-none pl-[80px] pr-3"
+      >
+        <img src="/LU-monogram-bw.png" alt="" width={18} height={18} className="pointer-events-none dark:invert-0 invert opacity-80" />
+      </div>
+    )
+  }
+
   return (
     <div
       data-tauri-drag-region
@@ -54,7 +71,7 @@ export function Titlebar() {
         <img src="/LU-monogram-bw.png" alt="" width={18} height={18} className="pointer-events-none dark:invert-0 invert opacity-80" />
       </div>
 
-      {/* Right: Window controls */}
+      {/* Right: Window controls (Windows/Linux — custom, since decorations:false) */}
       <div className="flex items-center">
         <button
           onClick={handleMinimize}

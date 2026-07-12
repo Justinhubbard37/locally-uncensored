@@ -18,7 +18,7 @@ import { useCloudAuthStore, deriveCloudAvailable } from '../../stores/cloudAuthS
 import { useCloudAuth } from '../../hooks/useCloudAuth'
 import { AccountPanel } from '../auth/AccountPanel'
 import { CLOUD_BASE } from '../../api/cloud/config'
-import { openExternal } from '../../api/backend'
+import { openExternal, isCloudOnly } from '../../api/backend'
 
 const PLANS = [
   { anchor: 'hosted', name: 'Hosted' },
@@ -89,10 +89,15 @@ export function CloudGateModal() {
   const quota = useCloudAuthStore((s) => s.quota)
   const available = deriveCloudAvailable({ user, licenseActive, access, quota })
 
-  // Signed-out walkthrough position. Reset to the hero every time the gate
-  // opens so a re-open never lands mid-flow.
-  const [step, setStep] = useState<Step>('intro')
-  useEffect(() => { if (open) setStep('intro') }, [open])
+  // macOS Cloud-only build: there is no Local to fall back to. Lead with
+  // sign-in, drop every "Stay on Local" escape, and don't let the gate be
+  // dismissed while the cloud axis is unusable (David 2026-07-11).
+  const cloudOnly = isCloudOnly()
+
+  // Signed-out walkthrough position. Reset every time the gate opens so a
+  // re-open never lands mid-flow — straight to sign-in on the Cloud-only build.
+  const [step, setStep] = useState<Step>(cloudOnly ? 'login' : 'intro')
+  useEffect(() => { if (open) setStep(cloudOnly ? 'login' : 'intro') }, [open, cloudOnly])
 
   // The moment the account clears every gate (fresh login, re-check after
   // subscribing), flip the global switch and get out of the way — via the
@@ -108,6 +113,7 @@ export function CloudGateModal() {
   }, [available, cloudOnboardingSeen, setCloudOnboardingOpen, setOpen, updateSettings])
 
   const stayLocal = () => {
+    if (cloudOnly) return
     updateSettings({ appMode: 'local' })
     setOpen(false)
   }
@@ -128,7 +134,7 @@ export function CloudGateModal() {
   const signedOut = status === 'signed-out' || !user
 
   return (
-    <Modal open={open} onClose={() => setOpen(false)} title="LU Cloud" hideHeader>
+    <Modal open={open} onClose={() => { if (!cloudOnly) setOpen(false) }} title="LU Cloud" hideHeader>
       {signedOut ? (
         step === 'intro' ? (
           <div className="space-y-5 pt-2">
@@ -137,7 +143,7 @@ export function CloudGateModal() {
               <button onClick={() => setStep('plans')} className={primaryBtn}>
                 Get LU Cloud <ArrowRight size={13} />
               </button>
-              <StayLocalButton onLocal={stayLocal} />
+              {!cloudOnly && <StayLocalButton onLocal={stayLocal} />}
             </div>
           </div>
         ) : step === 'plans' ? (
@@ -145,7 +151,7 @@ export function CloudGateModal() {
             <CloudHero subtitle="Pick a plan on lu-labs.ai — payment stays in the browser." />
             <div className="space-y-3 max-w-xs mx-auto">
               <PlanGrid />
-              <StayLocalButton onLocal={stayLocal} />
+              {!cloudOnly && <StayLocalButton onLocal={stayLocal} />}
               <div className="pt-1 flex items-center gap-2">
                 <div className="flex-1 h-px bg-gray-200 dark:bg-white/10" />
                 <span className="text-[0.6rem] text-gray-400 dark:text-gray-600">or</span>
@@ -177,7 +183,7 @@ export function CloudGateModal() {
               but this account has no active plan yet. LU Cloud is part of the paid plans.
             </p>
             <PlanGrid />
-            <StayLocalButton onLocal={stayLocal} />
+            {!cloudOnly && <StayLocalButton onLocal={stayLocal} />}
             <button className={ghostBtn} onClick={() => void refresh()}>
               <RefreshCw size={12} /> I subscribed — re-check
             </button>
@@ -192,7 +198,7 @@ export function CloudGateModal() {
               active, but the beta hasn't opened for it yet — you'll get in the
               moment it does, nothing to reinstall.
             </p>
-            <StayLocalButton onLocal={stayLocal} />
+            {!cloudOnly && <StayLocalButton onLocal={stayLocal} />}
             <button className={ghostBtn} onClick={() => void refresh()}>
               <RefreshCw size={12} /> Re-check
             </button>
@@ -206,7 +212,7 @@ export function CloudGateModal() {
               Your plan is active, but your usage couldn't be loaded just now, so
               Cloud mode can't switch on yet. Check your connection and re-check.
             </p>
-            <StayLocalButton onLocal={stayLocal} />
+            {!cloudOnly && <StayLocalButton onLocal={stayLocal} />}
             <button className={ghostBtn} onClick={() => void refresh()}>
               <RefreshCw size={12} /> Re-check
             </button>
@@ -224,7 +230,7 @@ export function CloudGateModal() {
             <button className={primaryBtn} onClick={() => void openExternal(`${CLOUD_BASE}/account`)}>
               <ExternalLink size={12} /> Open your account
             </button>
-            <StayLocalButton onLocal={stayLocal} />
+            {!cloudOnly && <StayLocalButton onLocal={stayLocal} />}
             <button className={ghostBtn} onClick={() => void refresh()}>
               <RefreshCw size={12} /> Re-check
             </button>

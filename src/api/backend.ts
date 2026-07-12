@@ -21,6 +21,29 @@ export function isTauri(): boolean {
   return !!(w.__TAURI_INTERNALS__ || w.__TAURI__);
 }
 
+/** True when the host OS is macOS. The frontend `dist` is shared across the
+ *  mac and Windows Tauri builds, so platform-specific behaviour must be a
+ *  RUNTIME check. WKWebView reports "MacIntel" / "Mac OS X" (even on Apple
+ *  Silicon); WebView2 reports "Win32" / "Windows NT". */
+export function isMacOS(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const plat = navigator.platform || "";
+  const ua = navigator.userAgent || "";
+  return /Mac|iPhone|iPad|iPod/.test(plat) || /Mac OS X|Macintosh/.test(ua);
+}
+
+/**
+ * Launch policy: the macOS desktop app ships Cloud-ONLY for now (David
+ * 2026-07-11) — it behaves like the web app (hosted models everywhere, no
+ * Local/Cloud switch, no local-hardware surfaces) until the fully-tested local
+ * version is unlocked in a later release. Windows/Linux keep the full
+ * local+cloud app, so this is gated to the packaged mac build only (isTauri so
+ * a mac browser dev session and the unit tests keep the normal switchable UI).
+ */
+export function isCloudOnly(): boolean {
+  return isTauri() && isMacOS();
+}
+
 async function getInvoke() {
   if (!_invoke) {
     const { invoke } = await import("@tauri-apps/api/core");
