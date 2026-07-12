@@ -5,7 +5,7 @@
 // off the cloudAuthStore this panel drives via useCloudAuth.
 
 import { useRef, useState } from 'react'
-import { Loader2, LogOut, ExternalLink, Cloud } from 'lucide-react'
+import { Loader2, LogOut, ExternalLink } from 'lucide-react'
 import { useCloudAuth } from '../../hooks/useCloudAuth'
 import { useCloudAuthStore } from '../../stores/cloudAuthStore'
 import { loginWithProvider } from '../../api/cloud/supabase'
@@ -165,7 +165,7 @@ export function AccountPanel() {
             disabled={busy || !email || !password}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded text-[0.7rem] font-medium bg-gray-900 text-white dark:bg-white dark:text-gray-900 disabled:opacity-40 hover:opacity-90 transition-opacity"
           >
-            {busy ? <Loader2 size={11} className="animate-spin" /> : <Cloud size={11} />}
+            {busy ? <Loader2 size={11} className="animate-spin" /> : <img src="/LU-monogram-bw.png" alt="" width={12} height={12} draggable={false} className="pointer-events-none select-none invert-0 dark:invert" />}
             {mode === 'signin' ? 'Sign in' : 'Create account'}
           </button>
           <button

@@ -55,7 +55,7 @@ export function CloudOnboardingModal() {
             onClick={start}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded text-[0.7rem] font-medium bg-[#7c3aed] text-white hover:opacity-90 transition-opacity"
           >
-            <Cloud size={11} /> Start Cloud mode
+            <img src="/LU-monogram-bw.png" alt="" width={12} height={12} draggable={false} className="pointer-events-none select-none invert-0" /> Start Cloud mode
           </button>
           <button
             onClick={() => setOpen(false)}
