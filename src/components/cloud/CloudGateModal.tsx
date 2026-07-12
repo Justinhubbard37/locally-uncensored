@@ -165,7 +165,9 @@ export function CloudGateModal() {
         ) : (
           /* step === 'login' */
           <div className="space-y-4 pt-2">
-            <CloudHero subtitle="Sign in with the account you subscribed with." />
+            <CloudHero subtitle={cloudOnly
+              ? "The Mac app runs on LU Cloud for now — sign in to chat and generate images and video on hosted GPUs. Local mode (on your own Mac) is coming soon."
+              : "Sign in with the account you subscribed with."} />
             <div className="max-w-xs mx-auto">
               <AccountPanel />
               <button onClick={() => setStep('plans')} className={linkRow + ' w-full mt-3'}>

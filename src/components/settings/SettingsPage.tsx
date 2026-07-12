@@ -53,7 +53,7 @@ import { MCPServerSettings } from './MCPServerSettings'
 import { WorkflowList } from '../agents/WorkflowList'
 import { WorkflowBuilder } from '../agents/WorkflowBuilder'
 import { useUpdateStore, isNewerVersion } from '../../stores/updateStore'
-import { backendCall } from '../../api/backend'
+import { backendCall, isCloudOnly } from '../../api/backend'
 import { ArrowUpCircle } from 'lucide-react'
 
 // ── User profile picture (Appearance) ───────────────────────────
@@ -1090,14 +1090,14 @@ export function SettingsPage() {
                 <div className="flex items-start gap-2">
                   <Lock size={12} className="mt-0.5 shrink-0 text-sky-500" />
                   <div>
-                    <p className="text-gray-700 dark:text-gray-300 font-medium mb-0.5">Cloud mode is active.</p>
-                    <p>Chat, Create renders and voice run on lu-labs.ai against your LU account and are metered against your credits; generated media and job records are stored with your account. Switch to Local in the header to run everything on your machine — the 100%-local pledge below then applies.</p>
+                    <p className="text-gray-700 dark:text-gray-300 font-medium mb-0.5">{isCloudOnly() ? 'The Mac app runs on the cloud.' : 'Cloud mode is active.'}</p>
+                    <p>Chat, Create renders and voice run on lu-labs.ai against your LU account and are metered against your credits; generated media and job records are stored with your account. {isCloudOnly() ? 'Local mode — running everything on your own Mac — is coming to the Mac app soon; the 100%-local pledge below is what it will bring.' : 'Switch to Local in the header to run everything on your machine — the 100%-local pledge below then applies.'}</p>
                   </div>
                 </div>
                 <div className="flex items-start gap-2 pt-1.5">
                   <Shield size={12} className="mt-0.5 shrink-0 text-emerald-500" />
                   <div>
-                    <p className="text-gray-700 dark:text-gray-300 font-medium mb-0.5">Local mode: 100% local.</p>
+                    <p className="text-gray-700 dark:text-gray-300 font-medium mb-0.5">Local mode{isCloudOnly() ? ' (coming soon)' : ''}: 100% local.</p>
                     <p>In local mode chat, agent runs, and image &amp; video generation all execute on your machine — no telemetry, no analytics, no model pings home. Your local data lives in <code className="px-1 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-[0.6rem]">%APPDATA%/Locally Uncensored</code> on Windows (or the equivalent on Linux/macOS).</p>
                   </div>
                 </div>

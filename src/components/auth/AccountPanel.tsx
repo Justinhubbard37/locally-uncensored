@@ -10,7 +10,7 @@ import { useCloudAuth } from '../../hooks/useCloudAuth'
 import { useCloudAuthStore } from '../../stores/cloudAuthStore'
 import { loginWithProvider } from '../../api/cloud/supabase'
 import { CLOUD_BASE } from '../../api/cloud/config'
-import { openExternal } from '../../api/backend'
+import { openExternal, isCloudOnly } from '../../api/backend'
 
 function Meter({ label, used, limit }: { label: string; used: number; limit: number }) {
   const pct = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0
@@ -138,7 +138,9 @@ export function AccountPanel() {
     return (
       <form onSubmit={submit} className="space-y-2">
         <p className="text-[0.7rem] text-gray-600 dark:text-gray-400">
-          Sign in to render images, video and chat on LU's cloud GPUs. Local features never need an account.
+          {isCloudOnly()
+            ? 'Sign in with your lu-labs.ai account to continue.'
+            : "Sign in to render images, video and chat on LU's cloud GPUs. Local features never need an account."}
         </p>
         <input
           type="email"
