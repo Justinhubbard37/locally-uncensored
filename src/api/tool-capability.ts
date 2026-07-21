@@ -10,10 +10,10 @@
  *   - the chat model dropdown can flag it with a small marker, and
  *   - a later Agent / Code run can warn before wasting another request.
  *
- * Mirrors `agents/format-capability.ts`: localStorage-backed, negative results
- * expire after a day so a re-quantised model or an upgraded server deployment
- * recovers on its own without a manual cache clear. No active probe — tool
- * support is learned from real request outcomes, never a synthetic call.
+ * localStorage-backed; negative results expire after a day so a re-quantised
+ * model or an upgraded server deployment recovers on its own without a manual
+ * cache clear. No active probe — tool support is learned from real request
+ * outcomes, never a synthetic call.
  */
 
 const STORAGE_KEY = 'lu-tool-capability-v1'
