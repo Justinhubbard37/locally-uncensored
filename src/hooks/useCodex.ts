@@ -24,6 +24,7 @@ import { fetchRepoMap, renderRepoMapSection } from '../api/agents/repo-map'
 import { isLocalModelByName } from '../api/agents/model-locality'
 import { useStagedChangesStore } from '../stores/stagedChangesStore'
 import { computeUnifiedDiff } from '../lib/diff'
+import { applyUniqueEdit } from '../lib/surgical-edit'
 import { log } from '../lib/logger'
 import type { AgentBlock, AgentToolCall } from '../types/agent-mode'
 import { isThinkingCompatible, isPlainTextPlanner } from '../lib/model-compatibility'
@@ -40,6 +41,8 @@ import { selectRelevantTools, selectRelevantToolsAsync } from '../lib/tool-selec
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
 import { compactMessages, getModelMaxTokens, estimateTokens } from '../lib/context-compaction'
+import { effectiveContextWindow } from '../lib/context-window'
+import { getModelContextCached } from '../api/ollama'
 import { useMemoryStore } from '../stores/memoryStore'
 import { extractMemoriesFromPair } from './useMemory'
 import type { OllamaChatMessage } from '../types/agent-mode'
@@ -61,7 +64,7 @@ const CODEX_REVIEW_SYSTEM_PROMPT = `You are the Coding Agent in REVIEW MODE — 
 
 REVIEW MODE CONTRACT (binding):
 - You MAY call: file_read, file_list, file_search, git_status, git_log, git_diff, system_info, process_list, get_current_time, web_fetch, web_search.
-- You MUST NOT call: file_write, shell_execute, code_execute, run_tests, git_commit, git_push, gh_pr_create, image_generate, video_generate, run_workflow, screenshot, delegate_task. If you call them, the harness will reject the call and tell the model "review-only mode" — wasted budget.
+- You MUST NOT call: file_write, file_edit, shell_execute, code_execute, run_tests, git_commit, git_push, gh_pr_create, image_generate, video_generate, run_workflow, screenshot, delegate_task. If you call them, the harness will reject the call and tell the model "review-only mode" — wasted budget.
 - Output format: a markdown report with sections "## Summary", "## Findings (priority order)", "## Suggested follow-ups". For each finding cite the file + line range (path:line or path:start-end).
 - Be direct. No flattery, no boilerplate. If the code is fine, say so in one sentence and stop.`
 
@@ -79,12 +82,13 @@ AUTONOMY CONTRACT (read carefully):
 Workflow per task:
 1. Understand the task (optional brief sentence)
 2. Explore the codebase — file_list / file_read / file_search
-3. Implement ALL required changes — file_write, as many calls as needed in one go
+3. Implement ALL required changes — file_edit to change existing files, file_write for new ones; as many calls as needed in one go
 4. Verify — shell_execute to run tests, lint, or build
 5. Only THEN write a short summary of what you did
 
 Rules:
 - Always read a file before modifying it
+- To CHANGE part of an existing file, use file_edit (replace a UNIQUE old_string with new_string) — it is far cheaper and safer than rewriting the whole file with file_write, and never truncates a large file. Use file_write only to CREATE a new file or fully replace one. If file_edit reports the old_string is missing or not unique, read the file and retry with more surrounding lines.
 - PATHS: use paths relative to the working directory shown below (e.g. \`package.json\`, \`src/app.ts\`, \`.\` for the current folder). Never start a path with \`/\` or a drive letter (\`C:\\\`) — that escapes the workspace and fails.
 - Chain tool calls: after each tool result, if there is another step left, IMMEDIATELY call the next tool
 - If a command fails, diagnose and retry with a different approach — don't hand back to the user unless truly stuck
@@ -103,6 +107,7 @@ const CODEX_SYSTEM_PROMPT_LEAN = `You are a coding agent in LU. Use tools to do 
 
 Rules:
 - Read a file before you edit it.
+- To change an existing file use file_edit (replace a unique old_string with new_string), not file_write. Use file_write only to create a new file.
 - PATHS: use relative paths (e.g. \`package.json\`, \`.\`). Never start with \`/\` or a drive letter — it escapes the workspace and fails.
 - Emit the tool call as your FIRST output — no "Okay, let me…" preamble. One step at a time, as valid JSON.
 - After each tool result, if more steps remain, immediately call the next tool. Do not narrate "I will now…" and then stop.
@@ -128,6 +133,7 @@ const CODEX_CATEGORIES = ['filesystem', 'terminal', 'system', 'web', 'image', 'v
 // stay allowed so the agent can do its job.
 const REVIEW_MODE_FORBIDDEN_TOOLS = new Set([
   'file_write',
+  'file_edit',
   'shell_execute',
   'code_execute',
   'shell_execute_background',
@@ -146,21 +152,29 @@ const REVIEW_MODE_FORBIDDEN_TOOLS = new Set([
   'delegate_task',
 ])
 
-// `.lurules` reader — backendCall wraps the desktop Tauri `file_read`
-// command. Resolves absolute paths as-is (Bug "doubled path" fix in
-// v2.3 made the drive-letter detection robust), so the absolute lurules
-// path we compute below lands at the user's real `.lurules` file. The
-// reader swallows errors to a null return so loadLurules() can treat
-// "missing file" and "fs error" identically.
-const lurulesReader: RulesReader = {
-  async read(path: string): Promise<string | null> {
-    try {
-      const r = await backendCall<{ content?: string }>('file_read', { path })
-      return r?.content ?? null
-    } catch {
-      return null
-    }
-  },
+// `.lurules` reader. MUST go through `fs_read` (the workspace-aware command)
+// with the run's chatId + workingDirectory — NOT the older `file_read`, which
+// jails every path to the per-chat sandbox (agent-workspace/<id>) and so
+// REJECTS the absolute `<workDir>/.lurules` path with "escapes the allowed
+// workspace". That silent rejection meant per-repo rules never loaded in a real
+// folder workspace. Threading workingDirectory sets the jail root to the actual
+// project folder, so the absolute rules path resolves. Errors still swallow to
+// null so loadLurules() treats "missing file" and "fs error" identically.
+function makeLurulesReader(chatId: string, workDir: string): RulesReader {
+  return {
+    async read(path: string): Promise<string | null> {
+      try {
+        const r = await backendCall<{ content?: string }>('fs_read', {
+          path,
+          chatId,
+          workingDirectory: workDir,
+        })
+        return r?.content ?? null
+      } catch {
+        return null
+      }
+    },
+  }
 }
 
 // Detect when the model emits a re-introduction of itself ("Hello, I am
@@ -388,7 +402,7 @@ export function useCodex() {
     // by the reader so the codex loop still starts.
     if (workDir && workDir !== '.') {
       try {
-        const rules = await loadLurules(workDir, lurulesReader)
+        const rules = await loadLurules(workDir, makeLurulesReader(convId, workDir))
         if (rules) {
           systemPrompt += renderRulesSection(rules)
         }
@@ -571,12 +585,22 @@ export function useCodex() {
     // Ollama used its small default (~4k) while compaction trimmed to the
     // model's max → the history overflowed the real window and weak models
     // (gemma4 with Think on) returned EMPTY turns, which the loop misread as
-    // "done" and printed a false "Task completed" (David 2026-06-04). Pin a
-    // sane floor (user override wins) and compact to it so both agree.
-    const numCtx =
-      settings.contextWindowOverride && settings.contextWindowOverride > 0
-        ? settings.contextWindowOverride
-        : 8192
+    // "done" and printed a false "Task completed" (David 2026-06-04). A later
+    // fix pinned a flat 8192 — but that hard cap throttled 32k-capable coding
+    // models (qwen2.5-coder 32k) down to 8k AND drove compaction to trim their
+    // history to ~6.5k. Mirror useAgentChat (David: "muss immer stimmen"): the
+    // user override wins, else the model's REAL context capped for VRAM
+    // (effectiveContextWindow → 16384 on Ollama), floored at 8192 so a
+    // 4k-default model never overflows. Both the num_ctx we send and the
+    // compaction target below derive from this one value, so they always agree.
+    let numCtx: number = settings.contextWindowOverride || 8192
+    if (providerId === 'ollama' && !settings.contextWindowOverride) {
+      try {
+        numCtx = Math.max(effectiveContextWindow(await getModelContextCached(modelToUse), 0), 8192)
+      } catch {
+        // Keep the 8192 floor when the model's context can't be probed.
+      }
+    }
 
     try {
       // Agent loop — max 20 iterations (legacy cap) AND AgentBudget cap,
@@ -613,7 +637,14 @@ export function useCodex() {
       // Raised again 50 → 200 (v2.5.0 — uselu live-test 1af958b2):
       // scaffold-install-fix-verify on 35B local model legitimately
       // needs 100+ iterations across multi-file refactors.
-      const MAX_CODEX_ITERATIONS = 200
+      // 2.5.9: derive the outer bound from the configured cap instead of a
+      // hardcoded 200 that shadowed it — setting agentMaxIterations above 200
+      // used to do nothing (loop exited at 200) and the budget's halt message
+      // told the user to raise a cap that had no effect. The AgentBudget below
+      // (same cap) still fires its halt message on the final iteration, since it
+      // is checked at the top of the loop body; this bound is the runaway
+      // backstop. Floor of 1 so a stray 0 setting can't zero the loop.
+      const MAX_CODEX_ITERATIONS = Math.max(settings.agentMaxIterations ?? 200, 1)
       for (let i = 0; i < MAX_CODEX_ITERATIONS && runningRef.current && !abort.signal.aborted; i++) {
         budget.addIteration()
         const bx = budget.exceeded()
@@ -1078,7 +1109,7 @@ export function useCodex() {
           //   workDir=D:/Pictures/foo, p=D:/Pictures/foo/bar.html →
           //   D:/Pictures/foo/D:/Pictures/foo/bar.html
           // which then grew further on retry as the model re-emitted the path.
-          if ((toolName === 'file_read' || toolName === 'file_write' || toolName === 'file_list' || toolName === 'file_search') && toolArgs.path) {
+          if ((toolName === 'file_read' || toolName === 'file_write' || toolName === 'file_edit' || toolName === 'file_list' || toolName === 'file_search') && toolArgs.path) {
             const p: string = toolArgs.path
             const isAbsolute =
               /^[a-zA-Z]:[/\\]/.test(p) ||  // Windows drive letter: C:/ D:\ etc.
@@ -1115,13 +1146,21 @@ export function useCodex() {
         // renders as a pure insert). Errors are swallowed — a failing
         // pre-read just means the file_change event won't carry a diff,
         // never blocks the write.
+        //
+        // MUST use `fs_read` with the run's chatId + workingDirectory. The
+        // older `file_read` jails to the per-chat sandbox and REJECTS the
+        // absolute project path, so every pre-read returned '' and every diff
+        // rendered as a 100% insert — hiding exactly the deletions/overwrites
+        // the user needs to see before approving a staged change.
+        const readCtx: { chatId?: string; workingDirectory?: string } =
+          workDir && workDir !== '.' ? { chatId: convId, workingDirectory: workDir } : { chatId: convId }
         const oldContents = new Map<string, string>()
         await Promise.all(
           batch
-            .filter((e) => e.ac.toolName === 'file_write' && typeof e.injectedArgs.path === 'string')
+            .filter((e) => (e.ac.toolName === 'file_write' || e.ac.toolName === 'file_edit') && typeof e.injectedArgs.path === 'string')
             .map(async (e) => {
               try {
-                const r = await backendCall<{ content?: string }>('file_read', { path: e.injectedArgs.path })
+                const r = await backendCall<{ content?: string }>('fs_read', { path: e.injectedArgs.path, ...readCtx })
                 oldContents.set(e.ac.id, r?.content ?? '')
               } catch {
                 oldContents.set(e.ac.id, '')
@@ -1183,14 +1222,19 @@ export function useCodex() {
           // happens later, after this turn's finally clears the active
           // chat/workspace context, so a relative path would otherwise route to
           // agent-workspace/default/ instead of the real project folder. The
-          // bridge uses an absolute path as-is. (v2.5.0 audit fix.)
+          // bridge jails absolute paths to the workspace root, so the pre-read
+          // MUST pass the run's workingDirectory (as its root) — otherwise the
+          // absolute project path is rejected and the staged diff shows a 100%
+          // insert, hiding what will be overwritten. (v2.5.0 + 2.5.9 audit fix.)
           const isAbs = /^([a-zA-Z]:[\\/]|[\\/]|\\\\)/.test(path)
           const resolvedPath = isAbs || !workDir || workDir === '.'
             ? path
             : `${workDir.replace(/[\\/]+$/, '')}${workDir.includes('\\') ? '\\' : '/'}${path.replace(/^[\\/]+/, '')}`
+          const stageReadCtx: { chatId?: string; workingDirectory?: string } =
+            workDir && workDir !== '.' ? { chatId: convId, workingDirectory: workDir } : { chatId: convId }
           let oldContent = ''
           try {
-            const r = await backendCall<{ content?: string }>('file_read', { path: resolvedPath })
+            const r = await backendCall<{ content?: string }>('fs_read', { path: resolvedPath, ...stageReadCtx })
             oldContent = r?.content ?? ''
           } catch {
             // New file — leave oldContent empty so the diff renders an
@@ -1200,6 +1244,11 @@ export function useCodex() {
           useStagedChangesStore.getState().stage(convId!, {
             path,
             resolvedPath,
+            // Capture the workspace root so Apply (which runs after the loop's
+            // finally clears the active context) can jail the write to the real
+            // project folder instead of agent-workspace/default. Undefined in
+            // sandbox mode — the per-chat sandbox is the right root there.
+            workingDirectory: workDir && workDir !== '.' ? workDir : undefined,
             oldContent,
             newContent,
             diff,
@@ -1207,9 +1256,56 @@ export function useCodex() {
           return `Staged for review: ${path}. The user will apply or reject the change before it lands on disk.`
         }
 
+        // Stage-mode counterpart for surgical edits: resolve old_string ->
+        // new_string against the current file NOW and stage the resulting full
+        // content, so the staged diff and the applied write are the real change
+        // (and a bad edit is reported the same way whether staged or not).
+        const stageFileEdit = async (args: Record<string, any>): Promise<string> => {
+          const path = String(args.path ?? '')
+          if (!path) return 'file_edit: missing path'
+          const oldString = typeof args.old_string === 'string' ? args.old_string : ''
+          const newString = typeof args.new_string === 'string' ? args.new_string : ''
+          const isAbs = /^([a-zA-Z]:[\\/]|[\\/]|\\\\)/.test(path)
+          const resolvedPath = isAbs || !workDir || workDir === '.'
+            ? path
+            : `${workDir.replace(/[\\/]+$/, '')}${workDir.includes('\\') ? '\\' : '/'}${path.replace(/^[\\/]+/, '')}`
+          const stageReadCtx: { chatId?: string; workingDirectory?: string } =
+            workDir && workDir !== '.' ? { chatId: convId, workingDirectory: workDir } : { chatId: convId }
+          let oldContent = ''
+          try {
+            const r = await backendCall<{ content?: string; encoding?: string }>('fs_read', { path: resolvedPath, ...stageReadCtx })
+            if (r?.encoding === 'base64') return `file_edit: cannot edit a binary file (${path}).`
+            oldContent = r?.content ?? ''
+          } catch {
+            return `file_edit: could not read ${path}. To create a new file use file_write.`
+          }
+          const applied = applyUniqueEdit(oldContent, oldString, newString)
+          if (!applied.ok) {
+            switch (applied.reason) {
+              case 'empty_old': return 'file_edit: old_string must be non-empty. Use file_write to create a new file.'
+              case 'noop': return 'file_edit: old_string and new_string are identical — nothing to change.'
+              case 'not_found': return `file_edit: old_string not found in ${path}. Read the file and copy the exact text you want to replace.`
+              case 'not_unique': return `file_edit: old_string matches ${applied.matches} places in ${path}. Add surrounding lines so it is unique.`
+              default: return 'file_edit: failed.'
+            }
+          }
+          const newContent = applied.content ?? ''
+          const diff = computeUnifiedDiff(path, oldContent, newContent)
+          useStagedChangesStore.getState().stage(convId!, {
+            path,
+            resolvedPath,
+            workingDirectory: workDir && workDir !== '.' ? workDir : undefined,
+            oldContent,
+            newContent,
+            diff,
+          })
+          return `Staged for review: ${path} (surgical edit). The user will apply or reject the change before it lands on disk.`
+        }
+
         const dispatchTool = (name: string, args: Record<string, any>): Promise<string> => {
-          if (name === 'file_write' && settings.codexStageMode) {
-            return stageFileWrite(args)
+          if (settings.codexStageMode) {
+            if (name === 'file_write') return stageFileWrite(args)
+            if (name === 'file_edit') return stageFileEdit(args)
           }
           return withTimeout(name, args)
         }
@@ -1319,6 +1415,26 @@ export function useCodex() {
               oldText,
               newText,
             )
+            codexStore.addEvent(convId, {
+              id: uuid(), type: 'file_change', content: resultStr,
+              filePath: entry.injectedArgs.path,
+              diff: diff || undefined,
+              timestamp: Date.now(),
+            })
+          } else if (entry.ac.toolName === 'file_edit') {
+            // Surgical edit — the tool only received old_string/new_string, so
+            // reconstruct the new content from the pre-read + the unique
+            // replacement to attach a real diff. If the edit did not apply
+            // uniquely the executor already returned an error; skip the diff.
+            const oldText = oldContents.get(entry.ac.id) ?? ''
+            const applied = applyUniqueEdit(
+              oldText,
+              typeof entry.injectedArgs.old_string === 'string' ? entry.injectedArgs.old_string : '',
+              typeof entry.injectedArgs.new_string === 'string' ? entry.injectedArgs.new_string : '',
+            )
+            const diff = applied.ok
+              ? computeUnifiedDiff(entry.injectedArgs.path, oldText, applied.content ?? '')
+              : undefined
             codexStore.addEvent(convId, {
               id: uuid(), type: 'file_change', content: resultStr,
               filePath: entry.injectedArgs.path,

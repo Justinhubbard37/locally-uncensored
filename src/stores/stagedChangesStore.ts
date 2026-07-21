@@ -15,6 +15,17 @@ export interface StagedChange {
    * where it should. Falls back to `path` (already absolute / no workspace set).
    */
   resolvedPath?: string
+  /**
+   * The run's workspace root, captured AT STAGE TIME. Apply runs after the loop
+   * ends, when the active chat/workspace context is cleared — so without this
+   * the write jails to agent-workspace/default and REJECTS the absolute project
+   * path ("escapes the allowed workspace"), silently failing every apply into a
+   * real folder. The apply path (a trusted, user-gated UI action) passes this
+   * as fs_write's working_directory so the jail root is the real project folder.
+   * Undefined for sandbox-mode runs (no real folder), where the per-chat
+   * sandbox is the correct root anyway.
+   */
+  workingDirectory?: string
   /** Full file content before the write — empty string when the target didn't exist. */
   oldContent: string
   /** Full file content the model wants to write. */

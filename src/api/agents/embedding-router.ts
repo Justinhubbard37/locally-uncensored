@@ -75,11 +75,16 @@ export async function precomputeToolEmbeddings(
 }
 
 function cosine(a: number[], b: number[]): number {
+  // Different-length vectors come from different embedding models — e.g. a
+  // mid-session backend switch between Ollama's nomic-embed-text (768-d) and
+  // the bundled embed server. They live in incompatible spaces, so comparing
+  // the Math.min(a,b) overlap yields a garbage similarity that silently
+  // corrupts the ranking. Refuse instead.
+  if (a.length !== b.length) return 0
   let dot = 0
   let magA = 0
   let magB = 0
-  const n = Math.min(a.length, b.length)
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < a.length; i++) {
     dot += a[i] * b[i]
     magA += a[i] * a[i]
     magB += b[i] * b[i]
@@ -107,6 +112,14 @@ export async function rankToolsByEmbedding(
   for (const t of tools) {
     const c = CACHE.get(t.name)
     if (!c) continue
+    if (c.vector.length !== queryVec.length) {
+      // Cached in a different embedding model's space (dimension differs from
+      // the current backend's query vector). Drop it so the next precompute
+      // pass re-embeds it in the CURRENT space — self-heals a mid-session
+      // backend switch instead of ranking on garbage similarity forever.
+      CACHE.delete(t.name)
+      continue
+    }
     scored.push({ tool: t, score: cosine(queryVec, c.vector) })
   }
   scored.sort((a, b) => b.score - a.score)

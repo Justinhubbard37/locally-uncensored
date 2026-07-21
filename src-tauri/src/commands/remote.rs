@@ -1564,7 +1564,7 @@ button{-webkit-appearance:none;appearance:none}
                  {name:'maxLength',type:'number',description:'Max chars to return (default: 24000)',required:false}]},
     {name:'file_read', description:'Read the complete contents of a file. PREFER absolute paths; relative paths resolve against the agent workspace (~/agent-workspace). The entire file is returned — there is no pagination or range parameter. DO NOT re-read a file you just wrote with file_write; the write response already confirmed the save. For directory listings use file_list; for content search across many files use file_search.',
      parameters:[{name:'path',type:'string',description:'Path to the file (absolute preferred)',required:true}]},
-    {name:'file_write', description:'Write a file. Creates parent directories if missing. OVERWRITES existing content — there is NO append mode. To preserve existing content and append, use file_read FIRST then file_write with the combined content. PREFER absolute paths. Writes to the same path within one turn are serialized automatically via the sideEffectKey scheduler.',
+    {name:'file_write', description:'Write a WHOLE file. Use for CREATING a new file or fully replacing one. To change part of an EXISTING file, PREFER file_edit — it is far cheaper than resending the whole file and never truncates a large one. Creates parent directories if missing. OVERWRITES existing content — there is NO append mode. PREFER absolute paths. Writes to the same path within one turn are serialized automatically via the sideEffectKey scheduler.',
      parameters:[{name:'path',type:'string',description:'Path to the file (absolute preferred)',required:true},
                  {name:'content',type:'string',description:'The complete new content of the file',required:true}]},
     {name:'file_list', description:'List directory contents. Returns entries with name, isDir, size, full path. Supports recursive=true for full tree and glob pattern ("*.ts", "**/*.py"). PREFER a specific pattern over recursive listing of large trees — recursing home / C:\\ is slow. For content search (grep), use file_search instead.',
@@ -2839,7 +2839,7 @@ button{-webkit-appearance:none;appearance:none}
   var PERMISSION_META = [
     {key:'filesystem',      label:'Filesystem',       desc:'Agent can read/write files + run code on the desktop.'},
     {key:'downloads',       label:'Downloads',        desc:'Agent can trigger model pulls / installs (Ollama + ComfyUI).'},
-    {key:'process_control', label:'Process Control',  desc:'Remote clients can access ComfyUI (generate images / video).'}
+    {key:'process_control', label:'Process Control',  desc:'Reach ComfyUI and Ollama on the desktop, and start or stop them.'}
   ];
 
   function fetchRemotePerms(){

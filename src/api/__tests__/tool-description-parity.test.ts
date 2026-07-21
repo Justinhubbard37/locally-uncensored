@@ -159,6 +159,10 @@ describe('tool-description-parity — extraction sanity', () => {
 //     a "desktop only" observation; video_generate isn't listed there yet).
 const MOBILE_SKIP: ReadonlySet<string> = new Set<string>([
   'run_workflow', 'delegate_task',
+  // file_edit (2.5.9 surgical edit) is desktop-only: its executor lives in
+  // src/api/mcp/builtin-tools.ts and the mobile remote surface has no Rust
+  // dispatcher for it (same situation as the other TS-only coding tools below).
+  'file_edit',
   'run_tests',
   'git_status', 'git_commit', 'git_push', 'git_log', 'git_diff',
   'gh_pr_create',

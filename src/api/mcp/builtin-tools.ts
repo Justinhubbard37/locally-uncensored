@@ -8,12 +8,16 @@ import { useAgentWorkflowStore } from '../../stores/agentWorkflowStore'
 import { WorkflowEngine } from '../../lib/workflow-engine'
 import type { StepResult } from '../../types/agent-workflows'
 import { DELEGATE_TASK_TOOL_DEF, buildDelegateExecutor } from '../agents/sub-agent'
+import { applyUniqueEdit } from '../../lib/surgical-edit'
 
 /**
- * Helper: current chat id as a plain `{ chatId }` fragment to spread into
- * backendCall payloads. Returns `{}` when no agent loop is active — the
- * Rust side then falls back to `agent-workspace/default/` for relative
- * paths (and uses absolute paths as-is regardless).
+ * Helper: current chat id (+ folder workspace) as a fragment to spread into
+ * backendCall payloads. Returns `{}` when no agent loop is active — the Rust
+ * side then falls back to `agent-workspace/default/` as the jail root. NOTE:
+ * absolute paths are NOT used as-is — the backend jails every path (relative OR
+ * absolute) to the resolved workspace root and rejects anything outside it, so
+ * a caller that needs an absolute project path to resolve MUST pass the real
+ * `workingDirectory` here (it becomes the root).
  */
 function chatCtx(): { chatId?: string; workingDirectory?: string } {
   const id = getActiveChatId()
@@ -92,8 +96,9 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
   {
     name: 'file_write',
     description:
-      'Write a file. Creates parent directories if missing. OVERWRITES existing content — there is NO append mode. '
-      + 'To preserve existing content and append, use file_read FIRST then file_write with the combined content. '
+      'Write a WHOLE file. Use for CREATING a new file or fully replacing one. '
+      + 'To change part of an EXISTING file, PREFER file_edit — it is far cheaper than resending the whole file and never truncates a large one. '
+      + 'Creates parent directories if missing. OVERWRITES existing content — there is NO append mode. '
       + 'PREFER absolute paths. '
       + 'Writes to the same path within one turn are serialized automatically via the sideEffectKey scheduler.',
     inputSchema: {
@@ -103,6 +108,26 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
         content: { type: 'string', description: 'The complete new content of the file' },
       },
       required: ['path', 'content'],
+    },
+    category: 'filesystem',
+    source: 'builtin',
+  },
+  {
+    name: 'file_edit',
+    description:
+      'Make a SURGICAL edit to an existing file: replace old_string with new_string. '
+      + 'PREFER this over file_write for changing an existing file — you send only the lines that change, so it is far cheaper and never truncates a large file. '
+      + 'old_string must match EXACTLY ONCE: copy the exact text (including indentation) from a prior file_read and include enough surrounding lines to be unique. '
+      + 'It FAILS with no change if old_string is missing or matches more than one place — then read the file and retry with more context. '
+      + 'Use file_write instead to create a new file or fully rewrite one.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Path to the existing file (absolute preferred)' },
+        old_string: { type: 'string', description: 'Exact text to find — must occur exactly once in the file' },
+        new_string: { type: 'string', description: 'Replacement text' },
+      },
+      required: ['path', 'old_string', 'new_string'],
     },
     category: 'filesystem',
     source: 'builtin',
@@ -667,6 +692,15 @@ async function executeWebFetch(args: Record<string, any>): Promise<string> {
 
 async function executeFileRead(args: Record<string, any>): Promise<string> {
   const data = await backendCall('fs_read', { path: args.path, ...chatCtx() })
+  // Binary files come back base64-encoded (encoding: 'base64'). Returning that
+  // raw base64 as if it were the file's text is a corruption trap: the model
+  // treats it as content and a later file_write persists the base64 STRING,
+  // silently mangling the binary. Surface a clear marker instead so the model
+  // knows it is binary and leaves it alone.
+  if (data.encoding === 'base64') {
+    const approxBytes = Math.floor((String(data.content || '').length * 3) / 4)
+    return `[binary file — ${formatBytes(approxBytes)}, not shown. This tool reads text only; do not write binary content back through file_write.]`
+  }
   return data.content || ''
 }
 
@@ -703,12 +737,60 @@ async function executeFileWrite(args: Record<string, any>): Promise<string> {
     return `Created "${name}" (${formatBytes(content.length)}). It is shown to the user right here in the chat with a preview and a Download button — nothing was written to disk. Do not call file_read on it; just tell the user it's ready.`
   }
   const data = await backendCall('fs_write', { path: args.path, content, ...chatCtx() })
-  // Rust returns {status: 'saved', path: <absolute>}. Surface the real path
-  // so the model (and the file-change event) knows WHERE the write landed —
-  // especially important when chatId is None and Rust routes a relative path
-  // to `agent-workspace/default/`.
+  // Rust returns {status: 'saved'|'unchanged', path: <absolute>, bytes}. Surface
+  // the real path so the model (and the file-change event) knows WHERE the write
+  // landed — especially important when chatId is None and Rust routes a relative
+  // path to `agent-workspace/default/`. 'unchanged' means the bytes already
+  // matched (EOL/BOM-normalized), so nothing was rewritten — tell the model so
+  // it doesn't loop trying to "apply" a change that is already in place.
   if (data.status === 'saved' && data.path) return `File saved: ${data.path}`
+  if (data.status === 'unchanged' && data.path) return `File already up to date, no changes written: ${data.path}`
   return JSON.stringify(data)
+}
+
+async function executeFileEdit(args: Record<string, any>): Promise<string> {
+  // Plain-chat artifact mode has no files on disk — file_edit makes no sense
+  // there. Steer to file_write (which captures a document artifact) instead of
+  // silently reaching into the agent sandbox.
+  if (isChatArtifactMode()) {
+    return 'file_edit is not available in plain chat (there are no files on disk here). Use file_write to create or replace a document.'
+  }
+  const path = typeof args.path === 'string' ? args.path : ''
+  if (!path) return 'Error: file_edit requires a "path".'
+  const oldString = typeof args.old_string === 'string' ? args.old_string : ''
+  const newString = typeof args.new_string === 'string' ? args.new_string : ''
+
+  // Read the CURRENT content (workspace-aware). file_edit only edits an
+  // existing text file — for a new file the model must use file_write.
+  let data: any
+  try {
+    data = await backendCall('fs_read', { path, ...chatCtx() })
+  } catch (e) {
+    return `Error: file_edit could not read ${path} — ${e instanceof Error ? e.message : String(e)}. To create a new file use file_write.`
+  }
+  if (data.encoding === 'base64') return `Error: file_edit cannot edit a binary file (${path}).`
+  const content = typeof data.content === 'string' ? data.content : ''
+
+  const res = applyUniqueEdit(content, oldString, newString)
+  if (!res.ok) {
+    switch (res.reason) {
+      case 'empty_old':
+        return 'Error: file_edit requires a non-empty old_string. To create a new file use file_write.'
+      case 'noop':
+        return 'Error: old_string and new_string are identical — nothing to change.'
+      case 'not_found':
+        return `Error: old_string was not found in ${path}. Read the file and copy the exact text (including indentation) you want to replace.`
+      case 'not_unique':
+        return `Error: old_string matches ${res.matches} places in ${path}. Add surrounding lines so it uniquely identifies ONE location, then retry.`
+      default:
+        return 'Error: file_edit failed.'
+    }
+  }
+
+  const w = await backendCall('fs_write', { path, content: res.content, ...chatCtx() })
+  if (w.status === 'saved' && w.path) return `Edited ${w.path} (1 replacement).`
+  if (w.status === 'unchanged' && w.path) return `No change written to ${w.path} (content already matched).`
+  return JSON.stringify(w)
 }
 
 async function executeFileList(args: Record<string, any>): Promise<string> {
@@ -968,8 +1050,12 @@ async function executeRunTests(args: Record<string, any>): Promise<string> {
           recursive: false,
           ...chatCtx(),
         })
-        const names: string[] = Array.isArray(listing.items)
-          ? listing.items.map((it: any) => String(it.name ?? '')).filter(Boolean)
+        // fs_list returns { entries, count } — NOT `items`. Reading the wrong
+        // key made `names` always [] → detectRunnerFromFiles([]) = 'unknown' →
+        // empty command → "could not detect a test runner" for every project,
+        // so the advertised auto-detect never once fired.
+        const names: string[] = Array.isArray(listing.entries)
+          ? listing.entries.map((it: any) => String(it.name ?? '')).filter(Boolean)
           : []
         runner = detectRunnerFromFiles(names)
       } catch {
@@ -1176,6 +1262,7 @@ const EXECUTOR_MAP: Record<string, (args: Record<string, any>) => Promise<string
   web_fetch: executeWebFetch,
   file_read: executeFileRead,
   file_write: executeFileWrite,
+  file_edit: executeFileEdit,
   file_list: executeFileList,
   file_search: executeFileSearch,
   shell_execute: executeShellExecute,

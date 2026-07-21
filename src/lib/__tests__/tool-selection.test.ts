@@ -279,4 +279,39 @@ describe('tool-selection', () => {
       expect(names).toContain('process_list')
     })
   })
+
+  // ── Coding intents don't route to web; discovery tools stay (P1 #4) ──
+  describe('coding intent routing', () => {
+    it('a coding search keeps file discovery tools and never web_fetch', () => {
+      // "search the codebase…" used to match the bare 'search' web keyword,
+      // pull web_search+web_fetch, inflate the count past 3 and skip the
+      // file-tool booster — leaving the coding turn with no way to find files.
+      const names = toolNames(
+        selectRelevantTools('search the codebase for the auth handler and refactor it', ALL_TOOLS, ALL_ALLOWED),
+      )
+      expect(names).toContain('file_search')
+      expect(names).toContain('file_list')
+      // The web GROUP must not fire on a bare coding "search" (web_fetch is only
+      // ever added by that group, never by the generic fallback).
+      expect(names).not.toContain('web_fetch')
+    })
+
+    it('"fix the current bug" does not trigger the web group', () => {
+      const names = toolNames(selectRelevantTools('fix the current bug in auth.ts', ALL_TOOLS, ALL_ALLOWED))
+      expect(names).not.toContain('web_fetch')
+    })
+
+    it('a shell-heavy coding turn still gets file discovery (safety net)', () => {
+      // Matches the shell group (count > 3) so the generic <=3 fallback is
+      // skipped; the discovery safety net must still add file_search/file_list.
+      const names = toolNames(
+        selectRelevantTools('run the tests and find the failing spec', ALL_TOOLS, ALL_ALLOWED),
+      )
+      expect(names).toContain('shell_execute')
+      expect(names).toContain('file_search')
+      expect(names).toContain('file_list')
+      // Not forced onto a pure coding turn.
+      expect(names).not.toContain('web_fetch')
+    })
+  })
 })

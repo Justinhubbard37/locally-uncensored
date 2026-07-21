@@ -186,6 +186,53 @@ pub fn fs_read(path: String, chatId: Option<String>, workingDirectory: Option<St
     }
 }
 
+/// Match new content to the EXISTING file's line-ending + BOM convention so an
+/// edit produces a minimal diff instead of flipping every line. Local coding
+/// models emit `\n`; on a Windows repo whose files are CRLF, writing that raw
+/// turned every edit into a whole-file whitespace diff. For a NEW file we honor
+/// exactly what the caller sent — there is no convention to match.
+fn normalize_to_existing_style(existing: Option<&[u8]>, new: &str) -> Vec<u8> {
+    const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+    let existing = match existing {
+        Some(e) => e,
+        None => return new.as_bytes().to_vec(),
+    };
+    let had_bom = existing.starts_with(&BOM);
+    // The file is treated as CRLF if it contains any CRLF pair.
+    let existing_crlf = existing.windows(2).any(|w| w == b"\r\n");
+    // Normalize incoming to LF first (idempotent), then to the target style.
+    let lf = new.replace("\r\n", "\n");
+    let bodied = if existing_crlf { lf.replace('\n', "\r\n") } else { lf };
+    let mut out = Vec::with_capacity(bodied.len() + 3);
+    if had_bom && !bodied.as_bytes().starts_with(&BOM) {
+        out.extend_from_slice(&BOM);
+    }
+    out.extend_from_slice(bodied.as_bytes());
+    out
+}
+
+/// Write bytes to `target` atomically: a temp file in the SAME directory, then
+/// rename over the target. A crash or interrupt can never leave a half-written
+/// (truncated) file where the original was — std::fs::rename replaces the
+/// destination on both Unix and Windows.
+fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let parent = target.parent().ok_or_else(|| "No parent directory".to_string())?;
+    let base = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = parent.join(format!(".{}.tmp{}-{}", base, std::process::id(), seq));
+    fs::write(&tmp, bytes).map_err(|e| format!("Write error: {}", e))?;
+    if let Err(e) = fs::rename(&tmp, target) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("Write error (rename): {}", e));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 #[allow(non_snake_case)]
 pub fn fs_write(path: String, content: String, chatId: Option<String>, workingDirectory: Option<String>) -> Result<serde_json::Value, String> {
@@ -193,8 +240,29 @@ pub fn fs_write(path: String, content: String, chatId: Option<String>, workingDi
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Create dir: {}", e))?;
     }
-    fs::write(&full, &content).map_err(|e| format!("Write error: {}", e))?;
-    Ok(serde_json::json!({ "status": "saved", "path": full.to_string_lossy() }))
+    // Read the current bytes (if any) to preserve the file's EOL/BOM convention
+    // and to detect a no-op write.
+    let existing = fs::read(&full).ok();
+    let out_bytes = normalize_to_existing_style(existing.as_deref(), &content);
+
+    if let Some(ref old) = existing {
+        if old.as_slice() == out_bytes.as_slice() {
+            // Nothing changed — skip the write so there is no spurious mtime
+            // bump and no misleading "saved" for an identical file.
+            return Ok(serde_json::json!({
+                "status": "unchanged",
+                "path": full.to_string_lossy(),
+                "bytes": out_bytes.len(),
+            }));
+        }
+    }
+
+    write_atomic(&full, &out_bytes)?;
+    Ok(serde_json::json!({
+        "status": "saved",
+        "path": full.to_string_lossy(),
+        "bytes": out_bytes.len(),
+    }))
 }
 
 #[tauri::command]
@@ -434,7 +502,60 @@ pub async fn save_binary_file_dialog(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_workspace_root_path, resolve_path};
+    use super::{is_workspace_root_path, normalize_to_existing_style, resolve_path};
+
+    // ── #11: fs_write preserves the existing file's EOL + BOM convention ──
+    #[test]
+    fn new_file_keeps_content_verbatim() {
+        // No existing file → honor exactly what the caller sent (LF).
+        assert_eq!(normalize_to_existing_style(None, "a\nb\n"), b"a\nb\n");
+        // Even CRLF the caller explicitly sent is preserved for a new file.
+        assert_eq!(normalize_to_existing_style(None, "a\r\nb"), b"a\r\nb");
+    }
+
+    #[test]
+    fn crlf_file_gets_lf_content_converted() {
+        let existing = b"old\r\nlines\r\n";
+        assert_eq!(
+            normalize_to_existing_style(Some(existing), "new\nlines\n"),
+            b"new\r\nlines\r\n"
+        );
+    }
+
+    #[test]
+    fn lf_file_stays_lf() {
+        let existing = b"old\nlines\n";
+        assert_eq!(
+            normalize_to_existing_style(Some(existing), "new\nlines\n"),
+            b"new\nlines\n"
+        );
+    }
+
+    #[test]
+    fn crlf_conversion_is_idempotent() {
+        let existing = b"x\r\ny\r\n";
+        // Caller already sent CRLF — must not become \r\r\n.
+        assert_eq!(
+            normalize_to_existing_style(Some(existing), "a\r\nb\r\n"),
+            b"a\r\nb\r\n"
+        );
+    }
+
+    #[test]
+    fn existing_bom_is_preserved() {
+        let existing = b"\xEF\xBB\xBFhello\n";
+        let out = normalize_to_existing_style(Some(existing), "world\n");
+        assert_eq!(out, b"\xEF\xBB\xBFworld\n");
+        // Not doubled when the new content already carries the BOM.
+        let out2 = normalize_to_existing_style(Some(existing), "\u{feff}world\n");
+        assert_eq!(out2, b"\xEF\xBB\xBFworld\n");
+    }
+
+    #[test]
+    fn no_bom_stays_no_bom() {
+        let existing = b"plain\n";
+        assert_eq!(normalize_to_existing_style(Some(existing), "x\n"), b"x\n");
+    }
 
     #[test]
     fn workspace_root_paths_match() {

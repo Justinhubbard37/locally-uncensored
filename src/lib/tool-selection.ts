@@ -15,13 +15,18 @@ interface ToolGroup {
 
 const TOOL_GROUPS: ToolGroup[] = [
   {
-    // Web search intents. German terms included (image group below has them
-    // too) — without them a German "such im internet nach…" never surfaced
-    // web_search and the model answered from stale training data instead.
-    keywords: ['search', 'find online', 'look up', 'google', 'bing', 'duckduckgo', 'internet',
-      'news', 'latest', 'current', 'web search', 'websearch', 'browse', 'website', 'webseite',
+    // Web search intents. Only EXPLICIT web cues route here. Bare 'search',
+    // 'latest', 'current', 'aktuell', 'neueste', 'suche' were removed: they
+    // collide head-on with coding intents ("search the codebase", "fix the
+    // current bug", "the latest changes"), which used to pull web_search+
+    // web_fetch, inflate the selection past 3, and silently skip the file-tool
+    // booster below — leaving a coding turn with no file_search/file_list.
+    // German phrases kept as multi-word cues ("such im internet", "im internet")
+    // so a real "such im internet nach…" still surfaces web_search.
+    keywords: ['find online', 'look up', 'look it up', 'google', 'bing', 'duckduckgo', 'internet',
+      'news', 'web search', 'websearch', 'search online', 'search the web', 'browse', 'website', 'webseite',
       'url', 'http://', 'https://', 'weather', 'wetter',
-      'suche', 'such nach', 'such im', 'recherch', 'nachrichten', 'neueste', 'aktuell'],
+      'such nach', 'such im', 'im internet', 'recherch', 'nachrichten', 'neueste'],
     tools: ['web_search', 'web_fetch'],
   },
   {
@@ -29,8 +34,11 @@ const TOOL_GROUPS: ToolGroup[] = [
     tools: ['file_read'],
   },
   {
-    keywords: ['write', 'create', 'save', 'make a file', 'put', 'generate file', 'output to'],
-    tools: ['file_write'],
+    keywords: ['write', 'create', 'save', 'make a file', 'put', 'generate file', 'output to',
+      'edit', 'modify', 'change', 'replace', 'update', 'refactor', 'rename', 'fix', 'patch'],
+    // file_edit (surgical) is preferred for changing existing files; file_write
+    // for new files / full rewrites. Both surfaced so the model can pick.
+    tools: ['file_write', 'file_edit'],
   },
   {
     keywords: ['list', 'ls', 'dir', 'files in', 'directory', 'folder', 'what files', 'tree'],
@@ -77,7 +85,7 @@ const TOOL_GROUPS: ToolGroup[] = [
 // a tool result reveals the user really wanted a file read). Keeping
 // `get_current_time` here means the agent NEVER has to fall back to web
 // for a trivial date question just because the keyword list missed.
-export const ALWAYS_INCLUDE = ['file_read', 'file_write', 'get_current_time']
+export const ALWAYS_INCLUDE = ['file_read', 'file_write', 'file_edit', 'get_current_time']
 
 /** Tool count at which embedding-based routing becomes worth the round trip. */
 export const EMBEDDING_ROUTING_THRESHOLD = 15
@@ -105,14 +113,34 @@ export function selectRelevantTools(
     }
   }
 
-  // If very few tools matched, include all (model might need flexibility)
-  // This handles generic messages like "help me with this project"
-  if (selectedNames.size <= 3) {
+  // If nothing beyond the always-included tools matched, include a broad set
+  // (model might need flexibility). Handles generic messages like "help me with
+  // this project". Threshold is ALWAYS_INCLUDE.length so adding an always-tool
+  // (e.g. file_edit) doesn't silently disable this fallback.
+  if (selectedNames.size <= ALWAYS_INCLUDE.length) {
     // Include common tools for generic requests
     selectedNames.add('shell_execute')
     selectedNames.add('file_list')
     selectedNames.add('file_search')
     selectedNames.add('web_search')
+  }
+
+  // Coding-discovery safety net (independent of the total count above). Any
+  // message that surfaced a shell / code / file tool but lacks the file-
+  // discovery pair cannot actually explore the codebase: "run the tests and
+  // find the failing spec" matches shell_execute, pushes the count past 3, and
+  // would otherwise skip the booster — leaving no file_search/file_list. Add
+  // the discovery trio (never web_search) so coding intents can always locate
+  // files, which is exactly what CODEX_SYSTEM_PROMPT tells the model to do.
+  const hasCodeSignal =
+    selectedNames.has('shell_execute') ||
+    selectedNames.has('code_execute') ||
+    selectedNames.has('file_search') ||
+    selectedNames.has('file_list')
+  if (hasCodeSignal) {
+    selectedNames.add('shell_execute')
+    selectedNames.add('file_list')
+    selectedNames.add('file_search')
   }
 
   // Filter by permissions (blocked categories excluded)

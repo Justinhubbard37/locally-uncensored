@@ -44,6 +44,19 @@ describe('side-effect-key', () => {
     expect(deriveSideEffectKey('code_execute', { code: '1' })).toBe('exec')
   })
 
+  it('repo-mutating + shelling tools also serialize on "exec" (avoid .git/index.lock races)', () => {
+    expect(deriveSideEffectKey('git_commit', { message: 'x' })).toBe('exec')
+    expect(deriveSideEffectKey('git_push', {})).toBe('exec')
+    expect(deriveSideEffectKey('run_tests', {})).toBe('exec')
+    expect(deriveSideEffectKey('shell_execute_background', { command: 'x' })).toBe('exec')
+  })
+
+  it('read-only git tools stay parallel (no key)', () => {
+    expect(deriveSideEffectKey('git_status', {})).toBeUndefined()
+    expect(deriveSideEffectKey('git_log', {})).toBeUndefined()
+    expect(deriveSideEffectKey('git_diff', {})).toBeUndefined()
+  })
+
   it('image_generate, video_generate and run_workflow share the "comfyui" queue', () => {
     expect(deriveSideEffectKey('image_generate', { prompt: 'x' })).toBe('comfyui')
     // video_generate MUST serialize with image_generate (same GPU + VRAM

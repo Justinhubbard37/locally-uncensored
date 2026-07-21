@@ -132,7 +132,44 @@ describe('compactMessages', () => {
       { role: 'assistant', content: 'new answer' },
     ]
     const result = compactMessages(messages, 50)
-    // Should have compacted the tool call pair into a summary
+    // Oldest messages (incl. the tool call pair) are dropped, not summarized.
     expect(result.length).toBeLessThanOrEqual(messages.length)
+  })
+
+  it('keeps a recent tool result verbatim — never a char-truncated slice', () => {
+    // A file the agent read must survive compaction intact, or the model edits
+    // against content it can no longer see.
+    const bigResult = 'export const config = {\n' + '  key: "value",\n'.repeat(60) + '}'
+    const messages: OllamaChatMessage[] = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'old '.repeat(400) },
+      { role: 'assistant', content: 'old '.repeat(400) },
+      { role: 'user', content: 'read the config' },
+      { role: 'assistant', content: '', tool_calls: [{ function: { name: 'file_read', arguments: { path: 'config.ts' } } }] },
+      { role: 'tool', content: bigResult },
+      { role: 'assistant', content: 'done' },
+    ]
+    const result = compactMessages(messages, 150)
+    const toolMsg = result.find((m) => m.role === 'tool')
+    // Full content, not a 80-char summary line.
+    expect(toolMsg?.content).toBe(bigResult)
+  })
+
+  it('drops oldest messages behind a notice, not a lossy summary', () => {
+    const messages: OllamaChatMessage[] = [
+      { role: 'system', content: 'sys' },
+      ...Array.from({ length: 10 }, (_, i) => ({
+        role: (i % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant',
+        content: `msg ${i} ${'x'.repeat(200)}`,
+      })),
+      { role: 'user', content: 'latest' },
+    ]
+    const result = compactMessages(messages, 120)
+    // Real system prompt stays first.
+    expect(result[0].content).toBe('sys')
+    // A trim notice is present (not a "[Previous conversation summary]").
+    expect(result.some((m) => m.role === 'system' && m.content.includes('trimmed to fit'))).toBe(true)
+    // Newest message preserved verbatim.
+    expect(result[result.length - 1].content).toBe('latest')
   })
 })
