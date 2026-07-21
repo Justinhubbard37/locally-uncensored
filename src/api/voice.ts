@@ -303,13 +303,20 @@ export async function checkTtsAvailable(): Promise<{ available: boolean; piper?:
 }
 
 export async function initTtsCheck(): Promise<boolean> {
-  if (ttsChecked) return ttsAvailableFlag;
+  // Cache only a POSITIVE result. A negative probe at boot is frequently a
+  // race — resolve_lu_python / the ComfyUI venv may not be ready when App.tsx
+  // fires this — and caching `false` would stick for the whole session, so
+  // every read-aloud silently fell back to the Windows SAPI voice and Piper
+  // never spoke at all (#77, ElBiggus). On a negative we leave ttsChecked
+  // false so the next caller (the lazy re-probe in useVoice, or Settings)
+  // gets a fresh probe instead of the stale miss.
+  if (ttsChecked && ttsAvailableFlag) return ttsAvailableFlag;
   try {
     ttsAvailableFlag = (await checkTtsAvailable()).available;
   } catch {
     ttsAvailableFlag = false;
   }
-  ttsChecked = true;
+  ttsChecked = ttsAvailableFlag;
   return ttsAvailableFlag;
 }
 

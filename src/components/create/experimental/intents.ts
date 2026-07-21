@@ -41,14 +41,18 @@ export const INTENTS: IntentMeta[] = [
     ],
   },
   {
-    // Local lane since 2.5.7: mask inpaint on the SDXL/SD1.5 checkpoint path
-    // (VAEEncodeForInpaint / InpaintModelConditioning) — the 4th local tab.
-    // Cloud keeps its hosted edit endpoint; both share the MaskEditor.
-    id: 'edit', label: 'Edit Image', short: 'Edit', icon: Wand2,
-    placeholder: 'Describe the edit. What should change in the painted area…',
+    // This IS the image-to-image tab. Source + empty mask restyles the WHOLE
+    // image (VAEEncode at denoise 0.7, dynamic-workflow isI2I); painting a mask
+    // switches to inpaint (VAEEncodeForInpaint / InpaintModelConditioning) on
+    // the SDXL/SD1.5 checkpoint path. Cloud keeps its hosted edit endpoint; both
+    // share the MaskEditor. Renamed 2.5.9: "Edit" alone hid the i2i entry for
+    // the r/SD crowd who search for "image to image" (GH D#86 jendrelele /
+    // the_mr_pickles / pnwpdr4519; David committed to making it clearer).
+    id: 'edit', label: 'Edit / Image to Image', short: 'Edit', icon: Wand2,
+    placeholder: 'Describe the new look. Leave the mask empty to restyle the whole image, or paint an area to change just that…',
     needsSource: true, needsPrompt: true, allowsMask: true, isVideo: false,
     capability: 'inpaint-nodes', requiresModels: 'image',
-    examples: ['replace the sky with a starry night', 'add a leather jacket', 'remove the person on the left'],
+    examples: ['turn this photo into a watercolor painting', 'make it a snowy winter scene', 'repaint it in a neon cyberpunk style'],
   },
   {
     id: 'removebg', label: 'Remove Background', short: 'Cutout', icon: Scissors,

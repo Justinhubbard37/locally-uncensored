@@ -49,6 +49,17 @@ function sttErrorMessage(err: unknown): string {
 let speakGen = 0;
 let speakAbort: AbortController | null = null;
 
+// #77 (ElBiggus): the boot probe (App.tsx) can lose a cold-start race against
+// resolve_lu_python and leave store.ttsAvailable stuck false, so read-aloud
+// silently used the Windows SAPI voice and Piper never spoke. When we're about
+// to concede to SAPI in local Piper mode, re-probe availability a bounded
+// number of times per session (module-scoped so the whole app shares the
+// budget across every SpeakerButton). A machine that really has Piper flips
+// the store true on the first successful re-probe; a machine without it pays
+// at most MAX_LAZY_TTS_REPROBES cheap find_spec spawns for the whole session.
+let lazyTtsReprobes = 0;
+const MAX_LAZY_TTS_REPROBES = 3;
+
 function stopSpeechPlayback(): void {
   // Invalidate the running speak generation (drops queued cloud chunks and any
   // synthesis that resolves late) and abort the in-flight cloud fetch — the
@@ -322,15 +333,29 @@ export function useVoice() {
             if (stopped()) return;
             log.error("External TTS failed, falling back to browser voices", { err });
           }
-        } else if (store.ttsAvailable) {
-          try {
-            const url = await synthesizeNeural(text, store.piperVoice);
+        } else {
+          // Local neural (Piper). Trust the cached availability flag, but if it
+          // is false while we're in local Piper mode, re-probe (bounded) before
+          // conceding to the browser SAPI fallback — a racy boot probe must not
+          // permanently silence Piper (#77, ElBiggus). A positive re-probe is
+          // written back to the store so later reads skip straight to Piper.
+          let piperReady = store.ttsAvailable;
+          if (!piperReady && lazyTtsReprobes < MAX_LAZY_TTS_REPROBES && store.ttsMode !== "external") {
+            lazyTtsReprobes++;
+            piperReady = await recheckTtsAvailable();
             if (stopped()) return;
-            await playNeuralAudio(url);
-            return;
-          } catch (err) {
-            if (stopped()) return;
-            log.error("Neural TTS failed, falling back to browser voices", { err });
+            if (piperReady) store.setTtsAvailable(true);
+          }
+          if (piperReady) {
+            try {
+              const url = await synthesizeNeural(text, store.piperVoice);
+              if (stopped()) return;
+              await playNeuralAudio(url);
+              return;
+            } catch (err) {
+              if (stopped()) return;
+              log.error("Neural TTS failed, falling back to browser voices", { err });
+            }
           }
         }
         if (!ttsSupported || stopped()) return;

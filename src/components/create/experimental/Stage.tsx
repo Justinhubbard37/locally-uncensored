@@ -138,6 +138,7 @@ function teachTitle(intent: string): string {
   switch (intent) {
     case 'image': return 'What do you want to create?'
     case 'video': return 'Describe a scene to animate'
+    case 'edit': return 'Edit or restyle your image'
     default: return 'Get started'
   }
 }
@@ -286,7 +287,7 @@ function SourcePreview({ onOpenMaskEditor }: { onOpenMaskEditor: () => void }) {
           {meta.id === 'removebg' ? 'Hit Create to cut out the subject and export a transparent PNG.'
             : meta.id === 'upscale' ? 'Hit Create to upscale the image.'
             : meta.id === 'eraser' ? 'Paint a mask over the object to remove, then hit Create.'
-            : meta.allowsMask ? 'Paint a mask over what should change, write the edit prompt below, then Create.'
+            : meta.allowsMask ? 'Leave the mask empty to restyle the whole image, or paint an area to change just that. Write your prompt below, then Create.'
             : 'Describe the motion below, then Create.'}
         </p>
       </div>
