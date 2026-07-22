@@ -52,10 +52,14 @@ media-Tools (in Phase 6): [ ] image_generate · [ ] video_generate (via MLX)
 - [ ] 5.3 Memory + RAG über lange Session persistent
 - [ ] 5.4 Kein Leak/Absturz, RAM sauber (offload wo nötig)
 
-## Phase 6 — MLX-Media Neubau (Mac, only MLX)
-- [ ] 6.1 MLX-Runtime: Bild+Video-Python-Env geklärt + installier-/bundle-bar
-- [ ] 6.2 Rust: `mlx_image_generate` + `mlx_video_generate` (ersetzt ComfyUI-Pfad auf Mac)
-- [ ] 6.3 Frontend: Mac-Local-Create → MLX, ComfyUI-Pfad Mac aus, Backend-Pin mlx
+## Phase 6 — MLX-Media via lu-bridge-Sidecar (Mac, only MLX)
+ARCHITEKTUR-ENTSCHEID: NICHT neu bauen — die bestehende `lu-bridge` (uselu/apps/bridge,
+Rust-Daemon :47711 + eingebetteter MLX-Python-Sidecar :47712 + `mlx-video`) als managed
+Sidecar bündeln (Muster wie llama-server). Honoriert Hardrule „only mlx via lu-bridge".
+- [x] 6.1 MLX-Runtime GEKLÄRT: Bridge-Source gefunden, Bild=diffusers/torch-MPS (Apple-nativ, kein ComfyUI), Video=`mlx-video`. Beide Engines auf diesem Mac bereits installiert (venv da)
+- [x] 6.2 Rust: `commands::bridge` start/stop/status-Sidecar (commit `7490585`), externalBin `bin/lu-bridge`, cargo grün
+- [x] 6.2b **BACKEND LIVE VALIDIERT (GUI-frei)**: gebündeltes Binary headless gestartet → `/health` ok, Bild+Video-Katalog geliefert, **echter sd-turbo-Render 512×512 PNG via `/cmd/mlx_generate` (HTTP 200, 432 KB)**. Fund: kalter Erst-Call braucht Sidecar-Readiness-Wait (JS-Port muss mlx_start→poll→generate wie Web `generateMlxImageDataUrl`)
+- [ ] 6.3 Frontend: `src/api/mlx-image.ts`+`mlx-video.ts` (localFetch→:47711), Mac-Local-Create → MLX-Zweig in useCreate, ComfyUI-Pfad Mac aus, AppShell setzt videoBackend='mlx' auf Apple Silicon
 - [ ] 6.4 Bild-Katalog: 5 licensed
   - [ ] img-L1 · [ ] img-L2 · [ ] img-L3 · [ ] img-L4 · [ ] img-L5
 - [ ] 6.5 Bild-Katalog: 5 uncensored
