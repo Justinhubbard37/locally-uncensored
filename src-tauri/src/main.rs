@@ -190,6 +190,10 @@ fn main() {
             commands::engine::start_bundled_embed,
             commands::engine::stop_bundled_embed,
             commands::engine::bundled_embed_status,
+            // lu-bridge media sidecar (macOS Apple-Silicon MLX local media, Phase 6)
+            commands::bridge::start_media_bridge,
+            commands::bridge::stop_media_bridge,
+            commands::bridge::media_bridge_status,
             // Provider API-key keychain (H5)
             commands::secret::secret_set,
             commands::secret::secret_get,

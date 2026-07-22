@@ -1,4 +1,7 @@
 # Bundled llama.cpp sidecar binaries are build artifacts, never committed.
 # Produced by scripts/build-llama.sh into llama-server-<target-triple>[.exe].
 llama-server-*
+# lu-bridge media sidecar (Apple-Silicon MLX). Built from uselu/apps/bridge
+# into lu-bridge-<target-triple>[.exe]. Also a build artifact, never committed.
+lu-bridge-*
 !.gitignore

@@ -135,6 +135,12 @@ pub(crate) fn load_ollama_base() -> String {
 
 pub struct AppState {
     pub comfy_process: Mutex<Option<Child>>,
+    /// Managed lu-bridge sidecar (Apple-Silicon MLX local media, macOS only).
+    /// `None` until `start_media_bridge` spawns the bundled `lu-bridge` binary
+    /// headless on 127.0.0.1:47711. The lifecycle lives in `commands::bridge`;
+    /// this is just the handle so shutdown can reap it. See the hard rule:
+    /// Mac local image/video is MLX-via-bridge only, never ComfyUI.
+    pub media_bridge: Mutex<Option<Child>>,
     /// Child handle for an Ollama daemon LU spawned itself (kj103x bug, Discord
     /// 2026-05-23 #help-chat). The Drop impl below kills the tree on shutdown
     /// so `ollama.exe` doesn't linger eating ~200 MB after the tray quit.
@@ -278,6 +284,7 @@ impl AppState {
 
         Self {
             comfy_process: Mutex::new(None),
+            media_bridge: Mutex::new(None),
             ollama_process: Mutex::new(None),
             bundled_engine: Mutex::new(None),
             bundled_embed: Mutex::new(None),
@@ -394,6 +401,16 @@ impl AppState {
                 }
                 println!("[ComfyUI] Stopped (explicit shutdown)");
             }
+        }
+
+        // lu-bridge media sidecar (macOS MLX). Plain kill of the bridge parent;
+        // the bridge reaps its own MLX Python sidecar (:47712) on shutdown.
+        if let Ok(mut proc) = self.media_bridge.lock() {
+            if let Some(ref mut child) = *proc {
+                let _ = child.kill();
+                println!("[Bridge] lu-bridge media sidecar stopped (explicit shutdown)");
+            }
+            *proc = None;
         }
 
         if let Ok(mut proc) = self.claude_code_process.lock() {
