@@ -15,6 +15,7 @@ Legende: [ ] offen · [~] in Arbeit · [x] grün (verifiziert) · [!] blockiert/
 - [~] 1.1 Wall lösen: `isCloudOnly()`→false (14 Gates schaltbar); tote Äste sauber entfernen = offen (Cleanup-Commit)
   - [x] Migration v14: Mac-Zwangs-`cloud` einmalig auf `local` zurückgesetzt (settingsStore)
 - [x] 1.2 tsc (`tsconfig.app.json`) Baseline-Diff = 0 neue Fehler (331 Baseline unverändert); vitest berührte Stores 108 grün
+  - [x] v14-Migrate-Unit-Test `settingsStore-migrate-v14.test.ts` 4/4 grün (Mac cloud→local, Win bleibt cloud, v14-cloud bleibt, Personas rebuild) — commit `b261e9d`
 - [ ] 1.3 e2e-Specs an neuen Zustand angepasst, grün
 - [~] 1.4 App startet lokal (`tauri:dev` läuft, v2.5.7); Local-Onboarding rendert (UI-Smoke :5173); Switch/Local live noch zu bestätigen
 - [~] 1.5 Local-Inferenz bewiesen: Ollama :11434 (qwen2.5:0.5b) → „LOCAL OK". Nach Rust-Restart bootet App in local (kein `[Offload] cloud`). Builtin-Engine-GGUF-Download noch (Phase 2.4)
@@ -24,7 +25,8 @@ Legende: [ ] offen · [~] in Arbeit · [x] grün (verifiziert) · [!] blockiert/
 - [ ] 2.1 Chat streamt Tokens über Builtin-Engine (Qwen)
 - [ ] 2.2 Think-Toggle wo unterstützt
 - [ ] 2.3 Modell-Swap (2. Modell)
-- [ ] 2.4 Discover-Download für Builtin-Engine gefixt (`detect_model_path`), 2. Chat-Modell lädt
+- [~] 2.4 Discover-Download für Builtin-Engine: CODE FERTIG (commit `39d2f06`) — `detect_model_path` akzeptiert Anzeigename-Aliase; DiscoverModels hat Built-in-Zweig (flach schreiben → engine booten). tsc/cargo grün. Live „2. Modell lädt" = nach Rebuild
+- [ ] Phase-6-Richtung (Bridge-MLX vs In-Process-MLX): Recon-Agent kartiert lu-bridge-Architektur — Ergebnis abwarten, DANN Phase 6 planen
 - [ ] 2.5 Langzeit: langer Multi-Turn-Chat stabil
 
 ## Phase 3 — Agent-Modus: jedes Tool einzeln (29 Builtin + MCP)
