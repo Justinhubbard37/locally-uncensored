@@ -90,7 +90,30 @@ pub fn screenshot() -> Result<serde_json::Value, String> {
         Ok(serde_json::json!({ "image": b64, "format": "png", "encoding": "base64" }))
     }
 
-    #[cfg(not(target_os = "windows"))]
+    // macOS: the native `screencapture` CLI. `-x` = silent (no shutter sound),
+    // `-t png` = PNG. Needs the app to hold Screen Recording permission (TCC);
+    // without it macOS returns a desktop-only capture rather than erroring.
+    #[cfg(target_os = "macos")]
+    {
+        let tmp = std::env::temp_dir().join("lu-screenshot.png");
+        let status = std::process::Command::new("/usr/sbin/screencapture")
+            .args(["-x", "-t", "png"])
+            .arg(&tmp)
+            .status()
+            .map_err(|e| format!("Screenshot failed: {}", e))?;
+        // screencapture fails (non-zero, "could not create image from display")
+        // when the app lacks Screen Recording permission — give an actionable hint.
+        if !status.success() || !tmp.exists() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err("Screenshot failed — grant LU the Screen Recording permission in System Settings ▸ Privacy & Security ▸ Screen Recording, then try again.".to_string());
+        }
+        let bytes = std::fs::read(&tmp).map_err(|e| format!("Read screenshot: {}", e))?;
+        let _ = std::fs::remove_file(&tmp);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok(serde_json::json!({ "image": b64, "format": "png", "encoding": "base64" }))
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         Err("Screenshot not implemented for this platform yet".to_string())
     }

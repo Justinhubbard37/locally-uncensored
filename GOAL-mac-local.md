@@ -17,7 +17,7 @@ Legende: [ ] offen · [~] in Arbeit · [x] grün (verifiziert) · [!] blockiert/
 - [x] 1.2 tsc (`tsconfig.app.json`) Baseline-Diff = 0 neue Fehler (331 Baseline unverändert); vitest berührte Stores 108 grün
 - [ ] 1.3 e2e-Specs an neuen Zustand angepasst, grün
 - [~] 1.4 App startet lokal (`tauri:dev` läuft, v2.5.7); Local-Onboarding rendert (UI-Smoke :5173); Switch/Local live noch zu bestätigen
-- [ ] 1.5 Local-Onboarding: Starter-Modell (Qwen2.5-0.5B) lädt, Engine bootet 127.0.0.1:8127 (Ollama-Modelle lokal schon da)
+- [~] 1.5 Local-Inferenz bewiesen: Ollama :11434 (qwen2.5:0.5b) → „LOCAL OK". Nach Rust-Restart bootet App in local (kein `[Offload] cloud`). Builtin-Engine-GGUF-Download noch (Phase 2.4)
 - [ ] 1.6 ComfyUI auf Mac überall aus (harte Regel), keine Crashes/Dead-Ends
 
 ## Phase 2 — Local Chat
@@ -34,7 +34,7 @@ terminal: [ ] shell_execute · [ ] code_execute · [ ] shell_execute_background 
 git: [ ] git_status · [ ] git_commit · [ ] git_push · [ ] git_log · [ ] git_diff
 dev: [ ] project_init · [ ] pr_resume · [ ] gh_pr_create · [ ] run_tests
 system: [ ] system_info · [ ] process_list · [ ] get_current_time
-desktop: [ ] screenshot (Rust Mac-Impl NEU, war Windows-only)
+desktop: [~] screenshot — macOS-Impl NEU (`/usr/sbin/screencapture`), kompiliert; live-grün braucht Screen-Recording-Grant für LU (OS-TCC)
 workflow: [ ] run_workflow · [ ] delegate_task
 extern: [ ] MCP-Tool (mind. 1 externer Server)
 media-Tools (in Phase 6): [ ] image_generate · [ ] video_generate (via MLX)
