@@ -35,7 +35,13 @@ import { DEFAULT_SETTINGS, BUILT_IN_PERSONAS } from '../lib/constants'
 // fills the default while preserving every existing value; NVIDIA unaffected.
 // v13 (2.5.7): added settings.cloudOnboardingSeen (one-time Cloud onboarding
 // on the first successful switch flip, default false). Additive merge.
-const STORE_VERSION = 13
+// v14 (2026-07-22): the macOS Cloud-only wall is lifted — the Mac app is a full
+// local+cloud app again (local mode built + tested). Existing Mac installs were
+// force-pinned to appMode 'cloud' with no real choice, so reset them to the
+// local default ONCE so they land in the now-built local mode; the visible
+// switch lets them flip back to cloud anytime. Windows/Linux appMode reflects a
+// real user choice and is never touched.
+const STORE_VERSION = 14
 
 interface SettingsState {
   settings: Settings
@@ -115,6 +121,13 @@ export const useSettingsStore = create<SettingsState>()(
             mergedSettings.preferredImageModel = ''
             mergedSettings.preferredVideoT2VModel = ''
             mergedSettings.preferredVideoI2VModel = ''
+          }
+          // v14: reset the force-pinned Mac cloud lock to the local default.
+          if (version < 14) {
+            const isMac = typeof navigator !== 'undefined' &&
+              (/Mac|iPhone|iPad|iPod/.test(navigator.platform || '') ||
+               /Mac OS X|Macintosh/.test(navigator.userAgent || ''))
+            if (isMac) mergedSettings.appMode = 'local'
           }
           return {
             ...persisted,

@@ -33,15 +33,15 @@ export function isMacOS(): boolean {
 }
 
 /**
- * Launch policy: the macOS desktop app ships Cloud-ONLY for now (David
- * 2026-07-11) — it behaves like the web app (hosted models everywhere, no
- * Local/Cloud switch, no local-hardware surfaces) until the fully-tested local
- * version is unlocked in a later release. Windows/Linux keep the full
- * local+cloud app, so this is gated to the packaged mac build only (isTauri so
- * a mac browser dev session and the unit tests keep the normal switchable UI).
+ * Launch policy: the macOS desktop app is now a full local+cloud app like
+ * Windows/Linux (David 2026-07-22 — local mode built + tested). The former
+ * Cloud-ONLY mac wall is lifted; the Local/Cloud switch, local-hardware
+ * surfaces and local onboarding are available again. Kept as a function
+ * returning false so the (dead) call sites collapse to the normal switchable
+ * behaviour; call sites are being removed in a follow-up cleanup.
  */
 export function isCloudOnly(): boolean {
-  return isTauri() && isMacOS();
+  return false;
 }
 
 async function getInvoke() {
