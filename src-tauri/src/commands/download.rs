@@ -535,7 +535,10 @@ pub fn detect_model_path(provider: String) -> Result<serde_json::Value, String> 
         // Built-in engine (P1): app-owned models dir. Handled before the
         // detection loop below because it must be auto-created on a fresh box —
         // returned directly here so onboarding can download into it immediately.
-        "builtin" => {
+        // Accept the display name too ("Built-in Engine") — the Discover tab
+        // passes `providers.openai.name`, not the internal id, so without these
+        // aliases a built-in-active install couldn't add a second chat model.
+        "builtin" | "built-in engine" | "built in engine" => {
             return crate::commands::engine::builtin_models_dir()
                 .map(|p| serde_json::json!(p.to_string_lossy()));
         }
