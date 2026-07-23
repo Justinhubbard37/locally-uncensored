@@ -3,6 +3,7 @@ import { useCreateStore } from '../../../stores/createStore'
 import { useCreateExp } from './CreateContext'
 import { cloudModelById, defaultCloudModel } from '../../../stores/cloudCatalogStore'
 import { INTENT_MAP } from './intents'
+import { isMlxImageHost } from '../../../api/mlx-image'
 import { SAMPLERS as SAMPLERS_FALLBACK, SCHEDULERS as SCHEDULERS_FALLBACK } from './badges'
 import { Section } from '../ui/Section'
 import { Slider } from '../ui/Slider'
@@ -22,6 +23,11 @@ export function ParamGroups() {
   const isVideo = meta.isVideo
   const isEdit = meta.id === 'edit'
   const isCloud = s.backend === 'cloud'
+  // The Mac's MLX pipeline only honours prompt/steps/seed/size/negative — every
+  // Expert knob (sampler, scheduler, VAE, clip-skip; LoRA/denoise/mask are
+  // already hidden locally) is silently dropped there, so the whole Expert
+  // section is dead on the local Mac. Keep it on Mac-cloud and Windows/Linux.
+  const isMlxLocal = !isCloud && isMlxImageHost()
 
   // On cloud the worker only honours steps for images and guidance_scale for
   // the flux family — hide the sliders elsewhere rather than show a dead
@@ -64,7 +70,9 @@ export function ParamGroups() {
         )}
       </Section>
 
-      {/* EXPERT */}
+      {/* EXPERT — every control here is dropped by the Mac MLX pipeline, so the
+          whole section is hidden on the local Mac (shown on cloud + ComfyUI). */}
+      {!isMlxLocal && (
       <Section title="Expert" icon={FlaskConical} defaultOpen={false}>
         {/* Sampler/Scheduler are ComfyUI-only knobs — the hosted WaveSpeed
             endpoints don't accept them, so hide them on the cloud backend
@@ -120,6 +128,7 @@ export function ParamGroups() {
           <Slider label="Skip CLIP layers" min={0} max={12} step={1} value={s.clipSkip} onChange={s.setClipSkip} />
         )}
       </Section>
+      )}
     </div>
   )
 }
