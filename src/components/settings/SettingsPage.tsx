@@ -54,6 +54,7 @@ import { WorkflowList } from '../agents/WorkflowList'
 import { WorkflowBuilder } from '../agents/WorkflowBuilder'
 import { useUpdateStore, isNewerVersion } from '../../stores/updateStore'
 import { backendCall, isCloudOnly } from '../../api/backend'
+import { isMlxImageHost } from '../../api/mlx-image'
 import { ArrowUpCircle } from 'lucide-react'
 
 // ── User profile picture (Appearance) ───────────────────────────
@@ -1049,8 +1050,9 @@ export function SettingsPage() {
             <ChatBackupSettings />
           </Section>
 
-          {/* ComfyUI-only knobs — cloud renders use server-side limits. */}
-          {settings.appMode !== 'cloud' && (
+          {/* ComfyUI-only knobs — cloud renders use server-side limits, and the
+              Mac's MLX pipeline has its own fixed timeout, so hide there too. */}
+          {settings.appMode !== 'cloud' && !isMlxImageHost() && (
           <Section title="Image / Video Generation Timeouts">
             <div className="text-[0.6rem] text-gray-500 dark:text-gray-500 leading-relaxed pb-1.5">
               Maximum minutes a ComfyUI generation can run before LU aborts it. Bump these up if you run on iGPU or CPU only — a 1024px image on integrated graphics can take 30+ min.
@@ -1160,14 +1162,18 @@ export function SettingsPage() {
             <HfDownloadPathSetting />
           </Section>
 
-          <Section title="ComfyUI (Image & Video)">
-            {settings.appMode === 'cloud' && (
-              <p className="text-[0.55rem] text-gray-500 leading-snug pb-1">
-                Local mode only — cloud renders run on lu-labs.ai and never use ComfyUI.
-              </p>
-            )}
-            <ComfyUISettings />
-          </Section>
+          {/* ComfyUI never runs on the Mac (MLX-only local media) — hide the whole
+              panel there so it isn't a dead Install/Start surface. */}
+          {!isMlxImageHost() && (
+            <Section title="ComfyUI (Image & Video)">
+              {settings.appMode === 'cloud' && (
+                <p className="text-[0.55rem] text-gray-500 leading-snug pb-1">
+                  Local mode only — cloud renders run on lu-labs.ai and never use ComfyUI.
+                </p>
+              )}
+              <ComfyUISettings />
+            </Section>
+          )}
         </>)}
 
         {/* ── Agent tab ─────────────────────────────────── */}
@@ -1610,10 +1616,12 @@ function TroubleshootSection() {
               <span className="text-[0.65rem] text-gray-300">Ollama</span>
               <ProbeBadge probe={report.ollama} />
             </div>
-            <div className="flex items-center justify-between">
-              <span className="text-[0.65rem] text-gray-300">ComfyUI</span>
-              <ProbeBadge probe={report.comfyui} />
-            </div>
+            {!isMlxImageHost() && (
+              <div className="flex items-center justify-between">
+                <span className="text-[0.65rem] text-gray-300">ComfyUI</span>
+                <ProbeBadge probe={report.comfyui} />
+              </div>
+            )}
             <div className="flex items-center justify-between">
               <span className="text-[0.65rem] text-gray-300">LM Studio</span>
               <ProbeBadge probe={report.lm_studio} />

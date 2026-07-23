@@ -6,6 +6,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { backendCall, isTauri } from '../../api/backend'
+import { isMlxImageHost } from '../../api/mlx-image'
 import { Cpu, RefreshCw, AlertTriangle } from 'lucide-react'
 
 interface DetectedGpu {
@@ -187,6 +188,9 @@ export function HardwareSettings() {
         )}
       </div>
 
+      {/* ComfyUI GPU selection is meaningless on the Mac — MLX runs on Metal and
+          ComfyUI never launches there. */}
+      {!isMlxImageHost() && (
       <div className="pt-2 border-t border-white/[0.06]">
         <div className="text-[0.7rem] text-gray-700 dark:text-gray-300 font-medium mb-1">ComfyUI GPU (image / video)</div>
         <div className="grid grid-cols-1 gap-1">
@@ -214,6 +218,7 @@ export function HardwareSettings() {
           AMD image / video needs a ComfyUI built for your card (ROCm or ZLUDA). LU installs an NVIDIA / CPU ComfyUI by default. Takes effect on next ComfyUI start.
         </div>
       </div>
+      )}
 
       {showRestartHint && (vendor !== 'auto' || indices.length > 0) && (
         <div className="text-[0.6rem] text-amber-300 italic">
