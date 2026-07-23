@@ -1519,18 +1519,15 @@ pub fn get_ollama_host(state: State<'_, AppState>) -> Result<serde_json::Value, 
 
 /// Auto-start Ollama on app launch (called from setup)
 pub fn auto_start_ollama(state: &AppState) {
-    // Check if already running
-    {
-        let mut cmd = Command::new("tasklist");
-        cmd.args(["/FI", "IMAGENAME eq ollama.exe"]);
-        #[cfg(target_os = "windows")]
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        if let Ok(output) = cmd.output() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.contains("ollama.exe") {
-                println!("[Ollama] Already running");
-                return;
-            }
+    // Already running? Probe the API port cross-platform. The old check shelled
+    // out to Windows-only `tasklist`, which silently no-op'd on macOS/Linux, so
+    // those re-spawned `ollama serve` at every boot (redundant when Ollama was
+    // already up).
+    if let Ok(addr) = "127.0.0.1:11434".parse() {
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok()
+        {
+            println!("[Ollama] Already running");
+            return;
         }
     }
 

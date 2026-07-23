@@ -4418,6 +4418,30 @@ pub async fn start_tunnel(
             return Err("cloudflared download failed integrity check (unexpected file header)".into());
         }
 
+        // macOS ships cloudflared as a gzip tarball (.tgz), not a raw binary —
+        // writing it straight to cf_path and exec'ing it is an ENOEXEC. Extract
+        // the `cloudflared` executable from the archive (system `tar` is always
+        // present on macOS). Windows/Linux download the raw binary.
+        #[cfg(target_os = "macos")]
+        {
+            let tgz = dir.join("cloudflared.tgz");
+            std::fs::write(&tgz, &bytes).map_err(|e| format!("write tgz: {}", e))?;
+            let status = std::process::Command::new("tar")
+                .arg("-xzf")
+                .arg(&tgz)
+                .arg("-C")
+                .arg(dir)
+                .status()
+                .map_err(|e| format!("tar spawn: {}", e))?;
+            let _ = std::fs::remove_file(&tgz);
+            if !status.success() {
+                return Err("Failed to extract cloudflared from its .tgz archive".into());
+            }
+            if !cf_path.exists() {
+                return Err("cloudflared binary missing after extracting the archive".into());
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
         std::fs::write(&cf_path, &bytes).map_err(|e| format!("write: {}", e))?;
 
         // Make executable on Unix
