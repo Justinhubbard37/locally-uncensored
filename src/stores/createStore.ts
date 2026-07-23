@@ -124,6 +124,14 @@ export interface GalleryItem {
   jobId?: string
   /** Which redesign intent produced this item (gallery tagging). */
   intent?: CreateIntent
+  /** MLX video (Mac, Apple Silicon): absolute filesystem path of the finished
+   *  mp4, as returned by `video_generate`'s `output` field. TODO(mlx-video-
+   *  playback): there is no in-process HTTP route or asset-protocol scope
+   *  serving this yet (unlike the MLX image sidecar on :47712), and the CSP
+   *  `media-src` doesn't allow `file:` — so `<video>` can't play it inline
+   *  today. Wire a served route or Tauri asset scope, then point display/
+   *  download at that URL instead of leaving this as a dead-end path. */
+  localPath?: string
   /** Runtime-only (stripped by partialize): the item's media failed to load
    *  and can't be recovered right now — a local ComfyUI item while the engine
    *  is unreachable. Tiles render an honest offline state and Download

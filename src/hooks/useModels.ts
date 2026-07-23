@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo } from 'react'
 import { listModels, pullModel as pullModelApi, pullModelTauri, deleteModel as deleteModelApi } from '../api/ollama'
-import { isTauri } from '../api/backend'
+import { isTauri, isMacOS } from '../api/backend'
 import { getCheckpoints as getComfyCheckpoints, getDiffusionModels as getComfyDiffusionModels, checkComfyConnection, filterPartialFiles } from '../api/comfyui'
 import { parseNDJSONStream } from '../api/stream'
 import { useModelStore } from '../stores/modelStore'
@@ -178,8 +178,11 @@ export function useModels() {
             .map(m => ({ ...m, provider: 'ollama' as const, providerName: 'Ollama' })))
         } catch { /* Ollama might not be running */ }
       }
+      // Hard rule: Mac local media is MLX-only — ComfyUI never auto-starts
+      // there (process.rs::auto_start_comfyui), so skip the probe outright
+      // instead of a doomed connection check on every model-list refresh.
       let comfyModels: AIModel[] = []
-      const comfyOk = await checkComfyConnection()
+      const comfyOk = !isMacOS() && (await checkComfyConnection())
       if (comfyOk) {
         try {
           const [checkpoints, diffusionModels] = await Promise.all([getComfyCheckpoints(), getComfyDiffusionModels()])

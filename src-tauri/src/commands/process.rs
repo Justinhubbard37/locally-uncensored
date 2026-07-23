@@ -1554,6 +1554,15 @@ pub fn auto_start_ollama(state: &AppState) {
 
 /// Auto-start ComfyUI on app launch (called from setup)
 pub fn auto_start_comfyui(state: &AppState) {
+    // Hard rule: macOS local media is MLX only, NEVER ComfyUI (see
+    // commands::mlx / commands::video). Auto-starting ComfyUI on Mac violated
+    // that rule (2026-07-23 log: "[ComfyUI] Already running on port 8188").
+    // ComfyUI itself stays fully intact for Windows/Linux and for a user who
+    // manually invokes `start_comfyui` — only the unattended boot path skips it.
+    if cfg!(target_os = "macos") {
+        println!("[ComfyUI] Auto-start skipped on macOS — local media is MLX-only");
+        return;
+    }
     // If user configured a remote host, don't try to auto-start anything locally.
     {
         let host = state.comfy_host.lock().unwrap().clone();

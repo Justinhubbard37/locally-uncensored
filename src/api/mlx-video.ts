@@ -11,6 +11,7 @@
  * elsewhere so the UI can dim/skip it.
  */
 import { backendCall } from './backend'
+import type { ClassifiedModel, ModelType } from './comfyui'
 
 /** See the `invokeMedia` doc comment in `mlx-image.ts` — the Rust wrappers
  *  take a single `args: serde_json::Value` param, so the payload must be
@@ -129,4 +130,39 @@ export async function getVideoProgress(): Promise<VideoProgress> {
 
 export async function cancelVideo(): Promise<{ ok: boolean }> {
   return invokeMedia<{ ok: boolean }>('video_cancel')
+}
+
+// ── Create-tab wiring (mirrors mlx-image.ts's synthetic-model pattern) ──
+//
+// On macOS the video picker shows the installed MLX catalog directly — there
+// is no ComfyUI video backend to merge with (hard rule: Mac video is MLX
+// only). A "MLX " prefix keeps these display names visually distinct and
+// guarantees a fresh persisted `videoModel` never collides with a stale
+// ComfyUI checkpoint name from a pre-MLX session.
+
+export const MLX_VIDEO_MODEL_PREFIX = 'MLX '
+
+export function mlxVideoDisplayName(m: Pick<VideoModel, 'name'>): string {
+  return `${MLX_VIDEO_MODEL_PREFIX}${m.name}`
+}
+
+const mlxVideoIdByDisplayName = new Map<string, string>()
+
+/** Resolve a video dropdown selection back to the bridge catalog id. */
+export function mlxVideoModelIdFor(displayName: string | null | undefined): string | null {
+  return (displayName && mlxVideoIdByDisplayName.get(displayName)) || null
+}
+
+function mlxVideoModelType(family: string): ModelType {
+  return family === 'ltx_2' ? 'ltx' : 'wan'
+}
+
+/** Build the Create-tab video model list from the installed MLX catalog. */
+export function buildMlxVideoModels(catalog: VideoModel[]): ClassifiedModel[] {
+  return catalog
+    .filter((m) => m.installed)
+    .map((m) => {
+      mlxVideoIdByDisplayName.set(mlxVideoDisplayName(m), m.id)
+      return { name: mlxVideoDisplayName(m), type: mlxVideoModelType(m.family), source: 'checkpoint' } satisfies ClassifiedModel
+    })
 }

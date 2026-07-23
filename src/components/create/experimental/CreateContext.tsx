@@ -6,7 +6,7 @@ import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
 import { getLoraModels, getVAEModels } from '../../../api/comfyui'
 import { getAllNodeInfo, clearNodeCache } from '../../../api/comfyui-nodes'
 import { installCustomNodes } from '../../../api/discover'
-import { backendCall } from '../../../api/backend'
+import { backendCall, isMacOS } from '../../../api/backend'
 import { ensureLocalFilename } from './loadImage'
 import type { CloudQuota } from '../../../lib/render/cloud-jobs'
 
@@ -90,9 +90,13 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
     }
   }, [backend, connected])
 
-  // Bootstrap the backend exactly like the old CreateView mount did.
+  // Bootstrap the backend exactly like the old CreateView mount did. On
+  // macOS skip the ComfyUI probe entirely — hard rule: Mac local media is
+  // MLX-only and ComfyUI never auto-starts there (process.rs::auto_start_
+  // comfyui). fetchModels() still runs unconditionally: it's what loads the
+  // MLX image/video catalogs on Mac.
   useEffect(() => {
-    checkConnection()
+    if (!isMacOS()) checkConnection()
     fetchModels()
   }, [checkConnection, fetchModels])
 

@@ -38,6 +38,10 @@ import {
   generateMlxImageDataUrl, isMlxImageHost, isMlxImageModel,
   mlxStatus, listMlxImageModels, buildMlxImageModels, mergeImageModels, mlxModelIdFor,
 } from '../api/mlx-image'
+import {
+  getVideoStatus, listVideoModels, generateVideo, getVideoProgress, cancelVideo,
+  buildMlxVideoModels, mlxVideoModelIdFor,
+} from '../api/mlx-video'
 
 export function useCreate() {
   const [connected, setConnected] = useState<boolean | null>(null)
@@ -97,27 +101,45 @@ export function useCreate() {
       // MLX catalog first (this also spins up the bundled bridge sidecar) so
       // images work even when ComfyUI is absent — the normal Mac case.
       let mlxImageModels: ClassifiedModel[] = []
+      // Video has no ComfyUI counterpart on Mac (hard rule: Mac video is
+      // MLX-only, ComfyUI never even auto-starts there — see
+      // process.rs::auto_start_comfyui). The video list IS the MLX catalog.
+      let mlxVideoModels: ClassifiedModel[] = []
       if (isMlxImageHost()) {
         try {
           const mlx = await mlxStatus()
           if (mlx.installed) mlxImageModels = buildMlxImageModels(await listMlxImageModels())
         } catch { /* bridge/sidecar not up yet — treat as no MLX models */ }
+        try {
+          mlxVideoModels = buildMlxVideoModels(await listVideoModels())
+        } catch { /* mlx-video status unavailable yet — treat as no MLX video models */ }
       }
 
       // Check connection — if ComfyUI is down, don't waste time on its queries.
       const comfyOk = await checkComfyConnection()
       if (!comfyOk) {
-        // On Apple Silicon MLX alone is a valid image backend — don't bail.
-        if (mlxImageModels.length > 0) {
-          setImageModels(mlxImageModels)
+        // On Apple Silicon MLX alone is a valid image/video backend — don't bail.
+        if (mlxImageModels.length > 0 || mlxVideoModels.length > 0) {
           const st = useCreateStore.getState()
+          setImageModels(mlxImageModels)
           st.setImageModelList(mlxImageModels)
-          if (!st.imageModel) st.setImageModel(mlxImageModels[0].name, mlxImageModels[0].type)
+          if (mlxImageModels.length > 0 && !st.imageModel) {
+            st.setImageModel(mlxImageModels[0].name, mlxImageModels[0].type)
+          }
+          setVideoModelsList(mlxVideoModels)
+          st.setVideoModelList(mlxVideoModels)
+          if (mlxVideoModels.length > 0 && !mlxVideoModels.find(m => m.name === st.videoModel)) {
+            st.setVideoModel(mlxVideoModels[0].name)
+          }
           zeroModelRetries.current = 0
           setModelsLoaded(true)
           return
         }
-        setModelLoadError('ComfyUI is not running. Start it from Settings or wait for auto-start.')
+        setModelLoadError(
+          isMlxImageHost()
+            ? 'No MLX models installed yet. Install one from the Model Manager (Mac Image / Mac Video).'
+            : 'ComfyUI is not running. Start it from Settings or wait for auto-start.'
+        )
         return
       }
 
@@ -126,7 +148,7 @@ export function useCreate() {
       // and its internal cache hasn't updated yet.
       await refreshComfyModels()
 
-      const [comfyImgModels, vidModels, samplers, schedulers, vBackend, _nodeInfo] = await Promise.all([
+      const [comfyImgModels, comfyVidModels, samplers, schedulers, vBackend, _nodeInfo] = await Promise.all([
         getImageModels(),
         getVideoModels(),
         getSamplers(),
@@ -138,6 +160,10 @@ export function useCreate() {
       const imgModels = mlxImageModels.length
         ? mergeImageModels(comfyImgModels, mlxImageModels)
         : comfyImgModels
+      // Mac video is MLX-only — never surface ComfyUI video checkpoints there,
+      // even in the rare case ComfyUI happens to be reachable (e.g. a manual
+      // install the user started outside LU).
+      const vidModels = isMlxImageHost() ? mlxVideoModels : comfyVidModels
       setImageModels(imgModels)
       setVideoModelsList(vidModels)
       setSamplerList(samplers)
@@ -258,6 +284,12 @@ export function useCreate() {
     if (!modelLoadError) return  // No error — nothing to retry
     if (modelsLoaded) return     // modelsLoaded + error = gave up after max retries, don't loop
     const retryInterval = setInterval(async () => {
+      // No ComfyUI to poll for on Mac (hard rule: MLX-only) — retry the MLX
+      // catalog directly instead of waiting on a connection that never comes.
+      if (isMlxImageHost()) {
+        fetchModels()
+        return
+      }
       const ok = await checkComfyConnection()
       if (ok) {
         console.log('[useCreate] Retrying model fetch...')
@@ -333,6 +365,102 @@ export function useCreate() {
       } finally {
         useCreateStore.getState().setIsGenerating(false)
         useCreateStore.getState().setProgress(0)
+      }
+      return
+    }
+
+    // ── MLX video pipeline (Apple Silicon) — hard rule: Mac local video is
+    // MLX-via-mlx-video, never ComfyUI. Unlike the image branch this doesn't
+    // need to check the selected model against a synthetic-name marker: on
+    // Mac the video picker IS the MLX catalog (Task 1 — ComfyUI never even
+    // auto-starts there, see process.rs::auto_start_comfyui), so every video
+    // generation routes here. Generation is a subprocess polled via
+    // video_progress every 2s (no WebSocket/node-graph like ComfyUI). ──
+    if (mode === 'video' && isMlxImageHost()) {
+      setError(null)
+      if (!prompt.trim()) { setError('Please enter a prompt.'); return }
+      if (!videoModel) { setError('No MLX video model selected. Install one from the Model Manager.'); return }
+      const catalogId = mlxVideoModelIdFor(videoModel)
+      if (!catalogId) { setError(`Unknown MLX video model "${videoModel}" — re-select it from the picker.`); return }
+      try {
+        const status = await getVideoStatus()
+        if (!status.available) { setError('MLX video is Apple Silicon only.'); return }
+        if (!status.mlxInstalled) { setError('mlx-video is not installed. Open the Model Manager → Mac Video to install it.'); return }
+        if (!status.installedModels.includes(catalogId)) { setError(`Model "${videoModel}" is not installed yet. Install it from the Model Manager.`); return }
+      } catch (e) {
+        setError(`MLX video status check failed: ${e instanceof Error ? e.message : String(e)}`)
+        return
+      }
+
+      setIsGenerating(true)
+      state.setProgressPhase('loading-model')
+      setProgress(0, 'Starting MLX video generation...')
+      addToPromptHistory(prompt)
+      const startTime = Date.now()
+      abortRef.current = new AbortController()
+      let result: Awaited<ReturnType<typeof generateVideo>>
+      try {
+        result = await generateVideo({
+          id: catalogId,
+          prompt,
+          seconds: Math.max(0.5, frames / Math.max(1, fps)),
+          fps,
+          seed: seed === -1 ? undefined : seed,
+          initImage: effI2vImage ?? undefined,
+        })
+      } catch (e) {
+        useCreateStore.getState().setError(`Failed to start: ${e instanceof Error ? e.message : String(e)}`)
+        useCreateStore.getState().setIsGenerating(false)
+        abortRef.current = null
+        return
+      }
+      try {
+        state.setProgressPhase('sampling')
+        await new Promise<void>((resolve, reject) => {
+          const tick = async () => {
+            if (abortRef.current?.signal.aborted) {
+              try { await cancelVideo() } catch { /* already finished/gone */ }
+              reject(new Error('Cancelled'))
+              return
+            }
+            try {
+              const prog = await getVideoProgress()
+              const elapsed = Math.round((Date.now() - startTime) / 1000)
+              setProgress(Math.min(95, elapsed * 2), `Generating with MLX... ${elapsed}s`)
+              if (prog.status === 'complete') {
+                setProgress(100, 'Complete!')
+                useCreateStore.getState().setLastGenTime(`${elapsed}s`)
+                addToGallery({
+                  id: uuid(), type: 'video', filename: '', subfolder: '',
+                  // No in-process route serves MLX video output yet (unlike the
+                  // image sidecar's :47712) — see GalleryItem.localPath's TODO.
+                  localPath: result.output,
+                  prompt, negativePrompt, model: videoModel, modelType: 'wan',
+                  seed: seed === -1 ? 0 : seed, steps, cfgScale, sampler, scheduler,
+                  width, height, batchSize: 1,
+                  createdAt: Date.now(), builderUsed: 'dynamic', intent,
+                })
+                resolve()
+                return
+              }
+              if (prog.status === 'error') {
+                reject(new Error(prog.error || 'mlx-video failed'))
+                return
+              }
+              setTimeout(tick, 2000)
+            } catch (e) {
+              reject(e instanceof Error ? e : new Error(String(e)))
+            }
+          }
+          tick()
+        })
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (msg !== 'Cancelled') useCreateStore.getState().setError(`Generation failed: ${msg}`)
+      } finally {
+        useCreateStore.getState().setIsGenerating(false)
+        useCreateStore.getState().setProgress(0)
+        abortRef.current = null
       }
       return
     }
