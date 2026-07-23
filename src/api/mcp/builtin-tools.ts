@@ -1153,7 +1153,7 @@ async function executeImageGenerateMlx(prompt: string, merged: Record<string, an
     return `Error: Could not query MLX image models — ${e instanceof Error ? e.message : String(e)}.`
   }
   if (installed.length === 0) {
-    return 'Error: No MLX image model installed. Download one from Models → Discover → Mac Image (e.g. "MLX SD-Turbo") and try again.'
+    return 'Error: No local image model is installed yet. The on-device image engine needs a one-time setup before local generation works.'
   }
   const requested = typeof merged.model === 'string' && merged.model ? merged.model : undefined
   let model: MlxImageModel
@@ -1202,7 +1202,7 @@ async function executeVideoGenerateMlx(prompt: string, merged: Record<string, an
     return `Error: Could not query MLX video status — ${e instanceof Error ? e.message : String(e)}.`
   }
   if (!status.available) return 'Error: MLX video is Apple Silicon only.'
-  if (!status.mlxInstalled) return 'Error: mlx-video is not installed. Open Models → Discover → Mac Video to install it, then try again.'
+  if (!status.mlxInstalled) return 'Error: the local video engine is not set up on this Mac yet (a one-time setup is needed before local video works).'
 
   let catalog: VideoModel[]
   try {
@@ -1211,7 +1211,7 @@ async function executeVideoGenerateMlx(prompt: string, merged: Record<string, an
     return `Error: Could not query MLX video models — ${e instanceof Error ? e.message : String(e)}.`
   }
   if (catalog.length === 0) {
-    return 'Error: No MLX video model installed. Download one from Models → Discover → Mac Video (e.g. "Wan 2.1 — 1.3B") and try again.'
+    return 'Error: No local video model is installed yet. The on-device video engine needs a one-time setup before local generation works.'
   }
   const requested = typeof merged.model === 'string' && merged.model ? merged.model : undefined
   let model: VideoModel

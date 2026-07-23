@@ -137,7 +137,7 @@ export function useCreate() {
         }
         setModelLoadError(
           isMlxImageHost()
-            ? 'No MLX models installed yet. Install one from the Model Manager (Mac Image / Mac Video).'
+            ? 'The local image engine is not set up on this Mac yet — a one-time setup is needed before local generation works.'
             : 'ComfyUI is not running. Start it from Settings or wait for auto-start.'
         )
         return
@@ -379,14 +379,14 @@ export function useCreate() {
     if (mode === 'video' && isMlxImageHost()) {
       setError(null)
       if (!prompt.trim()) { setError('Please enter a prompt.'); return }
-      if (!videoModel) { setError('No MLX video model selected. Install one from the Model Manager.'); return }
+      if (!videoModel) { setError('No local video model selected — pick one from the model picker.'); return }
       const catalogId = mlxVideoModelIdFor(videoModel)
       if (!catalogId) { setError(`Unknown MLX video model "${videoModel}" — re-select it from the picker.`); return }
       try {
         const status = await getVideoStatus()
         if (!status.available) { setError('MLX video is Apple Silicon only.'); return }
-        if (!status.mlxInstalled) { setError('mlx-video is not installed. Open the Model Manager → Mac Video to install it.'); return }
-        if (!status.installedModels.includes(catalogId)) { setError(`Model "${videoModel}" is not installed yet. Install it from the Model Manager.`); return }
+        if (!status.mlxInstalled) { setError('The local video engine is not set up on this Mac yet (a one-time setup is needed before local video works).'); return }
+        if (!status.installedModels.includes(catalogId)) { setError(`The local video model "${videoModel}" isn't downloaded yet.`); return }
       } catch (e) {
         setError(`MLX video status check failed: ${e instanceof Error ? e.message : String(e)}`)
         return

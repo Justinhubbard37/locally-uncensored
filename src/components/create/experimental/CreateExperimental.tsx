@@ -136,7 +136,7 @@ function CreateExperimentalInner() {
           <Stage
             displayed={displayed}
             onOpenMaskEditor={() => setMaskOpen(true)}
-            onEditResult={(it) => { void editResultWithMask(it) }}
+            onEditResult={backend === 'cloud' ? (it) => { void editResultWithMask(it) } : undefined}
             onFullscreen={(it) => setLightbox(it)}
           />
           <Composer onOpenAdvanced={() => setAdvancedOpen(true)} />

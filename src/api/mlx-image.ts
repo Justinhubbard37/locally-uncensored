@@ -158,7 +158,7 @@ export async function generateMlxImageDataUrl(
   const status = await mlxStatus()
   if (!status.installed) {
     throw new Error(
-      'MLX image generation is not installed. Open Models → Discover → Mac Image to install it.',
+      'The local image engine is not set up on this Mac yet (a one-time setup of the on-device image models is needed before local generation works).',
     )
   }
   if (!status.running) {

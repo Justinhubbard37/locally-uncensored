@@ -16,7 +16,8 @@ interface Props {
   onOpenMaskEditor: () => void
   /** Adopt a finished result as the edit source, THEN open the mask editor —
    *  a t2i run leaves `source` empty, and the editor always reads `source`. */
-  onEditResult: (item: GalleryItem) => void
+  /** Absent on the local backend — inpainting/edit is a cloud-only op. */
+  onEditResult?: (item: GalleryItem) => void
   onFullscreen: (item: GalleryItem) => void
 }
 
@@ -54,7 +55,7 @@ export function Stage({ displayed, onOpenMaskEditor, onEditResult, onFullscreen 
       <ResultView
         item={displayed}
         onFullscreen={() => onFullscreen(displayed)}
-        onSendToEditor={displayed.type === 'image' ? () => onEditResult(displayed) : undefined}
+        onSendToEditor={displayed.type === 'image' && onEditResult ? () => onEditResult(displayed) : undefined}
       />
     )
   } else {
