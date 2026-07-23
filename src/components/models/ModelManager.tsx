@@ -14,6 +14,7 @@ import { Modal } from '../ui/Modal'
 import { GlowButton } from '../ui/GlowButton'
 import { showModel } from '../../api/ollama'
 import { checkComfyConnection } from '../../api/comfyui'
+import { isMlxImageHost } from '../../api/mlx-image'
 import type { ModelCategory, AIModel } from '../../types/models'
 
 // Three-mode filter shared by both Installed and Discover banners. There is no
@@ -62,10 +63,16 @@ export function ModelManager() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // The Installed banner is driven by the same Mode tuple as Discover.
-  const installedMode: Mode = (categoryFilter === 'text' || categoryFilter === 'image' || categoryFilter === 'video')
-    ? categoryFilter
-    : 'text'
+  // The Installed banner is driven by the same Mode tuple as Discover. On the
+  // Mac, image/video models are ComfyUI-only here (MLX has no manager surface
+  // yet), so the whole media lane is dead — pin the mode to text so a persisted
+  // image/video filter never renders the "Start ComfyUI" dead state.
+  const macTextOnly = isMlxImageHost()
+  const installedMode: Mode = macTextOnly
+    ? 'text'
+    : (categoryFilter === 'text' || categoryFilter === 'image' || categoryFilter === 'video')
+      ? categoryFilter
+      : 'text'
 
   useEffect(() => {
     fetchModels()
@@ -208,7 +215,7 @@ export function ModelManager() {
           horizontal centre of the view. */}
       <div className="flex justify-center items-center gap-2 mb-5">
         <div className="flex gap-0.5 p-0.5 bg-gray-100 dark:bg-white/[0.04] rounded-lg border border-gray-200 dark:border-white/[0.06]">
-          {MODE_TABS.map(({ key, label, icon: Icon, accent }) => {
+          {MODE_TABS.filter((t) => !macTextOnly || t.key === 'text').map(({ key, label, icon: Icon, accent }) => {
             const active = tab === 'installed' ? installedMode === key : discoverMode === key
             const count = tab === 'installed' ? models.filter((m) => m.type === key).length : null
             return (
@@ -342,7 +349,7 @@ export function ModelManager() {
 
         {tab === 'discover' && (
           <DiscoverModels
-            category={discoverMode}
+            category={macTextOnly ? 'text' : discoverMode}
             search={searchQuery}
             searchSubmitToken={searchSubmitToken}
           />
