@@ -471,12 +471,12 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
   {
     name: 'image_generate',
     description:
-      'Generate an image from a text prompt via the local ComfyUI pipeline. Blocks up to 5 minutes. '
+      'Generate an image from a text prompt via the local image pipeline (Apple MLX on macOS; ComfyUI elsewhere, auto-detected). Blocks up to 5 minutes. '
       + 'USE for "draw me", "make an image of", "generate a picture". '
       + 'Pass `inputImage` (a filename from an earlier image_generate result) for image-to-image — restyle / edit an existing image at the given `denoise` strength; omit it for text-to-image. '
       + 'First installed image model is auto-selected (or pass `model`). '
-      + 'EXPECT A PAUSE: on a single-GPU machine LU may briefly unload the chat model from VRAM to fit the image model, then reload it after — typically a 30-90s swap (longer on a cold ComfyUI start). This avoids out-of-memory errors; your conversation is fully preserved across the swap. '
-      + 'Rate-limit yourself to 1 call per turn — ComfyUI serializes generations internally so parallel calls will queue, not speed up. '
+      + 'EXPECT A PAUSE on non-Mac (ComfyUI) single-GPU machines: LU may briefly unload the chat model from VRAM to fit the image model, then reload it after — typically a 30-90s swap. This avoids out-of-memory errors; your conversation is fully preserved across the swap. '
+      + 'Rate-limit yourself to 1 call per turn — generations serialize internally so parallel calls will queue, not speed up. '
       + 'Fine-tune with the optional `settings` object (steps, cfg, sampler, scheduler, width/height, seed, lora, vae); set ONLY what the user asked for. A value beyond the installed model\'s real limit is REJECTED with the actual limit so you can retry lower — values are never silently changed.',
     inputSchema: {
       type: 'object',

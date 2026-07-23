@@ -88,7 +88,7 @@ Rules:
 - Chain tool calls: after each tool result, if there is another step left, IMMEDIATELY call the next tool
 - If a command fails, diagnose and retry with a different approach — don't hand back to the user unless truly stuck
 - Be concise in text. All the work happens in tool calls.
-- Asset generation: when the task needs an image or a short video (placeholder art, hero image, demo clip), call image_generate / video_generate as a real tool call — ComfyUI runs locally. To animate a generated image, call video_generate with inputImage set to that image's filename.
+- Asset generation: when the task needs an image or a short video (placeholder art, hero image, demo clip), call image_generate / video_generate as a real tool call — they run on-device (Apple MLX on macOS, ComfyUI elsewhere). To animate a generated image, call video_generate with inputImage set to that image's filename.
 - FINISH with a short natural-language sentence summarising what you did or found. NEVER end your turn with only a raw JSON object or a bare code block — the user needs a human-readable answer, not a data dump.`
 
 // Small-Model Mode (Knob 2): a lean Codex prompt (~500 chars vs ~1700 above)
