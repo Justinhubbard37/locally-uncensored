@@ -75,3 +75,19 @@ export const INTENTS: IntentMeta[] = [
 
 export const INTENT_MAP: Record<CreateIntent, IntentMeta> =
   Object.fromEntries(INTENTS.map((i) => [i.id, i])) as Record<CreateIntent, IntentMeta>
+
+/**
+ * The intents to surface for a given backend + host. Utility intents
+ * (edit/upscale/eraser/animate) are hosted-only endpoints. Remove-Background
+ * runs through the ComfyUI RMBG node, which never exists on the Mac (MLX-only,
+ * no ComfyUI) — so on the local Mac it is hidden too, otherwise it's a dead
+ * affordance that only errors on submit. Cloud and non-Mac local keep it.
+ */
+export function visibleIntents(backend: 'local' | 'cloud', mlxHost: boolean): IntentMeta[] {
+  const localMac = backend !== 'cloud' && mlxHost
+  return INTENTS.filter((m) => {
+    if (m.cloudOnly && backend !== 'cloud') return false
+    if (m.capability === 'rmbg' && localMac) return false
+    return true
+  })
+}

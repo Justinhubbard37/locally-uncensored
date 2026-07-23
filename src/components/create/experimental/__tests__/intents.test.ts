@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { INTENTS, INTENT_MAP } from '../intents'
+import { INTENT_MAP, visibleIntents } from '../intents'
 
 // David 2026-07-10: the advanced ops have no local models — they exist only on
 // the cloud backend. Only plain generation and removebg (local RMBG node,
@@ -17,8 +17,20 @@ describe('intent cloud gating', () => {
     }
   })
 
-  it('the local IntentBar filter keeps exactly the local lane', () => {
-    const local = INTENTS.filter((m) => !m.cloudOnly).map((m) => m.id)
+  it('the local (non-Mac) IntentBar filter keeps exactly the local lane', () => {
+    const local = visibleIntents('local', false).map((m) => m.id)
     expect(local).toEqual(['image', 'removebg', 'video'])
+  })
+
+  it('the local Mac filter drops removebg (no ComfyUI RMBG node there)', () => {
+    // MLX-only Mac has no ComfyUI, so RMBG can't run locally — only plain image
+    // and video generation remain on the local Mac lane.
+    const localMac = visibleIntents('local', true).map((m) => m.id)
+    expect(localMac).toEqual(['image', 'video'])
+  })
+
+  it('cloud keeps every intent regardless of host', () => {
+    const cloud = visibleIntents('cloud', true).map((m) => m.id)
+    expect(cloud).toEqual(['image', 'edit', 'removebg', 'upscale', 'eraser', 'video', 'animate'])
   })
 })

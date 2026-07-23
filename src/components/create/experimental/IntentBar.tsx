@@ -1,5 +1,6 @@
 import { useCreateStore } from '../../../stores/createStore'
-import { INTENTS } from './intents'
+import { visibleIntents } from './intents'
+import { isMlxImageHost } from '../../../api/mlx-image'
 import { cn } from '../ui/cn'
 
 // Pure-CSS expand: no Framer layout projection anywhere, so nothing can snap or
@@ -13,10 +14,10 @@ export function IntentBar() {
   const intent = useCreateStore((s) => s.intent())
   const setIntent = useCreateStore((s) => s.setIntent)
   const backend = useCreateStore((s) => s.backend)
-  // Utility intents (upscale/eraser) are hosted-only endpoints — hide them on
-  // the local backend. setIntent's base already clears a stale utilityOp when
-  // the mode flips back and the user picks any normal intent.
-  const intents = INTENTS.filter((m) => !m.cloudOnly || backend === 'cloud')
+  // setIntent's base already clears a stale utilityOp when the mode flips back
+  // and the user picks any normal intent. Filtering (hosted-only ops + Mac's
+  // missing RMBG node) lives in visibleIntents so it stays unit-tested.
+  const intents = visibleIntents(backend, isMlxImageHost())
 
   return (
     <div
