@@ -9,7 +9,7 @@ import { WorkflowEngine } from '../../lib/workflow-engine'
 import type { StepResult } from '../../types/agent-workflows'
 import { DELEGATE_TASK_TOOL_DEF, buildDelegateExecutor } from '../agents/sub-agent'
 import { isMlxImageHost, generateMlxImageDataUrl, listMlxImageModels, type MlxImageModel } from '../mlx-image'
-import { getVideoStatus, listVideoModels, generateVideo as generateMlxVideo, getVideoProgress, readVideoAsBlobUrl, type VideoModel } from '../mlx-video'
+import { getVideoStatus, listVideoModels, generateVideo as generateMlxVideo, getVideoProgress, cancelVideo, readVideoAsBlobUrl, type VideoModel } from '../mlx-video'
 
 /**
  * Helper: current chat id as a plain `{ chatId }` fragment to spread into
@@ -514,7 +514,7 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
   {
     name: 'video_generate',
     description:
-      'Generate a short video clip from a text prompt via the local ComfyUI pipeline (Wan / Hunyuan / AnimateDiff backend, auto-detected). Blocks up to 10 minutes. '
+      'Generate a short video clip from a text prompt via the local video pipeline (Apple MLX on macOS; Wan / Hunyuan / AnimateDiff via ComfyUI elsewhere, auto-detected). Local video is slow — this can block up to 60 minutes. '
       + 'USE for "make a video of", "animate", "generate a clip". '
       + 'For a specific length pass `seconds` (e.g. seconds=4 for a 4-second clip) — prefer this over raw frames. Image-to-video (SVD) effectively tops out around 3-4 seconds; text-to-video can run longer. '
       + 'Pass `inputImage` (a filename from an earlier image_generate result) to animate a still image — image-to-video, which auto-selects an installed I2V model such as SVD; omit it for text-to-video. First installed video model is auto-selected (or pass `model`). '
@@ -1246,7 +1246,12 @@ async function executeVideoGenerateMlx(prompt: string, merged: Record<string, an
     return `Video generation failed: ${e instanceof Error ? e.message : String(e)}`
   }
 
-  const deadline = Date.now() + 10 * 60 * 1000
+  // Local video on Apple Silicon is genuinely slow — a few seconds of footage
+  // can take 30-50 min on wan_2. Give it a full hour before giving up, and on
+  // timeout actually KILL the mlx-video subprocess (video_cancel → kill_tree),
+  // otherwise it keeps churning in the background and pins the machine long
+  // after the tool has already reported failure.
+  const deadline = Date.now() + 60 * 60 * 1000
   while (Date.now() < deadline) {
     await sleep(2000)
     let prog: Awaited<ReturnType<typeof getVideoProgress>>
@@ -1268,7 +1273,8 @@ async function executeVideoGenerateMlx(prompt: string, merged: Record<string, an
       return `Video generation failed: ${prog.error || 'mlx-video failed'}`
     }
   }
-  return 'Video generation timed out after 10 minutes.'
+  try { await cancelVideo() } catch { /* already finished/gone */ }
+  return 'Video generation timed out after 60 minutes; the generation was stopped.'
 }
 
 async function executeGetCurrentTime(_args: Record<string, any>): Promise<string> {

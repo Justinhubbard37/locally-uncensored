@@ -423,6 +423,14 @@ export function useCreate() {
               reject(new Error('Cancelled'))
               return
             }
+            // Safety net: local MLX video is slow (tens of minutes), so give it
+            // a full hour — but never poll forever. On the cap, kill the
+            // mlx-video subprocess so it stops pinning the machine.
+            if (Date.now() - startTime > 60 * 60 * 1000) {
+              try { await cancelVideo() } catch { /* already finished/gone */ }
+              reject(new Error('Generation timed out after 60 minutes'))
+              return
+            }
             try {
               const prog = await getVideoProgress()
               const elapsed = Math.round((Date.now() - startTime) / 1000)
