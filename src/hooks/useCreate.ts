@@ -40,7 +40,7 @@ import {
 } from '../api/mlx-image'
 import {
   getVideoStatus, listVideoModels, generateVideo, getVideoProgress, cancelVideo,
-  buildMlxVideoModels, mlxVideoModelIdFor,
+  buildMlxVideoModels, mlxVideoModelIdFor, readVideoAsBlobUrl,
 } from '../api/mlx-video'
 
 export function useCreate() {
@@ -430,10 +430,24 @@ export function useCreate() {
               if (prog.status === 'complete') {
                 setProgress(100, 'Complete!')
                 useCreateStore.getState().setLastGenTime(`${elapsed}s`)
+                // The mp4 lives on disk only (no lu-bridge :47711/videos/<file>
+                // route anymore) — read it via the guarded `read_media_file`
+                // Rust command and hand the frontend a `blob:` URL, which the
+                // CSP's media-src allows (unlike `data:`). Reuse `dataUrl`:
+                // galleryItemUrl()/OutputView/Lightbox/download already prefer
+                // it over the ComfyUI /view path, and a blob: URL is just a
+                // string src as far as <video>/fetch are concerned.
+                let dataUrl: string | undefined
+                try {
+                  dataUrl = await readVideoAsBlobUrl(result.output)
+                } catch (e) {
+                  console.error('read_media_file failed for MLX video output', e)
+                }
                 addToGallery({
                   id: uuid(), type: 'video', filename: '', subfolder: '',
-                  // No in-process route serves MLX video output yet (unlike the
-                  // image sidecar's :47712) — see GalleryItem.localPath's TODO.
+                  dataUrl,
+                  // Keep the real on-disk path too, in case a future
+                  // download-to-disk path wants to reference it directly.
                   localPath: result.output,
                   prompt, negativePrompt, model: videoModel, modelType: 'wan',
                   seed: seed === -1 ? 0 : seed, steps, cfgScale, sampler, scheduler,

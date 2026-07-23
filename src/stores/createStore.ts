@@ -110,10 +110,14 @@ export interface GalleryItem {
   builderUsed?: 'dynamic' | 'legacy' | 'custom'
   resolvedVAE?: string
   resolvedCLIP?: string
-  /** Self-contained PNG data URL for backends that don't serve files over
-   *  ComfyUI's /view route (e.g. MLX on Apple Silicon). When set, display +
-   *  download read from this instead of filename/subfolder. In-memory only —
-   *  partialize strips it so media bytes never hit the localStorage quota. */
+  /** Self-contained media URL for backends that don't serve files over
+   *  ComfyUI's /view route (e.g. MLX on Apple Silicon): a `data:` PNG URL for
+   *  MLX images, or a `blob:` URL for MLX video (built from bytes read via
+   *  the `read_media_file` Tauri command — the CSP's media-src allows
+   *  `blob:` but not `data:` for video). When set, display + download read
+   *  from this instead of filename/subfolder. In-memory only — partialize
+   *  strips it so media bytes never hit the localStorage quota (and a
+   *  blob: URL wouldn't survive a reload anyway). */
   dataUrl?: string
   /** Cloud jobs: signed result URL from the render queue. Display prefers
    *  `remoteUrl` → `dataUrl` → the ComfyUI /view path (filename/subfolder). */
@@ -125,12 +129,10 @@ export interface GalleryItem {
   /** Which redesign intent produced this item (gallery tagging). */
   intent?: CreateIntent
   /** MLX video (Mac, Apple Silicon): absolute filesystem path of the finished
-   *  mp4, as returned by `video_generate`'s `output` field. TODO(mlx-video-
-   *  playback): there is no in-process HTTP route or asset-protocol scope
-   *  serving this yet (unlike the MLX image sidecar on :47712), and the CSP
-   *  `media-src` doesn't allow `file:` — so `<video>` can't play it inline
-   *  today. Wire a served route or Tauri asset scope, then point display/
-   *  download at that URL instead of leaving this as a dead-end path. */
+   *  mp4, as returned by `video_generate`'s `output` field. Playback/download
+   *  go through `dataUrl` (a blob: URL, see above) instead — this is kept
+   *  around as the real on-disk path for any future save-to-disk flow that
+   *  wants to reference the file directly instead of re-encoding the blob. */
   localPath?: string
   /** Runtime-only (stripped by partialize): the item's media failed to load
    *  and can't be recovered right now — a local ComfyUI item while the engine

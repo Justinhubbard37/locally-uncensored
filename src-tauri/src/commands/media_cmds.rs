@@ -16,7 +16,9 @@
 //! like the existing ComfyUI/whisper sidecars.
 
 use crate::state::AppState;
+use base64::Engine;
 use serde_json::Value;
+use std::path::PathBuf;
 use tauri::State;
 
 // ── MLX image (MLX-Stable-Diffusion) ────────────────────────────────────
@@ -121,4 +123,57 @@ pub fn video_progress(state: State<'_, AppState>, args: Value) -> Result<Value, 
 #[tauri::command]
 pub fn video_cancel(state: State<'_, AppState>, args: Value) -> Result<Value, String> {
     crate::commands::video::video_cancel(state.inner(), &args)
+}
+
+// ── Media playback (video → blob URL) ───────────────────────────────────
+//
+// MLX video never touches the sidecar HTTP surface the image path uses
+// (`mlx_generate` proxies to :47712 and returns base64 straight from the
+// response body) — `video_generate` runs `mlx_video.*.generate` as a bare
+// subprocess and writes an mp4 to disk (`commands::video::outputs_root()`).
+// With the lu-bridge daemon gone there is nothing serving that file at
+// :47711/videos/<file> anymore, and the CSP's `media-src` has no `file:`
+// grant (only `'self' blob: http://localhost:* http://127.0.0.1:*`), so a
+// `<video src="file:///...">` would just be blocked. Read the bytes here
+// and let the frontend build a `blob:` URL instead — that's an origin the
+// CSP already allows.
+
+/// Roots `read_media_file` is allowed to serve bytes from. Only MLX video
+/// output today (MLX images are never written to disk — see above); add
+/// more roots here if a future in-process media backend gains one.
+fn allowed_media_roots() -> Vec<PathBuf> {
+    vec![crate::commands::video::outputs_root()]
+}
+
+/// Read a file from one of the app's own media output directories and
+/// return its bytes as base64, so the frontend can turn it into a
+/// `Blob`/`URL.createObjectURL` blob: URL for `<video>` playback and
+/// Download.
+///
+/// Path-traversal guard: canonicalizes both `path` and every allowed root
+/// (resolving `..` and symlinks) and rejects anything whose canonical form
+/// doesn't fall under an allowed root — this is NOT a general-purpose file
+/// read, it only ever serves the app's own generated media.
+#[tauri::command]
+pub fn read_media_file(path: String) -> Result<String, String> {
+    let candidate = PathBuf::from(&path);
+    let canonical = candidate
+        .canonicalize()
+        .map_err(|e| format!("read_media_file: {}: {e}", candidate.display()))?;
+
+    let allowed = allowed_media_roots().into_iter().any(|root| {
+        root.canonicalize()
+            .map(|r| canonical.starts_with(&r))
+            .unwrap_or(false)
+    });
+    if !allowed {
+        return Err(format!(
+            "read_media_file: path escapes the allowed media directories: {}",
+            canonical.display()
+        ));
+    }
+
+    let bytes = std::fs::read(&canonical)
+        .map_err(|e| format!("read_media_file: {}: {e}", canonical.display()))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }

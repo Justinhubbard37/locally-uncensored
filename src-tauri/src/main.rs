@@ -215,6 +215,7 @@ fn main() {
             commands::media_cmds::video_generate,
             commands::media_cmds::video_progress,
             commands::media_cmds::video_cancel,
+            commands::media_cmds::read_media_file,
             // Provider API-key keychain (H5)
             commands::secret::secret_set,
             commands::secret::secret_get,

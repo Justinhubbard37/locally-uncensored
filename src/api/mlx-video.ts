@@ -132,6 +132,21 @@ export async function cancelVideo(): Promise<{ ok: boolean }> {
   return invokeMedia<{ ok: boolean }>('video_cancel')
 }
 
+/** Read a finished MLX video's bytes (via the `read_media_file` Rust command,
+ *  guarded to the app's own video output dir) and turn them into a `blob:`
+ *  URL — the CSP's `media-src` allows `blob:` but not `data:`, so this is
+ *  the only way to get `<video>` playback + Download working now that the
+ *  old lu-bridge (:47711/videos/<file>) is gone. Caller owns the returned
+ *  URL's lifetime (revoke it when the gallery item is dropped, if ever). */
+export async function readVideoAsBlobUrl(path: string): Promise<string> {
+  const b64 = await backendCall<string>('read_media_file', { path })
+  const binary = atob(b64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  const blob = new Blob([bytes], { type: 'video/mp4' })
+  return URL.createObjectURL(blob)
+}
+
 // ── Create-tab wiring (mirrors mlx-image.ts's synthetic-model pattern) ──
 //
 // On macOS the video picker shows the installed MLX catalog directly — there
