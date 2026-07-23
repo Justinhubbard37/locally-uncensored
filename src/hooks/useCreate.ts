@@ -34,6 +34,10 @@ import { useCreateStore } from '../stores/createStore'
 import { useWorkflowStore } from '../stores/workflowStore'
 import { injectParameters } from '../api/workflows'
 import { preflightCheck } from '../api/preflight'
+import {
+  generateMlxImageDataUrl, isMlxImageHost, isMlxImageModel,
+  mlxStatus, listMlxImageModels, buildMlxImageModels, mergeImageModels, mlxModelIdFor,
+} from '../api/mlx-image'
 
 export function useCreate() {
   const [connected, setConnected] = useState<boolean | null>(null)
@@ -88,9 +92,31 @@ export function useCreate() {
     setModelLoadError(null)
 
     try {
-      // Check connection first — if ComfyUI is down, don't waste time on model queries
+      // Apple Silicon: MLX is a first-class local image backend (hard rule —
+      // Mac local media is MLX-via-lu-bridge, never ComfyUI). Load the installed
+      // MLX catalog first (this also spins up the bundled bridge sidecar) so
+      // images work even when ComfyUI is absent — the normal Mac case.
+      let mlxImageModels: ClassifiedModel[] = []
+      if (isMlxImageHost()) {
+        try {
+          const mlx = await mlxStatus()
+          if (mlx.installed) mlxImageModels = buildMlxImageModels(await listMlxImageModels())
+        } catch { /* bridge/sidecar not up yet — treat as no MLX models */ }
+      }
+
+      // Check connection — if ComfyUI is down, don't waste time on its queries.
       const comfyOk = await checkComfyConnection()
       if (!comfyOk) {
+        // On Apple Silicon MLX alone is a valid image backend — don't bail.
+        if (mlxImageModels.length > 0) {
+          setImageModels(mlxImageModels)
+          const st = useCreateStore.getState()
+          st.setImageModelList(mlxImageModels)
+          if (!st.imageModel) st.setImageModel(mlxImageModels[0].name, mlxImageModels[0].type)
+          zeroModelRetries.current = 0
+          setModelsLoaded(true)
+          return
+        }
         setModelLoadError('ComfyUI is not running. Start it from Settings or wait for auto-start.')
         return
       }
@@ -108,7 +134,10 @@ export function useCreate() {
         detectVideoBackend(),
         getAllNodeInfo().catch(() => null),
       ])
-      const imgModels = comfyImgModels
+      // MLX entries go first so one is the default on a fresh Apple-Silicon box.
+      const imgModels = mlxImageModels.length
+        ? mergeImageModels(comfyImgModels, mlxImageModels)
+        : comfyImgModels
       setImageModels(imgModels)
       setVideoModelsList(vidModels)
       setSamplerList(samplers)
@@ -266,8 +295,47 @@ export function useCreate() {
     const maskFilename = mask?.filename
     const isRemoveBg = mode === 'image' && removebg
 
-    // Desktop port: the MLX video/image pipelines (Apple Silicon) are not
-    // part of this build — ComfyUI is the only local backend.
+    // ── MLX image pipeline (Apple Silicon) — hard rule: Mac local image is
+    // MLX-via-lu-bridge, never ComfyUI. Routes on the SELECTED model being the
+    // synthetic MLX entry (a stale videoBackend must not hijack a real ComfyUI
+    // checkpoint). Generation returns a base64 PNG stored as a data URL on the
+    // gallery item, so display + download work with no ComfyUI /view route. ──
+    if (mode === 'image' && isMlxImageHost() && isMlxImageModel(imageModel) && !isRemoveBg) {
+      setError(null)
+      if (!prompt.trim()) { setError('Please enter a prompt.'); return }
+      setIsGenerating(true)
+      state.setProgressPhase('loading-model')
+      setProgress(10, 'Starting MLX image generation...')
+      addToPromptHistory(prompt)
+      const startTime = Date.now()
+      try {
+        state.setProgressPhase('sampling')
+        setProgress(40, 'Generating with MLX...')
+        const { dataUrl, width: outW, height: outH } = await generateMlxImageDataUrl({
+          prompt, steps, seed, width, height,
+          model: mlxModelIdFor(imageModel),
+          negativePrompt: negativePrompt || undefined,
+        })
+        const elapsed = Math.round((Date.now() - startTime) / 1000)
+        state.setProgressPhase('complete')
+        setProgress(100, 'Complete!')
+        state.setLastGenTime(`${elapsed}s`)
+        addToGallery({
+          id: uuid(), type: 'image', filename: `mlx-${Date.now()}.png`, subfolder: '',
+          dataUrl, prompt, negativePrompt, model: imageModel, modelType: 'unknown',
+          seed: seed === -1 ? 0 : seed, steps, cfgScale, sampler, scheduler,
+          width: outW || width, height: outH || height, batchSize: 1,
+          createdAt: Date.now(), builderUsed: 'dynamic', intent,
+        })
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        useCreateStore.getState().setError(`Generation failed: ${msg}`)
+      } finally {
+        useCreateStore.getState().setIsGenerating(false)
+        useCreateStore.getState().setProgress(0)
+      }
+      return
+    }
 
     setError(null)
     const activeModel = mode === 'image' ? imageModel : videoModel
