@@ -71,6 +71,29 @@ export function comfyViewParams(url: string | null | undefined): { filename: str
   }
 }
 
+// Mac MLX media (hard rule: local image/video on Mac is MLX, never ComfyUI —
+// see api/mcp/builtin-tools.ts's executeImageGenerateMlx / executeVideoGenerateMlx).
+// There is no ComfyUI /view route for these, so the result carries a local
+// `blob:` (or, defensively, `data:`) URL created in THIS webview session
+// instead. Same F1 result shape as the ComfyUI path — `<kind> generated:
+// <file> (prompt: "...")\n<url>` — just a different url scheme. Exported for
+// unit testing.
+export function localMediaUrlFromResult(result: string | null | undefined): string | null {
+  if (!result) return null
+  const m = result.match(/(blob:[^\s)\]]+|data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,[^\s)\]]+)/i)
+  return m ? m[1] : null
+}
+
+// Pull the "<file>" back out of the "<kind> generated: <file> (prompt: …"
+// prefix so the local-media Download button can suggest a real filename
+// (blob:/data: URLs carry no filename of their own, unlike a ComfyUI /view
+// URL's `filename=` query param). Exported for unit testing.
+export function localMediaFilenameFromResult(result: string | null | undefined): string | null {
+  if (!result) return null
+  const m = result.match(/^(?:Image|Video) generated:\s*(\S+)/)
+  return m ? m[1] : null
+}
+
 interface Props {
   toolCall: AgentToolCall
   onApprove?: () => void
@@ -123,7 +146,13 @@ export function ToolCallBlock({ toolCall, onApprove, onReject }: Props) {
   // Computed once; rendered ALWAYS-visible below the header (even while the
   // tool block is collapsed) so an auto-approved generation shows its picture
   // without the user having to expand the block — konata's "and no image".
-  const previewUrl = comfyViewUrlFromResult(toolCall.result)
+  // Two possible sources: a ComfyUI /view URL (Windows/Linux), or a local
+  // blob:/data: URL from the Mac MLX path (executeImageGenerateMlx /
+  // executeVideoGenerateMlx in api/mcp/builtin-tools.ts — no ComfyUI /view
+  // route exists for those).
+  const comfyPreviewUrl = comfyViewUrlFromResult(toolCall.result)
+  const localPreviewUrl = comfyPreviewUrl ? null : localMediaUrlFromResult(toolCall.result)
+  const previewUrl = comfyPreviewUrl ?? localPreviewUrl
 
   // Model-Picker (v2.5.3): while a generation tool call is RUNNING and the
   // executor's pre-VRAM-swap gate is waiting, render the picker inside this
@@ -144,12 +173,20 @@ export function ToolCallBlock({ toolCall, onApprove, onReject }: Props) {
   const [imgFailed, setImgFailed] = useState(false)
   const effectivePreviewUrl = (() => {
     if (!previewUrl) return null
+    // blob:/data: URLs (Mac MLX) are self-contained in this session — the
+    // ComfyUI-host retry below only ever applies to a relative /view path.
     if (imgFailed && previewUrl.startsWith('/')) {
       const path = previewUrl.startsWith('/comfyui/') ? previewUrl.slice('/comfyui'.length) : previewUrl
       return `http://${getComfyHost()}:${getComfyPort()}${path}`
     }
     return previewUrl
   })()
+  // A blob:/data: URL carries no `filename=` query param for isInlineVideoUrl
+  // to key off, so fall back to the tool name — accurate since the MLX video
+  // executor never produces an image result and vice versa.
+  const isVideoResult = !!localPreviewUrl
+    ? toolCall.toolName === 'video_generate'
+    : !!effectivePreviewUrl && isInlineVideoUrl(effectivePreviewUrl)
 
   return (
     <div className="mb-0.5">
@@ -214,7 +251,7 @@ export function ToolCallBlock({ toolCall, onApprove, onReject }: Props) {
           ComfyUI by comfyViewUrlFromResult (never auto-loads arbitrary URLs). */}
       {previewUrl && effectivePreviewUrl && (
         <div className="pl-5 pt-0.5 space-y-1">
-          {isInlineVideoUrl(effectivePreviewUrl) ? (
+          {isVideoResult ? (
             <video
               src={effectivePreviewUrl}
               controls
@@ -235,18 +272,33 @@ export function ToolCallBlock({ toolCall, onApprove, onReject }: Props) {
           )}
           {/* Download (David 2026-06-12): generated media shows in the chat with
               a Download button, ChatGPT-style — downloadComfyFile pulls the real
-              bytes and saves via the native dialog. */}
+              bytes and saves via the native dialog. Mac MLX results have no
+              ComfyUI /view route to re-fetch from, so a plain anchor download
+              off the blob:/data: URL already in hand does the same job. */}
           {(() => {
             const p = comfyViewParams(effectivePreviewUrl)
-            if (!p) return null
+            if (p) {
+              return (
+                <button
+                  onClick={() => { void downloadComfyFile(p.filename, p.subfolder, p.type) }}
+                  title="Download"
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[0.6rem] font-medium bg-blue-500/15 text-blue-500 hover:bg-blue-500/25 border border-blue-500/30 transition-colors"
+                >
+                  <Download size={11} /> Download
+                </button>
+              )
+            }
+            if (!localPreviewUrl) return null
+            const filename = localMediaFilenameFromResult(toolCall.result) || (isVideoResult ? 'video.mp4' : 'image.png')
             return (
-              <button
-                onClick={() => { void downloadComfyFile(p.filename, p.subfolder, p.type) }}
+              <a
+                href={effectivePreviewUrl}
+                download={filename}
                 title="Download"
                 className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[0.6rem] font-medium bg-blue-500/15 text-blue-500 hover:bg-blue-500/25 border border-blue-500/30 transition-colors"
               >
                 <Download size={11} /> Download
-              </button>
+              </a>
             )
           })()}
         </div>

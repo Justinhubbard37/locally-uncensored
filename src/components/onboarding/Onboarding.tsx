@@ -9,7 +9,7 @@ import { detectLocalBackends, type DetectedBackend } from '../../lib/backend-det
 import { detectProviderModelPath, startModelDownloadToPath } from '../../api/discover'
 import { useDownloadStore } from '../../stores/downloadStore'
 import { ProgressBar } from '../ui/ProgressBar'
-import { openExternal } from '../../api/backend'
+import { openExternal, isMacOS } from '../../api/backend'
 import { formatBytes } from '../../lib/formatters'
 import { backendCall } from '../../api/backend'
 import { getSystemVRAM } from '../../api/comfyui'
@@ -344,7 +344,17 @@ export function Onboarding() {
     if (isTauri) backendCall('set_onboarding_done').catch(() => {})
   }
 
-  // Commit the chosen backend to the provider store and advance to ComfyUI.
+  // Hard rule: on macOS, local image/video generation is Apple MLX only —
+  // ComfyUI never runs there (see isMlxImageHost() / the image_generate +
+  // video_generate MLX routing in api/mcp/builtin-tools.ts). The ComfyUI
+  // wizard step would just auto-detect/install a backend that can't start on
+  // this platform, so skip straight to the model picker. MLX models are
+  // managed from Models → Discover after onboarding, same as any other
+  // model — no dedicated onboarding step for them.
+  const nextStepAfterBackends = (): Step => (isMacOS() ? 'models' : 'comfyui')
+
+  // Commit the chosen backend to the provider store and advance to ComfyUI
+  // (or straight to the model picker on macOS — see nextStepAfterBackends).
   // Built-in (default) reasserts the managed OpenAI-slot config; a detected
   // Ollama takes over the primary slot (managed built-in disabled) so there
   // aren't two defaults; other OpenAI-compat backends fill the openai slot.
@@ -367,7 +377,7 @@ export function Onboarding() {
         })
       }
     }
-    setStep('comfyui')
+    setStep(nextStepAfterBackends())
   }
 
   /* ── Scan for backends ──────────────────────────────────── */
@@ -600,7 +610,11 @@ export function Onboarding() {
   // are true. A `found && !complete` carcass (P14) keeps the install option
   // visible so the user can re-trigger and let LU rebuild torch/deps.
   useEffect(() => {
-    if (step === 'comfyui' && !comfyFound && !comfyDetecting) {
+    // Belt-and-suspenders: nextStepAfterBackends() already routes macOS
+    // straight past this step, so `step` should never actually be 'comfyui'
+    // there — but never auto-detect/install ComfyUI on Mac regardless (hard
+    // rule: Mac local image/video is MLX only).
+    if (step === 'comfyui' && !isMacOS() && !comfyFound && !comfyDetecting) {
       setComfyDetecting(true)
       // First: enumerate ALL installs (Bug #3). When >1 we show a picker
       // BEFORE auto-picking — preventing the ninjastic2008 trap where LU
@@ -727,7 +741,10 @@ export function Onboarding() {
   const handleClose = async () => { const { getCurrentWindow } = await import('@tauri-apps/api/window'); getCurrentWindow().close() }
   const winBtn = 'inline-flex items-center justify-center w-[46px] h-8 transition-colors text-gray-400 hover:text-gray-200'
 
-  const stepIndex = STEP_ORDER.indexOf(step)
+  // Mac never visits 'comfyui' (see nextStepAfterBackends) — drop it from the
+  // dots too so the indicator doesn't show a step the user will never see.
+  const visibleStepOrder = isMacOS() ? STEP_ORDER.filter((s) => s !== 'comfyui') : STEP_ORDER
+  const stepIndex = visibleStepOrder.indexOf(step)
 
   return (
     <div className={`h-screen w-screen flex items-center justify-center p-4 ${bgClass}`}>
@@ -742,7 +759,7 @@ export function Onboarding() {
 
       {/* Step indicator dots */}
       <div className="fixed top-10 left-1/2 -translate-x-1/2 z-40 flex gap-1.5">
-        {STEP_ORDER.map((s, i) => (
+        {visibleStepOrder.map((s, i) => (
           <div key={s} className={`w-1.5 h-1.5 rounded-full transition-colors ${i <= stepIndex ? (isDark ? 'bg-white' : 'bg-gray-900') : (isDark ? 'bg-white/15' : 'bg-gray-300')}`} />
         ))}
       </div>
@@ -1173,7 +1190,7 @@ export function Onboarding() {
                   )}
                   {(ollamaReady || lmstudioReady || (!ollamaInstalling && !lmstudioInstalling)) && (
                     <button
-                      onClick={() => setStep('comfyui')}
+                      onClick={() => setStep(nextStepAfterBackends())}
                       className={(ollamaReady || lmstudioReady) ? primaryBtn : `${secondaryBtn} opacity-60`}
                     >
                       {(ollamaReady || lmstudioReady) ? <>Continue <ArrowRight size={14} /></> : <>Skip for now <ChevronRight size={12} /></>}
