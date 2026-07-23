@@ -1324,8 +1324,18 @@ const LMSTUDIO_INSTALLER_URL: &str =
 const LMSTUDIO_DEFAULT_PORT: u16 = 1234;
 
 fn lmstudio_lms_path() -> Option<PathBuf> {
+    // Every branch below is a Windows-ism (`lms.exe`, LOCALAPPDATA/PROGRAMFILES,
+    // the registry, `where`), so on macOS/Linux this returned None even with LM
+    // Studio installed — breaking lmstudio_load/unload/server there. The
+    // cross-platform helper already handles the Unix layout (`lms` with no
+    // extension at ~/.lmstudio/bin, plus Spotlight), so delegate to it.
+    #[cfg(not(target_os = "windows"))]
+    {
+        return crate::os_paths::find_lms_cli();
+    }
     // Post-bootstrap: `lms bootstrap` materialises the launcher here and adds
     // the same path to PATH. Cheapest check first.
+    #[allow(unreachable_code)]
     let direct = dirs::home_dir().map(|h| h.join(".lmstudio").join("bin").join("lms.exe"));
     if let Some(ref p) = direct {
         if p.exists() {

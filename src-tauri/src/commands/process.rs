@@ -698,18 +698,14 @@ fn is_comfyui_running_on_port(port: u16) -> bool {
 
 #[tauri::command]
 pub fn start_ollama(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    // Check if already running
-    {
-        let mut cmd = Command::new("tasklist");
-        cmd.args(["/FI", "IMAGENAME eq ollama.exe"]);
-        #[cfg(target_os = "windows")]
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        if let Ok(output) = cmd.output() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.contains("ollama.exe") {
-                println!("[Ollama] Already running");
-                return Ok(serde_json::json!({"status": "already_running"}));
-            }
+    // Already running? Probe the API port cross-platform. The old check used
+    // Windows-only `tasklist`, which no-op'd on macOS/Linux (same bug fixed in
+    // auto_start_ollama), so this command never reported already_running there.
+    if let Ok(addr) = "127.0.0.1:11434".parse() {
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok()
+        {
+            println!("[Ollama] Already running");
+            return Ok(serde_json::json!({"status": "already_running"}));
         }
     }
 
