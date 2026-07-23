@@ -19,6 +19,9 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["stream", "blocking", "json", "multipart"] }
 zip = "2"
 dirs = "6"
+# Python interpreter discovery for the in-process MLX media engine
+# (os_paths::find_python, mlx.rs::locate_python_311).
+which = "6"
 regex = "1"
 glob = "0.3"
 sysinfo = "0.33"

@@ -2,6 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod install_state;
+mod os_paths;
+mod process_util;
 mod python;
 mod state;
 
@@ -190,10 +193,28 @@ fn main() {
             commands::engine::start_bundled_embed,
             commands::engine::stop_bundled_embed,
             commands::engine::bundled_embed_status,
-            // lu-bridge media sidecar (macOS Apple-Silicon MLX local media, Phase 6)
-            commands::bridge::start_media_bridge,
-            commands::bridge::stop_media_bridge,
-            commands::bridge::media_bridge_status,
+            // In-process MLX media engine (macOS Apple-Silicon local image/video,
+            // spawned in-process — no separate bridge daemon). See media_cmds.rs.
+            commands::media_cmds::mlx_status,
+            commands::media_cmds::mlx_start,
+            commands::media_cmds::mlx_unload,
+            commands::media_cmds::mlx_generate,
+            commands::media_cmds::mlx_image_models,
+            commands::media_cmds::mlx_image_install_model,
+            commands::media_cmds::mlx_image_install_status,
+            commands::media_cmds::mlx_image_delete_model,
+            commands::media_cmds::install_mlx_diffusion,
+            commands::media_cmds::install_mlx_diffusion_status,
+            commands::media_cmds::video_status,
+            commands::media_cmds::video_list_models,
+            commands::media_cmds::video_install_mlx,
+            commands::media_cmds::video_install_mlx_status,
+            commands::media_cmds::video_install_model,
+            commands::media_cmds::video_install_model_status,
+            commands::media_cmds::video_delete_model,
+            commands::media_cmds::video_generate,
+            commands::media_cmds::video_progress,
+            commands::media_cmds::video_cancel,
             // Provider API-key keychain (H5)
             commands::secret::secret_set,
             commands::secret::secret_get,

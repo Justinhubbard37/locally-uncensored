@@ -1,14 +1,26 @@
 /**
- * MLX-video pipeline (Apple Silicon), via the bundled lu-bridge sidecar.
- * Ported from uselu/apps/web/api/video.ts — transport swapped to `bridgeCmd`
- * (127.0.0.1:47711/cmd/*). The bridge spawns `python -m mlx_video.<family>.
- * generate` as a subprocess and exposes progress the frontend polls.
+ * MLX-video pipeline (Apple Silicon), running IN-PROCESS — Rust
+ * (`commands::video`) spawns `python -m mlx_video.<family>.generate` as a
+ * subprocess directly, no separate lu-bridge daemon. Ported from
+ * uselu/apps/web/api/video.ts; the transport is a direct Tauri `invoke` via
+ * `invokeMedia` (see mlx-image.ts) and progress is exposed for the frontend
+ * to poll.
  *
  * Hard rule: this is the Mac local video backend, NOT ComfyUI. Only Apple
  * Silicon Macs see a real surface — every call returns `available:false`
  * elsewhere so the UI can dim/skip it.
  */
-import { bridgeCmd } from './bridge-client'
+import { backendCall } from './backend'
+
+/** See the `invokeMedia` doc comment in `mlx-image.ts` — the Rust wrappers
+ *  take a single `args: serde_json::Value` param, so the payload must be
+ *  nested under an `args` key. */
+async function invokeMedia<T = unknown>(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
+  return backendCall<T>(command, { args: args ?? {} })
+}
 
 export interface VideoStatus {
   available: boolean
@@ -69,33 +81,33 @@ export interface GenerateResult {
 }
 
 export async function getVideoStatus(): Promise<VideoStatus> {
-  return bridgeCmd<VideoStatus>('video_status')
+  return invokeMedia<VideoStatus>('video_status')
 }
 
 export async function listVideoModels(): Promise<VideoModel[]> {
-  return bridgeCmd<VideoModel[]>('video_list_models')
+  return invokeMedia<VideoModel[]>('video_list_models')
 }
 
 export async function installMlxVideo(): Promise<{ ok: boolean; status: string }> {
-  return bridgeCmd<{ ok: boolean; status: string }>('video_install_mlx', {}, 1_800_000)
+  return invokeMedia<{ ok: boolean; status: string }>('video_install_mlx')
 }
 
 export async function getMlxInstallStatus(): Promise<InstallStatus> {
-  return bridgeCmd<InstallStatus>('video_install_mlx_status')
+  return invokeMedia<InstallStatus>('video_install_mlx_status')
 }
 
 export async function installVideoModel(
   id: string,
 ): Promise<{ ok: boolean; status: string; id?: string }> {
-  return bridgeCmd('video_install_model', { id })
+  return invokeMedia('video_install_model', { id })
 }
 
 export async function getModelInstallStatus(): Promise<InstallStatus> {
-  return bridgeCmd<InstallStatus>('video_install_model_status')
+  return invokeMedia<InstallStatus>('video_install_model_status')
 }
 
 export async function deleteVideoModel(id: string): Promise<{ ok: boolean; id: string }> {
-  return bridgeCmd('video_delete_model', { id })
+  return invokeMedia('video_delete_model', { id })
 }
 
 export async function generateVideo(params: GenerateParams): Promise<GenerateResult> {
@@ -108,16 +120,13 @@ export async function generateVideo(params: GenerateParams): Promise<GenerateRes
     seed: params.seed,
   }
   // Kick off the subprocess; generation itself is polled via video_progress.
-  return bridgeCmd<GenerateResult>('video_generate', body, 120_000)
+  return invokeMedia<GenerateResult>('video_generate', body)
 }
 
 export async function getVideoProgress(): Promise<VideoProgress> {
-  return bridgeCmd<VideoProgress>('video_progress')
+  return invokeMedia<VideoProgress>('video_progress')
 }
 
 export async function cancelVideo(): Promise<{ ok: boolean }> {
-  return bridgeCmd<{ ok: boolean }>('video_cancel')
+  return invokeMedia<{ ok: boolean }>('video_cancel')
 }
-
-/** Bridge base for <video src> playback of a finished clip (served at /videos/:file). */
-export const MLX_VIDEO_BASE = 'http://127.0.0.1:47711'

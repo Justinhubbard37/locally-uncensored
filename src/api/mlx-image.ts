@@ -1,15 +1,30 @@
 /**
- * MLX-Stable-Diffusion image pipeline (Apple Silicon), via the bundled
- * lu-bridge sidecar. Ported from uselu/apps/web/api/mlx-image.ts — the only
- * change is the transport (`bridgeCmd` → 127.0.0.1:47711/cmd/*) plus a
- * readiness wait: the FastAPI sidecar (:47712) binds a beat after `mlx_start`
- * returns, so a cold first generate can race and 500 with "mlx unreachable".
+ * MLX-Stable-Diffusion image pipeline (Apple Silicon), running IN-PROCESS —
+ * the app spawns its own MLX Python sidecar (server.py on 127.0.0.1:47712)
+ * directly from Rust (`commands::mlx`), no separate lu-bridge daemon. Ported
+ * from uselu/apps/web/api/mlx-image.ts; the transport is a direct Tauri
+ * `invoke` via `invokeMedia` (see below) plus a readiness wait: the FastAPI
+ * sidecar binds a beat after `mlx_start` returns, so a cold first generate
+ * can race and 500 with "mlx unreachable".
  *
  * Hard rule: this is the Mac local image backend, NOT ComfyUI.
  */
-import { bridgeCmd } from './bridge-client'
-import { isMacOS } from './backend'
+import { backendCall, isMacOS } from './backend'
 import type { ClassifiedModel } from './comfyui'
+
+/**
+ * Invoke an in-process MLX media Tauri command. The Rust wrappers
+ * (`src-tauri/src/commands/media_cmds.rs`) each take a single
+ * `args: serde_json::Value` parameter — matching the existing `shell_task_*`
+ * convention in this codebase (see `src/api/agents/bg-tasks.ts`) — so the
+ * payload must be nested under an `args` key, not passed at the top level.
+ */
+async function invokeMedia<T = unknown>(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
+  return backendCall<T>(command, { args: args ?? {} })
+}
 
 export interface MlxStatus {
   installed: boolean
@@ -58,15 +73,15 @@ export interface MlxGenerateResult {
 }
 
 export async function mlxStatus(): Promise<MlxStatus> {
-  return bridgeCmd<MlxStatus>('mlx_status')
+  return invokeMedia<MlxStatus>('mlx_status')
 }
 
 export async function mlxStart(): Promise<{ ok: boolean; port: number }> {
-  return bridgeCmd<{ ok: boolean; port: number }>('mlx_start')
+  return invokeMedia<{ ok: boolean; port: number }>('mlx_start')
 }
 
 export async function mlxUnload(): Promise<{ ok: boolean; was_loaded: boolean; running: boolean }> {
-  return bridgeCmd('mlx_unload')
+  return invokeMedia('mlx_unload')
 }
 
 export async function mlxGenerate(args: MlxGenerateArgs): Promise<MlxGenerateResult> {
@@ -77,35 +92,36 @@ export async function mlxGenerate(args: MlxGenerateArgs): Promise<MlxGenerateRes
   if (args.width != null) body.width = args.width
   if (args.height != null) body.height = args.height
   if (args.negativePrompt) body.negative_prompt = args.negativePrompt
-  // A single long-blocking request (model load + diffusion) — allow 5 min.
-  return bridgeCmd<MlxGenerateResult>('mlx_generate', body, 300_000)
+  // A single long-blocking request (model load + diffusion) — in-process
+  // invoke has no per-call timeout to pass (unlike the old HTTP bridgeCmd).
+  return invokeMedia<MlxGenerateResult>('mlx_generate', body)
 }
 
 export async function listMlxImageModels(): Promise<MlxImageModel[]> {
-  return bridgeCmd<MlxImageModel[]>('mlx_image_models')
+  return invokeMedia<MlxImageModel[]>('mlx_image_models')
 }
 
 export async function installMlxImageModel(
   id: string,
 ): Promise<{ ok: boolean; status: string; id?: string }> {
-  return bridgeCmd('mlx_image_install_model', { id })
+  return invokeMedia('mlx_image_install_model', { id })
 }
 
 export async function getMlxImageInstallStatus(): Promise<MlxInstallStatus> {
-  return bridgeCmd<MlxInstallStatus>('mlx_image_install_status')
+  return invokeMedia<MlxInstallStatus>('mlx_image_install_status')
 }
 
 export async function deleteMlxImageModel(id: string): Promise<{ ok: boolean; id: string }> {
-  return bridgeCmd('mlx_image_delete_model', { id })
+  return invokeMedia('mlx_image_delete_model', { id })
 }
 
 /** Install the MLX image engine itself (venv + torch/diffusers sidecar). */
 export async function installMlxImageEngine(): Promise<{ ok: boolean; status: string }> {
-  return bridgeCmd('install_mlx_diffusion', {}, 1_800_000)
+  return invokeMedia('install_mlx_diffusion')
 }
 
 export async function getMlxImageEngineStatus(): Promise<MlxInstallStatus> {
-  return bridgeCmd<MlxInstallStatus>('install_mlx_diffusion_status')
+  return invokeMedia<MlxInstallStatus>('install_mlx_diffusion_status')
 }
 
 export type MlxImageDecision = 'use' | 'start' | 'comfyui' | 'unavailable'

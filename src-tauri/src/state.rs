@@ -135,12 +135,6 @@ pub(crate) fn load_ollama_base() -> String {
 
 pub struct AppState {
     pub comfy_process: Mutex<Option<Child>>,
-    /// Managed lu-bridge sidecar (Apple-Silicon MLX local media, macOS only).
-    /// `None` until `start_media_bridge` spawns the bundled `lu-bridge` binary
-    /// headless on 127.0.0.1:47711. The lifecycle lives in `commands::bridge`;
-    /// this is just the handle so shutdown can reap it. See the hard rule:
-    /// Mac local image/video is MLX-via-bridge only, never ComfyUI.
-    pub media_bridge: Mutex<Option<Child>>,
     /// Child handle for an Ollama daemon LU spawned itself (kj103x bug, Discord
     /// 2026-05-23 #help-chat). The Drop impl below kills the tree on shutdown
     /// so `ollama.exe` doesn't linger eating ~200 MB after the tray quit.
@@ -251,6 +245,27 @@ pub struct AppState {
     /// ran on the CPU). None = LU hasn't started ComfyUI this session.
     /// Surfaced to the Create tab via `get_comfy_gpu_status`.
     pub comfy_started_cpu: Mutex<Option<bool>>,
+    // ── In-process MLX media engine (macOS Apple-Silicon local image/video) ──
+    // Ported from uselu/apps/bridge's `commands::mlx` / `commands::video`. The
+    // app spawns its OWN Python MLX sidecar (server.py on 127.0.0.1:47712) —
+    // no separate lu-bridge daemon. Hard rule: Mac local image/video is MLX
+    // only, never ComfyUI.
+    /// Install progress for the MLX-Stable-Diffusion engine (venv + torch +
+    /// diffusers). `commands::mlx::install_mlx_diffusion`.
+    pub install_mlx_diffusion: crate::install_state::InstallSlot,
+    /// Install progress for a single MLX image-catalog model download.
+    pub install_mlx_image_model: crate::install_state::InstallSlot,
+    /// Install progress for the `mlx-video` pip package.
+    pub install_mlx_video: crate::install_state::InstallSlot,
+    /// Install progress for a single MLX video-catalog model download/convert.
+    pub install_video_model: crate::install_state::InstallSlot,
+    /// Live progress/log of the currently running (or last) video generation.
+    pub video_progress: crate::install_state::InstallSlot,
+    /// Handle to the running `mlx_video.*.generate` subprocess, if any. `Arc`-
+    /// wrapped (unlike the other `Mutex<Option<Child>>` handles above) so the
+    /// video-generation reaper thread can hold its own clone of the same
+    /// mutex instead of needing a clone of the whole (non-`Clone`) `AppState`.
+    pub video_process: Arc<Mutex<Option<Child>>>,
 }
 
 impl AppState {
@@ -284,7 +299,6 @@ impl AppState {
 
         Self {
             comfy_process: Mutex::new(None),
-            media_bridge: Mutex::new(None),
             ollama_process: Mutex::new(None),
             bundled_engine: Mutex::new(None),
             bundled_embed: Mutex::new(None),
@@ -321,7 +335,48 @@ impl AppState {
             comfy_gpu_cache: Mutex::new(HashMap::new()),
             comfy_gpu_mode: Mutex::new("auto".to_string()),
             comfy_started_cpu: Mutex::new(None),
+            install_mlx_diffusion: crate::install_state::InstallSlot::default(),
+            install_mlx_image_model: crate::install_state::InstallSlot::default(),
+            install_mlx_video: crate::install_state::InstallSlot::default(),
+            install_video_model: crate::install_state::InstallSlot::default(),
+            video_progress: crate::install_state::InstallSlot::default(),
+            video_process: Arc::new(Mutex::new(None)),
         }
+    }
+}
+
+impl AppState {
+    /// Install-progress accessors for the in-process MLX media engine — each
+    /// returns a cloned handle (`InstallSlot` is a cheap `Arc`-backed clone),
+    /// matching the accessor-method convention the ported `commands::mlx` /
+    /// `commands::video` code expects (`state.install_mlx_diffusion()` etc.).
+    pub fn install_mlx_diffusion(&self) -> crate::install_state::InstallSlot {
+        self.install_mlx_diffusion.clone()
+    }
+    pub fn install_mlx_image_model(&self) -> crate::install_state::InstallSlot {
+        self.install_mlx_image_model.clone()
+    }
+    pub fn install_mlx_video(&self) -> crate::install_state::InstallSlot {
+        self.install_mlx_video.clone()
+    }
+    pub fn install_video_model(&self) -> crate::install_state::InstallSlot {
+        self.install_video_model.clone()
+    }
+    pub fn video_progress(&self) -> crate::install_state::InstallSlot {
+        self.video_progress.clone()
+    }
+    /// Cloned `Arc` handle to the video-subprocess mutex — cheap, and lets a
+    /// spawned reaper thread hold its own reference without needing the
+    /// (non-`Clone`) `AppState` itself. See the `video_process` field doc.
+    pub fn video_process(&self) -> Arc<Mutex<Option<Child>>> {
+        self.video_process.clone()
+    }
+    /// Resolved Python binary path, or `None` when no real Python was found
+    /// on this box (`python_bin` stores `""` as that sentinel — see the field
+    /// doc comment above).
+    pub fn python_bin(&self) -> Option<String> {
+        let bin = self.python_bin.lock().unwrap().clone();
+        if bin.is_empty() { None } else { Some(bin) }
     }
 }
 
@@ -403,12 +458,12 @@ impl AppState {
             }
         }
 
-        // lu-bridge media sidecar (macOS MLX). Plain kill of the bridge parent;
-        // the bridge reaps its own MLX Python sidecar (:47712) on shutdown.
-        if let Ok(mut proc) = self.media_bridge.lock() {
+        // In-process MLX video subprocess (`mlx_video.*.generate`). Plain kill —
+        // it's a single Python process, no child tree to walk.
+        if let Ok(mut proc) = self.video_process.lock() {
             if let Some(ref mut child) = *proc {
                 let _ = child.kill();
-                println!("[Bridge] lu-bridge media sidecar stopped (explicit shutdown)");
+                println!("[MLX] video subprocess stopped (explicit shutdown)");
             }
             *proc = None;
         }

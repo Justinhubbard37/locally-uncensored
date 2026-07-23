@@ -51,8 +51,7 @@
       "../dist"
     ],
     "externalBin": [
-      "bin/llama-server",
-      "bin/lu-bridge"
+      "bin/llama-server"
     ],
     "icon": [
       "icons/32x32.png",

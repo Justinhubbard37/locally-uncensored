@@ -4,6 +4,18 @@ use sysinfo::System;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
+/// Disk-space preflight shim for the ported `commands::video::video_install_model`
+/// (originally the bridge's real statvfs-based free/total/used probe). Not
+/// wired up to a real disk-usage check here — returning `None` makes the
+/// preflight a no-op (video installs proceed without a disk-space guard, same
+/// as every other model-download path in this codebase, none of which check
+/// free space today). Signature (`Option<(free, total, used)>` in bytes)
+/// matches the call site's `if let Some((free, _, _)) = ...` destructure.
+#[allow(dead_code)]
+pub fn volume_space_for(_path: &std::path::Path) -> Option<(u64, u64, u64)> {
+    None
+}
+
 #[tauri::command]
 pub fn system_info() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({

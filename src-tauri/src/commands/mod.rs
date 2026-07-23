@@ -1,6 +1,5 @@
 pub mod agent;
 pub mod bg_tasks;
-pub mod bridge;
 pub mod repo_map;
 pub mod claude_code;
 pub mod download;
@@ -9,6 +8,8 @@ pub mod filesystem;
 pub mod gpu;
 pub mod health;
 pub mod install;
+pub mod media_cmds;
+pub mod mlx;
 pub mod oauth;
 pub mod process;
 pub mod proxy;
@@ -18,6 +19,7 @@ pub mod secret;
 pub mod shell;
 pub mod system;
 pub mod tts;
+pub mod video;
 pub mod waitlist;
 pub mod whisper;
 
