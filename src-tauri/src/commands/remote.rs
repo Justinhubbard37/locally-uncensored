@@ -84,6 +84,19 @@ struct RemoteState {
     /// Remote Access proxy reach the same Ollama instance the desktop is
     /// configured for (Issue #31).
     ollama_base: String,
+    /// #87: active backend kind for the mobile chat proxy — "ollama" (native
+    /// /api/tags + /api/chat) or "openai" (OpenAI-compatible /v1: the built-in
+    /// engine, LM Studio, Lemonade, llama.cpp, vLLM). Remote used to hard-assume
+    /// Ollama, so any non-Ollama desktop backend showed "No models found" plus a
+    /// chat 400. For "openai" the proxy translates the mobile's Ollama-shaped
+    /// calls to /v1 and back so remote chat works with the desktop's real backend.
+    backend_kind: String,
+    /// OpenAI-compatible base URL including `/v1` (only read when backend_kind ==
+    /// "openai"), snapshotted from the desktop provider config at dispatch time.
+    openai_base: String,
+    /// Optional bearer key for the OpenAI-compatible backend (e.g. a LAN vLLM);
+    /// empty for keyless local servers (built-in engine, LM Studio, llama.cpp).
+    openai_key: String,
     comfy_port: u16,
     /// Configurable ComfyUI host — mirrors AppState.comfy_host so the mobile
     /// proxy forwards to the right machine when the user pointed LU at a
@@ -829,6 +842,15 @@ async fn proxy_ollama(
 ) -> Response {
     let path = req.uri().path().to_string();
 
+    // #87: when the desktop's active chat backend is OpenAI-compatible (the
+    // built-in engine, LM Studio, Lemonade, llama.cpp, vLLM), the mobile still
+    // speaks Ollama protocol here — translate its /api/* calls to /v1 instead of
+    // blindly proxying to Ollama (which the user may not even run). Ollama stays
+    // the default path below.
+    if state.backend_kind == "openai" {
+        return proxy_openai_compat(&state, req).await;
+    }
+
     // Enforce the `downloads` permission for any endpoint that writes model
     // state. Read-only endpoints (/api/tags, /api/chat, /api/show, etc.)
     // always remain open so an authenticated mobile can actually chat.
@@ -939,6 +961,484 @@ async fn proxy_to_target(target: &str, req: Request) -> Response {
             }
         }
         Err(e) => (StatusCode::BAD_GATEWAY, format!("Proxy error: {}", e)).into_response(),
+    }
+}
+
+// ─── #87: OpenAI-compatible bridge for the mobile client ───
+//
+// The mobile page (see mobile_landing) is a self-contained Ollama client: it
+// lists models via GET /api/tags and chats via POST /api/chat (Ollama's native
+// shape). When the desktop's active backend is an OpenAI-compatible server we
+// translate those calls to /v1 and translate the response back, so remote chat
+// works with the built-in engine / LM Studio / Lemonade / llama.cpp / vLLM —
+// not only Ollama. Like proxy_to_target this buffers the full response (the
+// mobile already receives Ollama replies buffered), so no streaming state
+// machine is needed: we ask the backend for stream:false and reshape once.
+
+/// Strip the leading `provider::` prefix a desktop model name may carry (e.g.
+/// `openai::qwen3:8b` → `qwen3:8b`). Matches the desktop's own `/^[^:]+::/`
+/// strip (first prefix only). Ollama tags use `:` but never `::`. Defensive —
+/// the desktop already sends a bare model, this is belt-and-suspenders.
+fn strip_provider_prefix(model: &str) -> &str {
+    match model.split_once("::") {
+        Some((_, m)) => m,
+        None => model,
+    }
+}
+
+/// Raw base64 (Ollama `images[]`) → data URL (OpenAI `image_url`). Detect the
+/// mime from the base64 magic so the declared type is right; default jpeg.
+fn to_data_url(b64: &str) -> String {
+    if b64.starts_with("data:") {
+        return b64.to_string();
+    }
+    let mime = if b64.starts_with("iVBORw0KGgo") {
+        "image/png"
+    } else if b64.starts_with("/9j/") {
+        "image/jpeg"
+    } else if b64.starts_with("R0lGOD") {
+        "image/gif"
+    } else if b64.starts_with("UklGR") {
+        "image/webp"
+    } else {
+        "image/jpeg"
+    };
+    format!("data:{};base64,{}", mime, b64)
+}
+
+/// OpenAI `GET /v1/models` response → Ollama `/api/tags` shape the mobile reads.
+fn openai_models_to_ollama_tags(v: &serde_json::Value) -> serde_json::Value {
+    let list = v
+        .get("data")
+        .and_then(|d| d.as_array())
+        .or_else(|| v.get("models").and_then(|d| d.as_array()));
+    let mut out = Vec::new();
+    if let Some(arr) = list {
+        for m in arr {
+            let id = m
+                .get("id")
+                .and_then(|x| x.as_str())
+                .or_else(|| m.get("name").and_then(|x| x.as_str()))
+                .or_else(|| m.get("model").and_then(|x| x.as_str()))
+                .unwrap_or("");
+            if id.is_empty() {
+                continue;
+            }
+            out.push(serde_json::json!({
+                "name": id, "model": id, "modified_at": "", "size": 0
+            }));
+        }
+    }
+    serde_json::json!({ "models": out })
+}
+
+/// Ollama `/api/chat` request → OpenAI `/v1/chat/completions` request. Always
+/// asks the backend for stream:false (we reshape the reply for the mobile's
+/// requested mode afterwards). Ollama tool defs are already OpenAI-shaped, so
+/// tools pass through; the `think`/`options` knobs are Ollama-only and dropped.
+fn ollama_chat_req_to_openai(req: &serde_json::Value) -> serde_json::Value {
+    let model = strip_provider_prefix(req.get("model").and_then(|v| v.as_str()).unwrap_or(""));
+    let mut messages = Vec::new();
+    if let Some(arr) = req.get("messages").and_then(|m| m.as_array()) {
+        for m in arr {
+            let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+            let content = m.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let images = m.get("images").and_then(|v| v.as_array());
+            match images {
+                Some(imgs) if !imgs.is_empty() => {
+                    let mut parts = Vec::new();
+                    if !content.is_empty() {
+                        parts.push(serde_json::json!({"type": "text", "text": content}));
+                    }
+                    for im in imgs {
+                        if let Some(b64) = im.as_str() {
+                            parts.push(serde_json::json!({
+                                "type": "image_url",
+                                "image_url": { "url": to_data_url(b64) }
+                            }));
+                        }
+                    }
+                    messages.push(serde_json::json!({"role": role, "content": parts}));
+                }
+                _ => {
+                    messages.push(serde_json::json!({"role": role, "content": content}));
+                }
+            }
+        }
+    }
+    let max_tokens = req
+        .get("options")
+        .and_then(|o| o.get("num_predict"))
+        .and_then(|v| v.as_i64())
+        .filter(|n| *n > 0)
+        .unwrap_or(16384);
+    let mut out = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "stream": false,
+        "max_tokens": max_tokens,
+    });
+    if let Some(tools) = req.get("tools") {
+        if tools.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+            out["tools"] = tools.clone();
+        }
+    }
+    out
+}
+
+/// Pull `{content, thinking, tool_calls}` out of an OpenAI non-streaming reply.
+fn openai_choice_parts(resp: &serde_json::Value) -> (String, String, Vec<serde_json::Value>) {
+    let msg = resp
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|a| a.first())
+        .and_then(|c| c.get("message"));
+    let content = msg
+        .and_then(|m| m.get("content"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let thinking = msg
+        .and_then(|m| m.get("reasoning_content").or_else(|| m.get("reasoning")))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut tool_calls = Vec::new();
+    if let Some(tcs) = msg.and_then(|m| m.get("tool_calls")).and_then(|v| v.as_array()) {
+        for tc in tcs {
+            if let Some(f) = tc.get("function") {
+                let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                // OpenAI sends `arguments` as a JSON string — the mobile's
+                // repairToolCallArgs already handles that, so pass it through.
+                let args = f.get("arguments").cloned().unwrap_or(serde_json::json!(""));
+                tool_calls.push(serde_json::json!({"function": {"name": name, "arguments": args}}));
+            }
+        }
+    }
+    (content, thinking, tool_calls)
+}
+
+/// OpenAI reply → single Ollama `/api/chat` message object (mobile requested
+/// stream:false — the native tool-calling path reads `data.message`).
+fn openai_resp_to_ollama_message(resp: &serde_json::Value) -> serde_json::Value {
+    let (content, thinking, tool_calls) = openai_choice_parts(resp);
+    let mut message = serde_json::json!({"role": "assistant", "content": content});
+    if !thinking.is_empty() {
+        message["thinking"] = serde_json::json!(thinking);
+    }
+    if !tool_calls.is_empty() {
+        message["tool_calls"] = serde_json::json!(tool_calls);
+    }
+    serde_json::json!({"model": "", "created_at": "", "message": message, "done": true, "done_reason": "stop"})
+}
+
+/// OpenAI reply → Ollama NDJSON stream (mobile requested stream:true — plain
+/// chat). Emits a content line then a terminal done line; streamResponse()
+/// consumes these exactly like Ollama's native stream.
+fn openai_resp_to_ollama_ndjson(resp: &serde_json::Value) -> String {
+    let (content, thinking, _) = openai_choice_parts(resp);
+    let mut first = serde_json::json!({
+        "model": "", "created_at": "",
+        "message": {"role": "assistant", "content": content}, "done": false
+    });
+    if !thinking.is_empty() {
+        first["message"]["thinking"] = serde_json::json!(thinking);
+    }
+    let done = serde_json::json!({
+        "model": "", "created_at": "",
+        "message": {"role": "assistant", "content": ""}, "done": true, "done_reason": "stop"
+    });
+    format!("{}\n{}\n", first, done)
+}
+
+async fn proxy_openai_compat(state: &RemoteState, req: Request) -> Response {
+    let path = req.uri().path().to_string();
+    let base = state.openai_base.trim_end_matches('/');
+    let base_final = if base.contains("://localhost") {
+        base.replace("://localhost", "://127.0.0.1")
+    } else {
+        base.to_string()
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Client init: {}", e)).into_response()
+        }
+    };
+
+    // Model list: /api/tags → GET {base}/models
+    if path.ends_with("/tags") {
+        let url = format!("{}/models", base_final);
+        let mut rb = client.get(&url);
+        if !state.openai_key.is_empty() {
+            rb = rb.bearer_auth(&state.openai_key);
+        }
+        return match rb.send().await {
+            Ok(resp) => {
+                let ok = resp.status().is_success();
+                match resp.json::<serde_json::Value>().await {
+                    Ok(v) if ok => Json(openai_models_to_ollama_tags(&v)).into_response(),
+                    _ => Json(serde_json::json!({ "models": [] })).into_response(),
+                }
+            }
+            Err(e) => (StatusCode::BAD_GATEWAY, format!("Proxy error: {}", e)).into_response(),
+        };
+    }
+
+    // Chat: /api/chat → POST {base}/chat/completions
+    if path.ends_with("/chat") {
+        let body_bytes = axum::body::to_bytes(req.into_body(), 100 * 1024 * 1024)
+            .await
+            .unwrap_or_default();
+        let ollama_req: serde_json::Value =
+            serde_json::from_slice(&body_bytes).unwrap_or_else(|_| serde_json::json!({}));
+        let want_stream = ollama_req
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let oai_req = ollama_chat_req_to_openai(&ollama_req);
+        let url = format!("{}/chat/completions", base_final);
+        let mut rb = client.post(&url).json(&oai_req);
+        if !state.openai_key.is_empty() {
+            rb = rb.bearer_auth(&state.openai_key);
+        }
+        return match rb.send().await {
+            Ok(resp) => {
+                let status = StatusCode::from_u16(resp.status().as_u16())
+                    .unwrap_or(StatusCode::BAD_GATEWAY);
+                if !status.is_success() {
+                    let txt = resp.text().await.unwrap_or_default();
+                    return (status, txt).into_response();
+                }
+                match resp.json::<serde_json::Value>().await {
+                    Ok(v) => {
+                        if want_stream {
+                            let ndjson = openai_resp_to_ollama_ndjson(&v);
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .header(header::CONTENT_TYPE, "application/x-ndjson")
+                                .body(Body::from(ndjson))
+                                .unwrap_or_else(|_| {
+                                    (StatusCode::INTERNAL_SERVER_ERROR, "build").into_response()
+                                })
+                        } else {
+                            Json(openai_resp_to_ollama_message(&v)).into_response()
+                        }
+                    }
+                    Err(e) => (StatusCode::BAD_GATEWAY, format!("Read error: {}", e)).into_response(),
+                }
+            }
+            Err(e) => (StatusCode::BAD_GATEWAY, format!("Proxy error: {}", e)).into_response(),
+        };
+    }
+
+    // Other Ollama-only endpoints (/api/pull, /api/show, /api/delete, …) have no
+    // clean OpenAI-compatible equivalent. Return a benign empty object so the
+    // mobile degrades gracefully instead of surfacing a proxy error.
+    Json(serde_json::json!({})).into_response()
+}
+
+#[cfg(test)]
+mod openai_bridge_tests {
+    use super::{
+        ollama_chat_req_to_openai, openai_models_to_ollama_tags, openai_resp_to_ollama_message,
+        openai_resp_to_ollama_ndjson, strip_provider_prefix, to_data_url,
+    };
+
+    #[test]
+    fn strip_prefix_only_on_double_colon() {
+        assert_eq!(strip_provider_prefix("openai::qwen3:8b"), "qwen3:8b");
+        assert_eq!(strip_provider_prefix("qwen3:8b"), "qwen3:8b");
+        // Only the FIRST provider:: prefix is stripped (matches the desktop).
+        assert_eq!(strip_provider_prefix("a::b::c"), "b::c");
+    }
+
+    #[test]
+    fn tags_from_openai_data_array() {
+        let v = serde_json::json!({"data": [{"id": "qwen3:8b"}, {"id": "gemma"}]});
+        let out = openai_models_to_ollama_tags(&v);
+        let models = out["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["name"], "qwen3:8b");
+        assert_eq!(models[0]["model"], "qwen3:8b");
+    }
+
+    #[test]
+    fn tags_empty_when_no_models() {
+        assert_eq!(
+            openai_models_to_ollama_tags(&serde_json::json!({}))["models"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn chat_req_maps_knobs_and_strips_prefix() {
+        let req = serde_json::json!({
+            "model": "openai::qwen", "messages": [{"role": "user", "content": "hi"}],
+            "stream": true, "options": {"num_predict": 2048}, "think": false
+        });
+        let out = ollama_chat_req_to_openai(&req);
+        assert_eq!(out["model"], "qwen");
+        assert_eq!(out["stream"], false);
+        assert_eq!(out["max_tokens"], 2048);
+        assert!(out.get("think").is_none());
+        assert_eq!(out["messages"][0]["content"], "hi");
+    }
+
+    #[test]
+    fn chat_req_images_become_vision_parts() {
+        let req = serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "look", "images": ["/9j/abc"]}]
+        });
+        let out = ollama_chat_req_to_openai(&req);
+        let parts = out["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert!(parts[1]["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/jpeg;base64,/9j/"));
+    }
+
+    #[test]
+    fn chat_req_tools_pass_through() {
+        let req = serde_json::json!({
+            "model": "m", "messages": [],
+            "tools": [{"type": "function", "function": {"name": "f"}}]
+        });
+        let out = ollama_chat_req_to_openai(&req);
+        assert_eq!(out["tools"][0]["function"]["name"], "f");
+    }
+
+    #[test]
+    fn to_data_url_detects_png() {
+        assert!(to_data_url("iVBORw0KGgoAAA").starts_with("data:image/png;base64,"));
+        assert_eq!(to_data_url("data:image/png;base64,x"), "data:image/png;base64,x");
+    }
+
+    #[test]
+    fn resp_message_maps_content_thinking_toolcalls() {
+        let resp = serde_json::json!({"choices": [{"message": {
+            "content": "ok", "reasoning_content": "hmm",
+            "tool_calls": [{"id": "1", "function": {"name": "file_read", "arguments": "{\"path\":\"a\"}"}}]
+        }}]});
+        let out = openai_resp_to_ollama_message(&resp);
+        assert_eq!(out["message"]["content"], "ok");
+        assert_eq!(out["message"]["thinking"], "hmm");
+        assert_eq!(out["message"]["tool_calls"][0]["function"]["name"], "file_read");
+        assert_eq!(out["message"]["tool_calls"][0]["function"]["arguments"], "{\"path\":\"a\"}");
+        assert_eq!(out["done"], true);
+    }
+
+    #[test]
+    fn resp_ndjson_content_line_then_done() {
+        let resp = serde_json::json!({"choices": [{"message": {"content": "hello"}}]});
+        let s = openai_resp_to_ollama_ndjson(&resp);
+        let lines: Vec<&str> = s.trim().split('\n').collect();
+        assert_eq!(lines.len(), 2);
+        let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(first["message"]["content"], "hello");
+        assert_eq!(first["done"], false);
+        let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(second["done"], true);
+    }
+}
+
+// #87 live end-to-end proof: the exact reqwest calls proxy_openai_compat makes,
+// against a real OpenAI-compatible server (Ollama's own /v1), piped through the
+// real translation functions. Verifies the whole chain over HTTP, not just
+// hand-written fixtures. #[ignore]d so CI (no Ollama) stays green; run locally:
+//   cargo test --manifest-path src-tauri/Cargo.toml openai_bridge_live -- --ignored --nocapture
+#[cfg(test)]
+mod openai_bridge_live_tests {
+    use super::{
+        ollama_chat_req_to_openai, openai_models_to_ollama_tags, openai_resp_to_ollama_message,
+        openai_resp_to_ollama_ndjson,
+    };
+
+    #[test]
+    #[ignore]
+    fn openai_bridge_live_against_ollama_v1() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let base = "http://127.0.0.1:11434/v1";
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .unwrap();
+
+            // /api/tags → GET /v1/models → Ollama tags shape
+            let raw: serde_json::Value = client
+                .get(format!("{}/models", base))
+                .send()
+                .await
+                .expect("ollama /v1/models reachable — is `ollama serve` running?")
+                .json()
+                .await
+                .unwrap();
+            let tags = openai_models_to_ollama_tags(&raw);
+            let models = tags["models"].as_array().unwrap();
+            assert!(!models.is_empty(), "expected >=1 model from ollama /v1/models");
+            assert_eq!(models[0]["name"], models[0]["model"]);
+            let first = models[0]["name"].as_str().unwrap().to_string();
+            println!("LIVE tags ok: {} models, first = {}", models.len(), first);
+
+            // /api/chat stream:false (tool path shape) → single Ollama message
+            let ollama_req = serde_json::json!({
+                "model": first,
+                "messages": [{"role": "user", "content": "reply with the single word pong"}],
+                "stream": false, "options": {"num_predict": 32}
+            });
+            let resp: serde_json::Value = client
+                .post(format!("{}/chat/completions", base))
+                .json(&ollama_chat_req_to_openai(&ollama_req))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let msg = openai_resp_to_ollama_message(&resp);
+            assert!(
+                !msg["message"]["content"].as_str().unwrap_or("").is_empty(),
+                "expected non-empty translated chat content"
+            );
+            assert_eq!(msg["done"], true);
+            println!("LIVE chat(non-stream) ok: content = {:?}", msg["message"]["content"]);
+
+            // /api/chat stream:true (plain chat) → Ollama NDJSON the mobile reads
+            let stream_req = serde_json::json!({
+                "model": first,
+                "messages": [{"role": "user", "content": "say hi"}],
+                "stream": true, "options": {"num_predict": 16}
+            });
+            let resp2: serde_json::Value = client
+                .post(format!("{}/chat/completions", base))
+                .json(&ollama_chat_req_to_openai(&stream_req))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let ndjson = openai_resp_to_ollama_ndjson(&resp2);
+            let lines: Vec<&str> = ndjson.trim().split('\n').collect();
+            assert_eq!(lines.len(), 2, "expected a content line then a done line");
+            let l0: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+            let l1: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+            assert_eq!(l0["done"], false);
+            assert!(l0["message"]["content"].is_string());
+            assert_eq!(l1["done"], true);
+            println!("LIVE chat(stream ndjson) ok: 2 lines, first content = {:?}", l0["message"]["content"]);
+        });
     }
 }
 
@@ -2329,7 +2829,7 @@ button{-webkit-appearance:none;appearance:none}
                    (active ? '<span class="material-symbols-outlined">'+svgIcon('check')+'</span>' : '') +
                  '</button>';
         }).join('')
-      : '<div class="picker-empty">No models found. Start Ollama on the desktop app.</div>';
+      : '<div class="picker-empty">No models found. Make sure your desktop backend is running with a model loaded.</div>';
     overlay.innerHTML =
       '<div class="picker-sheet">' +
         '<div class="picker-header">' +
@@ -3975,7 +4475,16 @@ pub async fn start_remote_server(
     state: tauri::State<'_, crate::state::AppState>,
     model: Option<String>,
     system_prompt: Option<String>,
+    // #87: the desktop tells us which backend serves the dispatched model so the
+    // mobile proxy reaches the real backend, not just Ollama. Defaults keep the
+    // Ollama path for older callers / a plain Ollama dispatch.
+    backend_kind: Option<String>,
+    backend_base: Option<String>,
+    backend_key: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    let backend_kind = backend_kind.unwrap_or_else(|| "ollama".to_string());
+    let openai_base = backend_base.unwrap_or_default();
+    let openai_key = backend_key.unwrap_or_default();
     // Clone Arcs from std::sync::Mutex, then drop it before any .await
     let (jwt_secret_arc, passcode_arc, permissions_arc, devices_arc, tunnel_url_arc, dispatched_model_arc, dispatched_system_prompt_arc, port, comfy_port, comfy_host, ollama_base) = {
         let remote = state.remote.lock().map_err(|e| e.to_string())?;
@@ -4052,6 +4561,9 @@ pub async fn start_remote_server(
         jwt_secret: jwt_secret_arc,
         passcode: passcode_arc,
         ollama_base,
+        backend_kind,
+        openai_base,
+        openai_key,
         comfy_port,
         comfy_host,
         permissions: permissions_arc,
@@ -4154,6 +4666,9 @@ pub async fn restart_remote_server(
     state: tauri::State<'_, crate::state::AppState>,
     model: Option<String>,
     system_prompt: Option<String>,
+    backend_kind: Option<String>,
+    backend_base: Option<String>,
+    backend_key: Option<String>,
 ) -> Result<serde_json::Value, String> {
     use tauri::Manager;
     // Stop first (ignore errors if not running)
@@ -4162,7 +4677,7 @@ pub async fn restart_remote_server(
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     // Start fresh with a re-acquired State handle from the AppHandle
     let state2 = app.state::<crate::state::AppState>();
-    start_remote_server(app.clone(), state2, model, system_prompt).await
+    start_remote_server(app.clone(), state2, model, system_prompt, backend_kind, backend_base, backend_key).await
 }
 
 #[tauri::command]

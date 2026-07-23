@@ -7,7 +7,49 @@ vi.mock('../../api/backend', () => ({
   isTauri: () => mockIsTauri(),
 }))
 
-import { useRemoteStore, REMOTE_DEV_MODE_ERROR } from '../remoteStore'
+import { useRemoteStore, REMOTE_DEV_MODE_ERROR, remoteBackendArgs } from '../remoteStore'
+
+describe('remoteBackendArgs (#87 non-Ollama remote routing)', () => {
+  const providers = {
+    ollama: { baseUrl: 'http://localhost:11434' },
+    openai: { baseUrl: 'http://127.0.0.1:8127/v1' },
+    anthropic: { baseUrl: 'https://api.anthropic.com' },
+  }
+  const noKey = () => ''
+  const withKey = (id: string) => (id === 'openai' ? 'sk-lan' : '')
+
+  it('routes an openai:: model to the openai backend with its base + bare name', () => {
+    const out = remoteBackendArgs('openai::qwen3:8b', providers, noKey)
+    expect(out.backendKind).toBe('openai')
+    expect(out.backendBase).toBe('http://127.0.0.1:8127/v1')
+    expect(out.model).toBe('qwen3:8b') // provider prefix stripped
+    expect(out.backendKey).toBeUndefined() // empty key omitted
+  })
+
+  it('forwards a bearer key when the openai provider has one', () => {
+    const out = remoteBackendArgs('openai::m', providers, withKey)
+    expect(out.backendKind).toBe('openai')
+    expect(out.backendKey).toBe('sk-lan')
+  })
+
+  it('leaves a bare Ollama model on the Ollama path (back-compat)', () => {
+    const out = remoteBackendArgs('qwen3:8b', providers, noKey)
+    expect(out.backendKind).toBe('ollama')
+    expect(out.backendBase).toBeUndefined()
+    expect(out.model).toBe('qwen3:8b')
+  })
+
+  it('falls back to Ollama for cloud/anthropic (not reachable over remote yet)', () => {
+    expect(remoteBackendArgs('anthropic::claude', providers, noKey).backendKind).toBe('ollama')
+    expect(remoteBackendArgs('lu-cloud::x', providers, noKey).backendKind).toBe('ollama')
+  })
+
+  it('defaults to Ollama with no dispatched model', () => {
+    const out = remoteBackendArgs(undefined, providers, noKey)
+    expect(out.backendKind).toBe('ollama')
+    expect(out.model).toBeUndefined()
+  })
+})
 
 describe('remoteStore', () => {
   beforeEach(() => {
@@ -63,7 +105,9 @@ describe('remoteStore', () => {
     it('calls backendCall with start_remote_server', async () => {
       mockBackendCall.mockResolvedValue({ port: 0, passcode: '', passcodeExpiresAt: 0, lanUrl: '', mobileUrl: '' })
       await useRemoteStore.getState().startServer()
-      expect(mockBackendCall).toHaveBeenCalledWith('start_remote_server', {})
+      // #87: startServer always tags the backend kind. With no dispatched model
+      // it defaults to the Ollama path (back-compat), so args carry only that.
+      expect(mockBackendCall).toHaveBeenCalledWith('start_remote_server', { backendKind: 'ollama' })
     })
 
     it('auto-fetches QR code after starting', async () => {

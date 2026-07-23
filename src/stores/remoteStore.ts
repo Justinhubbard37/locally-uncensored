@@ -1,6 +1,48 @@
 import { create } from 'zustand'
 import { backendCall, isTauri } from '../api/backend'
 import { useMemoryStore } from './memoryStore'
+import { useProviderStore } from './providerStore'
+
+/**
+ * #87: derive the backend the mobile proxy should reach for a dispatched
+ * model. Remote used to hard-assume Ollama (the Rust proxy forwarded every
+ * /api/* call to the Ollama base URL), so a session dispatched from any other
+ * desktop backend showed "No models found" and chat returned HTTP 400.
+ *
+ * Desktop model names are provider-prefixed: `openai::<name>` for the
+ * OpenAI-compatible slot (built-in engine, LM Studio, Lemonade, llama.cpp,
+ * vLLM), `anthropic::<name>` / `lu-cloud::<name>` for cloud, and a bare name
+ * for Ollama. We map the `openai` slot to backendKind:'openai' + its base URL
+ * so the Rust proxy translates the mobile's Ollama-shaped calls to /v1. Cloud
+ * and Anthropic aren't reachable as a local backend over remote yet, so they
+ * fall back to the Ollama path (a local Ollama can still serve, or the honest
+ * empty-state shows). The bare model name is sent so the backend matches it.
+ *
+ * Pure + exported for unit tests.
+ */
+export function remoteBackendArgs(
+  model: string | undefined,
+  providers: Record<string, { baseUrl?: string } | undefined>,
+  getKey: (id: string) => string,
+): { model?: string; backendKind: string; backendBase?: string; backendKey?: string } {
+  if (!model) return { model, backendKind: 'ollama' }
+  const hasPrefix = model.includes('::')
+  const providerId = hasPrefix ? model.split('::')[0] : 'ollama'
+  // Strip only the FIRST provider:: prefix — matches the desktop's /^[^:]+::/.
+  const bare = hasPrefix ? model.replace(/^[^:]+::/, '') : model
+  if (providerId === 'openai') {
+    const base = providers['openai']?.baseUrl || ''
+    const key = getKey('openai') || ''
+    return {
+      model: bare,
+      backendKind: 'openai',
+      backendBase: base,
+      backendKey: key || undefined,
+    }
+  }
+  // ollama (bare / ollama::) and any non-OpenAI-compatible provider.
+  return { model: bare, backendKind: 'ollama' }
+}
 
 /**
  * Reported on Discord by @phantomderp on v2.4.2 — clicking LAN/Internet
@@ -138,7 +180,15 @@ export const useRemoteStore = create<RemoteState>()((set, get) => ({
     set({ loading: true, error: null })
     try {
       const args: Record<string, unknown> = {}
-      if (model) args.model = model
+      // #87: tell the Rust proxy which backend serves the dispatched model so
+      // remote reaches the real backend (built-in engine / LM Studio / Lemonade
+      // / llama.cpp / vLLM), not just Ollama. Sends the bare model name.
+      const ps = useProviderStore.getState()
+      const backend = remoteBackendArgs(model, ps.providers, (id) => ps.getProviderApiKey(id))
+      if (backend.model) args.model = backend.model
+      args.backendKind = backend.backendKind
+      if (backend.backendBase) args.backendBase = backend.backendBase
+      if (backend.backendKey) args.backendKey = backend.backendKey
       // Always enrich systemPrompt with memory — even when caller passes no
       // prompt, we still want the remembered context injected so cross-chat
       // memory reaches the Remote session.
@@ -354,7 +404,14 @@ export const useRemoteStore = create<RemoteState>()((set, get) => ({
     set({ loading: true, error: null })
     try {
       const args: Record<string, unknown> = {}
-      if (model) args.model = model
+      // #87: same backend derivation as startServer so a restart keeps routing
+      // to the desktop's real backend, not just Ollama.
+      const ps = useProviderStore.getState()
+      const backend = remoteBackendArgs(model, ps.providers, (id) => ps.getProviderApiKey(id))
+      if (backend.model) args.model = backend.model
+      args.backendKind = backend.backendKind
+      if (backend.backendBase) args.backendBase = backend.backendBase
+      if (backend.backendKey) args.backendKey = backend.backendKey
       // Refresh memory context on restart so newly-extracted memories from
       // the ongoing session propagate into the next mobile connection.
       const enriched = await enrichSystemPromptWithMemory(systemPrompt || '')
