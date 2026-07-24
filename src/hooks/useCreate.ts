@@ -432,12 +432,16 @@ export function useCreate() {
       setError('Please add a source image first.')
       return
     }
-    // Local Edit is mask inpaint — without a painted mask it would silently
-    // degrade to plain img2img and repaint the WHOLE image.
-    if (intent === 'edit' && !maskFilename) {
-      setError('Paint a mask first, open the mask editor and mark the area to change.')
-      return
-    }
+    // No mask-required gate on Edit. In 2.5.8 this lane was inpaint-only and
+    // the guard existed because an empty mask SILENTLY became plain img2img and
+    // repainted the whole picture. 2.5.9 renamed the lane "Edit / Image to
+    // Image" and states the rule on the canvas ("leave the mask empty to
+    // restyle the whole image, or paint an area to change just that"), so that
+    // path is now the advertised behaviour rather than a surprise — and the
+    // guard was refusing exactly what the copy above it promises. The builder
+    // already routes it correctly: no mask means isInpaint is false and the
+    // request falls into the LoadImage → VAEEncode → KSampler(denoise) i2i
+    // branch, driven by the Edit strength slider.
     if (!isRemoveBg && !activeModel) {
       if (localOp === 'music') {
         setError('No music model installed. Use Download & install above to get ACE Step, then generate.')

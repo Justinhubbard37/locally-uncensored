@@ -113,6 +113,33 @@ describe('buildDynamicWorkflow — local Edit (mask inpaint, checkpoint path)', 
     expect(Object.values(wf).some((n: any) => n.class_type === 'VAEEncodeForInpaint')).toBe(false)
   })
 
+  // 2.5.9: the Edit lane is "Edit / Image to Image" and its canvas says "leave
+  // the mask empty to restyle the whole image". useCreate used to refuse that
+  // with "Paint a mask first" — the gate contradicted the copy directly above
+  // it (found by live E2E on the ship exe, 2026-07-24). The builder was never
+  // the problem; this pins the exact params the lane submits with no mask.
+  it('the Edit lane with no mask builds i2i at the Edit strength the slider shows', async () => {
+    const wf = await buildDynamicWorkflow({
+      ...(baseParams as object),
+      inputImage: 'apple.png',
+      denoise: 0.8, // Edit strength slider default
+    } as never)
+
+    const types = Object.values(wf).map((n: any) => n.class_type)
+    expect(types).toContain('VAEEncode')
+    expect(types).not.toContain('LoadImageMask')
+    expect(types).not.toContain('VAEEncodeForInpaint')
+    expect(types).not.toContain('EmptyLatentImage')
+
+    const [loadId, load] = node(wf, 'LoadImage')!
+    const [encId, enc] = node(wf, 'VAEEncode')!
+    const [, sampler] = node(wf, 'KSampler')!
+    expect(load.inputs.image).toBe('apple.png')
+    expect(enc.inputs.pixels).toEqual([loadId, 0])
+    expect(sampler.inputs.latent_image).toEqual([encId, 0])
+    expect(sampler.inputs.denoise).toBe(0.8)
+  })
+
   it('rejects a masked edit on a non-checkpoint strategy instead of dropping the mask', async () => {
     vi.mocked(getAllNodeInfo).mockResolvedValue({
       ...CHECKPOINT_NODES,
