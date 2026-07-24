@@ -1069,8 +1069,14 @@ export function useCodex() {
             void diagLog('continue-nudge', { iter: i, remaining: continueNudgesRemaining, turnContentLen: turnContent.length })
             messages.push({
               role: 'user',
-              content:
-                'Continue working autonomously until the task is fully done. Do NOT narrate what you are about to do, and do NOT ask me for paths or details you can discover yourself — use file_list / file_search / file_read to find them. Emit the NEXT step as an actual tool call right now. Only stop once everything is finished and verified.',
+              // A read-only command's deliverable IS the text. Demanding "the
+              // NEXT step as an actual tool call" there sent the model back for
+              // more searching until the budget ran out, and the user got
+              // "Done: 2 other operation(s) completed." instead of the answer
+              // they asked for (live /find on the ship exe, 2026-07-25).
+              content: readOnlyTurn
+                ? 'You have read enough. Write the answer now, in text, using what you found. Do not call any more tools and do not ask me for details you can look up. If something genuinely could not be determined, say which part and why.'
+                : 'Continue working autonomously until the task is fully done. Do NOT narrate what you are about to do, and do NOT ask me for paths or details you can discover yourself — use file_list / file_search / file_read to find them. Emit the NEXT step as an actual tool call right now. Only stop once everything is finished and verified.',
             })
             continue
           }
@@ -1557,6 +1563,11 @@ export function useCodex() {
             : `I stopped without completing the task, the model ended its turn without doing any work. Try rephrasing the instruction, or turn Think off and resend.`
         } else if (failed.length > 0) {
           fullContent = `Partially done: ${parts.join(', ')}. Some steps failed, see the errors above; the result may be incomplete.`
+        } else if (readOnlyTurn) {
+          // An operations count is not an answer. A read-only command was asked
+          // a question, so say plainly that the question went unanswered rather
+          // than dressing up a tool tally as success.
+          fullContent = `I looked (${parts.join(', ') || 'no steps recorded'}) but the model ended without writing the answer. Send the command again, or switch to a stronger model for this one.`
         } else {
           fullContent = parts.length > 0 ? `Done: ${parts.join(', ')}.` : 'Done.'
         }
