@@ -22,6 +22,8 @@ import { isMultimodalUnsupportedError, MULTIMODAL_UNSUPPORTED_MESSAGE } from '..
 import { log } from '../lib/logger'
 import { buildHermesToolPrompt, buildHermesToolResult, parseHermesToolCalls, stripToolCallTags, hasToolCallTags } from '../api/hermes-tool-calling'
 import { parseLooseToolCalls, stripMatchedCalls, stripToolCallText, canonicalToolName } from '../lib/loose-tool-parse'
+import { mediaCallSucceeded } from '../lib/media-result'
+import { summarizeTurn } from '../lib/turn-summary'
 import { buildVisionFeedback } from '../api/vision-feedback'
 import { compactMessages, getModelMaxTokens, estimateTokens } from '../lib/context-compaction'
 import { getModelContextCached } from '../api/ollama'
@@ -1177,25 +1179,37 @@ export function useAgentChat() {
           // (so an identical repeat is skipped) and count successful media gens
           // against the per-turn cap that stops "13× the same cat".
           executedCallKeys.add(callKey(entry.tc))
-          if (result.status === 'completed' || result.status === 'cached') {
+          // D#81 (TheRealNovelist, 2026-07-21): a ComfyUI 400/500 does not reject
+          // — the media tools RETURN their error as a normal result string, so
+          // status is 'completed' and every consumer below used to treat a failed
+          // generation as a delivered one. Reclassify it once, here, and the cap,
+          // the label, the memory write and the "is now displayed" note all
+          // follow. Non-media tools are unaffected.
+          const mediaOk = mediaCallSucceeded(entry.ac.toolName, entry.ac.result)
+          if (!mediaOk) entry.ac.status = 'failed'
+          if ((result.status === 'completed' || result.status === 'cached') && mediaOk) {
             if (entry.ac.toolName === 'image_generate') imageGenDone++
             else if (entry.ac.toolName === 'video_generate') videoGenDone++
           }
           const contentLabel =
-            result.status === 'completed'
-              ? `Completed: ${entry.ac.toolName}`
-              : result.status === 'cached'
-                ? `Cached: ${entry.ac.toolName}`
-                : result.status === 'rejected'
-                  ? `Rejected: ${entry.ac.toolName}`
-                  : `Failed: ${entry.ac.toolName}`
+            !mediaOk
+              ? `Failed: ${entry.ac.toolName}`
+              : result.status === 'completed'
+                ? `Completed: ${entry.ac.toolName}`
+                : result.status === 'cached'
+                  ? `Cached: ${entry.ac.toolName}`
+                  : result.status === 'rejected'
+                    ? `Rejected: ${entry.ac.toolName}`
+                    : `Failed: ${entry.ac.toolName}`
           updateBlockById(convId!, assistantMessage.id, entry.blockId, {
             toolCall: { ...entry.ac },
             toolCalls: [{ ...entry.ac }],
             content: contentLabel,
           })
 
-          if ((result.status === 'completed' || result.status === 'cached') && entry.ac.result) {
+          // `mediaOk` guard: without it a ComfyUI error text was written into the
+          // PERSISTENT cross-conversation memory store as a 'reference' fact.
+          if ((result.status === 'completed' || result.status === 'cached') && entry.ac.result && mediaOk) {
             const argsShort = JSON.stringify(entry.ac.args).substring(0, 100)
             const resultShort = entry.ac.result.substring(0, 200)
             useMemoryStore.getState().addMemory({
@@ -1236,6 +1250,10 @@ export function useAgentChat() {
         // The media-cap is the hard stop; this makes the normal path end with a
         // friendly sentence instead of a blocked-then-steered robotic one.
         const mediaNote = (name: string, r: typeof results[number]): string => {
+          // Never claim the media is on screen when the generation failed (D#81)
+          // — that injected sentence is what made the model cheerfully announce
+          // an image the user never got.
+          if (!mediaCallSucceeded(name, r.result)) return ''
           if ((r.status === 'completed' || r.status === 'cached') &&
               (name === 'image_generate' || name === 'video_generate')) {
             const kind = name === 'video_generate' ? 'video' : 'image'
@@ -1331,41 +1349,21 @@ export function useAgentChat() {
       // from the actually-completed blocks so there is always a final
       // answer at the bottom of the bubble.
       if (!contentRef.current.trim()) {
-        const blocks = blocksRef.current
-        const completedTools = blocks.filter(
-          (b) => b.phase === 'tool_call' && b.toolCall?.status === 'completed'
-        )
-        const failedTools = blocks.filter(
-          (b) => b.phase === 'tool_call' && b.toolCall?.status === 'failed'
-        )
-        const writes = completedTools.filter((b) => b.toolCall?.toolName === 'file_write').length
-        const reads = completedTools.filter((b) => b.toolCall?.toolName === 'file_read').length
-        // Media-aware closing: if a picture/clip was produced, say so warmly
-        // instead of a robotic "1 operation completed" (David 2026-06-04).
-        if (imageGenDone > 0 || videoGenDone > 0) {
-          // Only add a generic closing line when the model actually SAW the
-          // media (vision feedback was sent — image + vision-capable model).
-          // For video (never fed back) or a text-only model, contentRef stays
-          // empty: the bubble shows just the completed tool call with its inline
-          // image/video, no robotic "your video is above" (David 2026-06-16).
-          if (visionFeedbackGiven) {
-            contentRef.current = imageGenDone > 0 && videoGenDone > 0
-              ? 'Fertig — dein Bild und dein Video sind oben. / Done — your image and video are above.'
-              : videoGenDone > 0
-                ? 'Fertig — dein Video ist oben. / Done — your video is above.'
-                : 'Fertig — dein Bild ist oben. / Done — your image is above.'
-          }
-        } else {
-          const otherOk = completedTools.length - writes - reads
-          const parts: string[] = []
-          if (writes) parts.push(`${writes} file${writes === 1 ? '' : 's'} written`)
-          if (reads) parts.push(`${reads} file${reads === 1 ? '' : 's'} read`)
-          if (otherOk) parts.push(`${otherOk} operation${otherOk === 1 ? '' : 's'} completed`)
-          if (failedTools.length) parts.push(`${failedTools.length} failed`)
-          contentRef.current = parts.length
-            ? `Task completed: ${parts.join(', ')}.`
-            : "I couldn't produce a response for that. Please rephrase, or turn off Think and send again."
-        }
+        // Closing line when the model said nothing itself. Pure logic lives in
+        // summarizeTurn so the D#81 rules (a failed picture is not a completed
+        // task, and its reason gets shown) are locked by tests.
+        contentRef.current = summarizeTurn({
+          calls: blocksRef.current
+            .filter((b) => b.phase === 'tool_call' && b.toolCall)
+            .map((b) => ({
+              toolName: b.toolCall!.toolName,
+              status: b.toolCall!.status,
+              result: b.toolCall!.result,
+            })),
+          imageGenDone,
+          videoGenDone,
+          visionFeedbackGiven,
+        })
       }
 
       // Final store update
