@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { AlertTriangle, X } from 'lucide-react'
+import { AlertTriangle, Cloud, X } from 'lucide-react'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
+import { useCloudNoticeStore, CLOUD_RETENTION_DAYS, shouldShowRetentionNotice } from '../../../stores/cloudNoticeStore'
 import { CreateExpProvider, useCreateExp } from './CreateContext'
 import { IntentBar } from './IntentBar'
 import { Stage } from './Stage'
@@ -32,6 +33,8 @@ function CreateExperimentalInner() {
   const comfyCorsBlocked = useCreateStore((s) => s.comfyCorsBlocked)
   const setComfyCorsBlocked = useCreateStore((s) => s.setComfyCorsBlocked)
   const isGenerating = useCreateStore((s) => s.isGenerating)
+  const retentionNoticeSeen = useCloudNoticeStore((s) => s.retentionNoticeSeen)
+  const setRetentionNoticeSeen = useCloudNoticeStore((s) => s.setRetentionNoticeSeen)
   const { modelLoadError, connected, comfyOnCpu } = useCreateExp()
 
   const [shownId, setShownId] = useState<string | null>(null)
@@ -147,7 +150,7 @@ function CreateExperimentalInner() {
         <div className="flex items-center gap-2 px-4 py-2 bg-yellow-500/5 border-b border-yellow-500/10 text-yellow-300 text-xs shrink-0">
           <AlertTriangle size={12} className="shrink-0" />
           <span>
-            ComfyUI is running on the CPU (no usable GPU detected) — generation will be extremely slow and may time out.
+            ComfyUI is running on the CPU (no usable GPU detected). Generation will be extremely slow and may time out.
             AMD GPU? Point LU at a ROCm/ZLUDA ComfyUI and set Settings → Hardware → ComfyUI GPU to force GPU.
           </span>
         </div>
@@ -182,6 +185,27 @@ function CreateExperimentalInner() {
           )}
           <button onClick={() => { setComfyCorsBlocked(false); setCorsFixError(null) }} className="shrink-0 text-yellow-300/70 hover:text-yellow-100" title="Dismiss">
             <X size={14} />
+          </button>
+        </div>
+      )}
+
+      {/* Cloud gallery retention (David 2026-07-24). Cloud renders live on our
+          servers, not on this machine, so the gallery is not permanent storage.
+          Cloud mode only. One time ever: no close X and no auto-hide, the only
+          way out is the explicit "Do not show again", and it stays dismissed
+          across updates (persisted in lu_cloud_notice). */}
+      {shouldShowRetentionNotice(backend, retentionNoticeSeen) && (
+        <div className="flex items-start gap-2 px-4 py-2 bg-purple-500/5 border-b border-purple-500/10 text-purple-200 text-xs shrink-0">
+          <Cloud size={12} className="shrink-0 mt-0.5" />
+          <span className="flex-1 min-w-0">
+            Cloud results are stored for {CLOUD_RETENTION_DAYS} days and then deleted.
+            Download anything you want to keep from the gallery.
+          </span>
+          <button
+            onClick={() => setRetentionNoticeSeen(true)}
+            className="shrink-0 px-2 py-0.5 rounded bg-purple-500/15 hover:bg-purple-500/25 text-purple-100 transition-colors whitespace-nowrap"
+          >
+            Do not show again
           </button>
         </div>
       )}

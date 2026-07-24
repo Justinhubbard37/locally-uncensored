@@ -136,6 +136,28 @@ export async function refreshResultUrl(jobId: string): Promise<string | null> {
   }
 }
 
+/** Same fetch, but says WHY there is no url.
+ *
+ *  refreshResultUrl answers null for two very different situations: the render
+ *  is gone for good, or we could not reach the server just now. That was fine
+ *  while nothing ever deleted a render. Once the seven-day retention sweep runs
+ *  (services/render-worker/src/reaper.ts clears result_url as it deletes the
+ *  bytes), a tile that keeps retrying an expired render just renders blank
+ *  forever. Splitting the two lets the gallery say "expired" once instead. */
+export type ResultUrlState =
+  | { kind: 'ok'; url: string }
+  | { kind: 'gone' }   // job reachable, no result: expired or purged
+  | { kind: 'retry' }  // could not ask; offline launch, transient 5xx
+
+export async function resolveResultUrl(jobId: string): Promise<ResultUrlState> {
+  try {
+    const job = await getJob(jobId)
+    return job.result_url ? { kind: 'ok', url: job.result_url } : { kind: 'gone' }
+  } catch {
+    return { kind: 'retry' }
+  }
+}
+
 const TERMINAL = new Set(['succeeded', 'failed', 'canceled'])
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
