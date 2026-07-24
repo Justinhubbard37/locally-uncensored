@@ -46,6 +46,7 @@ import { getModelContextCached } from '../api/ollama'
 import { useMemoryStore } from '../stores/memoryStore'
 import { extractMemoriesFromPair } from './useMemory'
 import type { OllamaChatMessage } from '../types/agent-mode'
+import { useCodexConfirmStore } from '../stores/codexConfirmStore'
 
 // No-op diagnostic hook. Kept as a call site so future debugging can swap
 // this for a file logger without re-editing every iter-point in the loop.
@@ -1342,22 +1343,14 @@ export function useCodex() {
             ? async (req) => {
                 if (!CODEX_CONFIRM_TOOLS.has(req.toolName)) return true
                 const a = req.args || {}
-                const preview = String(a.command ?? a.code ?? a.script ?? '').slice(0, 800)
-                // Name the reason when the CLOUD arm is what is asking. Without
-                // it the user has the confirm setting off and still gets a
-                // prompt, which is exactly what read as broken before 2.5.9.
-                const cloudReason =
-                  !settings.codexConfirmShell && providerId === 'lu-cloud'
-                    ? `\n\nCloud models confirm commands by default. Turn that off in Settings under Coding.`
-                    : ''
-                const msg =
-                  `Coding agent wants to run "${req.toolName}":\n\n` +
-                  `${preview || '(no command preview)'}\n\n` +
-                  `Allow it to run?${cloudReason}`
-                if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
-                  return window.confirm(msg)
-                }
-                return true
+                // In-app popup, not window.confirm. The native dialog carried OS
+                // chrome and the app origin in its title bar, could not be
+                // styled, and had no way to say "stop asking" (David 2026-07-24).
+                return useCodexConfirmStore.getState().ask({
+                  toolName: req.toolName,
+                  command: String(a.command ?? a.code ?? a.script ?? '').slice(0, 800),
+                  cloudReason: !settings.codexConfirmShell && providerId === 'lu-cloud',
+                })
               }
             : undefined,
           recordAudit: (entry) => {

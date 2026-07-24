@@ -21,6 +21,7 @@ import { User, Code, Eye, GitBranch, Download, RefreshCw, RotateCcw, Folder, X }
 import { useEffect, useRef, useState } from 'react'
 import { checkGitInstalled, openExternal, type GitStatus } from '../../api/backend'
 import { extractToolCallsWithRanges, stripRanges } from '../../lib/tool-call-repair'
+import { CodexConfirmDialog } from './CodexConfirmDialog'
 
 function stripChannelTags(text: string): string {
   let t = text
@@ -498,6 +499,11 @@ export function CodexView() {
                   the per-conversation flag so switching to another (idle) chat
                   doesn't show its dots — David 2026-06-12 ("die drei ladepunkte
                   kommen in vorherigen chats auch"). */}
+              {/* Shell/code approval, inline in the stream so it reads as the
+                  next step of the run instead of covering it (David 2026-07-24:
+                  "ich hätte das gerne im chat, wie ein tool call"). Renders
+                  nothing while no request is pending. */}
+              <CodexConfirmDialog />
               {codexGenerating && (
                 <TypingIndicator />
               )}
