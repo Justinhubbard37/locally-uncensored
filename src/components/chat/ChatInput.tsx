@@ -354,7 +354,7 @@ export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApp
           />
         </div>
 
-        {/* Action bar — attach · voice · think · view actions · model · send.
+        {/* Action bar, attach · voice · think · view actions · model · send.
             Same in Chat, Code and Remote; each surface passes its own
             composerActions + composerModel (David 2026-07-11, web parity). */}
         <div className="flex items-center gap-1 px-2 py-1.5 border-t border-gray-200 dark:border-white/[0.05] flex-wrap">
@@ -363,7 +363,7 @@ export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApp
             onClick={() => fileInputRef.current?.click()}
             disabled={isGenerating}
             className="p-1.5 rounded-md text-gray-500 hover:text-gray-300 hover:bg-white/5 disabled:opacity-20 transition-all shrink-0"
-            title="Attach images — for PDFs and documents use the Documents panel"
+            title="Attach images. For PDFs and documents use the Documents panel"
           >
             <Paperclip size={14} />
           </button>
@@ -378,7 +378,7 @@ export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApp
 
           <VoiceButton
             // Streaming dictation: interim chunks arrive while talking, the final
-            // transcript replaces them on stop — both via applyDictation, which
+            // transcript replaces them on stop, both via applyDictation, which
             // writes base + transcript and NEVER sends (user presses Send).
             onInterim={applyDictation}
             onTranscript={applyDictation}
@@ -418,7 +418,7 @@ export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApp
 
           <div className="flex-1" />
 
-          {/* Model picker — opens upward from the composer */}
+          {/* Model picker, opens upward from the composer */}
           {composerModel}
 
           {isGenerating ? (

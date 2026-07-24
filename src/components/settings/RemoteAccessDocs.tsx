@@ -42,7 +42,7 @@ export function RemoteAccessDocs() {
         Remote Access lets you continue a chat from your phone (or any device on
         the same network, or over the internet) while the model keeps running on
         this machine. Nothing leaves your computer except the chat with your
-        paired device — generation still happens locally.
+        paired device. Generation still happens locally.
       </p>
 
       <div className="space-y-2.5">
@@ -54,7 +54,7 @@ export function RemoteAccessDocs() {
         <Step n={2} icon={<Wifi size={12} className="text-gray-500" />} title="Dispatch over LAN">
           Click <span className="text-gray-400 font-medium">Dispatch → LAN</span>, pick the chat to
           share and a working folder, and LU starts a local server on this machine. Your phone
-          reaches it directly over your home/office Wi-Fi — fastest, and the traffic never leaves
+          reaches it directly over your home/office Wi-Fi, which is fastest, and the traffic never leaves
           your network. Both devices must be on the same network.
         </Step>
 
@@ -77,7 +77,7 @@ export function RemoteAccessDocs() {
         <Step n={5} icon={<Server size={12} className="text-gray-500" />} title="Endpoint & disconnecting">
           The local server listens on <span className="text-gray-400 font-mono">port 11435</span>.
           Paired devices appear under <span className="text-gray-400 font-medium">Connected Devices</span> in
-          Settings → Voice &amp; Remote → Remote Access — hit the trash icon next to a device to kick
+          Settings → Voice &amp; Remote → Remote Access, hit the trash icon next to a device to kick
           it. Ending the dispatch (Undispatch) stops the server and the tunnel.
         </Step>
       </div>
@@ -119,7 +119,7 @@ export function RemoteAccessDocs() {
       <div className="flex items-start gap-1.5 pt-1 text-[0.55rem] text-gray-500 dark:text-gray-600">
         <Smartphone size={11} className="shrink-0 mt-0.5" />
         <span>
-          Tip: pair only devices you trust, and turn off permissions you don't need — a paired phone
+          Tip: pair only devices you trust, and turn off permissions you don't need, a paired phone
           acts with whatever scopes are enabled here.
         </span>
       </div>

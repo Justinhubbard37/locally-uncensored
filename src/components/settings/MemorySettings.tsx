@@ -53,9 +53,9 @@ export function MemorySettings() {
       const budget = effectiveMemoryBudget(ctx, override)
       const manual = override != null && override > 0 ? ' (manual)' : ''
       if (budget.budgetTokens === 0) {
-        setContextBudgetLabel(`${Math.round(ctx / 1024)}K ctx — memory injection disabled`)
+        setContextBudgetLabel(`${Math.round(ctx / 1024)}K ctx, memory injection disabled`)
       } else {
-        setContextBudgetLabel(`${Math.round(ctx / 1024)}K ctx — up to ${budget.maxMemories} memories injected${manual}`)
+        setContextBudgetLabel(`${Math.round(ctx / 1024)}K ctx, up to ${budget.maxMemories} memories injected${manual}`)
       }
     }).catch(() => setContextBudgetLabel(''))
   }, [settings.maxMemoriesOverride])
@@ -366,7 +366,7 @@ export function MemorySettings() {
                 <div className="flex items-center gap-1.5">
                   <p className="text-[0.65rem] font-medium text-gray-200 truncate">{entry.title}</p>
                   {stale && (
-                    <span className="flex items-center gap-0.5 text-[0.45rem] uppercase tracking-wider text-gray-500 border border-gray-600/40 rounded px-1 py-px shrink-0" title="Outdated — kept for reference, not injected into prompts">
+                    <span className="flex items-center gap-0.5 text-[0.45rem] uppercase tracking-wider text-gray-500 border border-gray-600/40 rounded px-1 py-px shrink-0" title="Outdated, kept for reference, not injected into prompts">
                       <Archive size={8} /> outdated
                     </span>
                   )}

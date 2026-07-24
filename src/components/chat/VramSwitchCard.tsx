@@ -33,13 +33,13 @@ function copyFor(phase: HandoffPhase | null, kind: 'image' | 'video' | null, det
         sub: detail ? `unloading ${detail} (chat is preserved)` : 'unloading the chat model (chat is preserved)',
       }
     case 'loading_image_model':
-      return { text: `Loading the ${what} model…`, sub: 'starting ComfyUI if needed — this can take a moment' }
+      return { text: `Loading the ${what} model…`, sub: 'starting ComfyUI if needed. This can take a moment' }
     case 'generating':
       return {
         text: `Generating the ${what}…`,
         // Only call it a "VRAM swap" when we actually evicted the chat model.
         // No eviction (models co-exist) → just an honest timing hint.
-        sub: evicted ? 'VRAM swap in progress — usually 30-90s (longer on a cold start)' : 'usually 30-90s (longer on a cold start)',
+        sub: evicted ? 'VRAM swap in progress, usually 30-90s (longer on a cold start)' : 'usually 30-90s (longer on a cold start)',
       }
     case 'restoring_text':
       // Nothing was evicted → the chat model stayed resident, so don't claim a

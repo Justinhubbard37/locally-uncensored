@@ -96,7 +96,7 @@ function CodingCommandsHint() {
     <div className="w-full max-w-[70%] mx-auto px-3 pt-1 flex justify-center">
       <div className="w-[60%] flex items-center gap-1.5 px-2 py-1 rounded-md border border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-white/[0.03]">
         <span className="flex-1 text-center text-[0.55rem] text-gray-500 dark:text-gray-400 leading-tight">
-          New — type <span className="font-mono px-1 rounded bg-gray-200/70 dark:bg-white/10">/</span> for coding commands: /review, /commit, /test, /fix …
+          New. Type <span className="font-mono px-1 rounded bg-gray-200/70 dark:bg-white/10">/</span> for coding commands: /review, /commit, /test, /fix …
         </span>
         <button
           onClick={() => { try { localStorage.setItem(SLASH_HINT_KEY, '1') } catch { /* private mode — just hide it for this session */ } setDismissed(true) }}
@@ -283,7 +283,7 @@ export function CodexView() {
             <div className="py-1">
               {messages.filter(msg => !msg.hidden).map((msg) => {
                 // Slash commands: the user typed "/review", but msg.content holds
-                // the expanded instruction the model ran on — show displayContent.
+                // the expanded instruction the model ran on, show displayContent.
                 const rawForDisplay = msg.role === 'user' ? (msg.displayContent || msg.content) : msg.content
                 const cleanContent = rawForDisplay ? stripChannelTags(rawForDisplay) : ''
                 return (
@@ -317,7 +317,7 @@ export function CodexView() {
                         const stepCount = msg.agentBlocks?.filter((b) => b.phase === 'tool_call' && b.toolCall).length ?? 0
                         const hasAnswerBlock = !!(msg.agentBlocks && msg.agentBlocks.some((b) => b.phase === 'answer' && b.content.trim()))
 
-                        // Reflection blocks (Architect plan, RepoMap context) —
+                        // Reflection blocks (Architect plan, RepoMap context) ,
                         // shown above the tool calls so the user sees what context
                         // primed the editor model before it started fetching tools.
                         const reflection = hasBlocks ? (
@@ -337,7 +337,7 @@ export function CodexView() {
 
                         // Interleaved tool_call + answer blocks (Codex 2026-05) so
                         // commentary sits BETWEEN tool calls, else the legacy
-                        // tool-only split. Identical logic to before — just hoisted
+                        // tool-only split. Identical logic to before, just hoisted
                         // into a value so a slash run can wrap it in the window.
                         const transcript = !hasBlocks
                           ? null
@@ -395,7 +395,7 @@ export function CodexView() {
                                 </div>
                               )
 
-                        // Text content — user bubble always; assistant only when
+                        // Text content, user bubble always; assistant only when
                         // there are no per-iteration answer blocks (interleave
                         // already rendered those). Assistant drops the bubble to
                         // match the regular Chat view; user keeps the right anchor.
@@ -417,7 +417,7 @@ export function CodexView() {
 
                         // Slash command (David 2026-06-12): the STEPS (tool calls +
                         // intermediate commentary) go in the collapsible window;
-                        // the FINAL answer renders OUTSIDE it, normal + readable —
+                        // the FINAL answer renders OUTSIDE it, normal + readable ,
                         // "die finale antwort soll nicht im tool call sein, nur die
                         // letzte". Same block shape for Ollama + LM Studio, so this
                         // is backend-agnostic. The final answer = the last 'answer'

@@ -147,7 +147,7 @@ export function ModelRecommendation() {
             <div>
               <h2 className="text-lg font-bold text-gray-900 dark:text-white">Welcome to LU</h2>
               <p className="text-sm text-gray-500">
-                {systemInfo.gpu ? `${systemInfo.gpu} (${systemInfo.vram} GB VRAM)` : 'No model installed — here are some recommendations:'}
+                {systemInfo.gpu ? `${systemInfo.gpu} (${systemInfo.vram} GB VRAM)` : 'No model installed. Here are some recommendations:'}
               </p>
             </div>
           </div>
@@ -175,7 +175,7 @@ export function ModelRecommendation() {
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-gray-900 dark:text-white">{rec.name}</p>
-                    <p className="text-xs text-gray-500">{rec.description} — {rec.vramNeeded}</p>
+                    <p className="text-xs text-gray-500">{rec.description}. {rec.vramNeeded}</p>
                   </div>
                   {rec.pullName && (
                     <GlowButton

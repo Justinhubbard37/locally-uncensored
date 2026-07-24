@@ -492,7 +492,7 @@ export function Onboarding() {
 
   const handlePullEmbeddings = async () => {
     if (!isTauri) {
-      setEmbeddingsError('Embedding install requires the desktop app — running in a browser preview.')
+      setEmbeddingsError('Embedding install requires the desktop app. Running in a browser preview.')
       return
     }
     setEmbeddingsPulling(true)
@@ -759,7 +759,7 @@ export function Onboarding() {
           >
             <h1 className="text-base font-semibold">LU <span className="font-normal opacity-60">by LU Labs</span></h1>
             <p className={`text-[0.75rem] leading-relaxed ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-              Private, local AI chat that works right away — no extra software to install. No servers, no tracking, everything stays on your machine.
+              Private, local AI chat that works right away. No extra software to install. No servers, no tracking, everything stays on your machine.
             </p>
             <button
               onClick={() => {
@@ -801,7 +801,7 @@ export function Onboarding() {
                     Advanced disclosure below (kept, just no longer required). */}
                 <h2 className="text-base font-semibold">Ready to chat</h2>
                 <p className={`text-[0.7rem] ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                  LU runs its own engine on your machine — nothing to install. Pick a starter model next.
+                  LU runs its own engine on your machine. Nothing to install. Pick a starter model next.
                 </p>
 
                 <button
@@ -889,9 +889,9 @@ export function Onboarding() {
                 <p className={`text-[0.7rem] ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
                   {lmstudioOfflineDetected
                     ? (lmstudioModelCount > 0
-                        ? `LM Studio is installed (${lmstudioModelCount} model${lmstudioModelCount === 1 ? '' : 's'} detected) but its server isn't currently running. Start it to use LM Studio as your backend — no re-install needed.`
-                        : "LM Studio is installed but its server isn't currently running. Start it to use LM Studio as your backend — no re-install needed.")
-                    : "You need a local AI backend to chat. We'll install Ollama for you — it's the easiest to set up."}
+                        ? `LM Studio is installed (${lmstudioModelCount} model${lmstudioModelCount === 1 ? '' : 's'} detected) but its server isn't currently running. Start it to use LM Studio as your backend, no re-install needed.`
+                        : "LM Studio is installed but its server isn't currently running. Start it to use LM Studio as your backend, no re-install needed.")
+                    : "You need a local AI backend to chat. We'll install Ollama for you, it's the easiest to set up."}
                 </p>
 
                 {/* Ollama ready state */}
@@ -1224,7 +1224,7 @@ export function Onboarding() {
                     Multiple ComfyUI installs detected
                   </p>
                   <p className={`text-[0.6rem] mt-0.5 ${isDark ? 'text-amber-300/80' : 'text-amber-700'}`}>
-                    Pick the one you want LU to use. We'll remember your choice — you can change it later in Settings → ComfyUI.
+                    Pick the one you want LU to use. We'll remember your choice, and you can change it later in Settings → ComfyUI.
                   </p>
                 </div>
                 <div className="space-y-1.5 max-h-44 overflow-y-auto">
@@ -1259,7 +1259,7 @@ export function Onboarding() {
                   onClick={() => { setComfyChoices([]); setComfyFound({ found: false, complete: false }) }}
                   className={`text-[0.55rem] ${isDark ? 'text-gray-500 hover:text-gray-300' : 'text-gray-500 hover:text-gray-700'} underline`}
                 >
-                  None of these — let me install a fresh one
+                  None of these, let me install a fresh one
                 </button>
               </div>
             )}
@@ -1285,13 +1285,13 @@ export function Onboarding() {
                 {comfyFound.found && comfyFound.complete === false && (
                   <div className={`p-2.5 rounded-lg border ${isDark ? 'bg-amber-500/10 border-amber-500/20' : 'bg-amber-50 border-amber-200'} text-left`}>
                     <p className={`text-[0.6rem] ${isDark ? 'text-amber-300' : 'text-amber-800'}`}>
-                      Found a previous ComfyUI install at <code className="font-mono">{comfyFound.path}</code> but it's missing PyTorch — looks like a previous install was interrupted. Click below to finish it.
+                      Found a previous ComfyUI install at <code className="font-mono">{comfyFound.path}</code> but it's missing PyTorch, looks like a previous install was interrupted. Click below to finish it.
                     </p>
                   </div>
                 )}
                 <button
                   onClick={async () => {
-                    // P14 pre-flight — install Python first if missing,
+                    // P14 pre-flight, install Python first if missing,
                     // then proceed with the original ComfyUI flow. Both
                     // progress cards animate from this single click; the
                     // user never has to interact mid-flight.
@@ -1321,7 +1321,7 @@ export function Onboarding() {
                             // Auto-start ComfyUI
                             try { await backendCall('start_comfyui') } catch {}
                           } else if (status.status === 'cancelled') {
-                            // Bug #1: install cancelled by user — close the
+                            // Bug #1: install cancelled by user, close the
                             // progress card and surface the install options
                             // again so they can retry or pick another drive.
                             clearInterval(poll)
@@ -1411,7 +1411,7 @@ export function Onboarding() {
                   </span>
                 </div>
                 <p className={`text-[0.55rem] mb-2 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-                  ComfyUI needs Python to run pip. We're installing it via winget — about 30 MB and 30–60 s on a typical connection.
+                  ComfyUI needs Python to run pip. We're installing it via winget, about 30 MB and 30 to 60 s on a typical connection.
                 </p>
                 <div className={`text-[0.55rem] font-mono max-h-24 overflow-y-auto space-y-0.5 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
                   {pythonInstallLogs.slice(-6).map((log, i) => (
@@ -1560,7 +1560,7 @@ export function Onboarding() {
               </p>
             </div>
 
-            {/* Unfiltered / Mainstream tabs — only meaningful when both
+            {/* Unfiltered / Mainstream tabs, only meaningful when both
                 categories have entries. With the curated single-starter list
                 (P4) the tabs are hidden; reintroduce only if the list grows. */}
             {ONBOARDING_MODELS.some(m => m.uncensored) && ONBOARDING_MODELS.some(m => !m.uncensored) && (
@@ -1675,7 +1675,7 @@ export function Onboarding() {
           </motion.div>
         )}
 
-        {/* Step 5: Embeddings (GH #45 — Document Chat / RAG) */}
+        {/* Step 5: Embeddings (GH #45, Document Chat / RAG) */}
         {step === 'embeddings' && (
           <motion.div
             key="embeddings"
@@ -1695,7 +1695,7 @@ export function Onboarding() {
               <div className={`p-3 rounded-lg border ${isDark ? 'bg-green-500/10 border-green-500/20' : 'bg-green-50 border-green-200'}`}>
                 <div className="flex items-center gap-2 justify-center">
                   <Check size={14} className="text-green-400" />
-                  <span className="text-[0.7rem] font-medium">Embedding model already installed — Document Chat is ready.</span>
+                  <span className="text-[0.7rem] font-medium">Embedding model already installed, Document Chat is ready.</span>
                 </div>
               </div>
             )}
@@ -1706,7 +1706,7 @@ export function Onboarding() {
                   <div className="flex-1 min-w-0">
                     <p className="text-[0.7rem] font-medium">nomic-embed-text</p>
                     <p className={`text-[0.6rem] mt-0.5 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                      Standard embedding model from Nomic AI. Used purely on-device to chunk and retrieve your documents — never sent anywhere.
+                      Standard embedding model from Nomic AI. Used purely on-device to chunk and retrieve your documents, never sent anywhere.
                     </p>
                     <p className={`text-[0.55rem] mt-0.5 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
                       {embedsViaBundled ? '84 MB · bundled engine, runs on any CPU' : '274 MB · runs on any CPU'}

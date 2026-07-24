@@ -101,7 +101,7 @@ export function CreatePanel({ open, onOpenChange, activeId, onSelect }: Props) {
                       {g.unavailable && (
                         <span
                           className="absolute inset-0 flex items-center justify-center bg-black/50 text-gray-500"
-                          title="Local render — the local engine isn't reachable"
+                          title="Local render, but the local engine isn't reachable"
                         >
                           <MonitorOff size={16} />
                         </span>

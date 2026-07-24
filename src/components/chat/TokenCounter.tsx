@@ -49,8 +49,8 @@ export function TokenCounter() {
       ? 'Ollama num_ctx'
       : 'model context'
   const title = isReal
-    ? `Context: ${usedTokens.toLocaleString()} / ${maxTokens.toLocaleString()} tokens (${source}) — anchored on the model's last reported usage (includes system prompt + tools + RAG); reasoning tokens are not context and aren't counted`
-    : `Estimated: ${usedTokens.toLocaleString()} / ${maxTokens.toLocaleString()} tokens (${source}) — estimate until the model reports real usage`
+    ? `Context: ${usedTokens.toLocaleString()} / ${maxTokens.toLocaleString()} tokens (${source}), anchored on the model's last reported usage (includes system prompt + tools + RAG); reasoning tokens are not context and aren't counted`
+    : `Estimated: ${usedTokens.toLocaleString()} / ${maxTokens.toLocaleString()} tokens (${source}), estimate until the model reports real usage`
 
   return (
     <div className={`flex items-center gap-1.5 px-2 py-1 ${color}`} title={title}>

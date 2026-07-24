@@ -1125,7 +1125,7 @@ export async function uploadImage(file: File): Promise<string> {
   // unreadable file. Catch the empty-blob case up front with a clear message
   // (konata 2026-06-14: "Video generation failed: Failed to upload image: HTTP 400").
   if (!file || file.size === 0) {
-    throw new Error('Failed to upload image: the source image is empty (0 bytes) — it could not be read from ComfyUI.')
+    throw new Error('Failed to upload image: the source image is empty (0 bytes), it could not be read from ComfyUI.')
   }
 
   // ComfyUI saves the file under the multipart filename and opens it with PIL by
@@ -1176,7 +1176,7 @@ export async function uploadImage(file: File): Promise<string> {
   if (!res.ok) {
     let detail = ''
     try { detail = (await res.text()).trim() } catch { /* body empty / already consumed */ }
-    throw new Error(`Failed to upload image: HTTP ${res.status}${detail ? ` — ${detail.slice(0, 300)}` : ''}`)
+    throw new Error(`Failed to upload image: HTTP ${res.status}${detail ? `, ${detail.slice(0, 300)}` : ''}`)
   }
   const data = await res.json()
   return data.name // ComfyUI returns { name, subfolder, type }

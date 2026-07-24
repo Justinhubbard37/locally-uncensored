@@ -47,7 +47,7 @@ export function StorageQuotaToast() {
       />
       <div className="flex-1 min-w-0 text-[0.7rem]">
         <span className="font-semibold text-amber-800 dark:text-amber-200">
-          App storage limit reached — that setting wasn't saved.
+          App storage limit reached, so that setting wasn't saved.
         </span>
         <span className="ml-1.5 text-amber-700/90 dark:text-amber-300/80">
           This is the browser's small per-app store, not your disk space. Your chats and

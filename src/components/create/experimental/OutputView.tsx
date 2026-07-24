@@ -85,7 +85,7 @@ async function downloadGalleryItem(item: GalleryItem): Promise<void> {
   if (item.filename && item.unavailable) {
     // The item's media already failed to load — the ComfyUI fetch would only
     // fail again (and downloadComfyFile swallows its errors). Be honest.
-    useCreateStore.getState().setError('Download needs the local engine — start it and try again.')
+    useCreateStore.getState().setError('Download needs the local engine. Start it and try again.')
     return
   }
   try {
@@ -125,7 +125,7 @@ async function downloadGalleryItem(item: GalleryItem): Promise<void> {
   } catch (err) {
     useCreateStore
       .getState()
-      .setError(`Download failed — ${err instanceof Error ? err.message : String(err)}`)
+      .setError(`Download failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 

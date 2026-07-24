@@ -27,7 +27,7 @@ export function PersonaPanel() {
           <span className="text-[0.55rem] text-gray-500 dark:text-gray-500">
             {personasEnabled
               ? 'Active persona is applied to new chats.'
-              : 'Off — raw model, no persona prompt.'}
+              : 'Off: raw model, no persona prompt.'}
           </span>
         </div>
         <button

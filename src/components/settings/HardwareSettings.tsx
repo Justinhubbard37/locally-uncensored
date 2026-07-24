@@ -29,7 +29,7 @@ const VENDOR_HELP: Record<GpuVendor, string> = {
   auto: 'No env-var set. Ollama / ComfyUI use whatever the driver picks first. This matches pre-v2.5.0 behaviour.',
   nvidia: 'Forwards CUDA_VISIBLE_DEVICES. Use on NVIDIA-only or NVIDIA+iGPU setups.',
   amd: 'Forwards HIP_VISIBLE_DEVICES + ROCR_VISIBLE_DEVICES. Works on ROCm Linux + ROCm-on-Windows.',
-  intel: 'Forwards ONEAPI_DEVICE_SELECTOR. For Intel Arc / Iris with IPEX-LLM. Ollama support is limited — verify your engine first.',
+  intel: 'Forwards ONEAPI_DEVICE_SELECTOR. For Intel Arc / Iris with IPEX-LLM. Ollama support is limited, verify your engine first.',
 }
 
 export function HardwareSettings() {
@@ -144,7 +144,7 @@ export function HardwareSettings() {
         )}
         {!error && gpus.length === 0 && !loading && (
           <div className="text-[0.6rem] text-gray-500 italic">
-            No GPUs detected via nvidia-smi / rocm-smi / lspci / wmic. The "Auto" vendor option still works — Ollama will use whatever the driver picks.
+            No GPUs detected via nvidia-smi / rocm-smi / lspci / wmic. The "Auto" vendor option still works, Ollama will use whatever the driver picks.
           </div>
         )}
         {gpusForVendor.length > 0 && (
@@ -193,7 +193,7 @@ export function HardwareSettings() {
           {([
             ['auto', 'Auto (recommended)', 'NVIDIA runs on the GPU. On an AMD / other card LU checks whether your ComfyUI has a GPU-capable torch (ROCm or ZLUDA) and uses it, otherwise falls back to CPU.'],
             ['gpu', 'Force GPU', 'Never fall back to CPU. Use if you run a DirectML / ROCm ComfyUI that LU cannot auto-detect. If your ComfyUI has no working GPU torch it will fail to start.'],
-            ['cpu', 'Force CPU', 'Always run image / video on the CPU. Slow but stable — useful if generation crashes your GPU by running out of VRAM.'],
+            ['cpu', 'Force CPU', 'Always run image / video on the CPU. Slow but stable, useful if generation crashes your GPU by running out of VRAM.'],
           ] as const).map(([val, label, help]) => (
             <label key={val} className="flex items-start gap-2 cursor-pointer p-1.5 rounded hover:bg-white/[0.04] border border-transparent has-[input:checked]:border-white/10 has-[input:checked]:bg-white/[0.03]">
               <input

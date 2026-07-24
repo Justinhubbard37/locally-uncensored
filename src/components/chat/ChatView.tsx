@@ -260,8 +260,8 @@ export function ChatView() {
                     <span className="font-medium">Live</span>
                     <span className="text-green-500/60">
                       {mobileConnectedCount > 0
-                        ? ` — ${mobileConnectedCount} mobile${mobileConnectedCount === 1 ? '' : 's'} connected`
-                        : ' — ready for mobile'}
+                        ? `, ${mobileConnectedCount} mobile${mobileConnectedCount === 1 ? '' : 's'} connected`
+                        : ', ready for mobile'}
                     </span>
                   </div>
                   <button
@@ -289,7 +289,7 @@ export function ChatView() {
                       <Radio size={10} />
                       <span className="font-medium">Server stopped</span>
                       <span className={remoteError ? 'text-red-400/70' : 'text-gray-500/70'}>
-                        {remoteError ? '— last attempt failed' : '— restart to reconnect mobile'}
+                        {remoteError ? ', last attempt failed' : ', restart to reconnect mobile'}
                       </span>
                     </div>
                     {/* #29: surface the actual reason (port in use,

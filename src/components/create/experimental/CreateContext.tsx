@@ -189,7 +189,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
       await new Promise((r) => setTimeout(r, 2000))
       if (await checkComfyConnection()) { checkConnection(); return }
     }
-    onProgress?.('ComfyUI is not installed — downloading & installing it now (one-time, a few GB)…')
+    onProgress?.('ComfyUI is not installed. Downloading & installing it now (one-time, a few GB)…')
     await backendCall('install_comfyui')
     // Poll the same status contract the Settings installer uses. Generous cap:
     // a slow connection legitimately needs a while for the one-time install.
@@ -200,7 +200,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
       if (lastLog) onProgress?.(lastLog)
       if (st?.status === 'complete') break
       if (st?.status === 'error') {
-        throw new Error(lastLog || 'ComfyUI install failed — see Settings → AI Backends for details.')
+        throw new Error(lastLog || 'ComfyUI install failed. See Settings → AI Backends for details.')
       }
     }
     onProgress?.('Starting ComfyUI…')
@@ -209,7 +209,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
       await new Promise((r) => setTimeout(r, 2000))
       if (await checkComfyConnection()) { checkConnection(); return }
     }
-    throw new Error('Installed ComfyUI but it did not come up — check Settings → AI Backends.')
+    throw new Error('Installed ComfyUI but it did not come up. Check Settings → AI Backends.')
   }, [checkConnection])
 
   // Install a capability in place — mirrors the VHS one-click flow (#72):
@@ -233,7 +233,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
       setCaps(capsFrom(names))
       if (!names.has('VAEEncodeForInpaint') && !names.has('InpaintModelConditioning')) {
         throw new Error(
-          'This ComfyUI is missing its core inpaint nodes (VAEEncodeForInpaint) — update ComfyUI to a current version.',
+          'This ComfyUI is missing its core inpaint nodes (VAEEncodeForInpaint). Update ComfyUI to a current version.',
         )
       }
       return
@@ -311,7 +311,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
           if (!p || p.status === 'complete') break
           if (p.status === 'error') throw new Error(p.error || `Download failed: ${file.filename}`)
           if (p.total > 0) {
-            onProgress?.(`Downloading ${file.filename} — ${Math.round((p.progress / p.total) * 100)}%`)
+            onProgress?.(`Downloading ${file.filename}: ${Math.round((p.progress / p.total) * 100)}%`)
           }
         }
       }

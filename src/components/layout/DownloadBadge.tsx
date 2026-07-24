@@ -228,7 +228,7 @@ export function DownloadBadge() {
                                       <button
                                         onClick={() => useDownloadStore.getState().retry(id)}
                                         className="flex items-center gap-0.5 text-red-400 hover:text-red-300 transition-colors"
-                                        title={d.error || 'Download failed — click to retry'}
+                                        title={d.error || 'Download failed, click to retry'}
                                       >
                                         <RotateCcw size={8} />
                                         <span>Retry</span>

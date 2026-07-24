@@ -19,7 +19,7 @@ export function MemoryDebugToggle() {
     <>
       <button
         onClick={() => setOpen(!open)}
-        title="Memory — view, add or delete the context injected into prompts"
+        title="Memory: view, add or delete the context injected into prompts"
         className={
           'relative flex items-center justify-center h-[26px] w-[26px] rounded-md border transition-colors ' +
           (open
@@ -151,7 +151,7 @@ function MemoryPopover({ onClose }: { onClose: () => void }) {
         {/* Memory list — each row deletable on hover */}
         <div className="overflow-y-auto flex-1 scrollbar-thin">
           {entries.length === 0 ? (
-            <p className="text-[0.6rem] text-gray-600 px-3 py-5 text-center">No memories yet — click <span className="text-purple-400">Add</span> to write one.</p>
+            <p className="text-[0.6rem] text-gray-600 px-3 py-5 text-center">No memories yet, click <span className="text-purple-400">Add</span> to write one.</p>
           ) : (
             entries.slice(0, 50).map((entry) => {
               const stale = entry.stale === true || typeof entry.supersededBy === 'string'
@@ -161,7 +161,7 @@ function MemoryPopover({ onClose }: { onClose: () => void }) {
                     <span className={`text-[0.5rem] uppercase font-bold tracking-wider ${typeColors[entry.type] || 'text-gray-500'}`}>{entry.type}</span>
                     <span className="text-[0.6rem] text-gray-300 font-medium truncate flex-1">{entry.title}</span>
                     {stale && (
-                      <span className="flex items-center gap-0.5 text-[0.45rem] uppercase tracking-wider text-gray-500 shrink-0" title="Outdated — not injected"><Archive size={8} /> outdated</span>
+                      <span className="flex items-center gap-0.5 text-[0.45rem] uppercase tracking-wider text-gray-500 shrink-0" title="Outdated, not injected"><Archive size={8} /> outdated</span>
                     )}
                     <button
                       onClick={() => removeMemory(entry.id)}

@@ -203,7 +203,7 @@ export function AccountPanel() {
 
       {licenseActive && quota ? (
         <div className="space-y-2">
-          {/* One shared compute-credit wallet — chat, images, video and voice
+          {/* One shared compute-credit wallet, chat, images, video and voice
               all draw from the same monthly budget. */}
           <Meter
             label="Cloud credits (this month)"

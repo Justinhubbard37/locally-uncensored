@@ -223,7 +223,7 @@ export function Header() {
             title={staleError.message}
           >
             <span className="text-amber-600 dark:text-amber-300 font-medium">
-              stale — refresh?
+              stale, refresh?
             </span>
             <button
               onClick={handleRefreshStale}

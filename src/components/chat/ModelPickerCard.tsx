@@ -100,7 +100,7 @@ export function ModelPickerCard({ request }: { request: ModelPickRequest }) {
     <div className="mt-1 ml-5 rounded-md border border-blue-400/25 bg-blue-500/[0.04] px-2.5 py-2 space-y-1.5" data-testid="model-picker-card">
       <div className="text-[0.6rem] font-medium text-gray-700 dark:text-gray-300">
         Pick the {PICK_KIND_LABEL[request.kind]}
-        <span className="ml-1 font-normal text-gray-500 dark:text-gray-500">— runs before the VRAM swap</span>
+        <span className="ml-1 font-normal text-gray-500 dark:text-gray-500">runs before the VRAM swap</span>
       </div>
       <ModelList models={request.models} selected={selected} onPick={setSelected} />
       <div className="flex items-center gap-2 pt-0.5">
@@ -178,7 +178,7 @@ export function ChangeModelInline({ kind }: { kind: ModelPickKind }) {
         <div className="rounded-md border border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-white/[0.03] px-2.5 py-2 space-y-1.5 max-w-sm">
           <div className="flex items-center justify-between">
             <span className="text-[0.55rem] font-medium text-gray-600 dark:text-gray-400">
-              Saved {PICK_KIND_LABEL[kind]} — applies from the next generation
+              Saved {PICK_KIND_LABEL[kind]}, applies from the next generation
             </span>
             <button type="button" onClick={(e) => { e.stopPropagation(); setOpen(false) }} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
               <X size={9} />
@@ -188,7 +188,7 @@ export function ChangeModelInline({ kind }: { kind: ModelPickKind }) {
             <div className="flex items-center gap-1 text-[0.55rem] text-gray-500"><Loader2 size={9} className="animate-spin" /> loading models…</div>
           )}
           {loadError && (
-            <div className="text-[0.55rem] text-amber-500">Could not reach ComfyUI — model list unavailable.</div>
+            <div className="text-[0.55rem] text-amber-500">Could not reach ComfyUI, so the model list is unavailable.</div>
           )}
           {models !== null && models.length > 0 && (
             <ModelList
@@ -202,7 +202,7 @@ export function ChangeModelInline({ kind }: { kind: ModelPickKind }) {
             />
           )}
           {savedFlash && (
-            <div className="flex items-center gap-1 text-[0.55rem] text-emerald-500"><Check size={9} /> Saved — next generation uses it.</div>
+            <div className="flex items-center gap-1 text-[0.55rem] text-emerald-500"><Check size={9} /> Saved, the next generation uses it.</div>
           )}
         </div>
       )}

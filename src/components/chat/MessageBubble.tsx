@@ -287,7 +287,7 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
                       <div className="mt-1 flex items-start gap-2 px-2 py-1.5 rounded-md border border-amber-400/30 bg-amber-500/10 text-[0.65rem] text-amber-700 dark:text-amber-200">
                         <Wrench size={11} className="mt-0.5 shrink-0" />
                         <div className="flex-1">
-                          <p className="font-medium">The model spent its whole reply deciding to call a tool — but Agent Mode is off, so it never said anything.</p>
+                          <p className="font-medium">The model spent its whole reply deciding to call a tool, but Agent Mode is off, so it never said anything.</p>
                           <p className="opacity-80 mt-0.5">Turn Agent Mode on and ask again to let it actually run the tool (search the web, generate media, read files). Its reasoning is in the thinking block above.</p>
                         </div>
                         <button
@@ -299,7 +299,7 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
                       </div>
                     ) : (
                       <p className="mt-1 text-[0.65rem] italic text-gray-500 dark:text-gray-400">
-                        The model only produced internal reasoning and no answer — see the thinking block above, or rephrase and try again.
+                        The model only produced internal reasoning and no answer. See the thinking block above, or rephrase and try again.
                       </p>
                     )
                   )}
@@ -326,7 +326,7 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
         </div>
 
         {/* Chat-tools artifacts (David 2026-06-12): files the model "wrote" in
-            plain chat — rendered inline with preview + Download, never on disk. */}
+            plain chat, rendered inline with preview + Download, never on disk. */}
         {!isUser && message.artifacts && message.artifacts.length > 0 && (
           <div className="space-y-1">
             {message.artifacts.map((a) => (
@@ -362,7 +362,7 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
             <p className="text-[0.5rem] text-gray-500 mb-0.5">Sources:</p>
             {message.sources.map((s, i) => (
               <p key={i} className="text-[0.5rem] text-gray-600 truncate">
-                [{i + 1}] {s.documentName} — {s.preview.slice(0, 60)}...
+                [{i + 1}] {s.documentName}, {s.preview.slice(0, 60)}...
               </p>
             ))}
           </div>

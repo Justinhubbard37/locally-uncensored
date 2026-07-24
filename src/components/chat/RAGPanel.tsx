@@ -315,7 +315,7 @@ function RAGPanelInner({ conversationId, onClose }: { conversationId: string; on
                 Document Chat needs <code className="font-mono px-1 rounded bg-gray-200 dark:bg-white/5">{embeddingModelReactive ?? 'nomic-embed-text'}</code> (274 MB). One-time download.
                 {embeddingQueuedCount > 0 && (
                   <span className="block mt-0.5 text-gray-400 dark:text-gray-500">
-                    {embeddingQueuedCount} file{embeddingQueuedCount === 1 ? '' : 's'} queued — will index after install.
+                    {embeddingQueuedCount} file{embeddingQueuedCount === 1 ? '' : 's'} queued, they will index after install.
                   </span>
                 )}
               </p>

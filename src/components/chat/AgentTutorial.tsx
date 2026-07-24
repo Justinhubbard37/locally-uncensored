@@ -12,13 +12,13 @@ interface Props {
 const STEPS = [
   {
     title: 'Welcome to Agent Mode',
-    description: 'Your AI can now use tools to take action — search the web, read and write files, execute code, and generate images. All locally, all uncensored.',
-    tagline: 'Generate anything — text, images, video. Locally. Uncensored.',
+    description: 'Your AI can now use tools to take action. Search the web, read and write files, execute code, and generate images. All locally, all uncensored.',
+    tagline: 'Generate anything: text, images, video. Locally. Uncensored.',
     accent: 'bg-green-500',
   },
   {
     title: 'Available Tools',
-    description: 'Agent Mode gives your model access to powerful tools. Safe actions run automatically — risky ones always ask for approval first.',
+    description: 'Agent Mode gives your model access to powerful tools. Safe actions run automatically. Risky ones always ask for approval first.',
     tools: [
       { name: 'Web Search', desc: 'Search the internet for current information', accent: 'bg-blue-400' },
       { name: 'File Read/Write', desc: 'Read and create files on your system', accent: 'bg-amber-400' },

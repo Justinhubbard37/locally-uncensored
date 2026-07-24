@@ -44,7 +44,7 @@ export function CloudSwitch() {
       aria-checked={on}
       aria-label="Cloud"
       title={on
-        ? "Cloud mode is on — chat, image and video run on LU's hosted GPUs. Click to go back to Local."
+        ? "Cloud mode is on. Chat, image and video run on LU's hosted GPUs. Click to go back to Local."
         : "Run LU on hosted GPUs with your lu-labs.ai account"}
       onClick={toggle}
       className={cn(

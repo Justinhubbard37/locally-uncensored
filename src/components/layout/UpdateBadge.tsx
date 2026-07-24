@@ -59,7 +59,7 @@ export function UpdateBadge() {
                 : 'text-emerald-400 hover:bg-emerald-500/10'
         }`}
         title={
-          isDownloaded ? 'Update ready — click to restart'
+          isDownloaded ? 'Update ready, click to restart'
             : isDownloading ? `Downloading update... ${downloadProgress}%`
               : `Update available: v${latestVersion}`
         }

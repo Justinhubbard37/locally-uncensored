@@ -179,7 +179,7 @@ function InputSlot() {
     // containers (HEIC/AVIF/GIF) pass: loadImageRef re-encodes them to PNG,
     // and throws honestly when the WebView can't decode them.
     if (!file.type.startsWith('image/')) {
-      setError('That file type is not supported — use PNG, JPG or WebP.')
+      setError('That file type is not supported. Use PNG, JPG or WebP.')
       return
     }
     setLoading(true)
@@ -303,7 +303,7 @@ function ChangeImageButton({ onChange }: { onChange: (r: Awaited<ReturnType<type
   // fine and then 415ed at submit (and a decode failure rejected unhandled).
   const handleFile = async (file: File) => {
     if (!file.type.startsWith('image/')) {
-      setError('That file type is not supported — use PNG, JPG or WebP.')
+      setError('That file type is not supported. Use PNG, JPG or WebP.')
       return
     }
     setError(null)
@@ -355,7 +355,7 @@ const CAP_COPY = {
   rmbg: {
     icon: Scissors,
     title: 'Background removal needs a one-time download',
-    description: 'The AI cutout runs fully locally (ComfyUI-RMBG). This installs the node now — the ~300 MB cutout model downloads automatically on your first cutout.',
+    description: 'The AI cutout runs fully locally (ComfyUI-RMBG). This installs the node now. The ~300 MB cutout model downloads automatically on your first cutout.',
   },
   'inpaint-nodes': {
     icon: Wand2,
@@ -400,7 +400,7 @@ const BUNDLE_COPY = {
   image: {
     icon: ImageIcon,
     title: 'Local image generation needs a one-time download',
-    description: 'This sets up everything for a fully local run: ComfyUI itself if it’s missing, plus the Juggernaut XL starter checkpoint (~6.5 GB) — the same model also powers the local Edit tab.',
+    description: 'This sets up everything for a fully local run: ComfyUI itself if it’s missing, plus the Juggernaut XL starter checkpoint (~6.5 GB). That same model also powers the local Edit tab.',
   },
   video: {
     icon: Film,

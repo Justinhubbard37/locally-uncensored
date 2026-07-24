@@ -143,8 +143,8 @@ export function AgentModeToggle() {
           !isCompatible
             ? 'This model is not agent-compatible'
             : isActive
-              ? 'Agent Mode is on — click to turn off'
-              : 'Agent Mode is off — click to turn on'
+              ? 'Agent Mode is on. Click to turn off'
+              : 'Agent Mode is off. Click to turn on'
         }
         className={
           'flex items-center gap-1 px-2 py-0.5 rounded border transition-colors text-[0.55rem] ' +

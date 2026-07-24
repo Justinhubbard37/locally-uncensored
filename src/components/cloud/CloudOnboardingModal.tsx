@@ -12,17 +12,17 @@ const POINTS = [
   {
     icon: Cloud,
     title: 'Hosted models everywhere',
-    body: "Chat, image and video switch to LU's hosted GPU fleet — the full cloud catalog, no downloads, no VRAM limits. The Create tab gains the cloud-only ops (edit, animate, upscale, erase, enhance).",
+    body: "Chat, image and video switch to LU's hosted GPU fleet, the full cloud catalog, no downloads, no VRAM limits. The Create tab gains the cloud-only ops (edit, animate, upscale, erase, enhance).",
   },
   {
     icon: Coins,
     title: 'Your plan pays with credits',
-    body: 'Every render and chat draws from the monthly credit budget of your plan — the meter in Create always shows what is left. Local-hardware surfaces (Model Manager, Benchmark) hide while Cloud is on.',
+    body: 'Every render and chat draws from the monthly credit budget of your plan. The meter in Create always shows what is left. Local-hardware surfaces (Model Manager, Benchmark) hide while Cloud is on.',
   },
   {
     icon: Shield,
     title: 'Local stays local',
-    body: 'Cloud mode is a switch, not a migration: flip back to Local anytime and everything runs on this machine again — free, private, no account needed.',
+    body: 'Cloud mode is a switch, not a migration: flip back to Local anytime and everything runs on this machine again, free, private, no account needed.',
   },
 ]
 

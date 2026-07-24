@@ -208,7 +208,7 @@ export function ProviderSettings() {
                     URL is fixed and lifecycle is owned by the app. */}
                 {config.managed ? (
                   <p className="pt-1.5 text-[0.6rem] text-gray-500 leading-tight">
-                    Built-in engine — runs locally, nothing to configure.
+                    Built-in engine, runs locally, nothing to configure.
                   </p>
                 ) : (
                   <div className="pt-1.5">
