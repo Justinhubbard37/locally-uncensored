@@ -37,6 +37,7 @@ import { budgetFromSettings } from '../api/agents/budget'
 import { finalStripThinkingTags } from '../lib/thinking-stripper'
 import { streamOllamaChatWithTools } from '../lib/ollama-stream-tools'
 import { extractToolCallsWithRanges, stripRanges } from '../lib/tool-call-repair'
+import { canonicalToolName } from '../lib/loose-tool-parse'
 import { selectRelevantTools, selectRelevantToolsAsync } from '../lib/tool-selection'
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
@@ -1002,6 +1003,25 @@ export function useCodex() {
             phase: 'answer',
             content: turnContent,
             timestamp: Date.now(),
+          })
+        }
+
+        // Repair near-miss tool names before anything tries to resolve them.
+        // The chat agent has done this since 2026-06-03 (gemma4 calling
+        // `video_generation`); Code never did, so the same class of miss ended
+        // as "Unknown tool" here. Live on the ship exe 2026-07-24, gpt-oss on
+        // LU Cloud sent `file_edit<|channel|>commentary` — a harmony control
+        // token welded onto the recipient — and every write call died while the
+        // model retried the identical name for a minute before falling back to
+        // a full-file rewrite that failed the same way. canonicalToolName only
+        // rewrites a name when the repaired form is a REGISTERED tool, so a
+        // genuinely unknown tool still errors instead of being rerouted.
+        if (toolCalls.length > 0) {
+          const knownToolNames = toolRegistry.getAll().map((t) => t.name)
+          toolCalls = toolCalls.map((tc) => {
+            const raw = tc.function?.name ?? ''
+            const fixed = canonicalToolName(raw, knownToolNames)
+            return fixed === raw ? tc : { ...tc, function: { ...tc.function, name: fixed } }
           })
         }
 

@@ -208,14 +208,9 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   list_files: 'file_list', search_files: 'file_search', run_shell: 'shell_execute', run_code: 'code_execute',
 }
 
-/**
- * Map a model-emitted tool name to a registered one. Tries exact, lowercase,
- * an explicit alias table, then a punctuation-insensitive equality. Returns the
- * original name unchanged when no confident match exists (so genuinely unknown
- * tools still error rather than being silently rerouted).
- */
-export function canonicalToolName(name: string, known: string[]): string {
-  if (!name) return name
+/** Exact → lowercase → alias → punctuation-insensitive. Undefined if none hit. */
+function matchKnown(name: string, known: string[]): string | undefined {
+  if (!name) return undefined
   if (known.includes(name)) return name
   const lc = name.toLowerCase()
   if (known.includes(lc)) return lc
@@ -225,6 +220,48 @@ export function canonicalToolName(name: string, known: string[]): string {
   const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '')
   const target = norm(name)
   for (const k of known) if (norm(k) === target) return k
+  return undefined
+}
+
+/**
+ * Transport noise a model (or a proxy that half-parses its format) can wrap
+ * around the bare tool name. Two shapes seen live on gpt-oss via LU Cloud,
+ * 2026-07-24:
+ *
+ *   file_edit<|channel|>commentary   harmony control token leaked into the
+ *                                    recipient field, so EVERY write tool call
+ *                                    came back "Unknown tool" and the model
+ *                                    burned a minute retrying the same name
+ *   functions.file_edit              the harmony recipient namespace, verbatim
+ *
+ * Cutting at the first character a registered name can never contain is safe:
+ * builtin names are [a-z_], so the cut can shorten a name but can never turn
+ * one tool into a different one. The namespace strip is only ever ACCEPTED by
+ * the caller when the tail matches a registered tool, which keeps MCP tools
+ * that legitimately carry dots intact.
+ */
+function toolNameCandidates(name: string): string[] {
+  const cut = name.trim().match(/^[A-Za-z0-9_.-]+/)?.[0] ?? ''
+  if (!cut) return []
+  const dot = cut.lastIndexOf('.')
+  return dot > 0 ? [cut, cut.slice(dot + 1)] : [cut]
+}
+
+/**
+ * Map a model-emitted tool name to a registered one. Tries the name as sent,
+ * then the same ladder on the name with transport noise stripped. Returns the
+ * original name unchanged when no confident match exists (so genuinely unknown
+ * tools still error rather than being silently rerouted).
+ */
+export function canonicalToolName(name: string, known: string[]): string {
+  if (!name) return name
+  const direct = matchKnown(name, known)
+  if (direct) return direct
+  for (const candidate of toolNameCandidates(name)) {
+    if (candidate === name) continue
+    const hit = matchKnown(candidate, known)
+    if (hit) return hit
+  }
   return name
 }
 

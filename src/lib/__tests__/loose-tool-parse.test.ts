@@ -115,6 +115,44 @@ describe('canonicalToolName — map near-miss tool names', () => {
     expect(canonicalToolName('teleport', KN)).toBe('teleport')
   })
 
+  // Live on the ship exe, 2026-07-24: gpt-oss through LU Cloud sent the
+  // recipient as `file_edit<|channel|>commentary`. Every write tool call came
+  // back "Unknown tool" and the model spent a minute retrying the same name.
+  describe('harmony control tokens welded onto the name', () => {
+    const CODE = ['file_read', 'file_write', 'file_edit', 'shell_execute']
+
+    it('recovers the exact name that failed live', () => {
+      expect(canonicalToolName('file_edit<|channel|>commentary', CODE)).toBe('file_edit')
+    })
+
+    it('recovers other tools carrying the same marker', () => {
+      expect(canonicalToolName('file_write<|channel|>commentary', CODE)).toBe('file_write')
+      expect(canonicalToolName('shell_execute<|channel|>analysis', CODE)).toBe('shell_execute')
+    })
+
+    it('strips the harmony recipient namespace', () => {
+      expect(canonicalToolName('functions.file_edit', CODE)).toBe('file_edit')
+      expect(canonicalToolName('functions.file_edit<|channel|>commentary', CODE)).toBe('file_edit')
+    })
+
+    it('tolerates surrounding whitespace and a trailing call arrow', () => {
+      expect(canonicalToolName('  file_edit ', CODE)).toBe('file_edit')
+      expect(canonicalToolName('file_edit<|constrain|>json', CODE)).toBe('file_edit')
+    })
+
+    // The cut can only SHORTEN a name, so it can never turn one registered
+    // tool into a different one, and an unknown stem still errors.
+    it('does not invent a tool out of noise', () => {
+      expect(canonicalToolName('<|channel|>commentary', CODE)).toBe('<|channel|>commentary')
+      expect(canonicalToolName('teleport<|channel|>commentary', CODE)).toBe('teleport<|channel|>commentary')
+    })
+
+    it('keeps a dotted name intact when the full name is the registered one', () => {
+      const mcp = ['mcp.server.do_thing']
+      expect(canonicalToolName('mcp.server.do_thing', mcp)).toBe('mcp.server.do_thing')
+    })
+  })
+
   it('never maps an alias to a tool that is not registered', () => {
     expect(canonicalToolName('video_generation', ['image_generate'])).toBe('video_generation')
   })
