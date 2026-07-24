@@ -8,7 +8,7 @@ import { getProviderForModel, getProviderIdFromModel } from '../api/providers'
 import { markToolsUnsupported } from '../api/tool-capability'
 import { toolRegistry } from '../api/mcp'
 import { usePermissionStore } from '../stores/permissionStore'
-import { getToolCallingStrategy } from '../lib/model-compatibility'
+import { toolStrategyFor } from '../lib/tool-support'
 import { CODEX_CONFIRM_TOOLS, codexConfirmEnabled } from './codexShellGate'
 import { buildHermesToolPrompt, buildHermesToolResult, parseHermesToolCalls, stripToolCallTags, hasToolCallTags } from '../api/hermes-tool-calling'
 import { chatNonStreaming } from '../api/agents'
@@ -336,9 +336,16 @@ export function useCodex() {
     // Resolve provider
     const { provider, modelId } = getProviderForModel(activeModel)
     const providerId = getProviderIdFromModel(activeModel)
-    const strategy = providerId === 'ollama'
-      ? getToolCallingStrategy(activeModel)
-      : 'native'
+    // Every non-Ollama provider used to be hardcoded to 'native' here, which
+    // ignored both the server's `supports_tools` answer and the cache of models
+    // a previous run watched reject a `tools` payload. The request went out
+    // anyway, came back 405, and the negative expired 24 h later so the user
+    // paid for the same discovery again. toolStrategyFor applies the same
+    // precedence the dropdown and the Agent toggle use.
+    const strategy = toolStrategyFor({
+      name: activeModel,
+      supportsTools: useModelStore.getState().models.find((m) => m.name === activeModel)?.supportsTools,
+    })
     const modelToUse = activeModel.includes('::') ? activeModel.split('::')[1] : activeModel
 
     // Pin the text model driving this Codex run — parity with useAgentChat.

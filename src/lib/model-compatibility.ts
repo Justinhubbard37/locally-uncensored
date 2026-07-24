@@ -63,7 +63,12 @@ function normalizeFamily(modelName: string): string {
   // slashes — the previous non-greedy strip left `trevorjs/...` behind and
   // the anchored dash-collapse below missed `gemma-4` entirely. Greedy fix
   // covers `hf.co/<user>/<repo>:<tag>`, `<user>/<repo>:<tag>`, and bare tags.
-  let s = modelName.toLowerCase().replace(/^.*\//, '')
+  // Drop LU's `provider::` routing prefix first. Ollama models are stored bare
+  // so this never used to matter, but every other provider prefixes, and the
+  // `:tag` strip below would otherwise cut at the FIRST colon and reduce
+  // `lu-cloud::qwen3-32b` to `lu-cloud` — every family check then silently
+  // says no.
+  let s = modelName.toLowerCase().replace(/^[a-z0-9_-]+::/, '').replace(/^.*\//, '')
   // Suffix markers — drop wherever they appear
   s = s
     .replace(/-abliterated/g, '')

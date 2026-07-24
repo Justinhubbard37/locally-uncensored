@@ -9,6 +9,7 @@ import { useUIStore } from '../../stores/uiStore'
 import { unloadAllModels, loadModel, unloadModel, listRunningModels } from '../../api/ollama'
 import { displayModelName } from '../../api/providers'
 import { getToolCapability } from '../../api/tool-capability'
+import { canUseTools } from '../../lib/tool-support'
 import { backendCall } from '../../api/backend'
 import { listLoadedLmStudioModels, loadLmStudioModel, unloadLmStudioModel } from '../../api/lmstudio'
 import { isLmStudioProvider } from '../../lib/hf-to-provider'
@@ -408,10 +409,24 @@ function LoadToggle({ loaded, busy, disabled, onClick }: {
 
 // ── Component ─────────────────────────────────────────────────
 
+export interface ModelSelectorProps {
+  openUpward?: boolean
+  /**
+   * Which surface is asking. 'code' is the coding agent, which cannot do
+   * anything at all without tool calls, so hosted models that have told us
+   * they do not support tools are left out of the list entirely rather than
+   * offered with a warning icon (David 2026-07-25: "Modelle ohne Tool-Support
+   * z.B. nicht im Code-Bereich anzeigen"). Local models stay listed on every
+   * surface — there the fallback XML path often still works, and when it does
+   * not the run says so.
+   */
+  surface?: 'chat' | 'code'
+}
+
 // `openUpward` flips the dropdown to open above the trigger, right-aligned —
 // used when the picker lives in the composer action bar (bottom of the screen)
 // instead of the header. Header usage keeps the default downward/centered menu.
-export function ModelSelector({ openUpward = false }: { openUpward?: boolean } = {}) {
+export function ModelSelector({ openUpward = false, surface = 'chat' }: ModelSelectorProps = {}) {
   const { models, activeModel, setActiveModel, fetchModels } = useModels()
   const isModelLoading = useModelStore((s) => s.isModelLoading)
   const [open, setOpen] = useState(false)
@@ -618,7 +633,15 @@ export function ModelSelector({ openUpward = false }: { openUpward?: boolean } =
   // FAMILY (Qwen/Gemma/Llama/…), not by provider, because users pick
   // models by lineage first and the backend that serves them is a
   // per-row badge.
-  const textModels = models.filter(m => m.type === 'text')
+  const allTextModels = models.filter(m => m.type === 'text')
+  // Code needs tools to do literally anything. A hosted model that has told us
+  // it cannot call them is not a degraded choice there, it is a dead one, so it
+  // does not get listed. Keep the ACTIVE model visible even if it fails the
+  // check, or switching away from it becomes impossible.
+  const textModels = surface === 'code'
+    ? allTextModels.filter((m) => m.name === activeModel || canUseTools({ name: m.name, supportsTools: m.supportsTools }))
+    : allTextModels
+  const hiddenForCode = allTextModels.length - textModels.length
   const groups = groupByFamily(textModels)
   const hasOllamaModels = textModels.some(m => ('provider' in m && m.provider === 'ollama') || !('provider' in m))
 
@@ -673,6 +696,14 @@ export function ModelSelector({ openUpward = false }: { openUpward?: boolean } =
                 LM Studio is on disk but its server is off. wakeywakeynow's
                 "can't choose any models i have installed" symptom. */}
             <LmStudioServerHint onStarted={fetchModels} />
+
+            {/* Say WHY the list is shorter here than in Chat, otherwise a
+                missing favourite reads as a bug. */}
+            {hiddenForCode > 0 && (
+              <div className="px-2.5 py-1.5 border-b border-black/5 dark:border-white/[0.06] text-[0.55rem] text-gray-500">
+                {hiddenForCode} cloud {hiddenForCode === 1 ? 'model is' : 'models are'} hidden here because they cannot call tools. They are still in Chat.
+              </div>
+            )}
 
             {/* §18 — surfaced when an LM Studio auto-load (on select) failed,
                 so the user isn't left wondering why the model didn't switch. */}

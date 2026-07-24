@@ -78,39 +78,6 @@ function stripChannelTags(text: string): string {
 // chatty small model can't stack the same line. (The old CollapsibleAnswer
 // one-line-preview component was removed.)
 
-// One-time hint that "/" opens the coding commands (David 2026-06-12: "kleiner
-// hinweis über dem prompt fenster … nur im coding bereich … mit x zum wegdrücken,
-// soll nur einmal erscheinen"). Persisted in localStorage so it never returns
-// after dismissal. Code-view only — it's rendered solely inside CodexView.
-const SLASH_HINT_KEY = 'lu-coding-slash-hint-dismissed'
-function CodingCommandsHint() {
-  const [dismissed, setDismissed] = useState(() => {
-    try { return localStorage.getItem(SLASH_HINT_KEY) === '1' } catch { return false }
-  })
-  if (dismissed) return null
-  // Outer matches the ChatInput container (max-w-[70%] mx-auto) so the inner
-  // w-[60%] is 60 % of the REAL prompt width, centered (David 2026-06-12: "60%
-  // so breit wie das prompt fenster, in der mitte"). Monochrome — no colour, no
-  // icon — and an English UI string (David 2026-06-12: "in deutsch? … farbe weg
-  // … emoji weg").
-  return (
-    <div className="w-full max-w-[70%] mx-auto px-3 pt-1 flex justify-center">
-      <div className="w-[60%] flex items-center gap-1.5 px-2 py-1 rounded-md border border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-white/[0.03]">
-        <span className="flex-1 text-center text-[0.55rem] text-gray-500 dark:text-gray-400 leading-tight">
-          New. Type <span className="font-mono px-1 rounded bg-gray-200/70 dark:bg-white/10">/</span> for coding commands: /review, /commit, /test, /fix …
-        </span>
-        <button
-          onClick={() => { try { localStorage.setItem(SLASH_HINT_KEY, '1') } catch { /* private mode — just hide it for this session */ } setDismissed(true) }}
-          title="Dismiss"
-          className="flex items-center justify-center w-4 h-4 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/5 transition-colors shrink-0"
-        >
-          <X size={11} />
-        </button>
-      </div>
-    </div>
-  )
-}
-
 export function CodexView() {
   const { sendInstruction, stopCodex, isRunning } = useCodex()
   const activeConversationId = useChatStore((s) => s.activeConversationId)
@@ -515,7 +482,6 @@ export function CodexView() {
         <RealtimeCounter isRunning={codexGenerating} />
 
         {/* One-time "/" hint, directly above the prompt (Code view only). */}
-        <CodingCommandsHint />
 
         {/* Input */}
         <ChatInput
@@ -523,7 +489,7 @@ export function CodexView() {
           onStop={stopCodex}
           isGenerating={isRunning}
           slashCommands
-          composerModel={<ModelSelector openUpward />}
+          composerModel={<ModelSelector openUpward surface="code" />}
           composerActions={<PluginsDropdown openUpward />}
         />
       </div>
