@@ -200,6 +200,16 @@ export function stripRanges(content: string, ranges: Array<[number, number]>): s
   }
   // Remove orphan fence lines left behind by the JSON strip.
   out = out.replace(/```(?:json)?\s*\n?\s*```/g, '')
+  // Remove the tool-call TAGS the JSON sat inside. We only strip the JSON range
+  // itself above, so a model that wraps its call in the Hermes tags leaves
+  // `<tool_call>` and `</tool_call>` behind — and the renderer eats the first
+  // two characters of an unknown tag, so the user sees a stray `ool_call>` in
+  // the transcript (live Agent run on the ship exe, 2026-07-25). Also covers
+  // the `<|tool_call|>` / `[TOOL_CALL]` spellings other families use.
+  // The slash sits outside the pipes in some spellings (`</tool_call>`) and
+  // inside in others (`<|/tool_call|>`), so allow any mix on either side.
+  out = out.replace(/<[|/\s]*tool_calls?[|/\s]*>/gi, '')
+  out = out.replace(/\[[/\s]*TOOL_CALLS?[/\s]*\]/gi, '')
   // Collapse 3+ consecutive blank lines down to one blank line so the chat
   // bubble doesn't have a sea of whitespace where the JSON used to be.
   out = out.replace(/\n{3,}/g, '\n\n')

@@ -13,6 +13,8 @@ import {
   repairJson,
   repairToolCallArgs,
   extractToolCallsFromContent,
+  extractToolCallsWithRanges,
+  stripRanges,
 } from '../tool-call-repair'
 
 describe('tool-call-repair', () => {
@@ -319,5 +321,32 @@ And after.`
       expect(calls).toHaveLength(1)
       expect(calls[0].name).toBe('process_list')
     })
+  })
+})
+
+// Live Agent run on the ship exe, 2026-07-25: a model wrapped its call in the
+// Hermes tags, stripRanges removed only the JSON, and the leftover `<tool_call>`
+// rendered as a stray `ool_call>` in the transcript (the renderer eats the first
+// two chars of an unknown tag).
+describe('stripRanges clears the tool-call wrapper, not just the JSON', () => {
+  const strip = (content: string) => {
+    const { ranges } = extractToolCallsWithRanges(content)
+    return stripRanges(content, ranges)
+  }
+
+  it('leaves no Hermes tag behind', () => {
+    const out = strip('Let me look.\n<tool_call>\n{"name": "file_list", "arguments": {"path": "."}}\n</tool_call>')
+    expect(out).not.toContain('tool_call')
+    expect(out).toBe('Let me look.')
+  })
+
+  it('handles the pipe and bracket spellings too', () => {
+    expect(strip('<|tool_call|>{"name": "file_read", "arguments": {"path": "a"}}<|/tool_call|>')).toBe('')
+    expect(strip('[TOOL_CALL]{"name": "file_read", "arguments": {"path": "a"}}[/TOOL_CALL]')).toBe('')
+  })
+
+  it('does not touch ordinary prose that merely mentions the words', () => {
+    const prose = 'the tool call failed, try again'
+    expect(stripRanges(prose, [])).toBe(prose)
   })
 })
