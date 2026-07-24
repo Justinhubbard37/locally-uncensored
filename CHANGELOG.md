@@ -4,6 +4,42 @@ All notable changes to Locally Uncensored are documented here.
 
 ## [Unreleased]
 
+## [2.5.9] - 2026-07-24
+
+A correctness release. Most of it is things that looked like they worked and did not.
+
+### Fixed
+
+- **Auto-approve now works on cloud models.** "Confirm shell & code commands" is off by default, which is how you tell the coding agent to stop asking. On an LU Cloud model it did nothing at all: the confirm dialog was hard-wired on and the switch had no effect. Confirming on a cloud model is still the right default, so it stays the default, but it is now a switch you own: turn the main confirm off and a second option appears for cloud models specifically.
+- **A failed image no longer counts as a delivered one.** When ComfyUI returned a 400 or a 500, the image tool handed the error text back as if it were a result. LU then treated it exactly like a picture: it burned the turn's image budget so the model could not retry, wrote the error into long-term memory, and told the model "the image is now displayed to the user" right next to the error saying it was not. Models believed that line, and the rest of the conversation was built on a picture that never existed. Failures are now marked as failures everywhere, and instead of "Task completed: 1 failed" you get the actual reason and a way to retry.
+- **Read-aloud reaches the Piper voice you picked.** A cold-start probe could cache a false result for the whole session, so every read-aloud silently fell back to a Windows SAPI voice no matter which Piper voice was selected.
+- **The Edit tab says what it is.** It is now "Edit / Image to Image", with wording that makes plain image-to-image (source image, no mask) obvious instead of hiding it behind a name that sounded like touch-ups.
+- **Image generation is no longer locked to Ask on desktop, and Video generation has a permission row at all.** Both settings existed in the agent but not in the UI.
+
+### Changed
+
+- **Three video models are gone: CogVideoX (both), Pyramid Flow.** They could never run. Their pipelines were built against ComfyUI node names that no version of the wrappers we pointed you at actually registers, so every generation came back as an error, and the install check looked for an invented node too, which is why a correct install was told to go install what it already had. Between them they offered 46 GB of downloads for that. Wan 2.1 and 2.2, LTX, SVD, FramePack, Hunyuan, Mochi and Cosmos are unaffected. Allegro is closed for the same reason. If you already downloaded a CogVideoX model, nothing is deleted from your disk, it simply is not offered any more.
+- **Cloud renders are kept for seven days and then deleted.** Cloud mode now says so once, in Create, with a download reminder. This is enforced on the server, not just claimed.
+- **The interface lost its em-dashes.** Labels, tooltips, errors and onboarding text now read the way the rest of LU is written.
+
+### Coding agent
+
+Rebuilt in the places that were quietly costing you turns:
+
+- A surgical `file_edit` tool that changes the lines you asked for, instead of rewriting whole files.
+- Verify loops no longer serve stale shell, test and read results from the same turn.
+- Context compaction stopped truncating code you had just read to 80 characters.
+- `num_ctx` is no longer pinned to 8192, so a 32k model gets its context.
+- The tool router stopped sending "search", "current" and "latest" to the web when you meant the codebase.
+- Diffs show deletions, `.lurules` actually loads, and stage-and-approve applies in a real folder instead of failing silently.
+- Sub-agents no longer collide on tool call ids, which produced a cloud 400 whenever a turn used the same tool twice.
+- Plus: `run_tests` auto-detect, encoding flags, atomic writes, parallel git safety, the iteration cap, and the embedding cache keyed by model.
+
+### Remote
+
+- **Non-Ollama backends work over remote access.** The remote bridge forwarded everything to Ollama, so a desktop running LM Studio, Lemonade or llama.cpp answered a phone with an empty model list and a 400 on chat. The server now translates between the phone's Ollama-shaped requests and an OpenAI-compatible backend, including streaming, tool calls, vision and reasoning.
+- The remote-access guide no longer promises image generation over remote. Create stays on the desktop for now.
+
 ## [2.5.8] - 2026-07-19
 
 Community fix release: works through every open GitHub issue plus the actionable Discord reports since 2.5.7. (Releases 2.5.1–2.5.7 were documented in their GitHub release notes and are not backfilled here.)
