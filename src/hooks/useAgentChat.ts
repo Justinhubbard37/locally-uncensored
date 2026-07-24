@@ -1081,6 +1081,24 @@ export function useAgentChat() {
         // pure reads fully parallel).
         if (!runningRef.current || abort.signal.aborted) break
 
+        // Same execution-time guard as Code: the catalog filter is not enough on
+        // its own, because the loose-parse fallback lifts a call the model wrote
+        // as TEXT and the executor resolves it by name without asking whether
+        // this turn was allowed to offer it. Proven live on the Code side
+        // 2026-07-25, where a read-only /plan created a file while every request
+        // carried a read-only catalog.
+        if (opts?.readOnly) {
+          const blocked = toolCalls.filter((tc) => MUTATING_TOOLS.has(tc.function?.name ?? ''))
+          if (blocked.length) {
+            toolCalls = toolCalls.filter((tc) => !MUTATING_TOOLS.has(tc.function?.name ?? ''))
+            const names = [...new Set(blocked.map((tc) => tc.function.name))].join(', ')
+            messages.push({
+              role: 'user',
+              content: `${names} is not available on this turn — it is a read-only command. Do not try to change anything. Finish with the written answer using what you have already read.`,
+            })
+          }
+        }
+
         type BatchEntry = { tc: typeof toolCalls[number]; ac: AgentToolCall; blockId: string }
         const batch: BatchEntry[] = []
         budget.addToolCalls(toolCalls.length)

@@ -1009,6 +1009,28 @@ export function useCodex() {
           })
         }
 
+        // Enforce read-only at EXECUTION, not just at offer time.
+        //
+        // Stripping the mutating tools from the catalog was supposed to be
+        // belt-and-braces, and it was not: the loose-parse fallback lifts a call
+        // the model WROTE AS TEXT and hands the name straight to
+        // toolRegistry.execute, which resolves by name and never asks whether
+        // this turn was allowed to offer it. Live on the ship exe 2026-07-25:
+        // /plan (read-only) was offered file_read/file_list/file_search only, on
+        // every one of its six requests, and still created a file on disk.
+        // Review Mode carried the identical hole since 2.5.6.
+        if (settings.codexReviewMode || readOnlyTurn) {
+          const blocked = toolCalls.filter((tc) => MUTATING_TOOLS.has(tc.function?.name ?? ''))
+          if (blocked.length) {
+            toolCalls = toolCalls.filter((tc) => !MUTATING_TOOLS.has(tc.function?.name ?? ''))
+            const names = [...new Set(blocked.map((tc) => tc.function.name))].join(', ')
+            messages.push({
+              role: 'user',
+              content: `${names} is not available on this turn — it is ${readOnlyTurn ? `a read-only command (/${slash!.command.name})` : 'Code Review Mode'}. Do not try to change anything. Finish with the written answer using what you have already read.`,
+            })
+          }
+        }
+
         // Repair near-miss tool names before anything tries to resolve them.
         // The chat agent has done this since 2026-06-03 (gemma4 calling
         // `video_generation`); Code never did, so the same class of miss ended
