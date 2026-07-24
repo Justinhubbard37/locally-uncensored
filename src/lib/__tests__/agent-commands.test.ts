@@ -1,15 +1,28 @@
 import { describe, it, expect } from 'vitest'
 import {
   AGENT_COMMANDS,
+  getAgentCommand,
   parseAgentCommand,
   matchAgentCommands,
 } from '../agent-commands'
+import { MUTATING_TOOLS } from '../mutating-tools'
+
+// The 2.5.9 set. Kept as an explicit list rather than a count so a rename or an
+// accidental drop fails loudly instead of quietly changing a number.
+const EXPECTED = [
+  // understand
+  'plan', 'explain', 'find', 'diff', 'log', 'todo',
+  // change
+  'fix', 'types', 'test', 'refactor', 'clean', 'optimize',
+  // check
+  'review', 'security', 'deps',
+  // ship
+  'commit', 'pr', 'undo', 'docs', 'init',
+]
 
 describe('AGENT_COMMANDS registry', () => {
-  it('ships exactly the 10 named commands', () => {
-    expect(AGENT_COMMANDS.map((c) => c.name).sort()).toEqual(
-      ['commit', 'docs', 'explain', 'fix', 'init', 'optimize', 'refactor', 'review', 'security', 'test'].sort(),
-    )
+  it('ships the expected command set', () => {
+    expect(AGENT_COMMANDS.map((c) => c.name).sort()).toEqual([...EXPECTED].sort())
   })
 
   it('every command has a summary and a non-empty expansion', () => {
@@ -25,11 +38,50 @@ describe('AGENT_COMMANDS registry', () => {
     expect(new Set(names).size).toBe(names.length)
   })
 
-  it('read-only commands never instruct file_write in their template', () => {
-    for (const c of AGENT_COMMANDS.filter((c) => c.readOnly)) {
-      expect(c.build('x').toLowerCase()).toContain('read-only')
-      expect(c.build('x')).not.toMatch(/\bfile_write\b/)
+  it('every command tells the model to act via tools', () => {
+    for (const c of AGENT_COMMANDS) {
+      expect(c.build('')).toContain('Use your tools')
     }
+  })
+
+  it('an argument the user typed always reaches the expansion', () => {
+    // A template that silently drops its args looks like it worked and does the
+    // wrong thing, which is worse than refusing.
+    const arg = 'src/hooks/useChat.ts'
+    for (const c of AGENT_COMMANDS) {
+      // /init takes no argument by design.
+      if (c.name === 'init') continue
+      expect(c.build(arg), `${c.name} dropped its argument`).toContain(arg)
+    }
+  })
+
+  it('read-only commands never name a mutating tool in their template', () => {
+    // The runner strips these tools for the turn, so a template that asks for
+    // one would be instructing the model to reach for something that is gone.
+    for (const c of AGENT_COMMANDS.filter((c) => c.readOnly)) {
+      const text = c.build('x')
+      for (const tool of MUTATING_TOOLS) {
+        expect(text, `${c.name} names ${tool}`).not.toContain(tool)
+      }
+    }
+  })
+
+  it('read-only commands say up front that they cannot write or run', () => {
+    for (const c of AGENT_COMMANDS.filter((c) => c.readOnly)) {
+      expect(c.build('x')).toContain('no write or shell tools')
+    }
+  })
+
+  it('marks exactly the inspection commands read-only', () => {
+    expect(AGENT_COMMANDS.filter((c) => c.readOnly).map((c) => c.name).sort()).toEqual(
+      ['diff', 'explain', 'find', 'plan', 'review', 'security', 'todo'].sort(),
+    )
+  })
+
+  it('getAgentCommand looks up by name, case-insensitively', () => {
+    expect(getAgentCommand('review')?.name).toBe('review')
+    expect(getAgentCommand('REVIEW')?.name).toBe('review')
+    expect(getAgentCommand('nope')).toBeUndefined()
   })
 })
 
@@ -58,6 +110,10 @@ describe('parseAgentCommand', () => {
     expect(r?.expanded).toContain('TypeError')
   })
 
+  it('tolerates leading whitespace', () => {
+    expect(parseAgentCommand('  /review')?.command.name).toBe('review')
+  })
+
   it('returns null for unknown commands so they fall through to chat', () => {
     expect(parseAgentCommand('/notacommand do thing')).toBeNull()
     expect(parseAgentCommand('/')).toBeNull()
@@ -72,19 +128,53 @@ describe('parseAgentCommand', () => {
   it('commit template forbids pushing', () => {
     expect(parseAgentCommand('/commit')?.expanded.toLowerCase()).toContain('do not push')
   })
+
+  it('undo shows what would be lost before destroying it', () => {
+    const t = parseAgentCommand('/undo')!.expanded
+    expect(t).toContain('show the user exactly what would be lost')
+    expect(t.toLowerCase()).toContain('never rewrite published history')
+  })
+
+  it('pr does not silently sweep in uncommitted work', () => {
+    expect(parseAgentCommand('/pr')?.expanded).toContain('ask before including them')
+  })
+
+  it('deps reports without upgrading', () => {
+    expect(parseAgentCommand('/deps')?.expanded).toContain('Do NOT upgrade anything yet')
+  })
+
+  it('types refuses to silence errors quietly', () => {
+    const t = parseAgentCommand('/types')!.expanded
+    expect(t).toContain('never silence one with')
+  })
+
+  it('clean proves a symbol is unused before deleting it', () => {
+    expect(parseAgentCommand('/clean')?.expanded).toContain('Prove each one is unused')
+  })
+
+  it('plan stops at the plan', () => {
+    expect(parseAgentCommand('/plan add caching')?.expanded).toContain('Do not start implementing')
+  })
 })
 
 describe('matchAgentCommands (autocomplete)', () => {
-  it('returns all commands for a lone slash', () => {
-    expect(matchAgentCommands('/').length).toBe(10)
+  it('returns every command for a lone slash', () => {
+    expect(matchAgentCommands('/').length).toBe(AGENT_COMMANDS.length)
   })
 
   it('prefix-filters by name', () => {
     expect(matchAgentCommands('/re').map((c) => c.name).sort()).toEqual(['refactor', 'review'])
     expect(matchAgentCommands('/sec').map((c) => c.name)).toEqual(['security'])
+    expect(matchAgentCommands('/d').map((c) => c.name).sort()).toEqual(['deps', 'diff', 'docs'])
   })
 
-  it('returns [] once the user has typed a space (now typing args, not picking)', () => {
+  it('opens the menu even when the line starts with whitespace', () => {
+    // parseAgentCommand trimmed and matchAgentCommands did not, so hitting
+    // space first killed the menu while sending still expanded the command.
+    expect(matchAgentCommands('  /re').map((c) => c.name).sort()).toEqual(['refactor', 'review'])
+  })
+
+  it('closes once the user has typed a space (now typing args, not picking)', () => {
     expect(matchAgentCommands('/review ')).toEqual([])
     expect(matchAgentCommands('/review changes')).toEqual([])
   })

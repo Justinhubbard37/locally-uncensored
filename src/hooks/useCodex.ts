@@ -9,6 +9,7 @@ import { markToolsUnsupported } from '../api/tool-capability'
 import { toolRegistry } from '../api/mcp'
 import { usePermissionStore } from '../stores/permissionStore'
 import { toolStrategyFor } from '../lib/tool-support'
+import { MUTATING_TOOLS } from '../lib/mutating-tools'
 import { CODEX_CONFIRM_TOOLS, codexConfirmEnabled } from './codexShellGate'
 import { buildHermesToolPrompt, buildHermesToolResult, parseHermesToolCalls, stripToolCallTags, hasToolCallTags } from '../api/hermes-tool-calling'
 import { chatNonStreaming } from '../api/agents'
@@ -60,7 +61,7 @@ function diagLog(_tag: string, _data: unknown): void {
 // Review-mode system prompt (B13). In review mode this REPLACES the base
 // CODEX_SYSTEM_PROMPT entirely — the autonomy/build contract is the wrong
 // framing for a read-only reviewer and would fight the executor gate. The
-// list-stripping below (REVIEW_MODE_FORBIDDEN_TOOLS) still enforces
+// list-stripping below (MUTATING_TOOLS) still enforces
 // read-only programmatically even if the model tries a write tool anyway.
 const CODEX_REVIEW_SYSTEM_PROMPT = `You are the Coding Agent in REVIEW MODE, a read-only code reviewer inside LU. You DO NOT modify any files, run any commands, or change any state. Your job is to read code with file_read / file_list / file_search / git_diff / git_log and return INLINE COMMENTS only.
 
@@ -126,33 +127,6 @@ const streamWithTools = streamOllamaChatWithTools
 // pure coding turns keep the same lean tool list as before.
 const CODEX_CATEGORIES = ['filesystem', 'terminal', 'system', 'web', 'image', 'video'] as const
 
-// Tools blocked in Code-Review Mode (B13). The agent goes read-only —
-// it inspects the codebase and writes inline comments, but never
-// mutates the filesystem, the shell, or remote state. Anything that
-// could change a file, run a command, or push to git/GitHub goes here.
-// Read-only inspectors (git_status / git_log / git_diff, pr_resume,
-// shell_task_status / shell_task_list, file_read / file_list / file_search)
-// stay allowed so the agent can do its job.
-const REVIEW_MODE_FORBIDDEN_TOOLS = new Set([
-  'file_write',
-  'file_edit',
-  'shell_execute',
-  'code_execute',
-  'shell_execute_background',
-  'shell_task_kill',
-  'git_commit',
-  'git_push',
-  'project_init',
-  'gh_pr_create',
-  'run_tests',
-  'image_generate',
-  'video_generate',
-  'run_workflow',
-  // Parity with uselu's review blocklist — a reviewer must not capture the
-  // screen or hand work off to a sub-agent that could mutate state.
-  'screenshot',
-  'delegate_task',
-])
 
 // `.lurules` reader. MUST go through `fs_read` (the workspace-aware command)
 // with the run's chatId + workingDirectory — NOT the older `file_read`, which
@@ -232,6 +206,10 @@ export function useCodex() {
     const slash = parseAgentCommand(rawInstruction)
     const instruction = slash ? slash.expanded : rawInstruction
     const displayInstruction = slash ? rawInstruction : opts?.displayContent
+    // `readOnly` used to be documentation. Now it strips the mutating tools for
+    // this turn, so /review and /security physically cannot rewrite the files
+    // they were asked to look at.
+    const readOnlyTurn = slash?.command.readOnly === true
 
     const store = useChatStore.getState()
     const codexStore = useCodexStore.getState()
@@ -299,6 +277,20 @@ export function useCodex() {
       })
     }
 
+    // Review Mode strips every mutating tool. A command whose whole job is to
+    // change something would then run to completion narrating work it could not
+    // do, with nothing on screen explaining why. Say it and stop.
+    if (settings.codexReviewMode && slash && !slash.command.readOnly) {
+      useChatStore.getState().addMessage(convId, {
+        id: uuid(), role: 'user', content: rawInstruction, timestamp: Date.now(),
+      })
+      useChatStore.getState().addMessage(convId, {
+        id: uuid(), role: 'assistant', timestamp: Date.now(),
+        content: `Review Mode is on, so I cannot write files or run commands, and /${slash.command.name} needs both. Turn Review Mode off in Settings, or use a read-only command such as /review, /plan, /diff or /explain.`,
+      })
+      return
+    }
+
     // Add instruction event
     codexStore.addEvent(convId, {
       id: uuid(), type: 'instruction', content: instruction, timestamp: Date.now(),
@@ -364,7 +356,7 @@ export function useCodex() {
 
     // System prompt with working directory. Review mode swaps the base
     // prompt to lock the model into read-only behaviour — the
-    // list-stripping below (REVIEW_MODE_FORBIDDEN_TOOLS) still enforces it
+    // list-stripping below (MUTATING_TOOLS) still enforces it
     // programmatically even if the model tries to call a write tool anyway.
     const reviewMode = settings.codexReviewMode === true
     // Review mode always wins; otherwise Small-Model Mode swaps in the lean
@@ -430,7 +422,7 @@ export function useCodex() {
     // Code-Review Mode (B13) — the dedicated CODEX_REVIEW_SYSTEM_PROMPT
     // above already replaced the base prompt with the read-only contract,
     // so no extra banner append is needed here. The list-stripping in the
-    // tool-build path (REVIEW_MODE_FORBIDDEN_TOOLS) remains the
+    // tool-build path (MUTATING_TOOLS) remains the
     // belt-and-braces programmatic guard.
 
     // Caveman mode: append as response style modifier after Codex instructions
@@ -719,8 +711,12 @@ export function useCodex() {
           // physically cannot fire them. Belt-and-braces with the
           // system-prompt banner above — covers the case where the model
           // ignores the instruction and tries anyway.
-          const codexTools = settings.codexReviewMode
-            ? codexToolsAll.filter((t) => !REVIEW_MODE_FORBIDDEN_TOOLS.has(t.name))
+          // Two reasons to strip the mutating tools: Code-Review Mode is on, or
+          // this turn was started by a read-only slash command. Belt-and-braces
+          // with the system prompt — covers the model ignoring the instruction
+          // and trying anyway.
+          const codexTools = (settings.codexReviewMode || readOnlyTurn)
+            ? codexToolsAll.filter((t) => !MUTATING_TOOLS.has(t.name))
             : codexToolsAll
           // Keep the tool list LEAN — exactly like the uselu reference. A small
           // model (qwen2.5-coder:7b) handed the full ~24-tool category set every
@@ -930,7 +926,7 @@ export function useCodex() {
               const def = toolRegistry.getToolByName(t.name)
               if (!def) return true
               if (!(CODEX_CATEGORIES as readonly string[]).includes(def.category)) return false
-              if (settings.codexReviewMode && REVIEW_MODE_FORBIDDEN_TOOLS.has(t.name)) return false
+              if ((settings.codexReviewMode || readOnlyTurn) && MUTATING_TOOLS.has(t.name)) return false
               return true
             },
           )

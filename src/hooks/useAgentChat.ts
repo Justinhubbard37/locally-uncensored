@@ -38,6 +38,7 @@ import { useAgentWorkflowStore } from '../stores/agentWorkflowStore'
 import { WorkflowEngine } from '../lib/workflow-engine'
 import type { AgentBlock, AgentToolCall, OllamaChatMessage } from '../types/agent-mode'
 import { selectRelevantToolsAsync } from '../lib/tool-selection'
+import { MUTATING_TOOLS } from '../lib/mutating-tools'
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
 import { budgetFromSettings } from '../api/agents/budget'
@@ -177,6 +178,10 @@ export function useAgentChat() {
       curatedTools?: readonly string[]
       chatToolsMode?: boolean
       displayContent?: string
+      // A read-only slash command (/review, /plan, /diff, …). Strips the
+      // mutating tools for this turn so the command cannot do what it just
+      // told the user it would not do.
+      readOnly?: boolean
       // Chat-tools router hint (David 2026-06-20): when a bare follow-up like
       // "nochmal"/"ok generiere jetzt" continues an in-progress media task, the
       // router passes the task kind + the prior generation's exact args so a weak
@@ -435,7 +440,8 @@ export function useAgentChat() {
     // model in plain chat only ever sees the 5 chat tools (and small models
     // aren't drowned in the full ~24-tool set).
     const curated = opts?.curatedTools
-    const toolMatchesCurated = (name: string) => !curated || curated.includes(name)
+    const toolMatchesCurated = (name: string) =>
+      (!curated || curated.includes(name)) && !(opts?.readOnly && MUTATING_TOOLS.has(name))
 
     // Build agent system prompt FIRST, then append caveman style as a modifier
     const hermesToolDefs = toolRegistry.toHermesToolDefs(permissions)

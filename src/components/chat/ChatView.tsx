@@ -333,6 +333,9 @@ export function ChatView() {
                 pendingApproval={pendingApproval}
                 onApprove={approveToolCall}
                 onReject={rejectToolCall}
+                // Commands need the tool catalog to drive, which only Agent
+                // mode has here. Plain chat leaves "/cmd" as ordinary text.
+                slashCommands={isAgentActive}
                 onAttachDocs={appMode !== 'cloud' ? () => setRagPanelOpen(true) : undefined}
                 composerModel={<ModelSelector openUpward />}
                 composerActions={

@@ -13,6 +13,7 @@ import { getModelContextCached } from "../api/ollama"
 import { requestGenerationCancel } from "../api/vram-handoff"
 import { effectiveContextWindow } from "../lib/context-window"
 import { useAgentChat } from "./useAgentChat"
+import { parseAgentCommand } from '../lib/agent-commands'
 import { useMemory } from "./useMemory"
 import { useAgentModeStore } from "../stores/agentModeStore"
 import { useGenerationStore } from "../stores/generationStore"
@@ -66,14 +67,22 @@ export function useChat() {
     const store = useChatStore.getState()
     const persona = useSettingsStore.getState().getActivePersona()
 
-    // NB: slash commands ("/review", "/commit", …) are NOT handled here — they
-    // belong to the Coding Agent (Code view), not the normal chat/agent (David
-    // 2026-06-12). useCodex.sendInstruction expands them there; in plain chat a
-    // "/cmd" is just ordinary text. The normal Agent gets its own commands later
-    // (slash loop / remember / scheduler).
-
-    // Agent mode delegation: if active for this conversation, use agent chat
+    // Agent mode delegation: if active for this conversation, use agent chat.
+    //
+    // 2.5.9: slash commands work here too. They were Code-only, which meant the
+    // Agent — same tool catalog, same executor — could not use a single one of
+    // them. The expansion goes to the model, the raw "/cmd" stays on screen, and
+    // a read-only command has the mutating tools stripped for the turn exactly
+    // like it does in Code. In PLAIN chat (no agent mode) a "/cmd" is still just
+    // text: there is no tool catalog there for the templates to drive.
     if (store.activeConversationId && useAgentModeStore.getState().isActive(store.activeConversationId)) {
+      const slash = parseAgentCommand(content)
+      if (slash) {
+        return agentChat.sendAgentMessage(slash.expanded, images, {
+          displayContent: content,
+          readOnly: slash.command.readOnly === true,
+        })
+      }
       return agentChat.sendAgentMessage(content, images)
     }
 

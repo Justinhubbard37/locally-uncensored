@@ -261,7 +261,7 @@ export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApp
         {cmdMenu.length > 0 && (
           <div className="absolute bottom-full left-0 right-0 mb-1.5 z-50 max-h-64 overflow-y-auto scrollbar-thin rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-[#1f1f1f] shadow-xl py-1">
             <div className="px-2.5 py-1 flex items-center gap-1 text-[0.5rem] uppercase tracking-widest text-gray-400 dark:text-gray-600">
-              <Terminal size={9} /> Coding commands
+              <Terminal size={9} /> Agent commands
             </div>
             {cmdMenu.map((cmd, i) => (
               <button
