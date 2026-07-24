@@ -278,3 +278,28 @@ describe('parseLooseToolCalls — nested function object + string args (OpenAI/P
     expect(r.calls[0]).toEqual({ name: 'image_generate', arguments: { prompt: 'y' } })
   })
 })
+
+describe('stripToolCallText — leftover Hermes tags', () => {
+  const KN = ['file_list', 'file_read', 'web_search']
+
+  // Live Agent run, ship exe 2026-07-25. stripToolCallTags only removes matched
+  // PAIRS, so an unclosed `<tool_call>` survived every stripper and reached the
+  // bubble, where the renderer ate the `<t` and the user saw `ool_call>`.
+  it('removes an UNCLOSED opening tag', () => {
+    expect(stripToolCallText('Let me look.\n<tool_call>', KN)).toBe('Let me look.')
+  })
+
+  it('removes a stray closing tag', () => {
+    expect(stripToolCallText('</tool_call>\nDone.', KN)).toBe('Done.')
+  })
+
+  it('still removes the piped and bracketed spellings', () => {
+    expect(stripToolCallText('<|tool_call|>x', KN)).toBe('x')
+    expect(stripToolCallText('[TOOL_CALLS]x', KN)).toBe('x')
+  })
+
+  it('leaves ordinary prose about tool calls alone', () => {
+    const prose = 'the tool call failed, try again'
+    expect(stripToolCallText(prose, KN)).toBe(prose)
+  })
+})

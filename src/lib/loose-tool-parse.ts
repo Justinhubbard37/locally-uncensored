@@ -303,6 +303,12 @@ export function stripToolCallText(text: string, known: string[]): string {
     // (Phi-4: <|tool_call|>/<|tool|>; Mistral: [TOOL_CALLS]) so they don't show
     // in the bubble. Detection/parsing above already handled the JSON inside.
     .replace(/<\|\/?tool(?:_call)?(?:_start|_end)?\|>/gi, '')
+    // The plain Hermes spelling with no pipes. stripToolCallTags only removes
+    // MATCHED pairs, so an unclosed `<tool_call>` (a stream that ended mid-tag,
+    // a model that opened one and then answered in prose) walked all the way to
+    // the bubble — where the markdown renderer swallowed the `<t` and left the
+    // user staring at a bare `ool_call>` (live Agent run, ship exe 2026-07-25).
+    .replace(/<[|/\s]*tool_calls?[|/\s]*>/gi, '')
     .replace(/\[\/?TOOL_CALLS?\]/gi, '')
     .replace(/```(?:json|tool_code)?\s*```/gi, '')
     .replace(/\n{3,}/g, '\n\n')
