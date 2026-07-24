@@ -15,11 +15,14 @@ A correctness release. Most of it is things that looked like they worked and did
 - **Read-aloud reaches the Piper voice you picked.** A cold-start probe could cache a false result for the whole session, so every read-aloud silently fell back to a Windows SAPI voice no matter which Piper voice was selected.
 - **The Edit tab says what it is.** It is now "Edit / Image to Image", with wording that makes plain image-to-image (source image, no mask) obvious instead of hiding it behind a name that sounded like touch-ups.
 - **Image generation is no longer locked to Ask on desktop, and Video generation has a permission row at all.** Both settings existed in the agent but not in the UI.
+- **The image and video tools now see GGUF models.** They read only the two ComfyUI loaders that list `.safetensors`, so a GGUF quant was invisible to them. Since several catalogue bundles ship as GGUF, you could install one from the Model Manager, watch it finish, ask for a picture and be told nothing was installed.
+- **Error messages quote model names that actually exist.** The "no video model" message sent people looking for "Wan 2.1 — 1.3B", which the Model Manager calls "Wan 2.1 · 1.3B (Lightweight)". Same for SVD.
 
 ### Changed
 
 - **Three video models are gone: CogVideoX (both), Pyramid Flow.** They could never run. Their pipelines were built against ComfyUI node names that no version of the wrappers we pointed you at actually registers, so every generation came back as an error, and the install check looked for an invented node too, which is why a correct install was told to go install what it already had. Between them they offered 46 GB of downloads for that. Wan 2.1 and 2.2, LTX, SVD, FramePack, Hunyuan, Mochi and Cosmos are unaffected. Allegro is closed for the same reason. If you already downloaded a CogVideoX model, nothing is deleted from your disk, it simply is not offered any more.
 - **Cloud renders are kept for seven days and then deleted.** Cloud mode now says so once, in Create, with a download reminder. This is enforced on the server, not just claimed.
+- **Nothing says COMING SOON any more, because nothing was.** AnimateDiff v3, Mochi and Cosmos sat behind a dimmed "COMING SOON" cover while their own download buttons worked fine underneath. The badge came from a flag somebody forgot to set, not from anything being unfinished. Every model in the catalogue downloads, installs and generates.
 - **The interface lost its em-dashes.** Labels, tooltips, errors and onboarding text now read the way the rest of LU is written.
 
 ### Coding agent
