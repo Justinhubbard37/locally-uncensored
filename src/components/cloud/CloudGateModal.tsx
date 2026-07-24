@@ -88,9 +88,7 @@ type Step = 'intro' | 'plans' | 'login'
 export function CloudGateModal() {
   const open = useUIStore((s) => s.cloudGateOpen)
   const setOpen = useUIStore((s) => s.setCloudGateOpen)
-  const setCloudOnboardingOpen = useUIStore((s) => s.setCloudOnboardingOpen)
   const updateSettings = useSettingsStore((s) => s.updateSettings)
-  const cloudOnboardingSeen = useSettingsStore((s) => s.settings.cloudOnboardingSeen)
   const { refresh } = useCloudAuth()
 
   const status = useCloudAuthStore((s) => s.status)
@@ -118,10 +116,11 @@ export function CloudGateModal() {
   useEffect(() => {
     if (open && available) {
       setOpen(false)
-      if (!cloudOnboardingSeen) setCloudOnboardingOpen(true)
-      else updateSettings({ appMode: 'cloud' })
+      // 2.5.9 dropped the cloud onboarding modal, so there is nothing to hand
+      // off to — an available account just switches.
+      updateSettings({ appMode: 'cloud' })
     }
-  }, [open, available, cloudOnboardingSeen, setCloudOnboardingOpen, setOpen, updateSettings])
+  }, [open, available, setOpen, updateSettings])
 
   const stayLocal = () => {
     updateSettings({ appMode: 'local' })

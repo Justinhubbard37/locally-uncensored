@@ -9,12 +9,10 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { isAgentCompatible } from '../../lib/model-compatibility'
 import { getToolCapability } from '../../api/tool-capability'
 import { FEATURE_FLAGS } from '../../lib/constants'
-import { AgentTutorial } from './AgentTutorial'
 import { AgentWorkspaceDialog } from './AgentWorkspaceDialog'
 import type { AgentWorkspace } from '../../types/agent-workspace'
 
 export function AgentModeToggle() {
-  const [showTutorial, setShowTutorial] = useState(false)
   const [showNewChatModal, setShowNewChatModal] = useState(false)
   const [neverShowChecked, setNeverShowChecked] = useState(false)
   // Workspace picker — opens after a fresh agent-mode activation when
@@ -28,7 +26,7 @@ export function AgentModeToggle() {
   const createConversation = useChatStore((s) => s.createConversation)
   const activeModel = useModelStore((s) => s.activeModel)
   const activeModelMeta = useModelStore((s) => s.models.find((m) => m.name === s.activeModel))
-  const { agentModeActive, toggleAgentMode, tutorialCompleted, newChatHintDismissed } = useAgentModeStore()
+  const { agentModeActive, toggleAgentMode, newChatHintDismissed } = useAgentModeStore()
 
   if (!FEATURE_FLAGS.AGENT_MODE || !activeConversationId) return null
 
@@ -69,9 +67,6 @@ export function AgentModeToggle() {
     if (!activeModel) return
     const persona = useSettingsStore.getState().getActivePersona()
     const newId = createConversation(activeModel, persona?.systemPrompt || '')
-    if (!tutorialCompleted) {
-      useAgentModeStore.getState().setTutorialCompleted()
-    }
     useAgentModeStore.getState().toggleAgentMode(newId)
     maybeOpenWorkspaceDialog(newId)
   }
@@ -90,23 +85,12 @@ export function AgentModeToggle() {
       return
     }
 
-    // First time → show tutorial
-    if (!isActive && !tutorialCompleted) {
-      setShowTutorial(true)
-      return
-    }
-
+    // 2.5.9 dropped the first-run Agent tutorial modal — flipping the switch
+    // just flips it now.
     toggleAgentMode(activeConversationId)
     // If the user just turned agent ON (was inactive, now active) and
     // hasn't picked a workspace for this conversation, prompt for one.
     if (!isActive) maybeOpenWorkspaceDialog(activeConversationId)
-  }
-
-  const handleTutorialComplete = () => {
-    setShowTutorial(false)
-    useAgentModeStore.getState().setTutorialCompleted()
-    toggleAgentMode(activeConversationId)
-    maybeOpenWorkspaceDialog(activeConversationId)
   }
 
   const handleNewAgentChat = () => {
@@ -213,14 +197,6 @@ export function AgentModeToggle() {
           </div>
         </div>
       </Modal>
-
-      {showTutorial && (
-        <AgentTutorial
-          open={showTutorial}
-          onClose={() => setShowTutorial(false)}
-          onComplete={handleTutorialComplete}
-        />
-      )}
 
       {showWorkspaceDialog && workspaceDialogConvId && (
         <AgentWorkspaceDialog

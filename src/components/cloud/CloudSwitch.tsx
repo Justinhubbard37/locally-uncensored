@@ -15,10 +15,8 @@ import { cn } from '../create/ui/cn'
 
 export function CloudSwitch() {
   const appMode = useSettingsStore((s) => s.settings.appMode)
-  const cloudOnboardingSeen = useSettingsStore((s) => s.settings.cloudOnboardingSeen)
   const updateSettings = useSettingsStore((s) => s.updateSettings)
   const setCloudGateOpen = useUIStore((s) => s.setCloudGateOpen)
-  const setCloudOnboardingOpen = useUIStore((s) => s.setCloudOnboardingOpen)
   const available = useCloudAuthStore(deriveCloudAvailable)
   const on = appMode === 'cloud'
 
@@ -31,10 +29,7 @@ export function CloudSwitch() {
       setCloudGateOpen(true)
       return
     }
-    if (!cloudOnboardingSeen) {
-      setCloudOnboardingOpen(true)
-      return
-    }
+    // The cloud onboarding modal was dropped in 2.5.9 — the switch just flips.
     updateSettings({ appMode: 'cloud' })
   }
 

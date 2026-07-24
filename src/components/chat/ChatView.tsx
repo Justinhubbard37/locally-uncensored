@@ -28,7 +28,6 @@ import { CodexView } from './CodexView'
 import { useCodexStore } from '../../stores/codexStore'
 import { useGenerationStore } from '../../stores/generationStore'
 import { useRemoteStore } from '../../stores/remoteStore'
-import { useImageToolNoti } from '../../hooks/useImageToolNoti'
 
 export function ChatView() {
   const { sendMessage, stopGeneration, isGenerating, isLoadingModel, regenerateMessage, editAndResend, pendingApproval, approveToolCall, rejectToolCall } = useChat()
@@ -64,9 +63,6 @@ export function ChatView() {
   const isAgentActive = useAgentModeStore((s) =>
     activeConversationId ? s.agentModeActive[activeConversationId] ?? false : false
   )
-  // Image-tool discovery noti (HW-gated, clears on first click). Used to dot
-  // the Tools button; the "1" itself lives on the Image row in the dropdown.
-  const { visible: imageToolNoti } = useImageToolNoti()
   const isComparing = useCompareStore((s) => s.isComparing)
 
   // Remote-chat state: show a reactivate banner when the user is viewing a
@@ -381,10 +377,6 @@ export function ChatView() {
                           <span>Tools</span>
                           <ChevronDown size={9} className={`transition-transform ${toolsDropdownOpen ? 'rotate-180' : ''}`} />
                         </button>
-                        {/* Image-tool discovery noti dot — purely visual. */}
-                        {imageToolNoti && (
-                          <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-purple-500 ring-2 ring-gray-100 dark:ring-[#141414] pointer-events-none" />
-                        )}
                         {toolsDropdownOpen && (
                           <>
                             <div className="fixed inset-0 z-40" onClick={() => setToolsDropdownOpen(false)} />
