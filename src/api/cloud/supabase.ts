@@ -114,7 +114,7 @@ export function supabaseCloud(): SupabaseClient {
 export async function getAccessToken(): Promise<string | null> {
   const { data, error } = await supabaseCloud().auth.getSession()
   if (!data.session && error) {
-    throw new Error('LU Cloud unreachable — check your connection.')
+    throw new Error('LU Cloud unreachable. Check your connection.')
   }
   return data.session?.access_token ?? null
 }
@@ -139,7 +139,7 @@ export async function loginWithProvider(provider: OAuthProvider, signal?: AbortS
     },
   })
   if (error) throw new Error(error.message)
-  if (!data?.url) throw new Error('OAuth start failed — no provider URL')
+  if (!data?.url) throw new Error('OAuth start failed, no provider URL')
   await openExternal(data.url)
   const wait = oauthWait(port, 300)
   const query = signal

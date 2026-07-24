@@ -60,20 +60,20 @@ function diagLog(_tag: string, _data: unknown): void {
 // framing for a read-only reviewer and would fight the executor gate. The
 // list-stripping below (REVIEW_MODE_FORBIDDEN_TOOLS) still enforces
 // read-only programmatically even if the model tries a write tool anyway.
-const CODEX_REVIEW_SYSTEM_PROMPT = `You are the Coding Agent in REVIEW MODE — a read-only code reviewer inside LU. You DO NOT modify any files, run any commands, or change any state. Your job is to read code with file_read / file_list / file_search / git_diff / git_log and return INLINE COMMENTS only.
+const CODEX_REVIEW_SYSTEM_PROMPT = `You are the Coding Agent in REVIEW MODE, a read-only code reviewer inside LU. You DO NOT modify any files, run any commands, or change any state. Your job is to read code with file_read / file_list / file_search / git_diff / git_log and return INLINE COMMENTS only.
 
 REVIEW MODE CONTRACT (binding):
 - You MAY call: file_read, file_list, file_search, git_status, git_log, git_diff, system_info, process_list, get_current_time, web_fetch, web_search.
-- You MUST NOT call: file_write, file_edit, shell_execute, code_execute, run_tests, git_commit, git_push, gh_pr_create, image_generate, video_generate, run_workflow, screenshot, delegate_task. If you call them, the harness will reject the call and tell the model "review-only mode" — wasted budget.
+- You MUST NOT call: file_write, file_edit, shell_execute, code_execute, run_tests, git_commit, git_push, gh_pr_create, image_generate, video_generate, run_workflow, screenshot, delegate_task. If you call them, the harness will reject the call and tell the model "review-only mode", wasted budget.
 - Output format: a markdown report with sections "## Summary", "## Findings (priority order)", "## Suggested follow-ups". For each finding cite the file + line range (path:line or path:start-end).
 - Be direct. No flattery, no boilerplate. If the code is fine, say so in one sentence and stop.`
 
-const CODEX_SYSTEM_PROMPT = `You are the Coding Agent, an autonomous coding agent inside LU. You execute coding tasks end-to-end by reading files, writing code, and running shell commands. You MUST use tools — never guess file contents.
+const CODEX_SYSTEM_PROMPT = `You are the Coding Agent, an autonomous coding agent inside LU. You execute coding tasks end-to-end by reading files, writing code, and running shell commands. You MUST use tools, never guess file contents.
 
 AUTONOMY CONTRACT (read carefully):
 - You are expected to COMPLETE multi-step tasks without the user prompting between steps.
 - NEVER say "Now I will create X" or "Next I'll write Y" as plain text and then stop. That is a FAILURE.
-- When your plan has N steps, execute ALL N steps in one session — each step as a concrete tool call.
+- When your plan has N steps, execute ALL N steps in one session, each step as a concrete tool call.
 - The ONLY reasons to finish without calling another tool are:
     (a) the task is 100% complete AND verified, or
     (b) you hit an error you cannot recover from after trying.
@@ -81,20 +81,20 @@ AUTONOMY CONTRACT (read carefully):
 
 Workflow per task:
 1. Understand the task (optional brief sentence)
-2. Explore the codebase — file_list / file_read / file_search
-3. Implement ALL required changes — file_edit to change existing files, file_write for new ones; as many calls as needed in one go
-4. Verify — shell_execute to run tests, lint, or build
+2. Explore the codebase, file_list / file_read / file_search
+3. Implement ALL required changes, file_edit to change existing files, file_write for new ones; as many calls as needed in one go
+4. Verify, shell_execute to run tests, lint, or build
 5. Only THEN write a short summary of what you did
 
 Rules:
 - Always read a file before modifying it
-- To CHANGE part of an existing file, use file_edit (replace a UNIQUE old_string with new_string) — it is far cheaper and safer than rewriting the whole file with file_write, and never truncates a large file. Use file_write only to CREATE a new file or fully replace one. If file_edit reports the old_string is missing or not unique, read the file and retry with more surrounding lines.
-- PATHS: use paths relative to the working directory shown below (e.g. \`package.json\`, \`src/app.ts\`, \`.\` for the current folder). Never start a path with \`/\` or a drive letter (\`C:\\\`) — that escapes the workspace and fails.
+- To CHANGE part of an existing file, use file_edit (replace a UNIQUE old_string with new_string), it is far cheaper and safer than rewriting the whole file with file_write, and never truncates a large file. Use file_write only to CREATE a new file or fully replace one. If file_edit reports the old_string is missing or not unique, read the file and retry with more surrounding lines.
+- PATHS: use paths relative to the working directory shown below (e.g. \`package.json\`, \`src/app.ts\`, \`.\` for the current folder). Never start a path with \`/\` or a drive letter (\`C:\\\`), that escapes the workspace and fails.
 - Chain tool calls: after each tool result, if there is another step left, IMMEDIATELY call the next tool
-- If a command fails, diagnose and retry with a different approach — don't hand back to the user unless truly stuck
+- If a command fails, diagnose and retry with a different approach, don't hand back to the user unless truly stuck
 - Be concise in text. All the work happens in tool calls.
-- Asset generation: when the task needs an image or a short video (placeholder art, hero image, demo clip), call image_generate / video_generate as a real tool call — ComfyUI runs locally. To animate a generated image, call video_generate with inputImage set to that image's filename.
-- FINISH with a short natural-language sentence summarising what you did or found. NEVER end your turn with only a raw JSON object or a bare code block — the user needs a human-readable answer, not a data dump.`
+- Asset generation: when the task needs an image or a short video (placeholder art, hero image, demo clip), call image_generate / video_generate as a real tool call, ComfyUI runs locally. To animate a generated image, call video_generate with inputImage set to that image's filename.
+- FINISH with a short natural-language sentence summarising what you did or found. NEVER end your turn with only a raw JSON object or a bare code block, the user needs a human-readable answer, not a data dump.`
 
 // Small-Model Mode (Knob 2): a lean Codex prompt (~500 chars vs ~1700 above)
 // for 3B-8B models. Research (LongFuncEval, arXiv 2505.10570) shows long
@@ -103,13 +103,13 @@ Rules:
 // workflow prose costs more than it buys. Keep only the essentials and stay
 // faithful to the native tool-call format. Selected at the injection point
 // below when settings.smallModelMode is on (review mode still wins).
-const CODEX_SYSTEM_PROMPT_LEAN = `You are a coding agent in LU. Use tools to do the work — never guess file contents.
+const CODEX_SYSTEM_PROMPT_LEAN = `You are a coding agent in LU. Use tools to do the work, never guess file contents.
 
 Rules:
 - Read a file before you edit it.
 - To change an existing file use file_edit (replace a unique old_string with new_string), not file_write. Use file_write only to create a new file.
-- PATHS: use relative paths (e.g. \`package.json\`, \`.\`). Never start with \`/\` or a drive letter — it escapes the workspace and fails.
-- Emit the tool call as your FIRST output — no "Okay, let me…" preamble. One step at a time, as valid JSON.
+- PATHS: use relative paths (e.g. \`package.json\`, \`.\`). Never start with \`/\` or a drive letter, it escapes the workspace and fails.
+- Emit the tool call as your FIRST output, no "Okay, let me…" preamble. One step at a time, as valid JSON.
 - After each tool result, if more steps remain, immediately call the next tool. Do not narrate "I will now…" and then stop.
 - When the task is done and verified, reply with one short sentence. Never end with only raw JSON or a bare code block.`
 
@@ -199,7 +199,7 @@ function isSystemPromptEcho(content: string): boolean {
 }
 
 // Server-declared think capability (LU Cloud models carry thinkMode from
-// /models) wins over the local name-heuristic — same precedence as
+// /models) wins over the local name-heuristic, same precedence as
 // useChat/useAgentChat: 'always' reasoners keep their native channel,
 // 'never' models get no think prompting or knobs.
 function codexThinkMode(model: string) {
@@ -221,7 +221,7 @@ export function useCodex() {
     if (!activeModel) return
 
     // Coding-Agent slash commands (David 2026-06-12): "/review", "/commit",
-    // "/test", … live HERE, in the Code view — its full file_*/shell/git tools
+    // "/test", … live HERE, in the Code view, its full file_*/shell/git tools
     // + working directory are exactly what these templates drive. Expand the
     // command to the full instruction the model acts on; the raw "/cmd args" is
     // shown as the user's message (displayContent). A non-command input passes
@@ -501,7 +501,7 @@ export function useCodex() {
           id: uuid(),
           phase: 'reflection',
           content:
-            `🏗️ Architect skipped — \`${archModel}\` is a cloud model and "Allow cloud architect" is off. Enable it in Settings → Coding Agent, or pick a local model.`,
+            `🏗️ Architect skipped, \`${archModel}\` is a cloud model and "Allow cloud architect" is off. Enable it in Settings → Coding Agent, or pick a local model.`,
           timestamp: Date.now(),
         })
         useChatStore.getState().updateMessageAgentBlocks(convId, assistantMsg.id, [...blocks])
@@ -555,7 +555,7 @@ export function useCodex() {
           blocks.push({
             id: uuid(),
             phase: 'reflection',
-            content: `🗺️ Repo map: top ${repoMap.files.length} files (of ${repoMap.count}) — ${repoMap.files.slice(0, 5).map((f) => f.path).join(', ')}${repoMap.files.length > 5 ? '…' : ''}`,
+            content: `🗺️ Repo map: top ${repoMap.files.length} files (of ${repoMap.count}), ${repoMap.files.slice(0, 5).map((f) => f.path).join(', ')}${repoMap.files.length > 5 ? '…' : ''}`,
             timestamp: Date.now(),
           })
           useChatStore.getState().updateMessageAgentBlocks(convId, assistantMsg.id, [...blocks])
@@ -1034,7 +1034,7 @@ export function useCodex() {
           const emptyTurn = turnContent.trim().length === 0
           // Only nudge an empty turn when NOTHING has been produced yet (a true
           // early stall). An empty turn AFTER a real answer means the model is
-          // finished — break immediately instead of spinning slow no-op nudge
+          // finished, break immediately instead of spinning slow no-op nudge
           // iterations that keep the typing dots up long after the answer is
           // done (David 2026-06-12: "die punkte bleiben so lange obwohl keine
           // antwort mehr kam"). Read-only report commands (/review, /explain …)
@@ -1054,7 +1054,7 @@ export function useCodex() {
           break
         }
 
-        // Phase 5b (v2.4.0) — parallel tool execution via tool-executor.
+        // Phase 5b (v2.4.0), parallel tool execution via tool-executor.
         if (!runningRef.current || abort.signal.aborted) break
 
         // Loop-detector: compute batch signature (sorted name+args pairs).
@@ -1066,7 +1066,7 @@ export function useCodex() {
         if (batchSig === prevBatchSig) {
           sameBatchRepeats++
           if (sameBatchRepeats >= 2) {
-            const msg = `\n\n_(halted: same tool sequence repeated ${sameBatchRepeats + 1}× — model is looping. Try a larger model like Qwen 3.6 for multi-step code tasks.)_`
+            const msg = `\n\n_(halted: same tool sequence repeated ${sameBatchRepeats + 1}×, model is looping. Try a larger model like Qwen 3.6 for multi-step code tasks.)_`
             useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent + msg)
             break
           }
@@ -1283,7 +1283,7 @@ export function useCodex() {
           if (!applied.ok) {
             switch (applied.reason) {
               case 'empty_old': return 'file_edit: old_string must be non-empty. Use file_write to create a new file.'
-              case 'noop': return 'file_edit: old_string and new_string are identical — nothing to change.'
+              case 'noop': return 'file_edit: old_string and new_string are identical, nothing to change.'
               case 'not_found': return `file_edit: old_string not found in ${path}. Read the file and copy the exact text you want to replace.`
               case 'not_unique': return `file_edit: old_string matches ${applied.matches} places in ${path}. Add surrounding lines so it is unique.`
               default: return 'file_edit: failed.'
@@ -1468,7 +1468,7 @@ export function useCodex() {
             r.status === 'completed' || r.status === 'cached'
               ? (r.result ?? '')
               : r.errorHint
-                ? `${r.error ?? 'Tool failed'} — ${r.errorHint}`
+                ? `${r.error ?? 'Tool failed'}, ${r.errorHint}`
                 : (r.error ?? 'Tool failed')
           // Small-Model Mode (Knob 3): truncate long tool outputs (head+tail)
           // before they re-enter the model history. Long results cost small
@@ -1537,10 +1537,10 @@ export function useCodex() {
         // nothing failed.
         if (completed.length === 0) {
           fullContent = failed.length
-            ? `I couldn't complete the task — ${failed.length} operation(s) failed and nothing succeeded. Check the tool errors above, then refine the instruction or try a stronger model.`
-            : `I stopped without completing the task — the model ended its turn without doing any work. Try rephrasing the instruction, or turn Think off and resend.`
+            ? `I couldn't complete the task, ${failed.length} operation(s) failed and nothing succeeded. Check the tool errors above, then refine the instruction or try a stronger model.`
+            : `I stopped without completing the task, the model ended its turn without doing any work. Try rephrasing the instruction, or turn Think off and resend.`
         } else if (failed.length > 0) {
-          fullContent = `Partially done: ${parts.join(', ')}. Some steps failed — see the errors above; the result may be incomplete.`
+          fullContent = `Partially done: ${parts.join(', ')}. Some steps failed, see the errors above; the result may be incomplete.`
         } else {
           fullContent = parts.length > 0 ? `Done: ${parts.join(', ')}.` : 'Done.'
         }

@@ -976,7 +976,7 @@ export function useAgentChat() {
               agentMessages.push({
                 role: 'user',
                 content:
-                  'Stop — the media you were asked for is already created and shown. Write ONLY a short, friendly closing line to the user in their own language (e.g. that their picture/clip is ready). Do not output JSON, do not repeat this note, and do not call any tool.',
+                  'Stop, the media you were asked for is already created and shown. Write ONLY a short, friendly closing line to the user in their own language (e.g. that their picture/clip is ready). Do not output JSON, do not repeat this note, and do not call any tool.',
               } as ChatMessage)
               continue
             }
@@ -1238,7 +1238,7 @@ export function useAgentChat() {
               : r.status === 'completed' || r.status === 'cached'
                 ? (r.result ?? '')
                 : r.errorHint
-                  ? `${r.error ?? 'Tool failed'} — ${r.errorHint}`
+                  ? `${r.error ?? 'Tool failed'}, ${r.errorHint}`
                   : (r.error ?? 'Tool failed')
           // Small-Model Mode (Knob 3): truncate long tool outputs (head+tail)
           // before re-injecting into history. No-op for big models. The short
@@ -1401,7 +1401,7 @@ export function useAgentChat() {
           useChatStore.getState().updateMessageContent(
             convId!, assistantMessage.id,
             (contentRef.current ? contentRef.current + '\n\n' : '') +
-            `Lost the connection to the local model backend mid-response — it may have crashed, been closed, or was busy swapping models. LU already retried automatically.\n\nCheck that Ollama / LM Studio is running (and the model still loads), then send the message again.\n\nDetails: ${errorMsg}`
+            `Lost the connection to the local model backend mid-response, it may have crashed, been closed, or was busy swapping models. LU already retried automatically.\n\nCheck that Ollama / LM Studio is running (and the model still loads), then send the message again.\n\nDetails: ${errorMsg}`
           )
         } else {
           useChatStore.getState().updateMessageContent(
@@ -1508,7 +1508,7 @@ export function extractMediaPrompt(text: string): string {
 }
 
 function buildAgentSystemPrompt(basePrompt: string): string {
-  const agentInstructions = `You are an autonomous AI agent inside LU with full access to this computer. You execute tasks end-to-end by using tools — you do NOT just describe what to do.
+  const agentInstructions = `You are an autonomous AI agent inside LU with full access to this computer. You execute tasks end-to-end by using tools, you do NOT just describe what to do.
 
 Available tools:
 - Filesystem: file_read, file_write, file_list, file_search
@@ -1516,29 +1516,29 @@ Available tools:
 - System: shell_execute, code_execute, system_info, screenshot, process_list, get_current_time
 - Creative: image_generate, video_generate (text-to-video, or animate a generated image via inputImage), run_workflow
 
-AUTONOMY CONTRACT (read carefully — this is the most important rule):
-- When the user asks you to BUILD, CREATE, MAKE, or WRITE something (a file, a website, a script, a folder structure), you MUST execute it via tools — typically file_write.
-- NEVER produce a code block in your reply followed by "save this as index.html". That is a FAILURE — it means you talked instead of acted.
+AUTONOMY CONTRACT (read carefully, this is the most important rule):
+- When the user asks you to BUILD, CREATE, MAKE, or WRITE something (a file, a website, a script, a folder structure), you MUST execute it via tools, typically file_write.
+- NEVER produce a code block in your reply followed by "save this as index.html". That is a FAILURE, it means you talked instead of acted.
 - NEVER say "Now I will create X" or "Next I'll write Y" as plain prose and then stop. The model is supposed to DO the next step right now, as a tool call.
-- When the task has N steps, execute ALL N as tool calls in one session. The user does not want a tutorial — they want the result on disk.
+- When the task has N steps, execute ALL N as tool calls in one session. The user does not want a tutorial, they want the result on disk.
 - The ONLY reasons to finish without calling another tool are: (a) the task is genuinely complete, or (b) you are stuck and need user input.
 
 Workflow for build / create tasks:
 1. (Optional) file_list to scout the target directory.
 2. file_write the artefact(s) directly. For a website: write index.html, style.css, script.js as separate file_write calls.
-3. After the LAST file_write, write a 1–3 sentence final answer ("Done — wrote 3 files to <path>"). Nothing in between.
+3. After the LAST file_write, write a 1 to 3 sentence final answer ("Done — wrote 3 files to <path>"). Nothing in between.
 
-Creative tools — image_generate, video_generate:
-- When the user asks for an image / picture / drawing, CALL image_generate. You HAVE this tool — do NOT reply with prose about DALL-E, Midjourney, or "as a text model I can't". Just call it.
+Creative tools, image_generate, video_generate:
+- When the user asks for an image / picture / drawing, CALL image_generate. You HAVE this tool, do NOT reply with prose about DALL-E, Midjourney, or "as a text model I can't". Just call it.
 - After image_generate runs you will be shown the generated image; LOOK at it and briefly describe what you actually see.
 - To make a video, CALL video_generate. To animate an image you just generated, call video_generate with inputImage set to that image's filename (it is in the image_generate result).
 - Emit these as REAL tool calls through the tool channel — never write the call as plain text like image_generate(prompt="…") in your answer.
 
 Other rules:
 - You MUST use tools — NEVER answer from memory or guess file contents.
-- PATHS: use paths relative to your working directory (e.g. \`package.json\`, \`src/app.ts\`, \`.\` for the current folder). Never start a path with \`/\` or a drive letter (\`C:\\\`) — that escapes your workspace and fails. To list the current folder, use file_list with path \`.\`.
+- PATHS: use paths relative to your working directory (e.g. \`package.json\`, \`src/app.ts\`, \`.\` for the current folder). Never start a path with \`/\` or a drive letter (\`C:\\\`), that escapes your workspace and fails. To list the current folder, use file_list with path \`.\`.
 - For filesystem READ tasks: file_list first if needed, then file_read.
-- For web tasks: web_search → web_fetch on the best URL → answer based on real data. web_search returns ONLY short snippets — ALWAYS call web_fetch to read the page.
+- For web tasks: web_search → web_fetch on the best URL → answer based on real data. web_search returns ONLY short snippets, ALWAYS call web_fetch to read the page.
 - If you need to know the OS, paths, or hardware: call system_info once at the start.
 - Chain multiple tools as needed. If a tool fails, try a different approach.
 - Be concise in text. All the work happens in tool calls.
@@ -1556,14 +1556,14 @@ Other rules:
 // have a limited instruction-following budget. Keep only what a small model
 // needs to ACT — same tool names + native call format as the full prompt.
 function buildAgentSystemPromptLean(basePrompt: string): string {
-  const lean = `You are an autonomous agent in LU with tools on this computer. Do tasks by CALLING tools — do not just describe them.
+  const lean = `You are an autonomous agent in LU with tools on this computer. Do tasks by CALLING tools, do not just describe them.
 
 Tools: file_read, file_write, file_list, file_search, web_search, web_fetch, shell_execute, code_execute, system_info, get_current_time, image_generate, video_generate.
 
 Rules:
-- To build/create/write something, CALL the tool (usually file_write) — never paste a code block and say "save this".
-- PATHS: use relative paths (e.g. \`package.json\`, \`.\`). Never start with \`/\` or a drive letter — it escapes your workspace and fails.
-- Emit the tool call as your FIRST output — no "Okay, let me…" preamble. Valid JSON, one at a time. Never guess file contents — file_read first.
+- To build/create/write something, CALL the tool (usually file_write), never paste a code block and say "save this".
+- PATHS: use relative paths (e.g. \`package.json\`, \`.\`). Never start with \`/\` or a drive letter, it escapes your workspace and fails.
+- Emit the tool call as your FIRST output, no "Okay, let me…" preamble. Valid JSON, one at a time. Never guess file contents, file_read first.
 - After each tool result, if a step remains, immediately call the next tool. Do not narrate "I will now…" and then stop.
 - For images/video call image_generate / video_generate as real tool calls.
 - When everything is done, reply with one short sentence in the user's language.`
@@ -1578,13 +1578,13 @@ Rules:
  * chat into an agent. Kept short so it doesn't crowd a small model's context.
  */
 function buildChatToolsSystemPrompt(basePrompt: string): string {
-  const p = `You are a helpful chat assistant in LU, having a normal conversation. You also have a few tools for things you cannot do from memory — use one ONLY when the user's request actually needs it, otherwise just reply normally:
-- web_search — look up current/real-world facts (returns short snippets)
-- web_fetch — read a specific web page or URL (after a search, or when the user gives a link)
-- file_write — save text to a file when the user asks you to write/create/save a file
-- image_generate — create an image when the user asks for a picture/drawing/logo
-- video_generate — create a short video/animation when the user asks for one (to animate an image you just made, pass its filename as inputImage)
+  const p = `You are a helpful chat assistant in LU, having a normal conversation. You also have a few tools for things you cannot do from memory, use one ONLY when the user's request actually needs it, otherwise just reply normally:
+- web_search, look up current/real-world facts (returns short snippets)
+- web_fetch, read a specific web page or URL (after a search, or when the user gives a link)
+- file_write, save text to a file when the user asks you to write/create/save a file
+- image_generate, create an image when the user asks for a picture/drawing/logo
+- video_generate, create a short video/animation when the user asks for one (to animate an image you just made, pass its filename as inputImage)
 
-Emit tool calls through the real tool channel — never as plain text like image_generate("…"). After a tool runs, give a short, natural reply about the result. For web questions, prefer web_search then web_fetch on the best result before answering. Reply in the user's language.`
+Emit tool calls through the real tool channel, never as plain text like image_generate("…"). After a tool runs, give a short, natural reply about the result. For web questions, prefer web_search then web_fetch on the best result before answering. Reply in the user's language.`
   return basePrompt ? `${p}\n\n${basePrompt}` : p
 }

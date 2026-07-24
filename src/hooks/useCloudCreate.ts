@@ -140,7 +140,7 @@ export function useCloudCreate(opts: { onQuotaChange?: () => void } = {}) {
     if (!cloudMediaLive()) {
       // Server MEDIA_LIVE switch is off — the GPU fleet isn't up, a submit
       // would only 503. Mirror the server's honest "coming soon".
-      s.setError('Cloud rendering is coming soon — the GPU fleet is not live yet.')
+      s.setError('Cloud rendering is coming soon, the GPU fleet is not live yet.')
       return
     }
     if ((op === 'generate' || op === 'music' || op === 'tts') && s.prompt.trim().length === 0) {
@@ -156,7 +156,7 @@ export function useCloudCreate(opts: { onQuotaChange?: () => void } = {}) {
     }
     // Per-intent input contracts (client UX; the server re-checks all of it).
     if (characterUse && !s.selectedCharacter) {
-      s.setError('Pick a character from your shelf first — or train one.')
+      s.setError('Pick a character from your shelf first, or train one.')
       return
     }
     if (op === 'lora-train' && s.trainImages.length < 4) {
@@ -165,7 +165,7 @@ export function useCloudCreate(opts: { onQuotaChange?: () => void } = {}) {
     }
     if (op === 'lipsync') {
       if (!s.audioInput && !s.voiceFromJob) {
-        s.setError('Add a voice first — upload an audio file or pick a generated one.')
+        s.setError('Add a voice first, upload an audio file or pick a generated one.')
         return
       }
       const needsClip = cloudModelById(model)?.lipsync_source === 'video'
@@ -252,8 +252,8 @@ export function useCloudCreate(opts: { onQuotaChange?: () => void } = {}) {
         if (!s.mask) {
           s.setError(
             op === 'eraser'
-              ? 'Paint a mask first — the eraser removes what you painted.'
-              : 'Paint a mask first — the edit only changes the painted area.',
+              ? 'Paint a mask first, the eraser removes what you painted.'
+              : 'Paint a mask first, the edit only changes the painted area.',
           )
           s.setIsGenerating(false)
           return
@@ -272,7 +272,7 @@ export function useCloudCreate(opts: { onQuotaChange?: () => void } = {}) {
         } else if (s.voiceFromJob) {
           // A prior own render (tts/music) — fresh signed URL, zero re-upload.
           const vj = await getJob(s.voiceFromJob.jobId)
-          if (!vj.result_url) throw new Error('That voice has expired — generate it again first.')
+          if (!vj.result_url) throw new Error('That voice has expired, generate it again first.')
           params.audio_url = vj.result_url
         }
       }
@@ -287,7 +287,7 @@ export function useCloudCreate(opts: { onQuotaChange?: () => void } = {}) {
       }
       if (op === 'extend' && s.extendSource) {
         const src = await getJob(s.extendSource.jobId)
-        if (!src.result_url) throw new Error('The source clip has expired — re-render it first.')
+        if (!src.result_url) throw new Error('The source clip has expired, re-render it first.')
         params.source_url = src.result_url
       }
 
@@ -374,13 +374,13 @@ export function useCloudCreate(opts: { onQuotaChange?: () => void } = {}) {
     } catch (err) {
       const st = useCreateStore.getState()
       if (err instanceof CloudJobError && err.status === 429) {
-        st.setError('Monthly credit budget exhausted — upgrade your plan or wait for the next period.')
+        st.setError('Monthly credit budget exhausted, upgrade your plan or wait for the next period.')
       } else if (err instanceof CloudJobError && err.status === 401) {
         st.setError('Sign in to your LU Cloud account to render in the cloud.')
       } else if (err instanceof CloudJobError && err.message === 'render timed out') {
         // The desktop app has no jobs-history view — point at the account
         // page instead of promising an in-app surface that doesn't exist.
-        st.setError('Still rendering — this is taking longer than expected. When it completes you can view it in your account at lu-labs.ai.')
+        st.setError('Still rendering, this is taking longer than expected. When it completes you can view it in your account at lu-labs.ai.')
       } else if (!(err instanceof CloudJobError && err.message === 'polling aborted')) {
         st.setError(err instanceof Error ? err.message : String(err))
       }
@@ -491,7 +491,7 @@ export function useCloudCreate(opts: { onQuotaChange?: () => void } = {}) {
       } catch (err) {
         const st = useCreateStore.getState()
         if (err instanceof CloudJobError && err.status === 429) {
-          st.setError('Monthly credit budget exhausted — upgrade your plan or wait for the next period.')
+          st.setError('Monthly credit budget exhausted, upgrade your plan or wait for the next period.')
         } else if (!(err instanceof CloudJobError && err.message === 'polling aborted')) {
           st.setError(err instanceof Error ? err.message : String(err))
         }
@@ -526,7 +526,7 @@ export function useCloudCreate(opts: { onQuotaChange?: () => void } = {}) {
       try {
         // Fresh signed URL — the stored one expires ~1 h after the last read.
         const sourceJob = await getJob(item.jobId)
-        if (!sourceJob.result_url) throw new Error('The source clip has expired — re-render it first.')
+        if (!sourceJob.result_url) throw new Error('The source clip has expired, re-render it first.')
 
         if (ac.signal.aborted) return
 
@@ -583,7 +583,7 @@ export function useCloudCreate(opts: { onQuotaChange?: () => void } = {}) {
       } catch (err) {
         const st = useCreateStore.getState()
         if (err instanceof CloudJobError && err.status === 429) {
-          st.setError('Monthly credit budget exhausted — upgrade your plan or wait for the next period.')
+          st.setError('Monthly credit budget exhausted, upgrade your plan or wait for the next period.')
         } else if (!(err instanceof CloudJobError && err.message === 'polling aborted')) {
           st.setError(err instanceof Error ? err.message : String(err))
         }

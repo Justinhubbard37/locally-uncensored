@@ -685,7 +685,7 @@ async function executeWebFetch(args: Record<string, any>): Promise<string> {
       if (text.length > maxLength) return text.substring(0, maxLength) + '\n\n[...truncated]'
       return text || 'Error: Page returned empty content'
     } catch (fallbackErr) {
-      return `Error: web_fetch failed — ${e instanceof Error ? e.message : String(e)}`
+      return `Error: web_fetch failed: ${e instanceof Error ? e.message : String(e)}`
     }
   }
 }
@@ -766,7 +766,7 @@ async function executeFileEdit(args: Record<string, any>): Promise<string> {
   try {
     data = await backendCall('fs_read', { path, ...chatCtx() })
   } catch (e) {
-    return `Error: file_edit could not read ${path} — ${e instanceof Error ? e.message : String(e)}. To create a new file use file_write.`
+    return `Error: file_edit could not read ${path}: ${e instanceof Error ? e.message : String(e)}. To create a new file use file_write.`
   }
   if (data.encoding === 'base64') return `Error: file_edit cannot edit a binary file (${path}).`
   const content = typeof data.content === 'string' ? data.content : ''
@@ -777,7 +777,7 @@ async function executeFileEdit(args: Record<string, any>): Promise<string> {
       case 'empty_old':
         return 'Error: file_edit requires a non-empty old_string. To create a new file use file_write.'
       case 'noop':
-        return 'Error: old_string and new_string are identical — nothing to change.'
+        return 'Error: old_string and new_string are identical, nothing to change.'
       case 'not_found':
         return `Error: old_string was not found in ${path}. Read the file and copy the exact text (including indentation) you want to replace.`
       case 'not_unique':

@@ -31,12 +31,12 @@ import { registerAutoSpeak } from "../lib/ttsBridge";
 // budget exhausted") are already human-readable — pass those through.
 function sttErrorMessage(err: unknown): string {
   if (err instanceof CloudJobError) {
-    if (err.status === 401) return "Signed out — sign in again to use cloud dictation";
-    if (err.status === 413) return "Recording too long — try a shorter take";
-    if (err.status >= 500) return "Cloud transcription is unavailable right now — try again";
+    if (err.status === 401) return "Signed out, sign in again to use cloud dictation";
+    if (err.status === 413) return "Recording too long, try a shorter take";
+    if (err.status >= 500) return "Cloud transcription is unavailable right now, try again";
     return err.message;
   }
-  return "Transcription failed — check the microphone and try again";
+  return "Transcription failed, check the microphone and try again";
 }
 
 // Speak-generation counter + abort plumbing, module-scoped (NOT per hook
@@ -225,7 +225,7 @@ export function useVoice() {
         if (streamTimerRef.current) { clearInterval(streamTimerRef.current); streamTimerRef.current = null; }
         interimBusyRef.current = false;
         recorderRef.current = null;
-        store.setSttError("Microphone unavailable — check mic permissions for LU in System Settings");
+        store.setSttError("Microphone unavailable, check mic permissions for LU in System Settings");
         return false;
       }
     },
@@ -268,7 +268,7 @@ export function useVoice() {
       store.setRecording(false);
       store.setTranscribing(false);
       recorderRef.current = null;
-      store.setSttError("Recording failed — try again");
+      store.setSttError("Recording failed, try again");
       return "";
     }
   }, [store, cloudVoice]);

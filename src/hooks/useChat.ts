@@ -477,13 +477,13 @@ export function useChat() {
         const explanation =
           finishReason === 'length'
             ? (captured
-                ? 'The model spent its entire token budget thinking and never wrote the answer. Try again — reasoning is not deterministic — or turn Thinking off for this question.'
+                ? 'The model spent its entire token budget thinking and never wrote the answer. Try again, reasoning is not deterministic, or turn Thinking off for this question.'
                 : 'The model hit its token limit before writing an answer. Try again, or raise Max Tokens in Settings.')
             : finishReason === 'disconnect'
               ? 'The connection dropped before the model finished its answer. Check your network and try again.'
               : captured && keepThinking
-                ? 'The model finished thinking but never wrote an answer. Try again — or turn Thinking off for this question.'
-                : "I didn't return a visible answer that time — please try again."
+                ? 'The model finished thinking but never wrote an answer. Try again, or turn Thinking off for this question.'
+                : "I didn't return a visible answer that time, please try again."
         if (captured && keepThinking) {
           // Thinking ON: surface the reasoning AND say why there's no answer
           // (the collapsed thinking pill alone reads as dead air).

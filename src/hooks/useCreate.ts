@@ -435,7 +435,7 @@ export function useCreate() {
     // Local Edit is mask inpaint — without a painted mask it would silently
     // degrade to plain img2img and repaint the WHOLE image.
     if (intent === 'edit' && !maskFilename) {
-      setError('Paint a mask first — open the mask editor and mark the area to change.')
+      setError('Paint a mask first, open the mask editor and mark the area to change.')
       return
     }
     if (!isRemoveBg && !activeModel) {
@@ -698,7 +698,7 @@ export function useCreate() {
                   // Re-build the workflow now that the new node is available
                   const genParams = { ...baseParams, frames, fps, ...(effI2vImage ? { inputImage: effI2vImage } : {}) }
                   workflow = await buildDynamicWorkflow(genParams, imageModelType)
-                  setProgress(10, 'VHS installed — generating MP4...')
+                  setProgress(10, 'VHS installed, generating MP4...')
                 } catch (instErr) {
                   setError(`Failed to install VHS_VideoCombine: ${instErr instanceof Error ? instErr.message : String(instErr)}. You can install it manually in ComfyUI Manager.`)
                   setIsGenerating(false)

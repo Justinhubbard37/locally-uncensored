@@ -673,7 +673,7 @@ async function runHandoff(kind: 'image' | 'video', args: VramHandoffArgs, seq: n
         const i2vModels = models.filter((m) => isI2VModel(m.name))
         if (i2vModels.length === 0) {
           emitHandoff('error', { kind, detail: 'no i2v model installed' })
-          return 'Error: Image-to-video needs an I2V model such as SVD. Install one from Models → Discover (e.g. "SVD-XT 1.1 — Image to Video"), then try again.'
+          return 'Error: Image-to-video needs an I2V model such as SVD. Install one from Models → Discover (e.g. "SVD-XT 1.1 (Image to Video)"), then try again.'
         }
         if (typeof args.model === 'string' && args.model) {
           const resolved = resolveModelName(args.model, i2vModels)
@@ -695,7 +695,7 @@ async function runHandoff(kind: 'image' | 'video', args: VramHandoffArgs, seq: n
         const t2vModels = models.filter((m) => isT2VCapable(m.name))
         if (t2vModels.length === 0 || backend === 'none') {
           emitHandoff('error', { kind, detail: 'no text-to-video model installed' })
-          return 'Error: No text-to-video model installed. Download one from Models → Discover (e.g. "Wan 2.1 — 1.3B (Lightweight)" for 8-10 GB VRAM or "HunyuanVideo 1.5 T2V FP8" for 12+ GB) — or generate an image first and animate it with an I2V model like "SVD-XT 1.1".'
+          return 'Error: No text-to-video model installed. Download one from Models → Discover (e.g. "Wan 2.1 · 1.3B (Lightweight)" for 8 to 10 GB VRAM or "HunyuanVideo 1.5 T2V FP8" for 12+ GB). Or generate an image first and animate it with an I2V model like "SVD-XT 1.1".'
         }
         if (typeof args.model === 'string' && args.model) {
           const resolved = resolveModelName(args.model, t2vModels)
@@ -714,7 +714,7 @@ async function runHandoff(kind: 'image' | 'video', args: VramHandoffArgs, seq: n
     // ComfyUI unreachable while listing models — we have not unloaded anything,
     // so just report it. Don't mask the connection failure.
     emitHandoff('error', { kind, detail: String(e) })
-    return `Error: Could not query ComfyUI models — ${e instanceof Error ? e.message : String(e)}. Is ComfyUI installed and reachable?`
+    return `Error: Could not query ComfyUI models: ${e instanceof Error ? e.message : String(e)}. Is ComfyUI installed and reachable?`
   }
 
   // Which text model do we reload afterwards? The pinned agent-loop model is
@@ -1498,7 +1498,7 @@ async function resolveInputImage(ref: string): Promise<ResolvedInputImage> {
   if (!resp.ok) throw new Error(`could not read input image "${ref}" (HTTP ${resp.status})`)
   const blob = await resp.blob()
   if (!blob || blob.size === 0) {
-    throw new Error(`could not read input image "${ref}" — ComfyUI returned an empty file`)
+    throw new Error(`could not read input image "${ref}", ComfyUI returned an empty file`)
   }
   // Probe the source dimensions so the I2V path can pick the model's native
   // aspect ratio (David 2026-06-11: a portrait still forced into 768×448
