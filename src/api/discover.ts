@@ -1585,77 +1585,16 @@ export function getVideoBundles(): ModelBundle[] {
         },
       ],
     },
-    {
-      name: 'CogVideoX 5B I2V',
-      description: 'CogVideoX 5B Image to Video by Tsinghua. Upload an image, get video. Needs 12+ GB VRAM.',
-      tags: ['CogVideoX', 'I2V', 'Quality'],
-      uncensored: true,
-      verified: true,
-      i2v: true,
-      totalSizeGB: 21.2,
-      vramRequired: '12+ GB',
-      workflow: 'cogvideo',
-      customNodes: ['cogvideox-wrapper'],
-      url: 'https://huggingface.co/Kijai/CogVideoX-comfy',
-      files: [
-        {
-          name: 'CogVideoX 5B I2V Model',
-          description: 'Main image to video generation model.',
-          pulls: '', tags: ['Model', '11.3 GB'], updated: '',
-          downloadUrl: 'https://huggingface.co/Kijai/CogVideoX-comfy/resolve/main/CogVideoX_1_0_5b_I2V_bf16.safetensors',
-          filename: 'CogVideoX_1_0_5b_I2V_bf16.safetensors', subfolder: 'diffusion_models', sizeGB: 11.3,
-        },
-        {
-          name: 'CogVideoX VAE',
-          description: 'Required video encoder/decoder.',
-          pulls: '', tags: ['VAE', '430 MB'], updated: '',
-          downloadUrl: 'https://huggingface.co/Kijai/CogVideoX-comfy/resolve/main/cogvideox_vae_bf16.safetensors',
-          filename: 'cogvideox_vae_bf16.safetensors', subfolder: 'vae', sizeGB: 0.4,
-        },
-        {
-          name: 'T5-XXL Text Encoder (FP16)',
-          description: 'Required text encoder (shared with other models).',
-          pulls: '', tags: ['Text Encoder', '9.5 GB'], updated: '',
-          downloadUrl: 'https://huggingface.co/Comfy-Org/mochi_preview_repackaged/resolve/main/split_files/text_encoders/t5xxl_fp16.safetensors',
-          filename: 't5xxl_fp16.safetensors', subfolder: 'text_encoders', sizeGB: 9.5,
-        },
-      ],
-    },
-    {
-      name: 'CogVideoX 1.5 5B',
-      description: 'Larger CogVideoX with 1360x768 output. Better quality, needs 16 GB VRAM.',
-      tags: ['CogVideoX 1.5', '1360x768', 'Quality'],
-      uncensored: true,
-      verified: true,
-      totalSizeGB: 20.9,
-      vramRequired: '16+ GB',
-      workflow: 'cogvideo',
-      customNodes: ['cogvideox-wrapper'],
-      url: 'https://huggingface.co/Kijai/CogVideoX-comfy',
-      files: [
-        {
-          name: 'CogVideoX 1.5 5B Model',
-          description: 'Higher quality video model with wider resolution.',
-          pulls: '', tags: ['Model', '11.1 GB'], updated: '',
-          downloadUrl: 'https://huggingface.co/Kijai/CogVideoX-comfy/resolve/main/CogVideoX_1_5_5b_T2V_bf16.safetensors',
-          filename: 'CogVideoX_1_5_5b_T2V_bf16.safetensors', subfolder: 'diffusion_models', sizeGB: 11.1,
-        },
-        {
-          name: 'CogVideoX VAE',
-          description: 'Required video encoder/decoder.',
-          pulls: '', tags: ['VAE', '430 MB'], updated: '',
-          downloadUrl: 'https://huggingface.co/Kijai/CogVideoX-comfy/resolve/main/cogvideox_vae_bf16.safetensors',
-          filename: 'cogvideox_vae_bf16.safetensors', subfolder: 'vae', sizeGB: 0.4,
-        },
-        {
-          name: 'T5-XXL Text Encoder (FP16)',
-          description: 'Required text encoder (shared with other models).',
-          pulls: '', tags: ['Text Encoder', '9.5 GB'], updated: '',
-          downloadUrl: 'https://huggingface.co/Comfy-Org/mochi_preview_repackaged/resolve/main/split_files/text_encoders/t5xxl_fp16.safetensors',
-          filename: 't5xxl_fp16.safetensors', subfolder: 'text_encoders', sizeGB: 9.5,
-        },
-      ],
-    },
+    // CogVideoX removed 2026-07-24 (D#88) · both bundles were 21 GB of download
+    // for a lane that could never run. buildCogVideoWorkflow emits five class
+    // types that exist in no version of kijai/ComfyUI-CogVideoXWrapper
+    // (CogVideoXCLIPLoader, CogVideoXTextEncode, CogVideoXEmptyLatents,
+    // CogVideoXSampler, CogVideoXVAEDecode · the real names are CogVideoTextEncode,
+    // CogVideoSampler, CogVideoDecode and there is no empty latents node at all),
+    // so every submit came back a 400. Verified against a real checkout of the
+    // wrapper. Offering the download again needs a rebuilt builder plus a real
+    // end to end run, not a rename. Wan, LTX and SVD cover the same ground and
+    // are proven.
     {
       name: 'FramePack F1 (Image to Video)',
       description: 'Revolutionary I2V: runs on 6 GB VRAM via next frame prediction. Upload an image, get a video. Uses HunyuanVideo backbone.',
@@ -1758,32 +1697,16 @@ export function getVideoBundles(): ModelBundle[] {
         },
       ],
     },
-    {
-      name: 'Pyramid Flow MiniFlux v2',
-      description: 'Pyramid style temporal generation based on SD3. 768x1280 output. Experimental but interesting results.',
-      tags: ['Pyramid Flow', '768x1280', 'Experimental'],
-      totalSizeGB: 4.6,
-      vramRequired: '16+ GB',
-      workflow: 'pyramidflow',
-      customNodes: ['pyramidflow-wrapper'],
-      url: 'https://huggingface.co/Kijai/pyramid-flow-comfy',
-      files: [
-        {
-          name: 'Pyramid Flow MiniFlux v2',
-          description: 'Main video generation model.',
-          pulls: '', tags: ['Model', '3.9 GB'], updated: '',
-          downloadUrl: 'https://huggingface.co/Kijai/pyramid-flow-comfy/resolve/main/pyramid_flow_miniflux_bf16_v2.safetensors',
-          filename: 'pyramid_flow_miniflux_bf16_v2.safetensors', subfolder: 'diffusion_models', sizeGB: 3.9,
-        },
-        {
-          name: 'Pyramid Flow VAE',
-          description: 'Required video encoder/decoder.',
-          pulls: '', tags: ['VAE', '670 MB'], updated: '',
-          downloadUrl: 'https://huggingface.co/Kijai/pyramid-flow-comfy/resolve/main/pyramid_flow_vae_bf16.safetensors',
-          filename: 'pyramid_flow_vae_bf16.safetensors', subfolder: 'vae', sizeGB: 0.7,
-        },
-      ],
-    },
+    // Pyramid Flow removed 2026-07-24 (same audit as CogVideoX) · the builder was
+    // written against invented node names too. Checked against a real checkout of
+    // kijai/ComfyUI-PyramidFlowWrapper: the loader is registered as
+    // PyramidFlowTransformerLoader (not PyramidFlowModelLoader), decode is
+    // PyramidFlowVAEDecode (not PyramidFlowDecode) and needs a vae input we never
+    // wired, the text encoder takes clip + positive_prompt + negative_prompt (we
+    // passed a single `text` and no CLIP at all), and the sampler wants
+    // prompt_embeds plus per stage step strings rather than steps and frames. That
+    // is a rewrite, not a rename, so the 4.6 GB download comes back only with a
+    // real run behind it.
     // Allegro removed · diffusers format only, no single-file safetensors available for one-click install
     {
       name: 'NVIDIA Cosmos 7B',

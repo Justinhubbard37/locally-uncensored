@@ -51,10 +51,10 @@ describe('determineStrategy — all 15 model types', () => {
     ['mochi', 'unet_mochi'],
     ['cosmos', 'unet_cosmos'],
     ['svd', 'svd'],
-    ['cogvideo', 'cogvideo'],
+    // cogvideo, pyramidflow and allegro deliberately absent: all three lanes are
+    // unavailable by design until their builders are rebuilt against a real
+    // wrapper registry (D#88 audit). Their assertions live below.
     ['framepack', 'framepack'],
-    ['pyramidflow', 'pyramidflow'],
-    ['allegro', 'allegro'],
     ['flux', 'unet_flux'],
     ['flux2', 'unet_flux2'],
     ['zimage', 'unet_zimage'],
@@ -93,10 +93,14 @@ describe('determineStrategy — missing nodes', () => {
     motion: [],
   }
 
-  it('cogvideo without CogVideoXSampler → unavailable', () => {
+  // D#88: the old assertion demanded we tell the user to install a pack they
+  // already had. The lane is unavailable for OUR reason (fictional node names in
+  // the builder), so the message must not point at their setup.
+  it('cogvideo → unavailable, and the reason does not blame the users install', () => {
     const r = determineStrategy('cogvideo', true, minimalNodes, defaultModels)
     expect(r.strategy).toBe('unavailable')
-    expect(r.reason).toContain('CogVideoXWrapper')
+    expect(r.reason).toContain('not supported in this build')
+    expect(r.reason).not.toContain('CogVideoXWrapper')
   })
 
   it('framepack without FramePackSampler → unavailable', () => {
@@ -111,16 +115,20 @@ describe('determineStrategy — missing nodes', () => {
     expect(r.reason).toContain('ImageOnlyCheckpointLoader')
   })
 
-  it('allegro without AllegroSampler → unavailable', () => {
+  // The reason must no longer name a pack to install. Pointing a user at a
+  // wrapper they cannot fix anything with is what made D#88 so confusing.
+  it('allegro → unavailable, and does not blame the install', () => {
     const r = determineStrategy('allegro', true, minimalNodes, defaultModels)
     expect(r.strategy).toBe('unavailable')
-    expect(r.reason).toContain('ComfyUI-Allegro')
+    expect(r.reason).toContain('not supported')
+    expect(r.reason).not.toContain('Install')
   })
 
-  it('pyramidflow without PyramidFlowSampler → unavailable', () => {
+  it('pyramidflow → unavailable, and does not blame the install', () => {
     const r = determineStrategy('pyramidflow', true, minimalNodes, defaultModels)
     expect(r.strategy).toBe('unavailable')
-    expect(r.reason).toContain('PyramidFlowWrapper')
+    expect(r.reason).toContain('not supported')
+    expect(r.reason).not.toContain('Install')
   })
 })
 
@@ -133,12 +141,13 @@ describe('Every video bundle workflow type has a strategy', () => {
     ['hunyuan', 'hunyuan'],
     ['ltx', 'ltx'],
     ['animatediff', 'sd15'],
-    ['cogvideo', 'cogvideo'],
+    // cogvideo, pyramidflow and allegro are no longer in getVideoBundles(): the
+    // 2026-07-24 audit pulled their bundles because none of the three lanes
+    // could run. Nothing left in the catalogue points at them, so nothing here
+    // needs to claim they have a strategy.
     ['framepack', 'framepack'],
     ['svd', 'svd'],
     ['mochi', 'mochi'],
-    ['pyramidflow', 'pyramidflow'],
-    ['allegro', 'allegro'],
     ['cosmos', 'cosmos'],
   ]
 

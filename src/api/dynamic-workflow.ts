@@ -50,10 +50,10 @@ export type WorkflowStrategy =
   | 'unet_mochi'      // Mochi: UNETLoader + CLIPLoader + VAELoader + EmptyMochiLatentVideo
   | 'unet_cosmos'     // Cosmos: UNETLoader + CLIPLoader(oldt5) + VAELoader + EmptyCosmosLatentVideo
   | 'svd'             // SVD: ImageOnlyCheckpointLoader + SVD_img2vid_Conditioning
-  | 'cogvideo'        // CogVideoX: Kijai wrapper nodes
   | 'framepack'       // FramePack: Kijai wrapper + image input
-  | 'pyramidflow'     // Pyramid Flow: Kijai wrapper nodes
-  | 'allegro'         // Allegro: Community wrapper nodes
+  // cogvideo / pyramidflow / allegro are gone on purpose (2026-07-24). Their
+  // builders emitted node names no wrapper registers, so those model types now
+  // resolve to 'unavailable' with an honest reason instead of a ComfyUI 400.
   | 'checkpoint'      // SDXL/SD1.5: CheckpointLoaderSimple + EmptyLatentImage
   | 'animatediff'     // AnimateDiff: CheckpointLoaderSimple + ADE_* nodes
   | 'unavailable'
@@ -169,16 +169,25 @@ export function determineStrategy(
     return { strategy: 'unavailable', reason: 'SVD requires ImageOnlyCheckpointLoader node' }
   }
 
-  // CogVideoX → Kijai wrapper nodes
+  // CogVideoX → Kijai wrapper nodes.
+  //
+  // 2026-07-24 (bob80817-dev, D#88 "it says I'm missing custom nodes, but they
+  // are there"): he was right. The gate looked for `CogVideoXSampler`, which has
+  // never existed in kijai/ComfyUI-CogVideoXWrapper — the real class is
+  // `CogVideoSampler` (verified against a real checkout; `git log -S` upstream
+  // finds the X-name in no commit ever). So a perfect install always failed the
+  // check and the user was told to go install what they already had.
+  //
+  // The gate deliberately STAYS closed rather than being pointed at the real
+  // name, because buildCogVideoWorkflow below emits the same invented names
+  // throughout (CogVideoXTextEncode / CogVideoXEmptyLatents / CogVideoXVAEDecode
+  // — none real). Opening it would only trade this clear message for an opaque
+  // ComfyUI 400. The lane needs a rebuild against the current wrapper plus a
+  // real generate E2E; until then say so honestly instead of blaming the setup.
   if (modelType === 'cogvideo') {
-    const hasCogNodes = nodes.samplers.includes('CogVideoXSampler')
-    if (hasCogNodes) {
-      return { strategy: 'cogvideo', reason: 'CogVideoX → Kijai wrapper pipeline' }
-    }
     return {
       strategy: 'unavailable',
-      reason: 'CogVideoX needs the ComfyUI-CogVideoXWrapper custom nodes. Install via ComfyUI Manager (Manager → Install Custom Nodes → search "CogVideoXWrapper") or git clone the repo into ComfyUI/custom_nodes/.',
-      installHint: { pack: 'ComfyUI-CogVideoXWrapper', url: 'https://github.com/kijai/ComfyUI-CogVideoXWrapper' },
+      reason: 'CogVideoX is not supported in this build yet. Its pipeline needs a rebuild against the current wrapper, so please pick another video model such as Wan, LTX or SVD for now.',
     }
   }
 
@@ -195,29 +204,39 @@ export function determineStrategy(
     }
   }
 
-  // Pyramid Flow → Kijai wrapper nodes
+  // Pyramid Flow → Kijai wrapper nodes.
+  //
+  // Closed for the same reason as CogVideoX above, found in the same 2026-07-24
+  // audit. The gate itself was fine (PyramidFlowSampler is real), but
+  // buildPyramidFlowWorkflow was written against a wrapper nobody checked:
+  // the loader is registered as PyramidFlowTransformerLoader, decode is
+  // PyramidFlowVAEDecode and wants a vae input we never wired, the text encoder
+  // takes clip plus positive_prompt plus negative_prompt rather than a bare
+  // `text`, and the sampler consumes prompt_embeds plus per stage step strings
+  // instead of steps and frames. So a correct install got a 400 with no clue
+  // why. Same deal as CogVideoX: reopen only with a rebuilt builder and a real
+  // generate behind it.
   if (modelType === 'pyramidflow') {
-    const hasPFNodes = nodes.samplers.includes('PyramidFlowSampler')
-    if (hasPFNodes) {
-      return { strategy: 'pyramidflow', reason: 'Pyramid Flow → Kijai wrapper pipeline' }
-    }
     return {
       strategy: 'unavailable',
-      reason: 'Pyramid Flow needs the ComfyUI-PyramidFlowWrapper custom nodes. Install via ComfyUI Manager or git clone into ComfyUI/custom_nodes/.',
-      installHint: { pack: 'ComfyUI-PyramidFlowWrapper', url: 'https://github.com/kijai/ComfyUI-PyramidFlowWrapper' },
+      reason: 'Pyramid Flow is not supported in this build yet. Its pipeline needs a rebuild against the current wrapper, so please pick another video model such as Wan, LTX or SVD for now.',
     }
   }
 
-  // Allegro → Community wrapper nodes
+  // Allegro → Community wrapper nodes.
+  //
+  // Also closed in the 2026-07-24 audit. Every other wrapper lane in this file
+  // that was never run turned out to emit invented node names, and Allegro is
+  // the one we cannot check: the wrapper it points at is a single community
+  // repo we have never had installed, its bundle was already pulled from the
+  // catalogue for being diffusers-only, and the builder follows the exact
+  // Loader/TextEncode/Sampler/Decoder shape that was wrong in both other cases.
+  // Unverifiable plus unreachable through the catalogue means it stays shut
+  // rather than shipping a third guess.
   if (modelType === 'allegro') {
-    const hasAllegroNodes = nodes.samplers.includes('AllegroSampler')
-    if (hasAllegroNodes) {
-      return { strategy: 'allegro', reason: 'Allegro → Community wrapper pipeline' }
-    }
     return {
       strategy: 'unavailable',
-      reason: 'Allegro needs the ComfyUI-Allegro community wrapper nodes (search "Allegro" in ComfyUI Manager → Install Custom Nodes).',
-      installHint: { pack: 'ComfyUI-Allegro', url: 'https://github.com/rhajou/ComfyUI-Allegro' },
+      reason: 'Allegro is not supported in this build. Please pick another video model such as Wan, LTX or SVD.',
     }
   }
 
@@ -401,9 +420,6 @@ export async function buildDynamicWorkflow(
 
   // ─── Wrapper Strategies (custom node pipelines — completely different node chains) ───
 
-  if (strategy === 'cogvideo') {
-    return buildCogVideoWorkflow(params as VideoParams, seed, nodes)
-  }
   if (strategy === 'svd') {
     return buildSVDWorkflow(params as VideoParams, seed, nodes)
   }
@@ -412,12 +428,6 @@ export async function buildDynamicWorkflow(
   }
   if (strategy === 'framepack') {
     return buildFramePackWorkflow(params as VideoParams, seed, nodes)
-  }
-  if (strategy === 'pyramidflow') {
-    return buildPyramidFlowWorkflow(params as VideoParams, seed, nodes)
-  }
-  if (strategy === 'allegro') {
-    return buildAllegroWorkflow(params as VideoParams, seed, nodes)
   }
 
   // ─── Standard Strategies (UNET/Checkpoint → CLIP → Latent → KSampler → VAEDecode) ───
@@ -1070,32 +1080,12 @@ function addVideoOutput(workflow: Record<string, any>, n: number, decodeId: stri
   return n
 }
 
-function buildCogVideoWorkflow(params: VideoParams, seed: number, nodes: CategorizedNodes): Record<string, any> {
-  const workflow: Record<string, any> = {}
-  let n = 1
-
-  const modelId = String(n++)
-  const clipId = String(n++)
-  const posId = String(n++)
-  const negId = String(n++)
-  const latentId = String(n++)
-  const samplerId = String(n++)
-  const decodeId = String(n++)
-
-  workflow[modelId] = { class_type: 'CogVideoXModelLoader', inputs: { model: params.model } }
-  workflow[clipId] = { class_type: 'CogVideoXCLIPLoader', inputs: { clip_name: 't5xxl_fp16.safetensors' } }
-  workflow[posId] = { class_type: 'CogVideoXTextEncode', inputs: { text: params.prompt, clip: [clipId, 0] } }
-  workflow[negId] = { class_type: 'CogVideoXTextEncode', inputs: { text: params.negativePrompt || '', clip: [clipId, 0] } }
-  workflow[latentId] = { class_type: 'CogVideoXEmptyLatents', inputs: { width: params.width, height: params.height, frames: params.frames, batch_size: 1 } }
-  workflow[samplerId] = {
-    class_type: 'CogVideoXSampler',
-    inputs: { model: [modelId, 0], positive: [posId, 0], negative: [negId, 0], latents: [latentId, 0], seed, steps: params.steps, cfg: params.cfgScale },
-  }
-  workflow[decodeId] = { class_type: 'CogVideoXVAEDecode', inputs: { samples: [samplerId, 0], vae: [modelId, 1] } }
-
-  addVideoOutput(workflow, n, decodeId, params.fps, nodes, params.prompt)
-  return workflow
-}
+// buildCogVideoWorkflow deleted 2026-07-24 (D#88). It emitted CogVideoXCLIPLoader,
+// CogVideoXTextEncode, CogVideoXEmptyLatents, CogVideoXSampler and
+// CogVideoXVAEDecode, none of which are registered by kijai's wrapper, so it
+// only ever produced ComfyUI 400s. Kept out of the tree on purpose: leaving a
+// known-wrong graph around invites someone to just reopen the gate. Git history
+// has it if the lane is ever rebuilt, which needs a real generate to land.
 
 function buildSVDWorkflow(params: VideoParams, seed: number, nodes: CategorizedNodes): Record<string, any> {
   const workflow: Record<string, any> = {}
@@ -1663,46 +1653,10 @@ function buildFramePackWorkflow(params: VideoParams, seed: number, nodes: Catego
   return workflow
 }
 
-function buildPyramidFlowWorkflow(params: VideoParams, seed: number, nodes: CategorizedNodes): Record<string, any> {
-  const workflow: Record<string, any> = {}
-  let n = 1
-
-  const modelId = String(n++)
-  const vaeId = String(n++)
-  const posId = String(n++)
-  const samplerId = String(n++)
-  const decodeId = String(n++)
-
-  workflow[modelId] = { class_type: 'PyramidFlowModelLoader', inputs: { model: params.model } }
-  workflow[vaeId] = { class_type: 'PyramidFlowVAELoader', inputs: { vae: 'pyramid_flow_vae_bf16.safetensors' } }
-  workflow[posId] = { class_type: 'PyramidFlowTextEncode', inputs: { text: params.prompt } }
-  workflow[samplerId] = {
-    class_type: 'PyramidFlowSampler',
-    inputs: { model: [modelId, 0], vae: [vaeId, 0], text: [posId, 0], seed, steps: params.steps, cfg: params.cfgScale, width: params.width, height: params.height, frames: params.frames },
-  }
-  workflow[decodeId] = { class_type: 'PyramidFlowDecode', inputs: { samples: [samplerId, 0] } }
-
-  addVideoOutput(workflow, n, decodeId, params.fps, nodes, params.prompt)
-  return workflow
-}
-
-function buildAllegroWorkflow(params: VideoParams, seed: number, nodes: CategorizedNodes): Record<string, any> {
-  const workflow: Record<string, any> = {}
-  let n = 1
-
-  const modelId = String(n++)
-  const posId = String(n++)
-  const samplerId = String(n++)
-  const decodeId = String(n++)
-
-  workflow[modelId] = { class_type: 'AllegroModelLoader', inputs: { model: params.model } }
-  workflow[posId] = { class_type: 'AllegroTextEncode', inputs: { text: params.prompt } }
-  workflow[samplerId] = {
-    class_type: 'AllegroSampler',
-    inputs: { model: [modelId, 0], text: [posId, 0], seed, steps: params.steps, cfg: params.cfgScale, width: params.width, height: params.height, frames: params.frames },
-  }
-  workflow[decodeId] = { class_type: 'AllegroDecoder', inputs: { samples: [samplerId, 0] } }
-
-  addVideoOutput(workflow, n, decodeId, params.fps, nodes, params.prompt)
-  return workflow
-}
+// buildPyramidFlowWorkflow and buildAllegroWorkflow deleted 2026-07-24, same
+// audit and same reason as buildCogVideoWorkflow above. Pyramid Flow named the
+// loader PyramidFlowModelLoader (registered as PyramidFlowTransformerLoader),
+// decoded through a PyramidFlowDecode that does not exist, and fed the sampler
+// steps and frames where it wants prompt_embeds and per stage step strings.
+// Allegro followed the identical invented shape against a wrapper we have never
+// had installed. Both are recoverable from git history for a rebuild.

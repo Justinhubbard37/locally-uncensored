@@ -69,12 +69,16 @@ describe('getModelCapabilities — real limits from /object_info', () => {
     expect(c!.availableSamplers).toBeUndefined() // FramePackSampler exposes no sampler_name enum
   })
 
-  it('CogVideoX → wrapper sampler (usesKSampler false), no sampler enum, fallback frameRange', async () => {
+  it('CogVideoX → generic KSampler caps now that its lane is gone', async () => {
+    // Until 2026-07-24 this asserted caps read off CogVideoXSampler and
+    // CogVideoXEmptyLatents, neither of which kijai's wrapper has ever
+    // registered. The lane was removed, so a CogVideoX file left on disk still
+    // classifies and still shows caps, it just gets the generic KSampler view
+    // and is stopped at generate time with an honest message.
     const c = await getModelCapabilities('CogVideoX_5b.safetensors')
-    expect(c!.usesKSampler).toBe(false)
-    expect(c!.availableSamplers).toBeUndefined()
-    expect(c!.stepsRange).toEqual({ min: 1, max: 200, default: 50 })
-    expect(c!.frameRange).toEqual({ min: 1, max: 49 }) // CogVideoXEmptyLatents absent → fallback
+    expect(c!.modelType).toBe('cogvideo')
+    expect(c!.usesKSampler).toBe(true)
+    expect(c!.frameRange).toBeUndefined()
   })
 
   it('unknown model → PARTIAL caps (KSampler enums), NOT null', async () => {

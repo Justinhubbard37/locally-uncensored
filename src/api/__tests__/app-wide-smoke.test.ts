@@ -170,12 +170,23 @@ describe('Video bundles → strategy pipeline', () => {
     expect(unique.size).toBe(names.length)
   })
 
+  // No exceptions here any more. Until 2026-07-24 this loop skipped cogvideo,
+  // because its bundles were 21 GB of download for a lane that could not run.
+  // The rule now is simply: if we offer the download, the lane must resolve.
   it('every video bundle maps to a valid strategy', () => {
     for (const b of bundles) {
       const type = b.workflow as ModelType
       const result = determineStrategy(type, true, fullNodes(), defaultModels)
       expect(result.strategy, `Video bundle "${b.name}" → unavailable: ${result.reason}`).not.toBe('unavailable')
     }
+  })
+
+  it('the catalogue offers nothing for a lane that cannot run (D#88 closed)', () => {
+    const dead = bundles.filter(b => ['cogvideo', 'pyramidflow', 'allegro'].includes(b.workflow))
+    expect(
+      dead.map(b => b.name),
+      'a bundle came back for a lane whose builder was removed',
+    ).toEqual([])
   })
 })
 

@@ -11,11 +11,14 @@ describe('Video Bundle Definitions', () => {
     bundles = getVideoBundles()
   })
 
-  it('has 16 video bundles', () => {
+  it('has 13 video bundles', () => {
     // 14 original - Allegro (diffusers only) + CogVideoX 2B replaced by 5B I2V,
     // + Wan 2.2 TI2V-5B (unified T2V/I2V, 2026-06-11); 2.5.8 adds the two
     // uncensored GGUF finetunes (NSFW Wan 14B t2v + Wan 2.2 Rapid AIO i2v).
-    expect(bundles.length).toBe(16)
+    // 2026-07-24 removes three that could never run: both CogVideoX bundles
+    // (21 GB each) and Pyramid Flow, whose builders emitted node class names no
+    // wrapper registers. See wrapper-node-names.test.ts.
+    expect(bundles.length).toBe(13)
   })
 
   it('every bundle has required fields', () => {
@@ -70,8 +73,9 @@ describe('Video Bundle Definitions', () => {
 
   it('I2V bundles have i2v: true', () => {
     const i2vBundles = bundles.filter(b => b.i2v)
-    // SVD + FramePack + CogVideoX 5B I2V + Wan 2.2 TI2V-5B + Rapid AIO (2.5.8)
-    expect(i2vBundles.length).toBe(5)
+    // SVD + FramePack + Wan 2.2 TI2V-5B + Rapid AIO (2.5.8). The CogVideoX 5B
+    // I2V bundle was pulled 2026-07-24 with the rest of its lane.
+    expect(i2vBundles.length).toBe(4)
     const i2vNames = i2vBundles.map(b => b.name)
     expect(i2vNames.some(n => n.includes('SVD'))).toBe(true)
     expect(i2vNames.some(n => n.includes('FramePack'))).toBe(true)
@@ -219,13 +223,12 @@ describe('Shared File Deduplication', () => {
     expect(new Set(urls).size).toBe(1)
   })
 
-  it('cogvideox_vae is shared between CogVideoX bundles', () => {
-    const cogBundles = bundles.filter(b => b.workflow === 'cogvideo')
-    expect(cogBundles.length).toBe(2) // 5B I2V + 1.5 5B
-
-    for (const b of cogBundles) {
-      const vae = b.files.find(f => f.filename === 'cogvideox_vae_bf16.safetensors')
-      expect(vae).toBeDefined()
-    }
+  it('no CogVideoX files are offered anywhere any more', () => {
+    // Was: "cogvideox_vae is shared between CogVideoX bundles". Both bundles are
+    // gone (2026-07-24), so the sharing check is replaced by the stronger claim
+    // that nothing in the catalogue still pulls a CogVideoX file down.
+    expect(bundles.filter(b => b.workflow === 'cogvideo')).toEqual([])
+    const cogFiles = bundles.flatMap(b => b.files).filter(f => (f.filename ?? '').includes('cogvideox'))
+    expect(cogFiles.map(f => f.filename)).toEqual([])
   })
 })
