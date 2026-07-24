@@ -37,7 +37,11 @@ import { DEFAULT_SETTINGS, BUILT_IN_PERSONAS } from '../lib/constants'
 // on the first successful switch flip, default false). Additive merge.
 // v14 (2.5.8): added settings.cloudTeasersEnabled (Cloud discovery in Local
 // mode: locked Create tabs + hosted-model picker rows, default true). Additive.
-const STORE_VERSION = 14
+// v15 (2.5.9): added settings.codexCloudConfirmShell (default true). The cloud
+// shell-confirm was hard-wired in useCodex, so the existing confirm toggle did
+// nothing on a cloud model. Additive merge backfills the default — behaviour is
+// byte-for-byte what 2.5.8 did until the user turns the new switch off.
+const STORE_VERSION = 15
 
 interface SettingsState {
   settings: Settings

@@ -14,19 +14,19 @@ import { checkWhisperAvailable, checkTtsAvailable, downloadPiperVoice, listInsta
 // Curated local neural (Piper) voices the user can pick. Selecting one not yet
 // on disk downloads it (~63 MB). Ids match rhasspy/piper-voices.
 const PIPER_VOICES: { id: string; label: string }[] = [
-  { id: 'en_US-lessac-medium', label: 'Lessac — US, neutral' },
-  { id: 'en_US-amy-medium', label: 'Amy — US, female' },
-  { id: 'en_US-ryan-high', label: 'Ryan — US, male (high)' },
-  { id: 'en_US-hfc_female-medium', label: 'HFC — US, female' },
-  { id: 'en_GB-alba-medium', label: 'Alba — UK, female' },
-  { id: 'en_GB-northern_english_male-medium', label: 'Northern — UK, male' },
+  { id: 'en_US-lessac-medium', label: 'Lessac, US, neutral' },
+  { id: 'en_US-amy-medium', label: 'Amy, US, female' },
+  { id: 'en_US-ryan-high', label: 'Ryan, US, male (high)' },
+  { id: 'en_US-hfc_female-medium', label: 'HFC, US, female' },
+  { id: 'en_GB-alba-medium', label: 'Alba, UK, female' },
+  { id: 'en_GB-northern_english_male-medium', label: 'Northern, UK, male' },
 ]
 
 // MiniMax Speech-02 system voices for the hosted cloud TTS. The server route
 // (/api/voice/tts) forwards the id verbatim as voice_id and only validates the
 // character set; default is Wise_Woman.
 const CLOUD_TTS_VOICES: { id: string; label: string }[] = [
-  { id: 'Wise_Woman', label: 'Wise Woman — default' },
+  { id: 'Wise_Woman', label: 'Wise Woman, default' },
   { id: 'Calm_Woman', label: 'Calm Woman' },
   { id: 'Lively_Girl', label: 'Lively Girl' },
   { id: 'Lovely_Girl', label: 'Lovely Girl' },
@@ -262,7 +262,7 @@ function HfDownloadPathSetting() {
   return (
     <div className="space-y-2 py-1">
       <div className="text-[0.6rem] text-gray-500 leading-relaxed">
-        Custom location for downloaded GGUFs. Leave empty to auto-detect from your active provider's models folder (e.g. <code className="font-mono">~/.lmstudio/models</code> for LM Studio). Ollama is unaffected — it manages its own blob store; LU pulls Ollama models via <code className="font-mono">ollama pull</code> regardless of this setting.
+        Custom location for downloaded GGUFs. Leave empty to auto-detect from your active provider's models folder (e.g. <code className="font-mono">~/.lmstudio/models</code> for LM Studio). Ollama is unaffected, it manages its own blob store; LU pulls Ollama models via <code className="font-mono">ollama pull</code> regardless of this setting.
       </div>
       <div className="flex items-center gap-2">
         <input
@@ -319,7 +319,7 @@ function ComfyUISettings() {
         if (!cancelled) {
           setStatus(s)
           // Mirror backend truth into the frontend URL builder so subsequent
-          // fetch() calls hit the right machine immediately — no restart needed.
+          // fetch() calls hit the right machine immediately, no restart needed.
           if (typeof s?.port === 'number' && s.port > 0) setComfyPort(s.port)
           if (typeof s?.host === 'string' && s.host.trim()) setComfyHost(s.host)
         }
@@ -358,7 +358,7 @@ function ComfyUISettings() {
       setStatus(prev => prev ? { ...prev, found: true, path: customPath.trim() } : { running: false, found: true, path: customPath.trim() })
       setTimeout(() => setPathSuccess(false), 3000)
     } catch (err) {
-      setPathError(err instanceof Error ? err.message : 'Invalid path — main.py not found')
+      setPathError(err instanceof Error ? err.message : 'Invalid path, main.py not found')
     }
   }
 
@@ -416,7 +416,7 @@ function ComfyUISettings() {
         {hostError && <p className="text-[0.55rem] text-red-400">{hostError}</p>}
         {hostSuccess && <p className="text-[0.55rem] text-green-400">Host saved. Restart ComfyUI to apply.</p>}
         {status?.host && !status?.isLocal && (
-          <p className="text-[0.55rem] text-amber-400">Remote ComfyUI — start/stop/install not available from LU. Manage the process on the server.</p>
+          <p className="text-[0.55rem] text-amber-400">Remote ComfyUI, start/stop/install not available from LU. Manage the process on the server.</p>
         )}
       </div>
 
@@ -477,7 +477,7 @@ function ComfyUISettings() {
         {portSuccess && <p className="text-[0.55rem] text-green-400">Port saved. Restart ComfyUI to apply.</p>}
       </div>
 
-      {/* Controls — local host only (can't manage a remote process) */}
+      {/* Controls, local host only (can't manage a remote process) */}
       {status?.isLocal !== false && (
       <div className="flex items-center gap-1.5">
         {status?.found && !status.running && (
@@ -653,7 +653,7 @@ function CodexAgentSettings() {
     <div className="space-y-3">
       <div className="text-[0.6rem] text-gray-500 leading-relaxed pb-1">
         v2.5.0 coding-agent capabilities ported from the companion repo. All
-        local-first by default — cloud usage requires the explicit toggle below.
+        local-first by default. Cloud usage requires the explicit toggle below.
       </div>
 
       {/* Architect / Editor split */}
@@ -720,6 +720,17 @@ function CodexAgentSettings() {
         enabled={settings.codexConfirmShell}
         onChange={() => updateSettings({ codexConfirmShell: !settings.codexConfirmShell })}
       />
+      {/* Cloud arm of the same gate. Until 2.5.9 this was hard-wired on and
+          invisible, so the toggle above appeared to do nothing whenever the
+          coding agent ran on a cloud model. Shown only while the toggle above is
+          off, because that is the only case where it changes anything. */}
+      {!settings.codexConfirmShell && (
+        <InlineToggle
+          label="Also confirm when the coding agent runs on an LU Cloud model (recommended)"
+          enabled={settings.codexCloudConfirmShell}
+          onChange={() => updateSettings({ codexCloudConfirmShell: !settings.codexCloudConfirmShell })}
+        />
+      )}
     </div>
   )
 }
@@ -917,7 +928,7 @@ export function SettingsPage() {
           break
         }
         if (Date.now() - start > 600_000) {
-          setWhisperInstallError('Install is taking unusually long — check the logs / try again.')
+          setWhisperInstallError('Install is taking unusually long, check the logs / try again.')
           break
         }
       }
@@ -951,7 +962,7 @@ export function SettingsPage() {
           break
         }
         if (Date.now() - start > 600_000) {
-          setTtsInstallError('Install is taking unusually long — check the logs / try again.')
+          setTtsInstallError('Install is taking unusually long, check the logs / try again.')
           break
         }
       }
@@ -1132,7 +1143,7 @@ export function SettingsPage() {
           {settings.appMode !== 'cloud' && (
           <Section title="Image / Video Generation Timeouts">
             <div className="text-[0.6rem] text-gray-500 dark:text-gray-500 leading-relaxed pb-1.5">
-              Maximum minutes a ComfyUI generation can run before LU aborts it. Bump these up if you run on iGPU or CPU only — a 1024px image on integrated graphics can take 30+ min.
+              Maximum minutes a ComfyUI generation can run before LU aborts it. Bump these up if you run on iGPU or CPU only, because a 1024px image on integrated graphics can take 30+ min.
             </div>
             <div className="flex items-center justify-between">
               <span className="text-[0.7rem] text-gray-700 dark:text-gray-400">Image timeout (min)</span>
@@ -1170,14 +1181,14 @@ export function SettingsPage() {
                   <Lock size={12} className="mt-0.5 shrink-0 text-sky-500" />
                   <div>
                     <p className="text-gray-700 dark:text-gray-300 font-medium mb-0.5">Cloud mode is active.</p>
-                    <p>Chat, Create renders and voice run on lu-labs.ai against your LU account and are metered against your credits; generated media and job records are stored with your account. Switch to Local in the header to run everything on your machine — the 100%-local pledge below then applies.</p>
+                    <p>Chat, Create renders and voice run on lu-labs.ai against your LU account and are metered against your credits; generated media and job records are stored with your account. Switch to Local in the header to run everything on your machine, and the 100% local pledge below then applies.</p>
                   </div>
                 </div>
                 <div className="flex items-start gap-2 pt-1.5">
                   <Shield size={12} className="mt-0.5 shrink-0 text-emerald-500" />
                   <div>
                     <p className="text-gray-700 dark:text-gray-300 font-medium mb-0.5">Local mode: 100% local.</p>
-                    <p>In local mode chat, agent runs, and image &amp; video generation all execute on your machine — no telemetry, no analytics, no model pings home. Your local data lives in <code className="px-1 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-[0.6rem]">%APPDATA%/Locally Uncensored</code> on Windows (or the equivalent on Linux/macOS).</p>
+                    <p>In local mode chat, agent runs, and image &amp; video generation all execute on your machine. No telemetry, no analytics, no model pings home. Your local data lives in <code className="px-1 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-[0.6rem]">%APPDATA%/Locally Uncensored</code> on Windows (or the equivalent on Linux/macOS).</p>
                   </div>
                 </div>
               </div>
@@ -1194,7 +1205,7 @@ export function SettingsPage() {
                   <Shield size={12} className="mt-0.5 shrink-0 text-emerald-500" />
                   <div>
                     <p className="text-gray-700 dark:text-gray-300 font-medium mb-0.5">You own your data.</p>
-                    <p>Conversations, memories, and generated media live in <code className="px-1 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-[0.6rem]">%APPDATA%/Locally Uncensored</code> on Windows (or the equivalent on Linux/macOS). Back up the folder, move it between machines, or delete it — LU writes nothing else.</p>
+                    <p>Conversations, memories, and generated media live in <code className="px-1 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-[0.6rem]">%APPDATA%/Locally Uncensored</code> on Windows (or the equivalent on Linux/macOS). Back up the folder, move it between machines, or delete it. LU writes nothing else.</p>
                   </div>
                 </div>
               </div>
@@ -1242,7 +1253,7 @@ export function SettingsPage() {
           <Section title="ComfyUI (Image & Video)">
             {settings.appMode === 'cloud' && (
               <p className="text-[0.55rem] text-gray-500 leading-snug pb-1">
-                Local mode only — cloud renders run on lu-labs.ai and never use ComfyUI.
+                Local mode only. Cloud renders run on lu-labs.ai and never use ComfyUI.
               </p>
             )}
             <ComfyUISettings />
@@ -1365,7 +1376,7 @@ export function SettingsPage() {
               </div>
             </>) : (<>
             <p className="text-[0.55rem] text-gray-500 leading-snug">
-              Voice runs 100% locally — no cloud. Each engine is a one-time local install.
+              Voice runs 100% locally, no cloud. Each engine is a one-time local install.
             </p>
 
             {/* Speech-to-Text — faster-whisper (powers the microphone / dictation) */}
@@ -1399,7 +1410,7 @@ export function SettingsPage() {
               </p>
             )}
 
-            {/* Text-to-Speech — Piper neural (read responses aloud) */}
+            {/* Text-to-Speech, Piper neural (read responses aloud) */}
             <div className="flex items-center gap-2 text-[0.65rem] pt-1">
               <span className="flex items-center gap-1.5">
                 {ttsLoading
@@ -1433,14 +1444,14 @@ export function SettingsPage() {
             <InlineToggle label="Enable read-aloud" enabled={voiceSettings.ttsEnabled} onChange={() => voiceSettings.updateVoiceSettings({ ttsEnabled: !voiceSettings.ttsEnabled })} icon={<Volume2 size={11} className="text-gray-500" />} />
             {/* Auto-read is a SEPARATE opt-in (default OFF). The toggle above only
                 surfaces the per-message Speaker button; this one also reads each
-                finished response aloud (#77, ElBiggus — the old single toggle was
+                finished response aloud (#77, ElBiggus, the old single toggle was
                 labelled "Read responses aloud" but never auto-read). */}
             {voiceSettings.ttsEnabled && (
               <InlineToggle label="Auto-read new responses" enabled={voiceSettings.autoReadAloud} onChange={() => voiceSettings.updateVoiceSettings({ autoReadAloud: !voiceSettings.autoReadAloud })} icon={<Volume2 size={11} className="text-gray-500" />} />
             )}
-            {/* Neural voice picker (Piper) — replaces the old Microsoft/browser
+            {/* Neural voice picker (Piper), replaces the old Microsoft/browser
                 voices (David 2026-06-06). Picking one not yet on disk downloads
-                it (~63 MB). Browser-only rate/pitch knobs dropped — they didn't
+                it (~63 MB). Browser-only rate/pitch knobs dropped, they didn't
                 apply to Piper. */}
             <div className="flex items-center justify-between gap-2">
               <span className="text-[0.7rem] text-gray-500 flex items-center gap-1">
@@ -1454,7 +1465,7 @@ export function SettingsPage() {
               >
                 {PIPER_VOICES.map((v) => (
                   <option key={v.id} value={v.id}>
-                    {v.label}{installedVoices.includes(v.id) ? '' : ' — download'}
+                    {v.label}{installedVoices.includes(v.id) ? '' : ', download'}
                   </option>
                 ))}
               </select>
@@ -1680,7 +1691,7 @@ function TroubleshootSection() {
     <div className="space-y-3 py-2">
       <p className="text-[0.6rem] text-gray-500 leading-relaxed">
         One-shot probe of the local backends and host facts. Use this when
-        the app behaves oddly — most "model not found" / "ComfyUI doesn't
+        the app behaves oddly. Most "model not found" / "ComfyUI doesn't
         respond" issues become obvious here.
       </p>
 
@@ -1741,7 +1752,7 @@ function TroubleshootSection() {
                   ? (report.host.vram_free_gb != null
                       ? `${report.host.vram_free_gb} / ${report.host.vram_total_gb} GB free`
                       : `${report.host.vram_total_gb} GB`)
-                  : '—'}
+                  : ','}
               </span>
             </div>
           </div>

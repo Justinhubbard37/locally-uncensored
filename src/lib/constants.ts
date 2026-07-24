@@ -71,6 +71,10 @@ export const DEFAULT_SETTINGS: Settings = {
   // H2 security gate. OFF by default = the autonomous coding agent keeps
   // running shell/code unattended; ON pauses each exec for a confirm.
   codexConfirmShell: false,
+  // Cloud arm of the same gate. ON = a cloud model always confirms shell/code
+  // even with the toggle above off. Keeps the 2.5.7 security-review default,
+  // but as a switch the user owns instead of a hidden override.
+  codexCloudConfirmShell: true,
   defaultWorkspace: null,
   // v8: user-uploaded profile picture (base64 data URL, ≤256px). '' = default icon.
   userAvatarDataUrl: '',

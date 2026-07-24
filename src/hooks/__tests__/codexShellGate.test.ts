@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { CODEX_CONFIRM_TOOLS, codexNeedsConfirm } from '../codexShellGate'
+import { CODEX_CONFIRM_TOOLS, codexNeedsConfirm, codexConfirmEnabled } from '../codexShellGate'
 
 // H2: the coding-agent shell/code confirm gate. These tests lock the contract
 // that (a) the autonomous workflow is unchanged when the gate is off, (b) the
@@ -41,6 +41,43 @@ describe('codexShellGate (H2)', () => {
       expect(codexNeedsConfirm('file_write', true)).toBe(false)
       expect(codexNeedsConfirm('file_read', true)).toBe(false)
       expect(codexNeedsConfirm('web_search', true)).toBe(false)
+    })
+  })
+
+  // 2.5.9 — David 2026-07-24: "auto approve bei cloud modellen setting nicht
+  // funktional". The 2.5.7 review hard-wired providerId === 'lu-cloud' into the
+  // gate, so the confirm toggle silently did nothing on a cloud model. These
+  // lock the new contract: same safe default, but the user can now actually
+  // turn the cloud arm off.
+  describe('codexConfirmEnabled (cloud arm)', () => {
+    const LOCALS = ['ollama', 'openai', 'anthropic']
+
+    it('both off on a local model: unattended, the autonomous default', () => {
+      for (const providerId of LOCALS) {
+        expect(codexConfirmEnabled({ confirmShell: false, cloudConfirmShell: true, providerId })).toBe(false)
+      }
+    })
+
+    it('global toggle on: confirms on every provider, cloud arm irrelevant', () => {
+      for (const providerId of [...LOCALS, 'lu-cloud']) {
+        expect(codexConfirmEnabled({ confirmShell: true, cloudConfirmShell: false, providerId })).toBe(true)
+        expect(codexConfirmEnabled({ confirmShell: true, cloudConfirmShell: true, providerId })).toBe(true)
+      }
+    })
+
+    it('default (cloud arm on): a cloud model still confirms — 2.5.8 behaviour preserved', () => {
+      expect(codexConfirmEnabled({ confirmShell: false, cloudConfirmShell: true, providerId: 'lu-cloud' })).toBe(true)
+    })
+
+    it('THE FIX: cloud arm off means auto-approve finally works on cloud models', () => {
+      expect(codexConfirmEnabled({ confirmShell: false, cloudConfirmShell: false, providerId: 'lu-cloud' })).toBe(false)
+    })
+
+    it('the cloud arm never gates a local provider', () => {
+      for (const providerId of LOCALS) {
+        expect(codexConfirmEnabled({ confirmShell: false, cloudConfirmShell: true, providerId })).toBe(false)
+        expect(codexConfirmEnabled({ confirmShell: false, cloudConfirmShell: false, providerId })).toBe(false)
+      }
     })
   })
 })

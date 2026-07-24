@@ -19,3 +19,30 @@ export const CODEX_CONFIRM_TOOLS: ReadonlySet<string> = new Set([
 export function codexNeedsConfirm(toolName: string, confirmEnabled: boolean): boolean {
   return confirmEnabled && CODEX_CONFIRM_TOOLS.has(toolName)
 }
+
+/**
+ * Is the confirm gate active for THIS run? (David 2026-07-24: "auto approve bei
+ * cloud modellen setting nicht funktional".)
+ *
+ * The 2.5.7 security review hard-wired `providerId === 'lu-cloud'` into the gate,
+ * so on a cloud model every shell/code call confirmed even with the setting off.
+ * The setting was silently overridden with nothing in the UI saying so, which
+ * reads as a broken toggle rather than a policy.
+ *
+ * The policy is still the right default — a remote model reaching unattended
+ * local shell is a bigger blast radius than a local model the user deliberately
+ * trusts — so it stays ON by default. It is now a real, visible, user-owned
+ * switch instead of a hidden override: turn `cloudConfirmShell` off and cloud
+ * models follow the same rule as local ones.
+ */
+export function codexConfirmEnabled(opts: {
+  /** settings.codexConfirmShell — confirm for EVERY provider. */
+  confirmShell: boolean
+  /** settings.codexCloudConfirmShell — also confirm on LU Cloud. Default true. */
+  cloudConfirmShell: boolean
+  /** Provider driving this run ('lu-cloud' | 'ollama' | 'openai' | ...). */
+  providerId: string
+}): boolean {
+  if (opts.confirmShell) return true
+  return opts.providerId === 'lu-cloud' && opts.cloudConfirmShell
+}

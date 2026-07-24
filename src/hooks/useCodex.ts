@@ -9,7 +9,7 @@ import { markToolsUnsupported } from '../api/tool-capability'
 import { toolRegistry } from '../api/mcp'
 import { usePermissionStore } from '../stores/permissionStore'
 import { getToolCallingStrategy } from '../lib/model-compatibility'
-import { CODEX_CONFIRM_TOOLS } from './codexShellGate'
+import { CODEX_CONFIRM_TOOLS, codexConfirmEnabled } from './codexShellGate'
 import { buildHermesToolPrompt, buildHermesToolResult, parseHermesToolCalls, stripToolCallTags, hasToolCallTags } from '../api/hermes-tool-calling'
 import { chatNonStreaming } from '../api/agents'
 import { setActiveChatId, clearActiveChatId, chatWorkspaceSlug, setActiveWorkspace, setActiveAgentModel } from '../api/agent-context'
@@ -1324,22 +1324,36 @@ export function useCodex() {
           // prompt-injected model auto-running shell/code. window.confirm works
           // in this Tauri webview (the app uses it elsewhere, e.g. Gallery).
           //
-          // Security review 2.5.7: ALWAYS confirm when the driving model is the
-          // CLOUD provider, regardless of the setting. A remote/semi-trusted model
-          // (or a compromised/MITM'd cloud endpoint) reaching unattended local
-          // shell is a materially bigger blast radius than a local model the user
-          // deliberately trusts — and a "Cloud"-mode user rarely expects the
-          // remote model to run commands on their box. Local models keep the
-          // unattended default; only the cloud path is force-gated.
-          awaitApproval: (settings.codexConfirmShell || providerId === 'lu-cloud')
+          // Security review 2.5.7 force-gated the CLOUD provider here regardless
+          // of the setting: a remote/semi-trusted model (or a compromised cloud
+          // endpoint) reaching unattended local shell is a materially bigger
+          // blast radius than a local model the user deliberately trusts.
+          //
+          // 2.5.9 (David 2026-07-24 "auto approve bei cloud modellen setting
+          // nicht funktional"): that override was invisible, so the confirm
+          // toggle looked broken on cloud models. Same default, but the cloud arm
+          // is now settings.codexCloudConfirmShell — a real switch the user owns.
+          // See codexConfirmEnabled for the whole rule.
+          awaitApproval: codexConfirmEnabled({
+            confirmShell: settings.codexConfirmShell,
+            cloudConfirmShell: settings.codexCloudConfirmShell,
+            providerId,
+          })
             ? async (req) => {
                 if (!CODEX_CONFIRM_TOOLS.has(req.toolName)) return true
                 const a = req.args || {}
                 const preview = String(a.command ?? a.code ?? a.script ?? '').slice(0, 800)
+                // Name the reason when the CLOUD arm is what is asking. Without
+                // it the user has the confirm setting off and still gets a
+                // prompt, which is exactly what read as broken before 2.5.9.
+                const cloudReason =
+                  !settings.codexConfirmShell && providerId === 'lu-cloud'
+                    ? `\n\nCloud models confirm commands by default. Turn that off in Settings under Coding.`
+                    : ''
                 const msg =
                   `Coding agent wants to run "${req.toolName}":\n\n` +
                   `${preview || '(no command preview)'}\n\n` +
-                  `Allow it to run?`
+                  `Allow it to run?${cloudReason}`
                 if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
                   return window.confirm(msg)
                 }

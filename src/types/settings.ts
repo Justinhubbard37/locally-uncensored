@@ -174,6 +174,16 @@ export interface Settings {
    */
   codexConfirmShell: boolean
   /**
+   * Also confirm shell/code on LU Cloud models even when `codexConfirmShell`
+   * is off. Default ON — a remote model reaching unattended local shell is a
+   * bigger blast radius than a local model the user deliberately trusts.
+   *
+   * Until 2.5.9 this was hard-wired into useCodex, so the confirm toggle above
+   * silently did nothing on a cloud model (David 2026-07-24). Same safe default,
+   * but now it is a real switch the user can see and turn off.
+   */
+  codexCloudConfirmShell: boolean
+  /**
    * Shared default workspace for Codex AND Agent (Underlying refactor —
    * workspace unification). When set, both surfaces resolve relative paths
    * against this folder by default; a per-chat override wins when present.
