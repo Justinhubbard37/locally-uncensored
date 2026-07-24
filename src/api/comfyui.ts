@@ -638,8 +638,18 @@ export async function filterPartialFiles(filenames: string[]): Promise<Set<strin
 // ─── Classified Model Lists ───
 
 export async function getImageModels(): Promise<ClassifiedModel[]> {
-  const [checkpoints, diffModels] = await Promise.all([getCheckpoints(), getDiffusionModels()])
-  const complete = await filterPartialFiles([...checkpoints, ...diffModels])
+  // GGUF quants are listed by ComfyUI-GGUF's own loader, NOT by UNETLoader
+  // (which only enumerates .safetensors/.sft). Leaving them out meant a user
+  // could install a GGUF bundle straight from our own Model Manager and then be
+  // told "No image model installed" by the image tool. Empty when the pack is
+  // absent, so this is free for everyone else.
+  const [checkpoints, diffModels, ggufModels] = await Promise.all([
+    getCheckpoints(),
+    getDiffusionModels(),
+    getGgufUnetModels(),
+  ])
+  const unets = [...new Set([...diffModels, ...ggufModels])]
+  const complete = await filterPartialFiles([...checkpoints, ...unets])
   const result: ClassifiedModel[] = []
 
   for (const name of checkpoints) {
@@ -650,9 +660,13 @@ export async function getImageModels(): Promise<ClassifiedModel[]> {
     result.push({ name, type: isImageModelType(type) ? type : 'sdxl', source: 'checkpoint' })
   }
 
-  for (const name of diffModels) {
+  for (const name of unets) {
     if (!complete.has(name)) continue
     const type = classifyModel(name)
+    // isImageModelType already lets 'unknown' through, so a UNET the classifier
+    // cannot name is still offered. The lane-specific architectures (ACE audio,
+    // Wan S2V/Animate/VACE) are excluded by that same predicate and stay in
+    // their own pickers.
     if (isImageModelType(type)) {
       result.push({ name, type, source: 'diffusion_model' })
     }
@@ -662,8 +676,16 @@ export async function getImageModels(): Promise<ClassifiedModel[]> {
 }
 
 export async function getVideoModels(): Promise<ClassifiedModel[]> {
-  const [checkpoints, diffModels] = await Promise.all([getCheckpoints(), getDiffusionModels()])
-  const complete = await filterPartialFiles([...checkpoints, ...diffModels])
+  // Same GGUF gap as getImageModels: our own catalogue ships Wan video models
+  // as GGUF quants, and UNETLoader does not list those, so downloading one from
+  // the Model Manager left the video tool insisting nothing was installed.
+  const [checkpoints, diffModels, ggufModels] = await Promise.all([
+    getCheckpoints(),
+    getDiffusionModels(),
+    getGgufUnetModels(),
+  ])
+  const unets = [...new Set([...diffModels, ...ggufModels])]
+  const complete = await filterPartialFiles([...checkpoints, ...unets])
   const result: ClassifiedModel[] = []
 
   // Video checkpoints (e.g. SVD)
@@ -675,7 +697,7 @@ export async function getVideoModels(): Promise<ClassifiedModel[]> {
     }
   }
 
-  for (const name of diffModels) {
+  for (const name of unets) {
     if (!complete.has(name)) continue
     const type = classifyModel(name)
     if (isVideoModelType(type)) {

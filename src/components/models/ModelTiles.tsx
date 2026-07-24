@@ -307,25 +307,26 @@ export interface BundleTileProps {
 }
 
 export function BundleTile({ bundle, vramGb, complete, downloading, hasErrors, onInstall, onRetry, onClear, onOpenUrl, parseVRAM }: BundleTileProps) {
-  const comingSoon = !bundle.verified && !complete
+  // No COMING SOON overlay any more (2026-07-24). It was driven by
+  // `!bundle.verified && !complete`, a hand-set boolean, and it dimmed the tile
+  // behind a full-cover "COMING SOON" pill while that tile's own working
+  // "Get · 3.6 GB" button sat underneath. Everything in this catalogue is
+  // downloadable and installable right now, so the badge only ever talked
+  // people out of models that work.
+  //
+  // What replaced the flag is stronger than the flag was: app-wide-smoke
+  // asserts every catalogued bundle resolves to a real strategy, and
+  // wrapper-node-names pins every node name the builder emits against real
+  // wrapper registries. A lane that cannot run gets pulled (see the CogVideoX
+  // and Pyramid Flow removals) rather than shipped behind a badge.
   const need = parseVRAM(bundle.vramRequired)
   const fit: Fit = !vramGb ? 'unknown' : need <= vramGb ? 'fits' : need <= vramGb + 2 ? 'tight' : 'big'
 
   return (
     <div
-      className={`relative rounded-xl border border-gray-200 dark:border-white/[0.06] bg-gray-50 dark:bg-white/[0.03] p-3 overflow-hidden transition-colors hover:bg-gray-100 dark:hover:bg-white/[0.05] ${comingSoon ? 'opacity-60' : ''}`}
+      className="relative rounded-xl border border-gray-200 dark:border-white/[0.06] bg-gray-50 dark:bg-white/[0.03] p-3 overflow-hidden transition-colors hover:bg-gray-100 dark:hover:bg-white/[0.05]"
       data-bundle-tile={bundle.name}
     >
-      {comingSoon && (
-        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/40 backdrop-blur-[1px] rounded-xl">
-          {/* Arbitrary values on purpose: the `.light .text-white` / `.bg-white/N`
-              rescue remaps (index.css) would flip this to dark-on-dark — but this
-              pill always sits on a black/40 backdrop, in both themes. */}
-          <span className="px-3 py-1.5 rounded-full bg-[rgba(255,255,255,0.12)] border border-[rgba(255,255,255,0.25)] text-[#f3f4f6] text-xs font-semibold tracking-wider">
-            COMING SOON
-          </span>
-        </div>
-      )}
       <div className="flex items-start gap-2.5">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5 min-w-0">
