@@ -304,7 +304,7 @@ export function decideUnload(input: DecideUnloadInput): DecideUnloadResult {
   if (modelFootprintGB == null || systemVramGB == null) {
     // Unknown sizes → don't unload on auto. Attempt the gen; if it OOMs the
     // user sees the verbatim ComfyUI error and can switch to 'always'.
-    return { unload: false, reason: 'auto: unknown footprint or system VRAM — not unloading on a guess' }
+    return { unload: false, reason: 'auto: unknown footprint or system VRAM, not unloading on a guess' }
   }
   const needed = textGB + modelFootprintGB
   if (needed > systemVramGB) {

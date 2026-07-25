@@ -313,5 +313,5 @@ export const ONBOARDING_MODELS: OnboardingModel[] = [
   // in the Model Manager → Discover tab (curated list + HuggingFace
   // search). Onboarding is "give the user a working chat in 30 seconds";
   // anything heavier comes after they've made it past the wizard.
-  { name: 'qwen2.5-0.5b', label: 'Qwen 2.5 0.5B (Starter)', description: 'Tiny instant-chat model — 400 MB, runs on anything. Great to verify your setup; pick bigger models from the Discover tab once you\'re in.', size: '0.4 GB', vram: '1 GB', vramGB: 1, recommended: true, agent: false, downloadUrl: HF_OB('bartowski/Qwen2.5-0.5B-Instruct-GGUF', 'Qwen2.5-0.5B-Instruct-Q4_K_M.gguf'), filename: 'Qwen2.5-0.5B-Instruct-Q4_K_M.gguf', sizeGB: 0.4 },
+  { name: 'qwen2.5-0.5b', label: 'Qwen 2.5 0.5B (Starter)', description: 'Tiny instant-chat model, 400 MB, runs on anything. Great to verify your setup; pick bigger models from the Discover tab once you\'re in.', size: '0.4 GB', vram: '1 GB', vramGB: 1, recommended: true, agent: false, downloadUrl: HF_OB('bartowski/Qwen2.5-0.5B-Instruct-GGUF', 'Qwen2.5-0.5B-Instruct-Q4_K_M.gguf'), filename: 'Qwen2.5-0.5B-Instruct-Q4_K_M.gguf', sizeGB: 0.4 },
 ]

@@ -621,9 +621,9 @@ export const useMemoryStore = create<MemoryState>()(
           md += `## ${typeTitles[type]}\n\n`
           for (const entry of typeEntries) {
             const date = new Date(entry.updatedAt).toLocaleDateString()
-            md += `- **${entry.title}** — ${entry.content}`
+            md += `- **${entry.title}**, ${entry.content}`
             if (entry.tags.length > 0) md += ` [${entry.tags.join(', ')}]`
-            md += ` *(${entry.source})* — ${date}\n`
+            md += ` *(${entry.source})*, ${date}\n`
           }
           md += '\n'
         }

@@ -411,7 +411,7 @@ export async function buildDynamicWorkflow(
   // plain img2img and repainted the WHOLE image.
   if (!isVideo && gp.inputImage && gp.maskImage && strategy !== 'checkpoint') {
     throw new WorkflowUnavailableError(
-      'Local image editing needs an SD 1.5 / SDXL checkpoint. Pick a checkpoint model for Edit — FLUX and video models are not wired for local inpaint.',
+      'Local image editing needs an SD 1.5 / SDXL checkpoint. Pick a checkpoint model for Edit. FLUX and video models are not wired for local inpaint.',
       strategy,
     )
   }
@@ -858,7 +858,7 @@ export async function buildDynamicWorkflow(
   if (isI2V && ['unet_video', 'unet_ltx', 'unet_cosmos', 'unet_mochi'].includes(strategy)) {
     if (strategy === 'unet_mochi') {
       throw new WorkflowUnavailableError(
-        'Mochi is text-to-video only — pick an i2v-capable model (WAN i2v, WAN 2.2 ti2v, SVD, LTX, Cosmos) to animate an image.',
+        'Mochi is text-to-video only, pick an i2v-capable model (WAN i2v, WAN 2.2 ti2v, SVD, LTX, Cosmos) to animate an image.',
         strategy,
       )
     }

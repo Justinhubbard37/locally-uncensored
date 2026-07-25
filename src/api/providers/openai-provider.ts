@@ -747,7 +747,7 @@ export class OpenAIProvider implements ProviderClient {
         "Open LM Studio → click the 🔍 Discover icon in the left sidebar → " +
         "switch to the \"Runtimes\" tab → download \"llama.cpp (CPU)\" " +
         "(plus a GPU runtime if you have one).\n\n" +
-        "Once the runtime is downloaded, come back here and resend your message — " +
+        "Once the runtime is downloaded, come back here and resend your message, " +
         "no need to restart LU."
     }
 

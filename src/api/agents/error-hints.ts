@@ -59,7 +59,7 @@ const TOOL_HINTS: Record<string, HintRule[]> = {
   code_execute: [
     { pattern: /SyntaxError/, hint: 'Python syntax error. Re-check indentation and parentheses before retrying.' },
     { pattern: /ModuleNotFoundError|No module named/i, hint: 'Module not in the sandbox Python. Use only stdlib, or shell_execute `pip install <name>` first.' },
-    { pattern: /NameError/i, hint: 'NameError — variable/function not defined. State does not persist between code_execute calls; redefine everything.' },
+    { pattern: /NameError/i, hint: 'NameError, variable or function not defined. State does not persist between code_execute calls; redefine everything.' },
     { pattern: /timed out/i, hint: 'Execution timed out. Shorten the code or break into chunks.' },
   ],
   web_fetch: [
@@ -75,13 +75,13 @@ const TOOL_HINTS: Record<string, HintRule[]> = {
     { pattern: /empty|no results/i, hint: 'No results. Broaden the query or switch to web_fetch with a known URL.' },
   ],
   image_generate: [
-    { pattern: /no image models|not available|ComfyUI has no/i, hint: 'No image model installed. Surface to the user — they need to install one in Model Manager.' },
+    { pattern: /no image models|not available|ComfyUI has no/i, hint: 'No image model installed. Surface to the user, they need to install one in Model Manager.' },
     { pattern: /timed out|timeout/i, hint: 'Generation timed out. Try a smaller resolution or simpler prompt.' },
     { pattern: /CUDA|out of memory|OOM/i, hint: 'GPU out of memory. Pick a lighter model or lower resolution.' },
     { pattern: /Generation failed/i, hint: 'ComfyUI returned an error. Surface the full error to the user; do not retry without changes.' },
   ],
   run_workflow: [
-    { pattern: /not found/i, hint: 'Workflow name unknown. The error already lists available names — pick one.' },
+    { pattern: /not found/i, hint: 'Workflow name unknown. The error already lists available names, pick one.' },
     { pattern: /depth|nesting/i, hint: 'Workflow nesting limit reached. Do not call run_workflow from inside another workflow.' },
   ],
   system_info: [],

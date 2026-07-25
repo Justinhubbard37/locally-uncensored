@@ -1073,7 +1073,7 @@ export function useCodex() {
             const names = [...new Set(blocked.map((tc) => tc.function.name))].join(', ')
             messages.push({
               role: 'user',
-              content: `${names} is not available on this turn — it is ${readOnlyTurn ? `a read-only command (/${slash!.command.name})` : 'Code Review Mode'}. Do not try to change anything. Finish with the written answer using what you have already read.`,
+              content: `${names} is not available on this turn, it is ${readOnlyTurn ? `a read-only command (/${slash!.command.name})` : 'Code Review Mode'}. Do not try to change anything. Finish with the written answer using what you have already read.`,
             })
           }
         }

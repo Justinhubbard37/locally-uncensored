@@ -32,7 +32,7 @@ export class LuCloudProvider implements ProviderClient {
       token = await getAccessToken()
     } catch (e) {
       throw new ProviderError(
-        e instanceof Error ? e.message : 'LU Cloud unreachable — check your connection.',
+        e instanceof Error ? e.message : 'LU Cloud unreachable, check your connection.',
         'lu-cloud',
         'network',
       )

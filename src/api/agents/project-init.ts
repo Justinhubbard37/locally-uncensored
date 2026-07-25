@@ -130,7 +130,7 @@ export const RECIPES: Record<string, InitRecipe> = {
   'vite-react': {
     id: 'vite-react',
     name: 'Vite + React + TypeScript',
-    summary: 'Vite 6 + React 19 + Tailwind 4 — the minimal SPA starter.',
+    summary: 'Vite 6 + React 19 + Tailwind 4, the minimal SPA starter.',
     prerequisites: ['node', 'pnpm'],
     steps: [
       {
@@ -185,7 +185,7 @@ export function renderInitPlan(recipe: InitRecipe): string {
       lines.push(s.command)
       lines.push('```')
     } else {
-      lines.push('_(no command — manual step)_')
+      lines.push('_(no command, manual step)_')
     }
   })
   return lines.join('\n')

@@ -330,7 +330,7 @@ export async function getModelCapabilities(model: string): Promise<ModelCapabili
       // resolveClip works in frames; derive a frame ceiling from the real duration
       // limit (× the 16-fps default) so its frame math stays bounded.
       caps.frameRange = { min: 1, max: Math.max(1, Math.round(maxSec * 16)) }
-      if (!tsl) caps.discoveryErrors!.push('framepack total_second_length absent — using 120s fallback')
+      if (!tsl) caps.discoveryErrors!.push('framepack total_second_length absent, using 120s fallback')
       break
     }
     case 'wan':

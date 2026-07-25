@@ -63,5 +63,5 @@ export function renderBgStatusOneLine(s: BgTaskStatus): string {
   const elapsed = s.finished_at
     ? `${s.finished_at - s.started_at}s`
     : `${Math.max(0, Math.floor(Date.now() / 1000) - s.started_at)}s`
-  return `[${s.id.slice(0, 8)}] ${phase} (${elapsed}) — ${s.command}`
+  return `[${s.id.slice(0, 8)}] ${phase} (${elapsed}), ${s.command}`
 }

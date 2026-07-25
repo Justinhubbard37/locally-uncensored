@@ -60,7 +60,7 @@ export function remoteBackendArgs(
  * case any future caller bypasses the store.
  */
 export const REMOTE_DEV_MODE_ERROR =
-  "Remote Access requires the installed desktop app. The plain `npm run dev` server can't host the Rust backend Remote needs (built-in HTTP server, secure passcodes, Cloudflare tunnel). For full Remote in development, use `npm run tauri:dev` instead — it brings the Rust side in and Remote works there too."
+  "Remote Access requires the installed desktop app. The plain `npm run dev` server can't host the Rust backend Remote needs (built-in HTTP server, secure passcodes, Cloudflare tunnel). For full Remote in development, use `npm run tauri:dev` instead, it brings the Rust side in and Remote works there too."
 
 /**
  * Enrich a system prompt with the user's memory context so Remote chats
