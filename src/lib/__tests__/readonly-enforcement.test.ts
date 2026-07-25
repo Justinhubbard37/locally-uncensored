@@ -84,3 +84,26 @@ describe('both hooks still carry the guard', () => {
     }
   })
 })
+
+describe('/loop budget is enforced in the run, not just stated', () => {
+  it('useCodex checks the wall clock between iterations', () => {
+    const src = read('../../hooks/useCodex.ts')
+    // The deadline has to be derived from the command, not from a setting.
+    expect(src).toContain("slash?.command.name === 'loop' ? parseLoopBudget(slash.args).budgetMs : null")
+    expect(src).toContain('if (loopDeadline && Date.now() > loopDeadline && i > 0)')
+    // And it must report the stop rather than going quiet.
+    expect(src).toContain('time is up')
+  })
+
+  it('the check sits at the TOP of the iteration, never mid-tool', () => {
+    const src = read('../../hooks/useCodex.ts')
+    const loopHead = src.indexOf('for (let i = 0; i < MAX_CODEX_ITERATIONS')
+    const deadline = src.indexOf('if (loopDeadline && Date.now() > loopDeadline')
+    const firstExec = src.indexOf('budget.addToolCalls(')
+    expect(loopHead).toBeGreaterThan(0)
+    expect(deadline).toBeGreaterThan(loopHead)
+    // Cutting a run off inside file_edit or a shell command would leave the
+    // workspace in a state nobody asked for.
+    expect(deadline).toBeLessThan(firstExec)
+  })
+})

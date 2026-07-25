@@ -48,6 +48,12 @@ function stripChannelTags(text: string): string {
   t = t.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '').replace(/<\/?tool_call>/gi, '')
   t = t.replace(/<tool_response>[\s\S]*?<\/tool_response>/gi, '').replace(/<\/?tool_response>/gi, '')
   t = t.replace(/<tool_result>[\s\S]*?<\/tool_result>/gi, '').replace(/<\/?tool_result>/gi, '')
+  //    1b) The same tag with its opening bracket already eaten. Captured off
+  //    the wire 2026-07-25: Qwen3-32B through LU Cloud sends
+  //    `</think>\n\nool_call>` as content next to a valid tool_calls array —
+  //    the PROVIDER's parser drops the `<t`, so a pattern anchored on `<`
+  //    cannot see the remainder. Line-anchored so prose is never touched.
+  t = t.replace(/^[ \t]*<?[|/]*t?ool_(?:call|calls|response|result)s?[|/]*>[ \t]*$/gim, '')
   // 2) The autonomous-continue NUDGE, if a weak model parrots it back as its
   //    own answer (qwen2.5-coder:7b did this verbatim). It is OUR fixed
   //    instruction from useCodex — strip from its opening clause ("…continue
