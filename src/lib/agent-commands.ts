@@ -50,26 +50,40 @@ export interface AgentCommand {
 /** Shared closing line so every command nudges the agent to act, not narrate. */
 const ACT = 'Use your tools to do this for real — do not just describe the steps. Be concise in text; the work happens in tool calls. Reply in the user\'s language.'
 
-/** Longest budget /loop will accept. Beyond this it is not a loop, it is a job. */
-export const MAX_LOOP_BUDGET_MS = 4 * 60 * 60 * 1000
-/** Used when the user gives no duration — long enough to be useful, short
- *  enough that a forgotten loop cannot quietly bill an afternoon of cloud. */
-export const DEFAULT_LOOP_BUDGET_MS = 15 * 60 * 1000
+/** How long the whole loop may run across all passes. A ceiling, not a deadline
+ *  for the work: a forgotten loop must not bill an afternoon of cloud. */
+export const MAX_LOOP_TOTAL_MS = 4 * 60 * 60 * 1000
+/** How many passes before we stop and hand back. */
+export const MAX_LOOP_PASSES = 10
+/** Pause between passes when the user names none. Short, because the value of a
+ *  loop is the re-check, not the waiting. */
+export const DEFAULT_LOOP_INTERVAL_MS = 5 * 1000
+/** Longest pause we will sit idle between passes. */
+export const MAX_LOOP_INTERVAL_MS = 30 * 60 * 1000
+
+/** The model ends a pass with one of these so the driver knows what to do. */
+export const LOOP_DONE_MARKER = 'LOOP_DONE'
+export const LOOP_CONTINUE_MARKER = 'LOOP_CONTINUE'
 
 /**
- * Pull a leading duration off `/loop`'s arguments: `20m`, `2h`, `90s`,
- * `1h30m`, or a bare number read as minutes. Returns the budget in ms plus
+ * Pull a leading interval off `/loop`'s arguments: `30s`, `20m`, `2h`,
+ * `1h30m`, or a bare number read as minutes. Returns the interval in ms plus
  * the remaining task text.
  *
- * The budget is REAL — useCodex stops the run when the clock runs out — so
- * parsing has to be strict about what counts as a duration. "5 minutes to
- * midnight" is a task, not a budget, which is why only a compact token at the
- * very start is accepted.
+ * This is the PAUSE BETWEEN PASSES, not a deadline. `/loop 30s <task>` means
+ * "work on it, then every 30 seconds look again and keep going until it is
+ * genuinely done" — the point is the repeated re-examination, so a model that
+ * declares victory early gets caught. An earlier version read it as a time
+ * limit, and Qwen3-32B then tried to cram the whole task into 30 seconds
+ * (David, 2026-07-25).
+ *
+ * Only a compact token at the very start counts, so "fix 20m of flakiness"
+ * stays a task.
  */
-export function parseLoopBudget(args: string): { budgetMs: number; rest: string } {
+export function parseLoopSpec(args: string): { intervalMs: number; rest: string } {
   const text = args.trim()
   const m = /^(\d+\s*h(?:\s*\d+\s*m)?|\d+\s*m(?:in)?|\d+\s*s(?:ec)?|\d+)\b[\s,:-]*/i.exec(text)
-  if (!m) return { budgetMs: DEFAULT_LOOP_BUDGET_MS, rest: text }
+  if (!m) return { intervalMs: DEFAULT_LOOP_INTERVAL_MS, rest: text }
 
   const token = m[1].replace(/\s+/g, '').toLowerCase()
   let ms = 0
@@ -79,8 +93,27 @@ export function parseLoopBudget(args: string): { budgetMs: number; rest: string 
   else if (/^\d+s(ec)?$/.test(token)) ms = parseInt(token, 10) * 1000
   else ms = parseInt(token, 10) * 60_000 // bare number = minutes
 
-  if (!ms) return { budgetMs: DEFAULT_LOOP_BUDGET_MS, rest: text }
-  return { budgetMs: Math.min(ms, MAX_LOOP_BUDGET_MS), rest: text.slice(m[0].length).trim() }
+  if (!ms) return { intervalMs: DEFAULT_LOOP_INTERVAL_MS, rest: text }
+  return { intervalMs: Math.min(ms, MAX_LOOP_INTERVAL_MS), rest: text.slice(m[0].length).trim() }
+}
+
+/**
+ * The instruction for pass 2 and beyond. The whole point of the loop: make the
+ * model re-read the ORIGINAL task and audit its own last pass, because "done"
+ * from a model that just did work is the least reliable claim it makes.
+ */
+export function buildLoopRecheck(task: string, pass: number): string {
+  return `This is pass ${pass} of a loop on this task:
+
+${task}
+
+Do not assume the previous pass was right. Re-read the task, then check the actual current state with your tools — the files, the test run, the build. Specifically:
+- Anything claimed as done that you have not PROVEN is still open. Prove it or fix it.
+- Anything the task asks for that has not been touched at all.
+- Anything the last pass broke on the way.
+
+If work remains, do it now and end your reply with ${LOOP_CONTINUE_MARKER} on its own line.
+If everything the task asks for is done AND verified, end your reply with ${LOOP_DONE_MARKER} on its own line, and name the check that proved it. Do not write ${LOOP_DONE_MARKER} on a hunch — an honest ${LOOP_CONTINUE_MARKER} costs one more pass, a wrong ${LOOP_DONE_MARKER} ships a broken result. ${ACT}`
 }
 
 /** "20m" / "1h 30m" / "45s" for the prompt and the UI. */
@@ -116,24 +149,23 @@ export const AGENT_COMMANDS: AgentCommand[] = [
   },
   {
     name: 'loop',
-    summary: 'Keep working until it is done, within a time budget',
-    argHint: '[20m] <task, and how you will know it is done>',
+    summary: 'Work, then re-check again and again until it is really done',
+    argHint: '[30s] <task, and how you will know it is done>',
     build: (a) => {
-      const { budgetMs, rest } = parseLoopBudget(a)
+      const { intervalMs, rest } = parseLoopSpec(a)
       const task = rest || 'the task the user just described'
-      const budgetLine = budgetMs
-        ? `\n\nYou have ${formatDuration(budgetMs)}. The app enforces it: when the time is up the run stops wherever it is, so spend it on the work and not on narration. If you can see you will not finish in time, say what you would do next and stop early rather than being cut off mid-edit.`
-        : ''
-      return `Work on this until it is genuinely finished: ${task}${budgetLine}
+      return `Work on this: ${task}
 
-Run it as a loop, not a single pass:
+This is pass 1 of a LOOP. The app will bring you back roughly every ${formatDuration(intervalMs)} to look at it again, up to ${MAX_LOOP_PASSES} passes, and each time you will be asked to prove what you claimed. So do not rush to a finish and do not pad the answer.
+
+Each pass:
 1) Do the next concrete step.
 2) VERIFY it — run the tests, the build, the command, whatever actually proves it. Reading your own change back is not verification.
-3) If the check fails, fix the cause and go back to step 2.
+3) If the check fails, fix the cause and check again.
 
-Stop when the finish condition is met, and say which check proved it.
+End this reply with ${LOOP_CONTINUE_MARKER} on its own line if anything is left, or ${LOOP_DONE_MARKER} on its own line if everything the task asks for is done AND verified, naming the check that proved it. A wrong ${LOOP_DONE_MARKER} ships a broken result; an honest ${LOOP_CONTINUE_MARKER} costs one more pass.
 
-Stop EARLY and say so plainly if: the same fix fails twice in a row, the next step needs a decision only the user can make, or you would have to guess at something you cannot look up. A loop that reports honest failure after three rounds is worth more than one that keeps going and reports success it did not earn. Never loosen the check to make it pass, and never delete or skip a test to go green. ${ACT}`
+Say so plainly and end with ${LOOP_DONE_MARKER} if you are genuinely stuck: the same fix failing twice, a decision only the user can make, or something you would have to guess at. Never loosen a check to make it pass, and never delete or skip a test to go green. ${ACT}`
     },
   },
 

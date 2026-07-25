@@ -85,25 +85,49 @@ describe('both hooks still carry the guard', () => {
   })
 })
 
-describe('/loop budget is enforced in the run, not just stated', () => {
-  it('useCodex checks the wall clock between iterations', () => {
+describe('/loop actually loops', () => {
+  // David, 2026-07-25: a loop is not a deadline. `/loop 30s <task>` means come
+  // back every 30 seconds and check again, so the agent cannot forget a piece
+  // and cannot get away with an early "done". An earlier build read the number
+  // as a time limit and Qwen3-32B tried to cram the whole task into 30 seconds.
+  it('derives the interval from the command, not from a setting', () => {
     const src = read('../../hooks/useCodex.ts')
-    // The deadline has to be derived from the command, not from a setting.
-    expect(src).toContain("slash?.command.name === 'loop' ? parseLoopBudget(slash.args).budgetMs : null")
-    expect(src).toContain('if (loopDeadline && Date.now() > loopDeadline && i > 0)')
-    // And it must report the stop rather than going quiet.
-    expect(src).toContain('time is up')
+    expect(src).toContain("slash?.command.name === 'loop'")
+    expect(src).toContain('parseLoopSpec(slash.args)')
   })
 
-  it('the check sits at the TOP of the iteration, never mid-tool', () => {
+  it('starts the NEXT pass after the interval instead of killing the run', () => {
+    const src = read('../../hooks/useCodex.ts')
+    expect(src).toContain('loopTimerRef.current = setTimeout(')
+    expect(src).toContain('buildLoopRecheck(loopState.task, nextPass)')
+    expect(src).toContain('}, loopState.intervalMs)')
+  })
+
+  it('stops on the done marker, the pass cap and the total ceiling', () => {
+    const src = read('../../hooks/useCodex.ts')
+    expect(src).toContain('LOOP_DONE_MARKER')
+    expect(src).toContain('nextPass > MAX_LOOP_PASSES')
+    expect(src).toContain('elapsed > MAX_LOOP_TOTAL_MS')
+  })
+
+  it('stop cancels a pass that is waiting out its interval', () => {
+    // Otherwise the run the user just killed comes back by itself.
+    const src = read('../../hooks/useCodex.ts')
+    const stopIdx = src.indexOf('const stopCodex = useCallback(')
+    expect(stopIdx).toBeGreaterThan(0)
+    const stopBody = src.slice(stopIdx, stopIdx + 600)
+    expect(stopBody).toContain('clearTimeout(loopTimerRef.current)')
+    expect(stopBody).toContain('userStoppedRef.current = true')
+  })
+
+  it('the total ceiling is checked between iterations, never mid-tool', () => {
     const src = read('../../hooks/useCodex.ts')
     const loopHead = src.indexOf('for (let i = 0; i < MAX_CODEX_ITERATIONS')
-    const deadline = src.indexOf('if (loopDeadline && Date.now() > loopDeadline')
+    const ceiling = src.indexOf('MAX_LOOP_TOTAL_MS && i > 0')
     const firstExec = src.indexOf('budget.addToolCalls(')
-    expect(loopHead).toBeGreaterThan(0)
-    expect(deadline).toBeGreaterThan(loopHead)
+    expect(ceiling).toBeGreaterThan(loopHead)
     // Cutting a run off inside file_edit or a shell command would leave the
     // workspace in a state nobody asked for.
-    expect(deadline).toBeLessThan(firstExec)
+    expect(ceiling).toBeLessThan(firstExec)
   })
 })

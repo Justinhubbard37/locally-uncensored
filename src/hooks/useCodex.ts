@@ -19,7 +19,10 @@ import { setActiveChatId, clearActiveChatId, chatWorkspaceSlug, setActiveWorkspa
 import { resolveWorkspace } from '../api/agents/workspace-resolve'
 import { useAgentModeStore } from '../stores/agentModeStore'
 import { loadLurules, renderRulesSection, type RulesReader } from '../lib/lurules'
-import { parseAgentCommand, parseLoopBudget, formatDuration } from '../lib/agent-commands'
+import {
+  parseAgentCommand, parseLoopSpec, buildLoopRecheck, formatDuration,
+  MAX_LOOP_PASSES, MAX_LOOP_TOTAL_MS, LOOP_DONE_MARKER,
+} from '../lib/agent-commands'
 import { useGenerationStore } from '../stores/generationStore'
 import { backendCall, isOllamaLocal } from '../api/backend'
 import { planWithArchitect, renderArchitectPlanSection } from '../api/agents/architect'
@@ -193,8 +196,20 @@ export function useCodex() {
   const [isRunning, setIsRunning] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const runningRef = useRef(false)
+  /** True once the user pressed stop, so the /loop driver does not start
+   *  another pass on the run they just killed. Cleared when a new run starts. */
+  const userStoppedRef = useRef(false)
+  /** The pending next /loop pass, so stop can cancel it mid-interval. */
+  const loopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const sendInstruction = useCallback(async (rawInstruction: string, opts?: { displayContent?: string }) => {
+  const sendInstruction = useCallback(async (
+    rawInstruction: string,
+    opts?: {
+      displayContent?: string
+      /** Set by the /loop driver when this run is pass 2 or later. */
+      loop?: { pass: number; intervalMs: number; task: string; startedAt: number }
+    },
+  ) => {
     const { activeModel } = useModelStore.getState()
     if (!activeModel) return
 
@@ -212,11 +227,19 @@ export function useCodex() {
     // this turn, so /review and /security physically cannot rewrite the files
     // they were asked to look at.
     const readOnlyTurn = slash?.command.readOnly === true
-    // `/loop [20m] …` — the budget is enforced by the loop below, not just
-    // stated in the prompt. A model told "you have 20 minutes" and left to
-    // police itself will happily run for an hour.
-    const loopBudgetMs = slash?.command.name === 'loop' ? parseLoopBudget(slash.args).budgetMs : null
-    const loopDeadline = loopBudgetMs ? Date.now() + loopBudgetMs : null
+    // A brand-new instruction clears a previous stop; a /loop pass inherits it.
+    if (!opts?.loop) userStoppedRef.current = false
+    // `/loop [30s] …` — the interval is the PAUSE BETWEEN PASSES, and the
+    // driver at the end of this function is what actually brings the model back.
+    // The value of a loop is the re-check: a model that declares victory early
+    // gets asked to prove it, with its own work in front of it.
+    const loopState = opts?.loop ??
+      (slash?.command.name === 'loop'
+        ? (() => {
+            const { intervalMs, rest } = parseLoopSpec(slash.args)
+            return { pass: 1, intervalMs, task: rest || rawInstruction, startedAt: Date.now() }
+          })()
+        : null)
 
     const store = useChatStore.getState()
     const codexStore = useCodexStore.getState()
@@ -670,17 +693,16 @@ export function useCodex() {
       // backstop. Floor of 1 so a stray 0 setting can't zero the loop.
       const MAX_CODEX_ITERATIONS = Math.max(settings.agentMaxIterations ?? 200, 1)
       for (let i = 0; i < MAX_CODEX_ITERATIONS && runningRef.current && !abort.signal.aborted; i++) {
-        // `/loop 20m …` — a real wall-clock deadline, checked between
-        // iterations. Never mid-tool: a run cut off inside file_edit or a shell
-        // command would leave the workspace in a state nobody asked for. So the
-        // budget is "no NEW step after this point", not a hard kill.
-        if (loopDeadline && Date.now() > loopDeadline && i > 0) {
+        // A loop's TOTAL runtime ceiling, checked between iterations so a run is
+        // never cut off inside a file_edit or a shell command. This is the
+        // runaway guard across all passes, not a deadline for the work.
+        if (loopState && Date.now() - loopState.startedAt > MAX_LOOP_TOTAL_MS && i > 0) {
           const done = fullContent.trim()
           useChatStore.getState().updateMessageContent(
             convId!,
             assistantMsg.id,
             (done ? done + '\n\n' : '') +
-              `_(time is up: the ${formatDuration(loopBudgetMs!)} budget for this loop ran out after ${i} step${i === 1 ? '' : 's'}. Nothing was cut off mid-step. Send /loop again with a longer budget to carry on.)_`,
+              `_(this loop has been running for ${formatDuration(MAX_LOOP_TOTAL_MS)} and stopped there. Nothing was cut off mid-step.)_`,
           )
           break
         }
@@ -1714,10 +1736,64 @@ export function useCodex() {
       abortRef.current = null
       clearActiveChatId()
       codexStore.setThreadStatus(convId, 'idle')
+
+      // ── /loop driver ───────────────────────────────────────────────────
+      // The pass is over. A loop is not "one long turn": it is the model being
+      // brought BACK with its own work in front of it and asked to prove the
+      // claim. That is the whole value, and it is why the interval is a pause
+      // between passes rather than a deadline for the task.
+      //
+      // We stop on LOOP_DONE, on the pass cap, on the total-time ceiling, or
+      // when the user hits stop (loopTimerRef is cleared there).
+      if (loopState && convId && !userStoppedRef.current) {
+        const answer = fullContent.trim()
+        const saidDone = new RegExp(`(^|\\s)${LOOP_DONE_MARKER}\\s*$`).test(answer)
+        const elapsed = Date.now() - loopState.startedAt
+        const nextPass = loopState.pass + 1
+
+        if (saidDone) {
+          // Nothing to do — the marker is stripped from the display by
+          // cleanCodexText, so the user just sees the answer.
+        } else if (nextPass > MAX_LOOP_PASSES) {
+          useChatStore.getState().addMessage(convId, {
+            id: uuid(), role: 'assistant', timestamp: Date.now(),
+            content: `Stopped after ${MAX_LOOP_PASSES} passes without a clean finish. What is above is where it got to. Send /loop again to keep going, or take it from here yourself.`,
+          })
+        } else if (elapsed > MAX_LOOP_TOTAL_MS) {
+          useChatStore.getState().addMessage(convId, {
+            id: uuid(), role: 'assistant', timestamp: Date.now(),
+            content: `Stopped after ${formatDuration(elapsed)} of looping. What is above is where it got to.`,
+          })
+        } else {
+          const convForLoop = convId
+          loopTimerRef.current = setTimeout(() => {
+            loopTimerRef.current = null
+            // Bail if the user moved on or started something else meanwhile.
+            if (runningRef.current) return
+            if (useChatStore.getState().activeConversationId !== convForLoop) return
+            void sendRef.current?.(buildLoopRecheck(loopState.task, nextPass), {
+              displayContent: `pass ${nextPass} of ${MAX_LOOP_PASSES}`,
+              loop: { ...loopState, pass: nextPass },
+            })
+          }, loopState.intervalMs)
+        }
+      }
     }
   }, [])
 
+  // Self-reference so the /loop driver can start the next pass. A plain
+  // recursive call is not possible inside the useCallback that defines it.
+  const sendRef = useRef<typeof sendInstruction | null>(null)
+  sendRef.current = sendInstruction
+
   const stopCodex = useCallback(() => {
+    // Stop means stop: also cancel a /loop pass that is waiting out its
+    // interval, otherwise the run the user just killed comes back by itself.
+    userStoppedRef.current = true
+    if (loopTimerRef.current) {
+      clearTimeout(loopTimerRef.current)
+      loopTimerRef.current = null
+    }
     runningRef.current = false
     abortRef.current?.abort()
     abortRef.current = null

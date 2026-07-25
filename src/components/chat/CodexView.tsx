@@ -54,6 +54,9 @@ function stripChannelTags(text: string): string {
   //    the PROVIDER's parser drops the `<t`, so a pattern anchored on `<`
   //    cannot see the remainder. Line-anchored so prose is never touched.
   t = t.replace(/^[ \t]*<?[|/]*t?ool_(?:call|calls|response|result)s?[|/]*>[ \t]*$/gim, '')
+  //    1c) The /loop control markers. They are protocol between the driver and
+  //    the model, not something the user needs to read.
+  t = t.replace(/^[ \t]*LOOP_(?:DONE|CONTINUE)[ \t]*$/gm, '')
   // 2) The autonomous-continue NUDGE, if a weak model parrots it back as its
   //    own answer (qwen2.5-coder:7b did this verbatim). It is OUR fixed
   //    instruction from useCodex — strip from its opening clause ("…continue

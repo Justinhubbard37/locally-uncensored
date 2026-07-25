@@ -4,10 +4,14 @@ import {
   getAgentCommand,
   parseAgentCommand,
   matchAgentCommands,
-  parseLoopBudget,
+  parseLoopSpec,
+  buildLoopRecheck,
   formatDuration,
-  DEFAULT_LOOP_BUDGET_MS,
-  MAX_LOOP_BUDGET_MS,
+  DEFAULT_LOOP_INTERVAL_MS,
+  MAX_LOOP_INTERVAL_MS,
+  MAX_LOOP_PASSES,
+  LOOP_DONE_MARKER,
+  LOOP_CONTINUE_MARKER,
 } from '../agent-commands'
 import { MUTATING_TOOLS } from '../mutating-tools'
 
@@ -59,15 +63,6 @@ describe('AGENT_COMMANDS registry', () => {
     // would need its own branch in three hooks and would silently no-op if it
     // did not get one.
     expect(AGENT_COMMANDS.filter((c) => c.handledLocally).map((c) => c.name)).toEqual(['goal'])
-  })
-
-  it('/loop refuses to fake a green result', () => {
-    const t = getAgentCommand('loop')!.build('make the tests pass')
-    expect(t).toContain('Never loosen the check to make it pass')
-    expect(t).toContain('never delete or skip a test to go green')
-    // And it has to stop rather than spin: a loop with no exit burns a cloud
-    // budget until the iteration cap saves it.
-    expect(t).toContain('Stop EARLY')
   })
 
   it('an argument the user typed always reaches the expansion', () => {
@@ -215,44 +210,75 @@ describe('matchAgentCommands (autocomplete)', () => {
   })
 })
 
-describe('/loop time budget', () => {
+describe('/loop interval', () => {
+  // The interval is the PAUSE BETWEEN PASSES, not a deadline. An earlier build
+  // treated it as a time limit and Qwen3-32B then tried to cram the whole task
+  // into 30 seconds (David, 2026-07-25).
   it('reads the compact forms', () => {
-    expect(parseLoopBudget('20m fix the tests').budgetMs).toBe(20 * 60_000)
-    expect(parseLoopBudget('2h refactor').budgetMs).toBe(2 * 3_600_000)
-    expect(parseLoopBudget('90s smoke').budgetMs).toBe(90_000)
-    expect(parseLoopBudget('1h30m big job').budgetMs).toBe(90 * 60_000)
-    expect(parseLoopBudget('45 something').budgetMs).toBe(45 * 60_000) // bare = minutes
+    expect(parseLoopSpec('30s fix the tests').intervalMs).toBe(30_000)
+    expect(parseLoopSpec('20m fix the tests').intervalMs).toBe(20 * 60_000)
+    // Capped: an interval longer than half an hour is not a loop cadence.
+    expect(parseLoopSpec('1h30m big job').intervalMs).toBe(MAX_LOOP_INTERVAL_MS)
+    // Bare number = minutes, also subject to the cap.
+    expect(parseLoopSpec('10 something').intervalMs).toBe(10 * 60_000)
   })
 
-  it('strips the duration out of the task text', () => {
-    expect(parseLoopBudget('20m fix the tests').rest).toBe('fix the tests')
-    expect(parseLoopBudget('2h: refactor the parser').rest).toBe('refactor the parser')
+  it('strips the interval out of the task text', () => {
+    expect(parseLoopSpec('30s fix the tests').rest).toBe('fix the tests')
+    expect(parseLoopSpec('2h: refactor the parser').rest).toBe('refactor the parser')
   })
 
-  it('falls back to a default when no duration is given', () => {
-    const r = parseLoopBudget('make the build green')
-    expect(r.budgetMs).toBe(DEFAULT_LOOP_BUDGET_MS)
+  it('falls back to a short default when none is given', () => {
+    const r = parseLoopSpec('make the build green')
+    expect(r.intervalMs).toBe(DEFAULT_LOOP_INTERVAL_MS)
     expect(r.rest).toBe('make the build green')
   })
 
-  it('caps a runaway budget', () => {
-    // A forgotten loop must not be able to bill a whole day of cloud.
-    expect(parseLoopBudget('99h forever').budgetMs).toBe(MAX_LOOP_BUDGET_MS)
+  it('caps a silly interval', () => {
+    expect(parseLoopSpec('99h forever').intervalMs).toBe(MAX_LOOP_INTERVAL_MS)
   })
 
-  it('does not mistake a task that starts with a number for a budget', () => {
-    // "3 failing tests" is the job, not the clock. Only a compact duration
-    // token counts, and a bare number is read as minutes by design, so this
-    // pins the shapes that must NOT be swallowed silently.
-    expect(parseLoopBudget('fix 20m of flakiness').budgetMs).toBe(DEFAULT_LOOP_BUDGET_MS)
-    expect(parseLoopBudget('fix 20m of flakiness').rest).toBe('fix 20m of flakiness')
+  it('does not mistake a task that mentions a duration for an interval', () => {
+    expect(parseLoopSpec('fix 20m of flakiness').intervalMs).toBe(DEFAULT_LOOP_INTERVAL_MS)
+    expect(parseLoopSpec('fix 20m of flakiness').rest).toBe('fix 20m of flakiness')
   })
 
-  it('states the budget in the prompt it sends', () => {
-    const t = getAgentCommand('loop')!.build('20m make the tests pass')
-    expect(t).toContain('You have 20m')
-    expect(t).toContain('The app enforces it')
-    expect(t).not.toContain('20m make the tests pass') // duration is consumed
+  it('tells the model it will be brought BACK, not that it has a deadline', () => {
+    const t = getAgentCommand('loop')!.build('30s make the tests pass')
+    expect(t).toContain('pass 1 of a LOOP')
+    expect(t).toContain('bring you back roughly every 30s')
+    expect(t).toContain(`up to ${MAX_LOOP_PASSES} passes`)
+    // The exact wording that caused the misread must not come back.
+    expect(t).not.toContain('You have 30s')
+    expect(t).not.toMatch(/time is up|budget/i)
+  })
+
+  it('makes the model declare done or continue explicitly', () => {
+    const t = getAgentCommand('loop')!.build('make the tests pass')
+    expect(t).toContain(LOOP_CONTINUE_MARKER)
+    expect(t).toContain(LOOP_DONE_MARKER)
+  })
+
+  it('still refuses to fake a green result', () => {
+    const t = getAgentCommand('loop')!.build('make the tests pass')
+    expect(t).toContain('Never loosen a check to make it pass')
+    expect(t).toContain('never delete or skip a test to go green')
+  })
+})
+
+describe('buildLoopRecheck — the actual point of a loop', () => {
+  it('makes the model audit its own last pass instead of trusting it', () => {
+    const t = buildLoopRecheck('make the tests pass', 3)
+    expect(t).toContain('pass 3')
+    expect(t).toContain('make the tests pass')
+    expect(t).toContain('Do not assume the previous pass was right')
+    expect(t).toContain('claimed as done that you have not PROVEN')
+  })
+
+  it('prices the two markers honestly, so DONE is not the cheap option', () => {
+    const t = buildLoopRecheck('x', 2)
+    expect(t).toContain(`an honest ${LOOP_CONTINUE_MARKER} costs one more pass`)
+    expect(t).toContain(`a wrong ${LOOP_DONE_MARKER} ships a broken result`)
   })
 })
 
