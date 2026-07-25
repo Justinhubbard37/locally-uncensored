@@ -1,8 +1,9 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import { useCompareStore } from '../../stores/compareStore'
 import { useModels } from '../../hooks/useModels'
 import { useABCompare } from '../../hooks/useABCompare'
 import { MarkdownRenderer } from './MarkdownRenderer'
+import { stripModelNoise } from '../../lib/strip-model-noise'
 import { ArrowLeft, Send, Square, Zap, Clock, Hash } from 'lucide-react'
 
 export function ABCompare() {
@@ -40,6 +41,16 @@ export function ABCompare() {
     sendCompare(input)
     setInput('')
   }
+
+  // Cleaned assistant text per pane. Memoised on a length signature because
+  // both panes stream at once and the strip would otherwise re-run its whole
+  // regex set over every message on every token.
+  const sig = (ms: typeof messagesA) => ms.reduce((n, m) => n + (m.content || '').length, 0) + ':' + ms.length
+  const sigA = sig(messagesA), sigB = sig(messagesB)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const cleanA = useMemo(() => new Map(messagesA.map((m) => [m.id, stripModelNoise(m.content || '')])), [sigA])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const cleanB = useMemo(() => new Map(messagesB.map((m) => [m.id, stripModelNoise(m.content || '')])), [sigB])
 
   return (
     <div className="h-full flex flex-col">
@@ -103,7 +114,7 @@ export function ABCompare() {
             {messagesA.map(msg => (
               <div key={msg.id} className={`text-[0.7rem] ${msg.role === 'user' ? 'text-gray-400 italic' : 'text-gray-200'}`}>
                 {msg.role === 'assistant' ? (
-                  <MarkdownRenderer content={msg.content || (isStreamingA ? '...' : '')} />
+                  <MarkdownRenderer content={cleanA.get(msg.id) || (isStreamingA ? '...' : '')} />
                 ) : (
                   <p>{msg.content}</p>
                 )}
@@ -128,7 +139,7 @@ export function ABCompare() {
             {messagesB.map(msg => (
               <div key={msg.id} className={`text-[0.7rem] ${msg.role === 'user' ? 'text-gray-400 italic' : 'text-gray-200'}`}>
                 {msg.role === 'assistant' ? (
-                  <MarkdownRenderer content={msg.content || (isStreamingB ? '...' : '')} />
+                  <MarkdownRenderer content={cleanB.get(msg.id) || (isStreamingB ? '...' : '')} />
                 ) : (
                   <p>{msg.content}</p>
                 )}

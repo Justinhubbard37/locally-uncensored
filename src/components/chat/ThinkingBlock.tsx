@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronDown, Brain } from 'lucide-react'
 import { MarkdownRenderer } from './MarkdownRenderer'
+import { stripModelNoise } from '../../lib/strip-model-noise'
 
 interface Props {
     thinking: string
@@ -18,7 +19,13 @@ export function ThinkingBlock({ thinking, streaming }: Props) {
     // When the turn ends, drop the manual override so the NEXT turn auto-expands.
     useEffect(() => { if (!streaming) setUserToggled(null) }, [streaming])
 
-    if (!thinking) return null
+    // Strip orchestration out of the reasoning too (2.5.9): Qwen3-32B writes
+    // its planned call as a raw <tool_call> tag inside the thought, and that
+    // call is already rendered properly as its own block right below. Guard on
+    // the CLEANED text so a thought that was nothing but a tag does not leave
+    // an empty "Thinking" header behind.
+    const cleaned = useMemo(() => stripModelNoise(thinking || ''), [thinking])
+    if (!cleaned) return null
 
     return (
         <div className="mb-0.5">
@@ -46,7 +53,7 @@ export function ThinkingBlock({ thinking, streaming }: Props) {
                     >
                         <div className="pl-4 pb-1 pt-0.5">
                             <div className="text-[0.65rem] leading-relaxed italic text-blue-200/40">
-                                <MarkdownRenderer content={thinking} />
+                                <MarkdownRenderer content={cleaned} />
                             </div>
                         </div>
                     </motion.div>

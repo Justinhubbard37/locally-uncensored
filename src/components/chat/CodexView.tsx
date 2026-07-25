@@ -22,68 +22,11 @@ import { SlashStepsBlock } from './SlashStepsBlock'
 import { User, Code, Eye, GitBranch, Download, RefreshCw, RotateCcw, Folder, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { checkGitInstalled, openExternal, type GitStatus } from '../../api/backend'
-import { extractToolCallsWithRanges, stripRanges } from '../../lib/tool-call-repair'
 import { CodexConfirmDialog } from './CodexConfirmDialog'
+import { stripModelNoise } from '../../lib/strip-model-noise'
 
-function stripChannelTags(text: string): string {
-  let t = text
-    .replace(/<\|?channel>?\s*thought\s*/gi, '')
-    .replace(/<\|?channel\|?>/gi, '')
-    .replace(/<channel\|>/gi, '')
-  // ChatML / special-token delimiters. A degenerating local model can spew its
-  // own template tokens as content — qwen2.5-coder:14b emitted a burst of
-  // <|im_start|> mid-stream 2026-06-02. <|im_start|>, <|im_end|>, <|endoftext|>,
-  // <|assistant|> etc. are NEVER real answer text, so strip any <|word|> token.
-  t = t.replace(/<\|[a-z0-9_]+\|>/gi, '')
-  // Display safety net (David 2026-06-02): the user must only ever see real
-  // prose answers + the rendered tool-call BLOCKS — never raw tool-call JSON,
-  // hermes orchestration tags, or our own continue-nudge echoed back as prose.
-  // The engine strips most of this upstream, but this guarantees a leak can
-  // never surface in the chat regardless of which weak model is driving.
-  //
-  // 1) tool_call / tool_response / tool_result tags + their content. qwen2.5-
-  //    coder:7b (confirmed live 2026-06-02) HALLUCINATES hermes-style
-  //    <tool_response> Error: … </tool_response> blocks INTO its prose. Native
-  //    tool results are role:'tool' messages and never reach assistant content,
-  //    so anything matching these tags is noise meant only for the model.
-  t = t.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '').replace(/<\/?tool_call>/gi, '')
-  t = t.replace(/<tool_response>[\s\S]*?<\/tool_response>/gi, '').replace(/<\/?tool_response>/gi, '')
-  t = t.replace(/<tool_result>[\s\S]*?<\/tool_result>/gi, '').replace(/<\/?tool_result>/gi, '')
-  //    1b) The same tag with its opening bracket already eaten. Captured off
-  //    the wire 2026-07-25: Qwen3-32B through LU Cloud sends
-  //    `</think>\n\nool_call>` as content next to a valid tool_calls array —
-  //    the PROVIDER's parser drops the `<t`, so a pattern anchored on `<`
-  //    cannot see the remainder. Line-anchored so prose is never touched.
-  t = t.replace(/^[ \t]*<?[|/]*t?ool_(?:call|calls|response|result)s?[|/]*>[ \t]*$/gim, '')
-  //    1c) The /loop control markers. They are protocol between the driver and
-  //    the model, not something the user needs to read.
-  //    The template asks for a reason after the marker, so drop the whole line
-  //    rather than leaving a dangling "(verified by …)".
-  t = t.replace(/^[ \t]*LOOP_(?:DONE|CONTINUE)\b.*$/gm, '')
-  // 2) The autonomous-continue NUDGE, if a weak model parrots it back as its
-  //    own answer (qwen2.5-coder:7b did this verbatim). It is OUR fixed
-  //    instruction from useCodex — strip from its opening clause ("…continue
-  //    working autonomously…") through the closing "finished and verified."
-  //    so the orchestration sentence never reads as a real LLM answer.
-  t = t.replace(/(?:please wait[,;:]?\s*(?:while\s+)?i\s+(?:will\s+)?)?continue working autonomously[\s\S]*?finished and verified\.?/gi, '')
-  // 3) Tool-call JSON the model emitted as CONTENT, PARSE-FREE. The structured
-  //    extractor below relies on JSON.parse via repairJson — which FAILS when
-  //    the model puts LITERAL newlines inside a string value (qwen2.5-coder:14b
-  //    emitted ```json {"name":"file_write","arguments":{"content":"line1<real
-  //    newline>line2"}}``` 2026-06-02), so that whole blob would leak as the
-  //    "answer". Strip it by pattern, no parsing:
-  //    (a) a fenced ```…``` block whose body is a "name"+"arguments" tool call.
-  t = t.replace(/```[a-z]*\s*\n?\s*\{[\s\S]*?["']name["']\s*:[\s\S]*?["']arguments["']\s*:[\s\S]*?```/gi, '')
-  //    (b) an unfenced / truncated {"name":"…","arguments": … blob — strip from
-  //        the header to end of text (a tool-call dump is never real prose, and
-  //        a truncated one has no clean close for the brace-balancer to find).
-  t = t.replace(/\{\s*["']?(?:name|tool|function)["']?\s*:\s*["'][a-z0-9_]+["']\s*,\s*["']?(?:arguments|args|parameters|input)["']?\s*:[\s\S]*$/i, '')
-  try {
-    const { ranges } = extractToolCallsWithRanges(t)
-    if (ranges.length) t = stripRanges(t, ranges)
-  } catch { /* ignore — never let a strip error hide the answer */ }
-  return t.trim()
-}
+// Code always drives a tool loop, so the aggressive tier applies here.
+const stripChannelTags = (text: string) => stripModelNoise(text, { aggressive: true })
 
 // Code-Mode renders EVERY between-tool answer as normal, always-visible prose
 // now (David 2026-06-04: "kein Collapse, das soll ganz normal wie eine Antwort
@@ -310,7 +253,7 @@ export function CodexView() {
                                   key={block.id}
                                   className="px-2 py-1.5 rounded border border-gray-200 dark:border-white/10 bg-gray-50/60 dark:bg-white/[0.02] text-[0.7rem] text-gray-700 dark:text-gray-300"
                                 >
-                                  <MarkdownRenderer content={block.content} />
+                                  <MarkdownRenderer content={stripModelNoise(block.content)} />
                                 </div>
                               ))}
                           </div>

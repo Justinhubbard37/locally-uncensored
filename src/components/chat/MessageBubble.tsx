@@ -9,6 +9,7 @@ import { VramSwitchCard } from './VramSwitchCard'
 import { SpeakerButton } from './SpeakerButton'
 import { ChatArtifactCard } from './ChatArtifactCard'
 import type { Message } from '../../types/chat'
+import { stripModelNoise } from '../../lib/strip-model-noise'
 import { useAgentModeStore } from '../../stores/agentModeStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useModelStore } from '../../stores/modelStore'
@@ -80,6 +81,33 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
   // banner can't flash mid-stream while a visible thinking phase runs.
   const thoughtOnly = !isUser && !(message.content || '').trim() && !!(message.thinking || '').trim()
     && (!isLast || !!message.usage)
+
+  // Orchestration strip for everything this bubble renders (2.5.9). Memoised:
+  // the regex set is not cheap and a long agent chat re-renders these bubbles
+  // often. Aggressive tier only while a tool loop drives the turn — in plain
+  // chat a {"name": …, "arguments": …} block is often the answer itself.
+  // Signature, not the array itself: a streaming turn may grow a block's
+  // content in place, leaving the array reference identical. Keying on the
+  // total length re-runs the strip on every token while still skipping the
+  // work on unrelated re-renders.
+  const blockSig = (message.agentBlocks ?? []).reduce((n, b) => n + b.content.length, 0)
+    + ':' + (message.agentBlocks?.length ?? 0)
+  const cleanBlocks = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const b of message.agentBlocks ?? []) {
+      if (b.phase === 'answer') map.set(b.id, stripModelNoise(b.content, { aggressive: true }))
+    }
+    return map
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blockSig])
+  // Aggressive while a tool loop drives the turn, same as Code. In plain chat
+  // the gentle tier only, because a {"name": …, "arguments": …} block there can
+  // be exactly the answer the user asked the model to print.
+  const toolLoopDriven = isAgentActive || !!message.agentBlocks?.length
+  const cleanContent = useMemo(
+    () => (isUser ? '' : stripModelNoise(message.content || '', { aggressive: toolLoopDriven })),
+    [isUser, message.content, toolLoopDriven],
+  )
   const thoughtOnlyToolIntent = useMemo(
     () => thoughtOnly && !isAgentActive && !chatToolsEnabled && looksLikeToolIntent(message.thinking || ''),
     [thoughtOnly, isAgentActive, chatToolsEnabled, message.thinking],
@@ -194,10 +222,14 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
                   return <ReflectionBlock key={block.id} content={block.content} />
                 }
                 if (block.phase === 'answer') {
+                  // A block that was ONLY orchestration (a bare LOOP_DONE line,
+                  // a stray ool_call>) renders nothing, not an empty bubble.
+                  const clean = cleanBlocks.get(block.id) ?? ''
+                  if (!clean) return null
                   return (
                     <div key={block.id} className="px-1 py-0.5">
                       <div className="text-[0.8rem] leading-relaxed">
-                        <MarkdownRenderer content={block.content} />
+                        <MarkdownRenderer content={clean} />
                       </div>
                     </div>
                   )
@@ -275,13 +307,14 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
             // a duplicate dump at the bottom. Falls back to message.content
             // for legacy chats / non-agent messages without answer blocks.
             (() => {
-              const hasAnswerBlock = !!message.agentBlocks?.some(
-                (b) => b.phase === 'answer' && b.content.trim(),
-              )
+              // Judge "has a real answer block" on the STRIPPED text: a block
+              // holding nothing but a LOOP_DONE line must not suppress the
+              // fallback, or the turn renders blank.
+              const hasAnswerBlock = [...cleanBlocks.values()].some(Boolean)
               if (hasAnswerBlock) return null
               return (
                 <div className="text-[0.78rem] leading-relaxed">
-                  <MarkdownRenderer content={message.content} />
+                  <MarkdownRenderer content={cleanContent} />
                   {thoughtOnly && (
                     thoughtOnlyToolIntent && activeModel && isAgentCompatible(activeModel) ? (
                       <div className="mt-1 flex items-start gap-2 px-2 py-1.5 rounded-md border border-amber-400/30 bg-amber-500/10 text-[0.65rem] text-amber-700 dark:text-amber-200">
