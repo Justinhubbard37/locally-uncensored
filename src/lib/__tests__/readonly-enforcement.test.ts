@@ -105,7 +105,7 @@ describe('/loop actually loops', () => {
 
   it('stops on the done marker, the pass cap and the total ceiling', () => {
     const src = read('../../hooks/useCodex.ts')
-    expect(src).toContain('LOOP_DONE_MARKER')
+    expect(src).toContain('loopPassSaysDone(answer)')
     expect(src).toContain('nextPass > MAX_LOOP_PASSES')
     expect(src).toContain('elapsed > MAX_LOOP_TOTAL_MS')
   })

@@ -56,7 +56,9 @@ function stripChannelTags(text: string): string {
   t = t.replace(/^[ \t]*<?[|/]*t?ool_(?:call|calls|response|result)s?[|/]*>[ \t]*$/gim, '')
   //    1c) The /loop control markers. They are protocol between the driver and
   //    the model, not something the user needs to read.
-  t = t.replace(/^[ \t]*LOOP_(?:DONE|CONTINUE)[ \t]*$/gm, '')
+  //    The template asks for a reason after the marker, so drop the whole line
+  //    rather than leaving a dangling "(verified by …)".
+  t = t.replace(/^[ \t]*LOOP_(?:DONE|CONTINUE)\b.*$/gm, '')
   // 2) The autonomous-continue NUDGE, if a weak model parrots it back as its
   //    own answer (qwen2.5-coder:7b did this verbatim). It is OUR fixed
   //    instruction from useCodex — strip from its opening clause ("…continue

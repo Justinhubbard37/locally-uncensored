@@ -66,6 +66,23 @@ export const LOOP_DONE_MARKER = 'LOOP_DONE'
 export const LOOP_CONTINUE_MARKER = 'LOOP_CONTINUE'
 
 /**
+ * Did the model declare this pass finished?
+ *
+ * Deliberately generous about what follows the marker, because the template
+ * ASKS for a reason after it. Qwen3-32B wrote `LOOP_DONE (verified by
+ * code_execute test)` and an end-anchored match missed it, so the loop kept
+ * re-running an already-finished task (caught live on the ship exe,
+ * 2026-07-25). A CONTINUE anywhere wins: if the model said both, it is not
+ * done.
+ */
+export function loopPassSaysDone(answer: string): boolean {
+  if (!answer) return false
+  const hasContinue = new RegExp(`\\b${LOOP_CONTINUE_MARKER}\\b`).test(answer)
+  if (hasContinue) return false
+  return new RegExp(`\\b${LOOP_DONE_MARKER}\\b`).test(answer)
+}
+
+/**
  * Pull a leading interval off `/loop`'s arguments: `30s`, `20m`, `2h`,
  * `1h30m`, or a bare number read as minutes. Returns the interval in ms plus
  * the remaining task text.

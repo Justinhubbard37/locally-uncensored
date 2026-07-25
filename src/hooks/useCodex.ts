@@ -21,7 +21,7 @@ import { useAgentModeStore } from '../stores/agentModeStore'
 import { loadLurules, renderRulesSection, type RulesReader } from '../lib/lurules'
 import {
   parseAgentCommand, parseLoopSpec, buildLoopRecheck, formatDuration,
-  MAX_LOOP_PASSES, MAX_LOOP_TOTAL_MS, LOOP_DONE_MARKER,
+  MAX_LOOP_PASSES, MAX_LOOP_TOTAL_MS, loopPassSaysDone,
 } from '../lib/agent-commands'
 import { useGenerationStore } from '../stores/generationStore'
 import { backendCall, isOllamaLocal } from '../api/backend'
@@ -1747,7 +1747,7 @@ export function useCodex() {
       // when the user hits stop (loopTimerRef is cleared there).
       if (loopState && convId && !userStoppedRef.current) {
         const answer = fullContent.trim()
-        const saidDone = new RegExp(`(^|\\s)${LOOP_DONE_MARKER}\\s*$`).test(answer)
+        const saidDone = loopPassSaysDone(answer)
         const elapsed = Date.now() - loopState.startedAt
         const nextPass = loopState.pass + 1
 

@@ -12,6 +12,7 @@ import {
   MAX_LOOP_PASSES,
   LOOP_DONE_MARKER,
   LOOP_CONTINUE_MARKER,
+  loopPassSaysDone,
 } from '../agent-commands'
 import { MUTATING_TOOLS } from '../mutating-tools'
 
@@ -288,5 +289,31 @@ describe('formatDuration', () => {
     expect(formatDuration(20 * 60_000)).toBe('20m')
     expect(formatDuration(90 * 60_000)).toBe('1h 30m')
     expect(formatDuration(2 * 3_600_000)).toBe('2h')
+  })
+})
+
+describe('loopPassSaysDone', () => {
+  // Caught live on the ship exe, 2026-07-25: Qwen3-32B ended with
+  // "LOOP_DONE (verified by code_execute test)" and an end-anchored match
+  // missed it, so the loop kept re-running an already-finished task. The
+  // template ASKS for that reason, so the detector has to tolerate it.
+  it('accepts the marker with the reason the template asks for', () => {
+    expect(loopPassSaysDone('All good.\nLOOP_DONE (verified by code_execute test)')).toBe(true)
+    expect(loopPassSaysDone('LOOP_DONE, tests pass')).toBe(true)
+    expect(loopPassSaysDone('done.\nLOOP_DONE')).toBe(true)
+  })
+
+  it('does not finish on a continue', () => {
+    expect(loopPassSaysDone('still work left\nLOOP_CONTINUE')).toBe(false)
+  })
+
+  it('treats a pass that says both as NOT done', () => {
+    // Safer to spend one more pass than to ship on an ambiguous claim.
+    expect(loopPassSaysDone('LOOP_DONE for the helper, LOOP_CONTINUE for the tests')).toBe(false)
+  })
+
+  it('does not finish on silence', () => {
+    expect(loopPassSaysDone('I added the function.')).toBe(false)
+    expect(loopPassSaysDone('')).toBe(false)
   })
 })
