@@ -12,6 +12,7 @@ import { toolStrategyFor } from '../lib/tool-support'
 import { MUTATING_TOOLS } from '../lib/mutating-tools'
 import { applyGoalCommand } from '../lib/goal-command'
 import { useAgentGoalStore, renderGoalSection } from '../stores/agentGoalStore'
+import { useAgentLoopStore } from '../stores/agentLoopStore'
 import { CODEX_CONFIRM_TOOLS, codexConfirmEnabled } from './codexShellGate'
 import { buildHermesToolPrompt, buildHermesToolResult, parseHermesToolCalls, stripToolCallTags, hasToolCallTags } from '../api/hermes-tool-calling'
 import { chatNonStreaming } from '../api/agents'
@@ -20,8 +21,8 @@ import { resolveWorkspace } from '../api/agents/workspace-resolve'
 import { useAgentModeStore } from '../stores/agentModeStore'
 import { loadLurules, renderRulesSection, type RulesReader } from '../lib/lurules'
 import {
-  parseAgentCommand, parseLoopSpec, buildLoopRecheck, formatDuration,
-  MAX_LOOP_PASSES, MAX_LOOP_TOTAL_MS, loopPassSaysDone,
+  parseAgentCommand, parseLoopSpec, buildLoopRecheck,
+  loopPassSaysDone,
 } from '../lib/agent-commands'
 import { useGenerationStore } from '../stores/generationStore'
 import { backendCall, isOllamaLocal } from '../api/backend'
@@ -693,19 +694,6 @@ export function useCodex() {
       // backstop. Floor of 1 so a stray 0 setting can't zero the loop.
       const MAX_CODEX_ITERATIONS = Math.max(settings.agentMaxIterations ?? 200, 1)
       for (let i = 0; i < MAX_CODEX_ITERATIONS && runningRef.current && !abort.signal.aborted; i++) {
-        // A loop's TOTAL runtime ceiling, checked between iterations so a run is
-        // never cut off inside a file_edit or a shell command. This is the
-        // runaway guard across all passes, not a deadline for the work.
-        if (loopState && Date.now() - loopState.startedAt > MAX_LOOP_TOTAL_MS && i > 0) {
-          const done = fullContent.trim()
-          useChatStore.getState().updateMessageContent(
-            convId!,
-            assistantMsg.id,
-            (done ? done + '\n\n' : '') +
-              `_(this loop has been running for ${formatDuration(MAX_LOOP_TOTAL_MS)} and stopped there. Nothing was cut off mid-step.)_`,
-          )
-          break
-        }
         budget.addIteration()
         const bx = budget.exceeded()
         if (bx.kind !== 'none') {
@@ -1743,36 +1731,43 @@ export function useCodex() {
       // claim. That is the whole value, and it is why the interval is a pause
       // between passes rather than a deadline for the task.
       //
-      // We stop on LOOP_DONE, on the pass cap, on the total-time ceiling, or
-      // when the user hits stop (loopTimerRef is cleared there).
+      // It stops on LOOP_DONE, on the user's pass cap if they set one, or when
+      // they hit stop. There is NO built-in ceiling: a loop someone asked to
+      // keep going keeps going (David 2026-07-25). The stop button is the
+      // brake, and the loop bar above the composer makes sure it is never
+      // running invisibly.
       if (loopState && convId && !userStoppedRef.current) {
-        const answer = fullContent.trim()
-        const saidDone = loopPassSaysDone(answer)
-        const elapsed = Date.now() - loopState.startedAt
+        const saidDone = loopPassSaysDone(fullContent.trim())
+        const cap = Math.max(0, settings.loopMaxPasses ?? 0)
         const nextPass = loopState.pass + 1
 
         if (saidDone) {
           // Nothing to do — the marker is stripped from the display by
           // cleanCodexText, so the user just sees the answer.
-        } else if (nextPass > MAX_LOOP_PASSES) {
+          useAgentLoopStore.getState().clear()
+        } else if (cap > 0 && nextPass > cap) {
+          useAgentLoopStore.getState().clear()
           useChatStore.getState().addMessage(convId, {
             id: uuid(), role: 'assistant', timestamp: Date.now(),
-            content: `Stopped after ${MAX_LOOP_PASSES} passes without a clean finish. What is above is where it got to. Send /loop again to keep going, or take it from here yourself.`,
-          })
-        } else if (elapsed > MAX_LOOP_TOTAL_MS) {
-          useChatStore.getState().addMessage(convId, {
-            id: uuid(), role: 'assistant', timestamp: Date.now(),
-            content: `Stopped after ${formatDuration(elapsed)} of looping. What is above is where it got to.`,
+            content: `Stopped after ${cap} passes, which is the limit set in Settings. What is above is where it got to. Raise the limit or set it to unlimited to keep going.`,
           })
         } else {
           const convForLoop = convId
+          useAgentLoopStore.getState().start({
+            conversationId: convForLoop, pass: nextPass, cap,
+            task: loopState.task, intervalMs: loopState.intervalMs,
+            nextAt: Date.now() + loopState.intervalMs,
+          })
           loopTimerRef.current = setTimeout(() => {
             loopTimerRef.current = null
             // Bail if the user moved on or started something else meanwhile.
             if (runningRef.current) return
-            if (useChatStore.getState().activeConversationId !== convForLoop) return
+            if (useChatStore.getState().activeConversationId !== convForLoop) {
+              useAgentLoopStore.getState().clear()
+              return
+            }
             void sendRef.current?.(buildLoopRecheck(loopState.task, nextPass), {
-              displayContent: `pass ${nextPass} of ${MAX_LOOP_PASSES}`,
+              displayContent: cap > 0 ? `pass ${nextPass} of ${cap}` : `pass ${nextPass}`,
               loop: { ...loopState, pass: nextPass },
             })
           }, loopState.intervalMs)
@@ -1794,6 +1789,7 @@ export function useCodex() {
       clearTimeout(loopTimerRef.current)
       loopTimerRef.current = null
     }
+    useAgentLoopStore.getState().clear()
     runningRef.current = false
     abortRef.current?.abort()
     abortRef.current = null

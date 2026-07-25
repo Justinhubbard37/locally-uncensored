@@ -16,6 +16,7 @@ import { FileText, ChevronDown, Download, Wrench, Radio, RefreshCw, X } from 'lu
 import { PluginsDropdown } from './PluginsDropdown'
 import { ModelSelector } from '../models/ModelSelector'
 import { GoalBar } from './GoalBar'
+import { LoopBar } from './LoopBar'
 import { MemoryDebugToggle } from './MemoryDebugPanel'
 import { TokenCounter } from './TokenCounter'
 import { ContextDropdown } from './ContextDropdown'
@@ -339,7 +340,7 @@ export function ChatView() {
                 slashCommands={isAgentActive}
                 onAttachDocs={appMode !== 'cloud' ? () => setRagPanelOpen(true) : undefined}
                 composerModel={<ModelSelector openUpward />}
-                composerAbove={<GoalBar />}
+                composerAbove={<><LoopBar onStop={stopGeneration} /><GoalBar /></>}
                 composerActions={
                   <>
                     {/* Documents (RAG) — local-embeddings only, so hide in

@@ -40,6 +40,8 @@ import type { AgentBlock, AgentToolCall, OllamaChatMessage } from '../types/agen
 import { selectRelevantToolsAsync } from '../lib/tool-selection'
 import { MUTATING_TOOLS } from '../lib/mutating-tools'
 import { useAgentGoalStore, renderGoalSection } from '../stores/agentGoalStore'
+import { useAgentLoopStore } from '../stores/agentLoopStore'
+import { buildLoopRecheck, loopPassSaysDone } from '../lib/agent-commands'
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
 import { budgetFromSettings } from '../api/agents/budget'
@@ -97,6 +99,11 @@ export function useAgentChat() {
   const [pendingApproval, setPendingApproval] = useState<AgentToolCall | null>(null)
 
   const abortRef = useRef<AbortController | null>(null)
+  /** True once the user pressed stop, so the /loop driver does not start
+   *  another pass on the run they just killed. */
+  const userStoppedRef = useRef(false)
+  /** The pending next /loop pass, so stop can cancel it mid-interval. */
+  const loopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const approvalQueueRef = useRef<ApprovalEntry[]>([])
   const contentRef = useRef('')
   const thinkingRef = useRef('')
@@ -183,6 +190,8 @@ export function useAgentChat() {
       // mutating tools for this turn so the command cannot do what it just
       // told the user it would not do.
       readOnly?: boolean
+      /** Carried by the /loop driver so a pass knows which pass it is. */
+      loop?: { pass: number; intervalMs: number; task: string; startedAt: number }
       // Chat-tools router hint (David 2026-06-20): when a bare follow-up like
       // "nochmal"/"ok generiere jetzt" continues an in-progress media task, the
       // router passes the task kind + the prior generation's exact args so a weak
@@ -1478,12 +1487,66 @@ export function useAgentChat() {
       if (memSettings.autoExtractEnabled && contentRef.current.trim() && convId) {
         extractMemories(userContent, contentRef.current, convId).catch(() => {})
       }
+
+      // ── /loop driver ───────────────────────────────────────────────────
+      // Same driver as Code, because a loop that only worked in one of the two
+      // agent surfaces is not a feature. No pass ceiling unless the user set
+      // one: a loop someone asked to keep going keeps going until it says done
+      // or they stop it. The loop bar above the composer is what keeps that
+      // honest rather than invisible.
+      if (opts?.loop && convId && !userStoppedRef.current) {
+        const loopState = opts.loop
+        const saidDone = loopPassSaysDone(contentRef.current.trim())
+        const cap = Math.max(0, useSettingsStore.getState().settings.loopMaxPasses ?? 0)
+        const nextPass = loopState.pass + 1
+
+        if (saidDone) {
+          useAgentLoopStore.getState().clear()
+        } else if (cap > 0 && nextPass > cap) {
+          useAgentLoopStore.getState().clear()
+          useChatStore.getState().addMessage(convId, {
+            id: uuid(), role: 'assistant', timestamp: Date.now(),
+            content: `Stopped after ${cap} passes, which is the limit set in Settings. What is above is where it got to. Raise the limit or set it to unlimited to keep going.`,
+          })
+        } else {
+          const convForLoop = convId
+          useAgentLoopStore.getState().start({
+            conversationId: convForLoop, pass: nextPass, cap,
+            task: loopState.task, intervalMs: loopState.intervalMs,
+            nextAt: Date.now() + loopState.intervalMs,
+          })
+          loopTimerRef.current = setTimeout(() => {
+            loopTimerRef.current = null
+            if (runningRef.current) return
+            if (useChatStore.getState().activeConversationId !== convForLoop) {
+              useAgentLoopStore.getState().clear()
+              return
+            }
+            void sendRef.current?.(buildLoopRecheck(loopState.task, nextPass), undefined, {
+              displayContent: cap > 0 ? `pass ${nextPass} of ${cap}` : `pass ${nextPass}`,
+              loop: { ...loopState, pass: nextPass },
+            })
+          }, loopState.intervalMs)
+        }
+      }
     }
   }, [])
+
+  // Self-reference so the /loop driver can start the next pass.
+  const sendRef = useRef<typeof sendAgentMessage | null>(null)
+  sendRef.current = sendAgentMessage
 
   // ── Stop the agent ────────────────────────────────────────────
 
   const stopAgent = useCallback(() => {
+    // Stop means stop: also cancel a /loop pass waiting out its interval,
+    // otherwise the run the user just killed comes back by itself.
+    userStoppedRef.current = true
+    if (loopTimerRef.current) {
+      clearTimeout(loopTimerRef.current)
+      loopTimerRef.current = null
+    }
+    useAgentLoopStore.getState().clear()
     runningRef.current = false
     abortRef.current?.abort()
     abortRef.current = null

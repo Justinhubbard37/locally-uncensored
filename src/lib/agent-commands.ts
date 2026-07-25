@@ -50,11 +50,6 @@ export interface AgentCommand {
 /** Shared closing line so every command nudges the agent to act, not narrate. */
 const ACT = 'Use your tools to do this for real — do not just describe the steps. Be concise in text; the work happens in tool calls. Reply in the user\'s language.'
 
-/** How long the whole loop may run across all passes. A ceiling, not a deadline
- *  for the work: a forgotten loop must not bill an afternoon of cloud. */
-export const MAX_LOOP_TOTAL_MS = 4 * 60 * 60 * 1000
-/** How many passes before we stop and hand back. */
-export const MAX_LOOP_PASSES = 10
 /** Pause between passes when the user names none. Short, because the value of a
  *  loop is the re-check, not the waiting. */
 export const DEFAULT_LOOP_INTERVAL_MS = 5 * 1000
@@ -173,7 +168,7 @@ export const AGENT_COMMANDS: AgentCommand[] = [
       const task = rest || 'the task the user just described'
       return `Work on this: ${task}
 
-This is pass 1 of a LOOP. The app will bring you back roughly every ${formatDuration(intervalMs)} to look at it again, up to ${MAX_LOOP_PASSES} passes, and each time you will be asked to prove what you claimed. So do not rush to a finish and do not pad the answer.
+This is pass 1 of a LOOP. The app will bring you back roughly every ${formatDuration(intervalMs)} to look at it again, for as long as it takes, and each time you will be asked to prove what you claimed. So do not rush to a finish and do not pad the answer. The loop only ends when you say it is done or the user stops it, so a premature finish just wastes everyone's time.
 
 Each pass:
 1) Do the next concrete step.

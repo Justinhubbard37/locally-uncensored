@@ -103,11 +103,32 @@ describe('/loop actually loops', () => {
     expect(src).toContain('}, loopState.intervalMs)')
   })
 
-  it('stops on the done marker, the pass cap and the total ceiling', () => {
+  it('stops on the done marker or on a cap the user set, and NOTHING else', () => {
     const src = read('../../hooks/useCodex.ts')
-    expect(src).toContain('loopPassSaysDone(answer)')
-    expect(src).toContain('nextPass > MAX_LOOP_PASSES')
-    expect(src).toContain('elapsed > MAX_LOOP_TOTAL_MS')
+    expect(src).toContain('loopPassSaysDone(')
+    // The cap comes from settings and 0 means unlimited (David 2026-07-25:
+    // "loop darf keine maximal loops erhalten").
+    expect(src).toContain('settings.loopMaxPasses ?? 0')
+    expect(src).toContain('cap > 0 && nextPass > cap')
+    // No built-in ceilings may creep back in.
+    expect(src).not.toContain('MAX_LOOP_PASSES')
+    expect(src).not.toContain('MAX_LOOP_TOTAL_MS')
+  })
+
+  it('runs in Agent mode too, not only in Code', () => {
+    const src = read('../../hooks/useAgentChat.ts')
+    expect(src).toContain('buildLoopRecheck(loopState.task, nextPass)')
+    expect(src).toContain('settings.loopMaxPasses ?? 0')
+    // And the chat router has to seed pass 1, or nothing ever loops there.
+    expect(read('../../hooks/useChat.ts')).toContain("slash.command.name === 'loop'")
+  })
+
+  it('a running loop is visible and stoppable', () => {
+    // Unlimited is only defensible if the user can see it and stop it.
+    for (const f of ['../../hooks/useCodex.ts', '../../hooks/useAgentChat.ts']) {
+      expect(read(f)).toContain('useAgentLoopStore.getState().start(')
+      expect(read(f)).toContain('useAgentLoopStore.getState().clear()')
+    }
   })
 
   it('stop cancels a pass that is waiting out its interval', () => {
@@ -120,14 +141,4 @@ describe('/loop actually loops', () => {
     expect(stopBody).toContain('userStoppedRef.current = true')
   })
 
-  it('the total ceiling is checked between iterations, never mid-tool', () => {
-    const src = read('../../hooks/useCodex.ts')
-    const loopHead = src.indexOf('for (let i = 0; i < MAX_CODEX_ITERATIONS')
-    const ceiling = src.indexOf('MAX_LOOP_TOTAL_MS && i > 0')
-    const firstExec = src.indexOf('budget.addToolCalls(')
-    expect(ceiling).toBeGreaterThan(loopHead)
-    // Cutting a run off inside file_edit or a shell command would leave the
-    // workspace in a state nobody asked for.
-    expect(ceiling).toBeLessThan(firstExec)
-  })
 })

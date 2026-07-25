@@ -13,6 +13,7 @@ import { RealtimeCounter } from './RealtimeCounter'
 import { PluginsDropdown } from './PluginsDropdown'
 import { ModelSelector } from '../models/ModelSelector'
 import { GoalBar } from './GoalBar'
+import { LoopBar } from './LoopBar'
 import { TypingIndicator } from './TypingIndicator'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useModelStore } from '../../stores/modelStore'
@@ -502,7 +503,7 @@ export function CodexView() {
           isGenerating={isRunning}
           slashCommands
           composerModel={<ModelSelector openUpward surface="code" />}
-          composerAbove={<GoalBar />}
+          composerAbove={<><LoopBar onStop={stopCodex} /><GoalBar /></>}
           composerActions={<PluginsDropdown openUpward />}
         />
       </div>

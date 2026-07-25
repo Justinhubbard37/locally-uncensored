@@ -13,7 +13,7 @@ import { getModelContextCached } from "../api/ollama"
 import { requestGenerationCancel } from "../api/vram-handoff"
 import { effectiveContextWindow } from "../lib/context-window"
 import { useAgentChat } from "./useAgentChat"
-import { parseAgentCommand } from '../lib/agent-commands'
+import { parseAgentCommand, parseLoopSpec } from '../lib/agent-commands'
 import { applyGoalCommand } from '../lib/goal-command'
 import { useMemory } from "./useMemory"
 import { useAgentModeStore } from "../stores/agentModeStore"
@@ -87,9 +87,18 @@ export function useChat() {
         return
       }
       if (slash) {
+        // /loop seeds the driver so pass 2 onward fires by itself, exactly as
+        // it does in Code. Nobody should have to re-type a loop.
+        const loop = slash.command.name === 'loop'
+          ? (() => {
+              const { intervalMs, rest } = parseLoopSpec(slash.args)
+              return { pass: 1, intervalMs, task: rest || content, startedAt: Date.now() }
+            })()
+          : undefined
         return agentChat.sendAgentMessage(slash.expanded, images, {
           displayContent: content,
           readOnly: slash.command.readOnly === true,
+          ...(loop ? { loop } : {}),
         })
       }
       return agentChat.sendAgentMessage(content, images)

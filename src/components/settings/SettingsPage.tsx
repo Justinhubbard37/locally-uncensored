@@ -703,6 +703,26 @@ function CodexAgentSettings() {
         />
       </div>
 
+      {/* /loop — unlimited by default. The stop button and the loop bar above
+          the composer are the brake; a number here is only for people who want
+          a hard stop after N passes. */}
+      <div className="pt-1.5 border-t border-white/[0.04]" />
+      <div className="flex items-center justify-between gap-3 py-1">
+        <div className="min-w-0">
+          <div className="text-[0.7rem] text-gray-700 dark:text-gray-300">Maximum /loop passes</div>
+          <div className="text-[0.6rem] text-gray-500">
+            0 means unlimited: the loop keeps checking until it reports done or you stop it.
+          </div>
+        </div>
+        <input
+          type="number"
+          min={0}
+          value={settings.loopMaxPasses}
+          onChange={(e) => updateSettings({ loopMaxPasses: Math.max(0, parseInt(e.target.value, 10) || 0) })}
+          className="w-16 shrink-0 px-1.5 py-0.5 rounded border border-gray-200 dark:border-white/10 bg-transparent text-[0.7rem] text-right text-gray-800 dark:text-gray-200"
+        />
+      </div>
+
       {/* Stage + Review */}
       <div className="pt-1.5 border-t border-white/[0.04]" />
       <InlineToggle

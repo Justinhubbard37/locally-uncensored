@@ -40,6 +40,8 @@ export const DEFAULT_SETTINGS: Settings = {
   // surfaces in finite wall-clock.
   agentMaxToolCalls: 400,
   agentMaxIterations: 200,
+  // Unlimited by design — see the note on the type.
+  loopMaxPasses: 0,
   hfDownloadPathOverride: '',
   // Generation timeouts (Bug P v2.4.7)
   imageGenTimeoutMinutes: 20,

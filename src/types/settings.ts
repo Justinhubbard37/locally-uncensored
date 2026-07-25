@@ -68,6 +68,12 @@ export interface Settings {
   agentMaxToolCalls: number
   /** Hard cap on ReAct loop iterations per user turn. 0 = unlimited. */
   agentMaxIterations: number
+  /**
+   * How many passes a `/loop` may run. 0 = unlimited, which is the default:
+   * a loop the user asked to keep going should keep going until it is done or
+   * they stop it (David 2026-07-25). The stop button is the brake, not a cap.
+   */
+  loopMaxPasses: number
   /** Override for the HuggingFace GGUF download directory. Empty = auto-detect from active openai-compat provider (e.g. LM Studio models folder). */
   hfDownloadPathOverride: string
   // Generation timeouts (Bug P v2.4.7 — ake0n_official Discord 2026-05-19,

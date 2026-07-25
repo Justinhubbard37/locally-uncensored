@@ -9,7 +9,6 @@ import {
   formatDuration,
   DEFAULT_LOOP_INTERVAL_MS,
   MAX_LOOP_INTERVAL_MS,
-  MAX_LOOP_PASSES,
   LOOP_DONE_MARKER,
   LOOP_CONTINUE_MARKER,
   loopPassSaysDone,
@@ -248,7 +247,9 @@ describe('/loop interval', () => {
     const t = getAgentCommand('loop')!.build('30s make the tests pass')
     expect(t).toContain('pass 1 of a LOOP')
     expect(t).toContain('bring you back roughly every 30s')
-    expect(t).toContain(`up to ${MAX_LOOP_PASSES} passes`)
+    // No pass ceiling is promised, because there is none by default.
+    expect(t).toContain('for as long as it takes')
+    expect(t).not.toMatch(/up to \d+ passes/)
     // The exact wording that caused the misread must not come back.
     expect(t).not.toContain('You have 30s')
     expect(t).not.toMatch(/time is up|budget/i)
