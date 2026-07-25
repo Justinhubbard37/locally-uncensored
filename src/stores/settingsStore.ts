@@ -41,7 +41,12 @@ import { DEFAULT_SETTINGS, BUILT_IN_PERSONAS } from '../lib/constants'
 // shell-confirm was hard-wired in useCodex, so the existing confirm toggle did
 // nothing on a cloud model. Additive merge backfills the default — behaviour is
 // byte-for-byte what 2.5.8 did until the user turns the new switch off.
-const STORE_VERSION = 15
+// v16 (2.5.9): added settings.loopMaxPasses (default 0 = unlimited). Additive,
+// but the bump is what makes the merge RUN — without it an existing profile
+// keeps the field undefined and the Settings number box renders empty, which
+// is how this was caught on the ship exe (2026-07-25). Behaviour was already
+// correct via `?? 0`; this is so the UI shows the real value.
+const STORE_VERSION = 16
 
 interface SettingsState {
   settings: Settings
