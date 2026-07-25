@@ -10,6 +10,7 @@ import { Button } from '../ui/Button'
 import { cn } from '../ui/cn'
 import { loadImageRef } from './loadImage'
 import { galleryItemUrl, fetchGalleryItemBlob, recoverGalleryUrl } from './galleryUrl'
+import { InstallCancelled } from '../../../lib/bundle-install'
 
 interface Props {
   displayed?: GalleryItem
@@ -322,15 +323,29 @@ function ChangeImageButton({ onChange }: { onChange: (r: Awaited<ReturnType<type
 }
 
 // ── Shared install-card chrome: spinner + streamed status + dismissible error ──
-function InstallCardBody({ run, installing, status, err, onDismiss }: {
-  run: () => void; installing: boolean; status: string; err: string | null; onDismiss: () => void
+// The Cancel button is not optional chrome. David 2026-07-25 clicked Download &
+// install on Motion Control, got a spinner, and had no way to stop or even see
+// a 10.5 GB transfer. Cancel here aborts the install loop and kills the running
+// download in Rust; the partial file stays, so a later run resumes.
+function InstallCardBody({ run, installing, status, err, onDismiss, onCancel }: {
+  run: () => void; installing: boolean; status: string; err: string | null
+  onDismiss: () => void; onCancel: () => void
 }) {
   return (
     <div className="flex flex-col items-center gap-2.5 pt-1">
       {installing ? (
-        <div className="t-control text-gray-400 flex items-center gap-2">
-          <Loader2 size={14} className="animate-spin shrink-0" />
-          <span>{status || 'Installing…'}</span>
+        <div className="flex flex-col items-center gap-1.5">
+          <div className="t-control text-gray-400 flex items-center gap-2">
+            <Loader2 size={14} className="animate-spin shrink-0" />
+            <span>{status || 'Installing…'}</span>
+          </div>
+          <button
+            onClick={onCancel}
+            title="Stops the setup. A download in flight is dropped, finished files stay."
+            className="t-control text-gray-500 hover:text-gray-300 underline underline-offset-2 transition-colors"
+          >
+            Cancel
+          </button>
         </div>
       ) : (
         <Button variant="primary" icon={Download} onClick={run}>Download &amp; install</Button>
@@ -369,28 +384,58 @@ const CAP_COPY = {
   },
 } as const
 
+/** While an install runs, the card must not keep saying "needs a one-time
+ *  download" with a bare spinner under it, which is what made David ask whether
+ *  anything was happening at all. Title and description both switch. */
+const BUSY_DESCRIPTION = {
+  capability: 'This installs a small node pack and restarts ComfyUI. Cancel any time.',
+  // Cancel really does throw the partial file away (cancel_download deletes the
+  // .download temp), so the copy says that rather than the friendlier thing.
+  // A connection that DROPS is the opposite case: that partial survives and the
+  // next try resumes from it, which is what the retry line promises.
+  bundle: 'Follow it in the Downloads tray up top. You can cancel any time, which stops the download and drops what it had so far.',
+} as const
+
 function CapabilityCard({ cap }: { cap: 'rmbg' | 'inpaint-nodes' | 'dwpose' }) {
   const { installCapability } = useCreateExp()
   const [installing, setInstalling] = useState(false)
   const [status, setStatus] = useState('')
   const [err, setErr] = useState<string | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
   const copy = CAP_COPY[cap]
 
   const run = async () => {
+    const ac = new AbortController()
+    abortRef.current = ac
     setInstalling(true); setErr(null); setStatus('Starting…')
     try {
       // On success the capability flips true and Stage swaps this card for the input slot.
-      await installCapability(cap, setStatus)
+      await installCapability(cap, setStatus, ac.signal)
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e))
+      // A cancel is a decision, not a failure: say so plainly and add the one
+      // thing that is not obvious, that the node install itself finishes in the
+      // background because there is nothing to roll back.
+      setErr(e instanceof InstallCancelled
+        ? 'Cancelled. Any node install already running finishes on its own in the background.'
+        : e instanceof Error ? e.message : String(e))
     } finally {
       setInstalling(false)
+      abortRef.current = null
     }
   }
 
   return (
-    <EmptyState icon={copy.icon} tone="accent" title={copy.title} description={copy.description}>
-      <InstallCardBody run={run} installing={installing} status={status} err={err} onDismiss={() => setErr(null)} />
+    <EmptyState
+      icon={copy.icon}
+      tone="accent"
+      title={installing ? 'Setting this up for you' : copy.title}
+      description={installing ? BUSY_DESCRIPTION.capability : copy.description}
+    >
+      <InstallCardBody
+        run={run} installing={installing} status={status} err={err}
+        onDismiss={() => setErr(null)}
+        onCancel={() => abortRef.current?.abort()}
+      />
     </EmptyState>
   )
 }
@@ -429,23 +474,38 @@ function ModelInstallCard({ kind }: { kind: 'image' | 'video' | 'audio' | 'lipsy
   const [installing, setInstalling] = useState(false)
   const [status, setStatus] = useState('')
   const [err, setErr] = useState<string | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
   const copy = BUNDLE_COPY[kind]
 
   const run = async () => {
+    const ac = new AbortController()
+    abortRef.current = ac
     setInstalling(true); setErr(null); setStatus('Starting…')
     try {
       // On success the model lists refill and Stage swaps this card away.
-      await installModelBundle(kind, setStatus)
+      await installModelBundle(kind, setStatus, ac.signal)
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e))
+      setErr(e instanceof InstallCancelled
+        ? 'Cancelled. Files that finished are kept, the one in flight was dropped.'
+        : e instanceof Error ? e.message : String(e))
     } finally {
       setInstalling(false)
+      abortRef.current = null
     }
   }
 
   return (
-    <EmptyState icon={copy.icon} tone="accent" title={copy.title} description={copy.description}>
-      <InstallCardBody run={run} installing={installing} status={status} err={err} onDismiss={() => setErr(null)} />
+    <EmptyState
+      icon={copy.icon}
+      tone="accent"
+      title={installing ? 'Setting this up for you' : copy.title}
+      description={installing ? BUSY_DESCRIPTION.bundle : copy.description}
+    >
+      <InstallCardBody
+        run={run} installing={installing} status={status} err={err}
+        onDismiss={() => setErr(null)}
+        onCancel={() => abortRef.current?.abort()}
+      />
     </EmptyState>
   )
 }

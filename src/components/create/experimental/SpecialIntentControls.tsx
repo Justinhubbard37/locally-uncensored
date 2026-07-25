@@ -19,6 +19,7 @@ import {
   TRAINER_BASE_FILES, type TrainerStatus,
 } from '../../../api/trainer'
 import { startModelDownload, getDownloadProgress } from '../../../api/discover'
+import { useDownloadStore } from '../../../stores/downloadStore'
 import { getLoraModels } from '../../../api/comfyui'
 import { useCreateExp } from './CreateContext'
 import { loadImageRef } from './loadImage'
@@ -320,10 +321,17 @@ function LocalTrainControls() {
       (f.subfolder === 'diffusion_models' && !status.dit) ||
       (f.subfolder === 'text_encoders' && !status.textEncoder) ||
       (f.subfolder === 'vae' && !status.vae))
+    // Same tray registration the Create install cards do: without it the header
+    // Downloads tray reads "No active downloads" through a multi GB transfer and
+    // its cancel + retry buttons never appear.
+    const dl = useDownloadStore.getState()
+    if (missing.length > 1) dl.setBundleGroup('Character Studio base models', missing.map((f) => f.filename))
     for (const f of missing) {
+      dl.setMeta(f.filename, f.url, f.subfolder)
       try { await startModelDownload(f.url, f.subfolder, f.filename) } catch (e) {
         setNote(e instanceof Error ? e.message : `Could not start ${f.filename}.`)
       }
+      dl.startPolling()
     }
   }
 
