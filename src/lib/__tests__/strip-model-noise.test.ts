@@ -57,4 +57,20 @@ describe('stripModelNoise', () => {
     expect(stripModelNoise('LOOP_DONE')).toBe('')
     expect(stripModelNoise('ool_call>')).toBe('')
   })
+
+  // Captured on the ship exe 2026-07-25: the model wrote BOTH of its calls as
+  // one ```json array while also emitting them natively. The objects were
+  // lifted out by range and the bubble showed an empty block holding `[ , ]`.
+  it('drops a fence whose body was fully consumed, leaving no empty husk', () => {
+    const husk = 'Running both now.\n\n```json\n[\n    ,\n     \n]\n```'
+    expect(stripModelNoise(husk, { aggressive: true })).toBe('Running both now.')
+  })
+
+  // The husk rule must not eat a fence that still carries content, and it is
+  // aggressive-only so a plain chat asked for an empty array still gets one.
+  it('keeps a fence that still has content, and an empty array in plain chat', () => {
+    const code = 'Here:\n\n```js\nconst a = 1\n```'
+    expect(stripModelNoise(code, { aggressive: true })).toContain('const a = 1')
+    expect(stripModelNoise('```json\n[]\n```')).toContain('[]')
+  })
 })

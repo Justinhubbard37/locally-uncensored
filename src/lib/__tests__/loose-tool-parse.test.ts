@@ -319,4 +319,18 @@ describe('stripToolCallText — leftover Hermes tags', () => {
     const prose = 'the log said ool_call> which is odd'
     expect(stripToolCallText(prose, KN)).toBe(prose)
   })
+
+  // Captured on the ship exe 2026-07-25 (Agent, qwen2.5-coder:14b): asked for
+  // two tools in one step, the model emitted them natively AND echoed both as
+  // one ```json ARRAY. The two objects were stripped by range and the user was
+  // left with a "notes" block containing nothing but `[`, a comma and `]`.
+  it('leaves no empty husk when an echoed call ARRAY is stripped', () => {
+    const echoed = 'Running both now.\n\n```json\n[\n  {"name": "run_tests", "arguments": {}},\n  {"name": "shell_execute", "arguments": {"command": "echo hi"}}\n]\n```'
+    expect(stripToolCallText(echoed, KN)).toBe('Running both now.')
+  })
+
+  it('never drops a fence that still carries real content', () => {
+    const code = 'Here is the patch:\n\n```js\nconst a = 1\n```'
+    expect(stripToolCallText(code, KN)).toContain('const a = 1')
+  })
 })

@@ -298,6 +298,14 @@ export function stripToolCallText(text: string, known: string[]): string {
       /["']?(?:arguments|parameters|params|prompt)["']?\s*[:=]/.test(inner)
     return looksLikeCall ? '' : m
   })
+  // A fence whose BODY was consumed by the strip above still leaves its
+  // container behind. Live Agent run on the ship exe (2026-07-25): the model
+  // wrote both of its calls as one ```json ARRAY next to perfectly good native
+  // tool_calls, the two objects were lifted out by range, and the bubble was
+  // left showing a "notes" block containing `[` , `,` , `]`. A fence with no
+  // letter or digit left in it carries nothing for the user, so drop it whole.
+  out = out.replace(/```[a-z_]*\s*([\s\S]*?)```/gi, (m, inner) =>
+    /[A-Za-z0-9]/.test(inner) ? m : '')
   return out
     // Strip special-token tool-call wrappers some models leave in the prose
     // (Phi-4: <|tool_call|>/<|tool|>; Mistral: [TOOL_CALLS]) so they don't show

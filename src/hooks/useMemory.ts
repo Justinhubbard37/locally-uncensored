@@ -10,7 +10,9 @@ import { useCallback } from 'react'
 import { useMemoryStore } from '../stores/memoryStore'
 import { useModelStore } from '../stores/modelStore'
 import { useProviderStore } from '../stores/providerStore'
-import { getProviderForModel } from '../api/providers'
+import { getProviderForModel, getProviderIdFromModel } from '../api/providers'
+import { useSettingsStore } from '../stores/settingsStore'
+import { resolveAgentNumCtx } from '../lib/agent-num-ctx'
 import {
   buildExtractionPrompt,
   parseExtractionResponse,
@@ -86,11 +88,22 @@ export async function extractMemoriesFromPair(
     // Use active provider for extraction call
     const { provider, modelId } = getProviderForModel(activeModel)
 
+    // Same num_ctx as the chat that just ran on this model. Ollama reloads the
+    // model whenever num_ctx changes between requests, so an options-less
+    // extraction call silently dropped the user's context back to the default
+    // and paid a second model load per turn.
+    const numCtx = await resolveAgentNumCtx(
+      modelId,
+      getProviderIdFromModel(activeModel),
+      useSettingsStore.getState().settings.contextWindowOverride,
+    )
+
     // Collect full response via streaming
     let fullResponse = ''
     const stream = provider.chatStream(modelId, messages, {
       temperature: 0.1,
       maxTokens: 500,
+      contextWindow: numCtx,
     })
 
     for await (const chunk of stream) {

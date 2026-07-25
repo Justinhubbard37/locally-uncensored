@@ -26,8 +26,7 @@ import { mediaCallSucceeded } from '../lib/media-result'
 import { summarizeTurn } from '../lib/turn-summary'
 import { buildVisionFeedback } from '../api/vision-feedback'
 import { compactMessages, getModelMaxTokens, estimateTokens } from '../lib/context-compaction'
-import { getModelContextCached } from '../api/ollama'
-import { effectiveContextWindow } from '../lib/context-window'
+import { resolveAgentNumCtx } from '../lib/agent-num-ctx'
 import { useMemoryStore } from '../stores/memoryStore'
 import { useVoiceStore } from '../stores/voiceStore'
 import { autoSpeak } from '../lib/ttsBridge'
@@ -64,8 +63,15 @@ async function extractMemories(userMsg: string, assistantMsg: string, conversati
   const messages = buildExtractionPrompt(userMsg, assistantMsg, existingSummary)
 
   const { provider, modelId } = getProviderForModel(activeModel)
+  // Same num_ctx as the turn that just finished. This call runs on the SAME
+  // model right after it, and Ollama reloads whenever num_ctx changes — sending
+  // nothing here dropped the user's context back to Ollama's default and cost a
+  // second model load on every single turn (seen live 2026-07-25).
+  const numCtx = await resolveAgentNumCtx(
+    modelId, getProviderIdFromModel(activeModel), useSettingsStore.getState().settings.contextWindowOverride,
+  )
   let fullResponse = ''
-  const stream = provider.chatStream(modelId, messages, { temperature: 0.1, maxTokens: 500 })
+  const stream = provider.chatStream(modelId, messages, { temperature: 0.1, maxTokens: 500, contextWindow: numCtx })
   for await (const chunk of stream) {
     if (chunk.content) fullResponse += chunk.content
     if (chunk.done) break
@@ -640,15 +646,12 @@ export function useAgentChat() {
                 : settings.thinkingEnabled === true)
             : undefined
 
-        // num_ctx (David: "muss immer stimmen"): the override, else the model's
-        // REAL context (capped for VRAM), floored at 8192 so feeding a generated
-        // image back for vision feedback never overflows a 4096-default model.
-        let agentCtx: number = settings.contextWindowOverride || 8192
-        if (providerId === 'ollama' && !settings.contextWindowOverride) {
-          try {
-            agentCtx = Math.max(effectiveContextWindow(await getModelContextCached(modelId), 0), 8192)
-          } catch { /* keep the 8192 floor on failure */ }
-        }
+        // num_ctx (David: "muss immer stimmen"). Shared resolver so the memory
+        // extraction that runs after this turn sends the SAME value and Ollama
+        // does not reload the model at its default between the two.
+        const agentCtx: number = await resolveAgentNumCtx(
+          modelId, providerId, settings.contextWindowOverride,
+        )
         const chatOptions = {
           // Small-Model Mode (Knob 6): gently clamp temperature for tool turns.
           // FOLKLORE, not measured — research found NO temperature finding for

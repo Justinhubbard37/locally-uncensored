@@ -75,6 +75,14 @@ export function stripModelNoise(text: string, opts: StripOptions = {}): string {
       const { ranges } = extractToolCallsWithRanges(t)
       if (ranges.length) t = stripRanges(t, ranges)
     } catch { /* ignore — never let a strip error hide the answer */ }
+    // Range-based stripping removes the CALLS but leaves whatever wrapped them.
+    // Live Agent run on the ship exe 2026-07-25: the model wrote its two calls
+    // as one ```json array, both objects were lifted out, and the user was left
+    // with a block containing `[` , `,` , `]`. A fence with no letter or digit
+    // left in it is pure residue. Aggressive tier only, so a plain-chat answer
+    // that is deliberately an empty array still renders.
+    t = t.replace(/```[a-z_]*\s*([\s\S]*?)```/gi, (m, inner) =>
+      /[A-Za-z0-9]/.test(inner) ? m : '')
   }
 
   return t.trim()
