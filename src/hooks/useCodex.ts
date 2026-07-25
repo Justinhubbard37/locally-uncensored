@@ -19,7 +19,7 @@ import { setActiveChatId, clearActiveChatId, chatWorkspaceSlug, setActiveWorkspa
 import { resolveWorkspace } from '../api/agents/workspace-resolve'
 import { useAgentModeStore } from '../stores/agentModeStore'
 import { loadLurules, renderRulesSection, type RulesReader } from '../lib/lurules'
-import { parseAgentCommand } from '../lib/agent-commands'
+import { parseAgentCommand, parseLoopBudget, formatDuration } from '../lib/agent-commands'
 import { useGenerationStore } from '../stores/generationStore'
 import { backendCall, isOllamaLocal } from '../api/backend'
 import { planWithArchitect, renderArchitectPlanSection } from '../api/agents/architect'
@@ -212,6 +212,11 @@ export function useCodex() {
     // this turn, so /review and /security physically cannot rewrite the files
     // they were asked to look at.
     const readOnlyTurn = slash?.command.readOnly === true
+    // `/loop [20m] …` — the budget is enforced by the loop below, not just
+    // stated in the prompt. A model told "you have 20 minutes" and left to
+    // police itself will happily run for an hour.
+    const loopBudgetMs = slash?.command.name === 'loop' ? parseLoopBudget(slash.args).budgetMs : null
+    const loopDeadline = loopBudgetMs ? Date.now() + loopBudgetMs : null
 
     const store = useChatStore.getState()
     const codexStore = useCodexStore.getState()
@@ -665,6 +670,20 @@ export function useCodex() {
       // backstop. Floor of 1 so a stray 0 setting can't zero the loop.
       const MAX_CODEX_ITERATIONS = Math.max(settings.agentMaxIterations ?? 200, 1)
       for (let i = 0; i < MAX_CODEX_ITERATIONS && runningRef.current && !abort.signal.aborted; i++) {
+        // `/loop 20m …` — a real wall-clock deadline, checked between
+        // iterations. Never mid-tool: a run cut off inside file_edit or a shell
+        // command would leave the workspace in a state nobody asked for. So the
+        // budget is "no NEW step after this point", not a hard kill.
+        if (loopDeadline && Date.now() > loopDeadline && i > 0) {
+          const done = fullContent.trim()
+          useChatStore.getState().updateMessageContent(
+            convId!,
+            assistantMsg.id,
+            (done ? done + '\n\n' : '') +
+              `_(time is up: the ${formatDuration(loopBudgetMs!)} budget for this loop ran out after ${i} step${i === 1 ? '' : 's'}. Nothing was cut off mid-step. Send /loop again with a longer budget to carry on.)_`,
+          )
+          break
+        }
         budget.addIteration()
         const bx = budget.exceeded()
         if (bx.kind !== 'none') {

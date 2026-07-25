@@ -309,6 +309,14 @@ export function stripToolCallText(text: string, known: string[]): string {
     // the bubble — where the markdown renderer swallowed the `<t` and left the
     // user staring at a bare `ool_call>` (live Agent run, ship exe 2026-07-25).
     .replace(/<[|/\s]*tool_calls?[|/\s]*>/gi, '')
+    // A whole line that is nothing but a tool-call tag, INCLUDING a truncated
+    // one. Captured from the wire on the ship exe, 2026-07-25: Qwen3-32B on LU
+    // Cloud sent `</think>\n\nool_call>` as its content, next to a perfectly
+    // good native tool_calls array. The provider's own parser had already eaten
+    // the `<t`, so every pattern that starts at `<` misses the remainder and it
+    // renders as a stray `ool_call>` above the answer. We cannot stop the model
+    // doing it; we can stop showing it. Line-anchored, so prose can never match.
+    .replace(/^[ \t]*<?[|/]*t?ool_calls?[|/]*>[ \t]*$/gim, '')
     .replace(/\[\/?TOOL_CALLS?\]/gi, '')
     .replace(/```(?:json|tool_code)?\s*```/gi, '')
     .replace(/\n{3,}/g, '\n\n')

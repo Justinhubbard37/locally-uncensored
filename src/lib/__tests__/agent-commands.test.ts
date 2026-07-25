@@ -4,6 +4,10 @@ import {
   getAgentCommand,
   parseAgentCommand,
   matchAgentCommands,
+  parseLoopBudget,
+  formatDuration,
+  DEFAULT_LOOP_BUDGET_MS,
+  MAX_LOOP_BUDGET_MS,
 } from '../agent-commands'
 import { MUTATING_TOOLS } from '../mutating-tools'
 
@@ -208,5 +212,55 @@ describe('matchAgentCommands (autocomplete)', () => {
 
   it('returns [] for an unmatched prefix', () => {
     expect(matchAgentCommands('/zzz')).toEqual([])
+  })
+})
+
+describe('/loop time budget', () => {
+  it('reads the compact forms', () => {
+    expect(parseLoopBudget('20m fix the tests').budgetMs).toBe(20 * 60_000)
+    expect(parseLoopBudget('2h refactor').budgetMs).toBe(2 * 3_600_000)
+    expect(parseLoopBudget('90s smoke').budgetMs).toBe(90_000)
+    expect(parseLoopBudget('1h30m big job').budgetMs).toBe(90 * 60_000)
+    expect(parseLoopBudget('45 something').budgetMs).toBe(45 * 60_000) // bare = minutes
+  })
+
+  it('strips the duration out of the task text', () => {
+    expect(parseLoopBudget('20m fix the tests').rest).toBe('fix the tests')
+    expect(parseLoopBudget('2h: refactor the parser').rest).toBe('refactor the parser')
+  })
+
+  it('falls back to a default when no duration is given', () => {
+    const r = parseLoopBudget('make the build green')
+    expect(r.budgetMs).toBe(DEFAULT_LOOP_BUDGET_MS)
+    expect(r.rest).toBe('make the build green')
+  })
+
+  it('caps a runaway budget', () => {
+    // A forgotten loop must not be able to bill a whole day of cloud.
+    expect(parseLoopBudget('99h forever').budgetMs).toBe(MAX_LOOP_BUDGET_MS)
+  })
+
+  it('does not mistake a task that starts with a number for a budget', () => {
+    // "3 failing tests" is the job, not the clock. Only a compact duration
+    // token counts, and a bare number is read as minutes by design, so this
+    // pins the shapes that must NOT be swallowed silently.
+    expect(parseLoopBudget('fix 20m of flakiness').budgetMs).toBe(DEFAULT_LOOP_BUDGET_MS)
+    expect(parseLoopBudget('fix 20m of flakiness').rest).toBe('fix 20m of flakiness')
+  })
+
+  it('states the budget in the prompt it sends', () => {
+    const t = getAgentCommand('loop')!.build('20m make the tests pass')
+    expect(t).toContain('You have 20m')
+    expect(t).toContain('The app enforces it')
+    expect(t).not.toContain('20m make the tests pass') // duration is consumed
+  })
+})
+
+describe('formatDuration', () => {
+  it('reads naturally at every scale', () => {
+    expect(formatDuration(45_000)).toBe('45s')
+    expect(formatDuration(20 * 60_000)).toBe('20m')
+    expect(formatDuration(90 * 60_000)).toBe('1h 30m')
+    expect(formatDuration(2 * 3_600_000)).toBe('2h')
   })
 })

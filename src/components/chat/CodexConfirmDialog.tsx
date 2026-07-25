@@ -64,9 +64,10 @@ export function CodexConfirmDialog() {
           )}
           <button
             onClick={stopAsking}
+            title="Run this and every later command in this session without asking"
             className="text-[0.58rem] text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 transition-colors"
           >
-            Don't ask again
+            Accept without asking
           </button>
         </div>
       </div>

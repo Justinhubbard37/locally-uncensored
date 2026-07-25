@@ -302,4 +302,21 @@ describe('stripToolCallText — leftover Hermes tags', () => {
     const prose = 'the tool call failed, try again'
     expect(stripToolCallText(prose, KN)).toBe(prose)
   })
+
+  // Captured from the wire, ship exe 2026-07-25. Qwen3-32B on LU Cloud put
+  // `</think>\n\nool_call>` in its content next to a valid native tool_calls
+  // array: the provider's harmony parser had already eaten the `<t`, so every
+  // pattern anchored on `<` missed the remainder and the user saw `ool_call>`.
+  it('removes a TRUNCATED tag the provider mangled before we ever saw it', () => {
+    expect(stripToolCallText('I will look at it.\nool_call>', KN)).toBe('I will look at it.')
+    expect(stripToolCallText('ool_call>', KN)).toBe('')
+    expect(stripToolCallText('ool_calls>', KN)).toBe('')
+  })
+
+  it('only strips the fragment when it is the whole line', () => {
+    // Anchored per line, so a sentence that happens to contain the characters
+    // is never touched.
+    const prose = 'the log said ool_call> which is odd'
+    expect(stripToolCallText(prose, KN)).toBe(prose)
+  })
 })

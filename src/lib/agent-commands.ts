@@ -50,6 +50,50 @@ export interface AgentCommand {
 /** Shared closing line so every command nudges the agent to act, not narrate. */
 const ACT = 'Use your tools to do this for real — do not just describe the steps. Be concise in text; the work happens in tool calls. Reply in the user\'s language.'
 
+/** Longest budget /loop will accept. Beyond this it is not a loop, it is a job. */
+export const MAX_LOOP_BUDGET_MS = 4 * 60 * 60 * 1000
+/** Used when the user gives no duration — long enough to be useful, short
+ *  enough that a forgotten loop cannot quietly bill an afternoon of cloud. */
+export const DEFAULT_LOOP_BUDGET_MS = 15 * 60 * 1000
+
+/**
+ * Pull a leading duration off `/loop`'s arguments: `20m`, `2h`, `90s`,
+ * `1h30m`, or a bare number read as minutes. Returns the budget in ms plus
+ * the remaining task text.
+ *
+ * The budget is REAL — useCodex stops the run when the clock runs out — so
+ * parsing has to be strict about what counts as a duration. "5 minutes to
+ * midnight" is a task, not a budget, which is why only a compact token at the
+ * very start is accepted.
+ */
+export function parseLoopBudget(args: string): { budgetMs: number; rest: string } {
+  const text = args.trim()
+  const m = /^(\d+\s*h(?:\s*\d+\s*m)?|\d+\s*m(?:in)?|\d+\s*s(?:ec)?|\d+)\b[\s,:-]*/i.exec(text)
+  if (!m) return { budgetMs: DEFAULT_LOOP_BUDGET_MS, rest: text }
+
+  const token = m[1].replace(/\s+/g, '').toLowerCase()
+  let ms = 0
+  const hm = /^(\d+)h(?:(\d+)m)?$/.exec(token)
+  if (hm) ms = Number(hm[1]) * 3_600_000 + Number(hm[2] ?? 0) * 60_000
+  else if (/^\d+m(in)?$/.test(token)) ms = parseInt(token, 10) * 60_000
+  else if (/^\d+s(ec)?$/.test(token)) ms = parseInt(token, 10) * 1000
+  else ms = parseInt(token, 10) * 60_000 // bare number = minutes
+
+  if (!ms) return { budgetMs: DEFAULT_LOOP_BUDGET_MS, rest: text }
+  return { budgetMs: Math.min(ms, MAX_LOOP_BUDGET_MS), rest: text.slice(m[0].length).trim() }
+}
+
+/** "20m" / "1h 30m" / "45s" for the prompt and the UI. */
+export function formatDuration(ms: number): string {
+  const total = Math.round(ms / 1000)
+  if (total < 60) return `${total}s`
+  const mins = Math.round(total / 60)
+  if (mins < 60) return `${mins}m`
+  const h = Math.floor(mins / 60)
+  const m = mins % 60
+  return m ? `${h}h ${m}m` : `${h}h`
+}
+
 /** Read-only commands cannot run shell, so they must be told how to look. */
 const LOOK = 'Read the real code with file_read / file_list / file_search first — never answer from memory. You have no write or shell tools on this turn, so do not plan to use them.'
 
@@ -72,11 +116,15 @@ export const AGENT_COMMANDS: AgentCommand[] = [
   },
   {
     name: 'loop',
-    summary: 'Keep working until a finish condition is met',
-    argHint: '<task, and how you will know it is done>',
+    summary: 'Keep working until it is done, within a time budget',
+    argHint: '[20m] <task, and how you will know it is done>',
     build: (a) => {
-      const task = a.trim() || 'the task the user just described'
-      return `Work on this until it is genuinely finished: ${task}
+      const { budgetMs, rest } = parseLoopBudget(a)
+      const task = rest || 'the task the user just described'
+      const budgetLine = budgetMs
+        ? `\n\nYou have ${formatDuration(budgetMs)}. The app enforces it: when the time is up the run stops wherever it is, so spend it on the work and not on narration. If you can see you will not finish in time, say what you would do next and stop early rather than being cut off mid-edit.`
+        : ''
+      return `Work on this until it is genuinely finished: ${task}${budgetLine}
 
 Run it as a loop, not a single pass:
 1) Do the next concrete step.
