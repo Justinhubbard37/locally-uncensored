@@ -1353,10 +1353,23 @@ mod openai_bridge_tests {
 }
 
 // #87 live end-to-end proof: the exact reqwest calls proxy_openai_compat makes,
-// against a real OpenAI-compatible server (Ollama's own /v1), piped through the
-// real translation functions. Verifies the whole chain over HTTP, not just
-// hand-written fixtures. #[ignore]d so CI (no Ollama) stays green; run locally:
+// against a real OpenAI-compatible server, piped through the real translation
+// functions. Verifies the whole chain over HTTP, not just hand-written fixtures.
+//
+// The base URL is an env var on purpose. #87 was reported against llama.cpp and
+// Lemonade, and every one of these servers has its own /v1 quirks (LM Studio
+// ships ids with '@' and '/' in them and omits `created`; llama.cpp answers
+// /v1/models with a single entry named after the loaded file). Proving it once
+// against Ollama's /v1 was never proof for the reporter's stack, so the same
+// test now runs against whatever server you point it at.
+//
+// #[ignore]d so CI (which runs no inference server) stays green. Run locally:
 //   cargo test --manifest-path src-tauri/Cargo.toml openai_bridge_live -- --ignored --nocapture
+//   LU_OPENAI_LIVE_BASE=http://127.0.0.1:1234/v1  (LM Studio)
+//   LU_OPENAI_LIVE_BASE=http://127.0.0.1:8000/api/v1  (Lemonade)
+//
+// Run 2026-07-26 against LM Studio 127.0.0.1:1234/v1 with 6 models loaded:
+// tags ok (6 models, ids with '@' survive), chat non-stream ok, stream ndjson ok.
 #[cfg(test)]
 mod openai_bridge_live_tests {
     use super::{
@@ -1366,10 +1379,13 @@ mod openai_bridge_live_tests {
 
     #[test]
     #[ignore]
-    fn openai_bridge_live_against_ollama_v1() {
+    fn openai_bridge_live_against_openai_compatible_server() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let base = "http://127.0.0.1:11434/v1";
+            let base_owned = std::env::var("LU_OPENAI_LIVE_BASE")
+                .unwrap_or_else(|_| "http://127.0.0.1:11434/v1".to_string());
+            let base = base_owned.as_str();
+            println!("LIVE base = {}", base);
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
@@ -1380,13 +1396,13 @@ mod openai_bridge_live_tests {
                 .get(format!("{}/models", base))
                 .send()
                 .await
-                .expect("ollama /v1/models reachable — is `ollama serve` running?")
+                .expect("/v1/models reachable — is the server in LU_OPENAI_LIVE_BASE running?")
                 .json()
                 .await
                 .unwrap();
             let tags = openai_models_to_ollama_tags(&raw);
             let models = tags["models"].as_array().unwrap();
-            assert!(!models.is_empty(), "expected >=1 model from ollama /v1/models");
+            assert!(!models.is_empty(), "expected >=1 model from /v1/models");
             assert_eq!(models[0]["name"], models[0]["model"]);
             let first = models[0]["name"].as_str().unwrap().to_string();
             println!("LIVE tags ok: {} models, first = {}", models.len(), first);

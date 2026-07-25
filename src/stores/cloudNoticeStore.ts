@@ -5,14 +5,13 @@ import { persist } from "zustand/middleware";
  * How long a cloud render stays retrievable. Single source of truth for the
  * copy so the number never drifts between surfaces.
  *
- * ⚠️ Server reality (verified 2026-07-24, lu-labs @ services/render-worker):
- * `RESULT_SIGNED_URL_TTL_SEC` defaults to 604800 (7 days) — that is the signed
- * URL lifetime, and the desktop silently re-signs an expired one via the job id
- * (galleryUrl.ts refreshResultUrl). The only deleting sweep, reaper.ts, targets
- * the render-INPUTS bucket (48h grace) and is OFF unless REAP_ORPHAN_INPUTS is
- * set. Nothing currently deletes the RESULTS bucket. So this notice states a
- * policy the backend does not enforce yet; it needs a results-bucket reaper
- * before the claim is literally true.
+ * Server side: `RESULT_SIGNED_URL_TTL_SEC` defaults to 604800 (7 days), which
+ * is the signed URL lifetime, and the desktop silently re-signs an expired one
+ * via the job id (galleryUrl.ts refreshResultUrl). Actually DELETING the
+ * results bucket on that schedule is a server job David owns and operates in
+ * lu-labs (his call, 2026-07-25) — the desktop's part is stating the policy,
+ * which is what this notice does. If the sweep is ever turned off, this copy is
+ * the thing that has to change, not the other way round.
  */
 export const CLOUD_RETENTION_DAYS = 7;
 
