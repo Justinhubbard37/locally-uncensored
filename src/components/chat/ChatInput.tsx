@@ -36,6 +36,8 @@ interface Props {
    * ModelSelector so the prompt window owns the model choice (web parity).
    */
   composerModel?: ReactNode
+  /** Rendered directly above the prompt box (the standing-goal bar). */
+  composerAbove?: ReactNode
   /**
    * View-specific action buttons (Docs · Plugins · Tools) shown in the action
    * bar between Think and the model picker. Chat and Code pass different sets.
@@ -56,7 +58,7 @@ function fileToImageAttachment(file: File): Promise<ImageAttachment> {
   })
 }
 
-export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApprove, onReject, disabled, slashCommands, onAttachDocs, composerModel, composerActions }: Props) {
+export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApprove, onReject, disabled, slashCommands, onAttachDocs, composerModel, composerActions, composerAbove }: Props) {
   const [input, setInput] = useState('')
   const [images, setImages] = useState<ImageAttachment[]>([])
   const [isDragOver, setIsDragOver] = useState(false)
@@ -279,6 +281,10 @@ export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApp
             ))}
           </div>
         )}
+
+        {/* The standing goal sits above everything else in the composer, so an
+            instruction that steers every turn is never invisible. */}
+        {composerAbove}
 
         {/* Prompt area — hints, image previews, then the textarea (buttons live
             in the action bar below, web-parity two-row composer). */}

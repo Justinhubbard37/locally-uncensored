@@ -39,6 +39,7 @@ import { WorkflowEngine } from '../lib/workflow-engine'
 import type { AgentBlock, AgentToolCall, OllamaChatMessage } from '../types/agent-mode'
 import { selectRelevantToolsAsync } from '../lib/tool-selection'
 import { MUTATING_TOOLS } from '../lib/mutating-tools'
+import { useAgentGoalStore, renderGoalSection } from '../stores/agentGoalStore'
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
 import { budgetFromSettings } from '../api/agents/budget'
@@ -459,6 +460,9 @@ export function useAgentChat() {
         : settings.smallModelMode
           ? buildAgentSystemPromptLean(systemPrompt)
           : buildAgentSystemPrompt(systemPrompt)
+    // Standing goal (/goal) — same section Code injects, so the objective
+    // survives a switch between the two surfaces.
+    agentSystemPrompt += renderGoalSection(useAgentGoalStore.getState().getGoal(convId))
 
     // Multi-Repo (Sprint C #8): when the agent workspace has extra paths,
     // append a "Workspaces" section so the model can reference them by

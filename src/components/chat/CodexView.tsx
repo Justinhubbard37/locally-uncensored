@@ -12,6 +12,7 @@ import { SmallModelModeToggle } from './SmallModelModeToggle'
 import { RealtimeCounter } from './RealtimeCounter'
 import { PluginsDropdown } from './PluginsDropdown'
 import { ModelSelector } from '../models/ModelSelector'
+import { GoalBar } from './GoalBar'
 import { TypingIndicator } from './TypingIndicator'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useModelStore } from '../../stores/modelStore'
@@ -490,6 +491,7 @@ export function CodexView() {
           isGenerating={isRunning}
           slashCommands
           composerModel={<ModelSelector openUpward surface="code" />}
+          composerAbove={<GoalBar />}
           composerActions={<PluginsDropdown openUpward />}
         />
       </div>

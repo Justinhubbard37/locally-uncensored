@@ -15,6 +15,7 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { FileText, ChevronDown, Download, Wrench, Radio, RefreshCw, X } from 'lucide-react'
 import { PluginsDropdown } from './PluginsDropdown'
 import { ModelSelector } from '../models/ModelSelector'
+import { GoalBar } from './GoalBar'
 import { MemoryDebugToggle } from './MemoryDebugPanel'
 import { TokenCounter } from './TokenCounter'
 import { ContextDropdown } from './ContextDropdown'
@@ -338,6 +339,7 @@ export function ChatView() {
                 slashCommands={isAgentActive}
                 onAttachDocs={appMode !== 'cloud' ? () => setRagPanelOpen(true) : undefined}
                 composerModel={<ModelSelector openUpward />}
+                composerAbove={<GoalBar />}
                 composerActions={
                   <>
                     {/* Documents (RAG) — local-embeddings only, so hide in

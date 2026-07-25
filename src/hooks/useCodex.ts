@@ -10,6 +10,8 @@ import { toolRegistry } from '../api/mcp'
 import { usePermissionStore } from '../stores/permissionStore'
 import { toolStrategyFor } from '../lib/tool-support'
 import { MUTATING_TOOLS } from '../lib/mutating-tools'
+import { applyGoalCommand } from '../lib/goal-command'
+import { useAgentGoalStore, renderGoalSection } from '../stores/agentGoalStore'
 import { CODEX_CONFIRM_TOOLS, codexConfirmEnabled } from './codexShellGate'
 import { buildHermesToolPrompt, buildHermesToolResult, parseHermesToolCalls, stripToolCallTags, hasToolCallTags } from '../api/hermes-tool-calling'
 import { chatNonStreaming } from '../api/agents'
@@ -277,6 +279,19 @@ export function useCodex() {
       })
     }
 
+    // `/goal` is bookkeeping, not a prompt. Handle it here and show the result;
+    // every LATER turn picks the goal up from the system prompt below.
+    if (slash?.command.handledLocally && slash.command.name === 'goal') {
+      const res = applyGoalCommand(convId, slash.args)
+      useChatStore.getState().addMessage(convId, {
+        id: uuid(), role: 'user', content: rawInstruction, timestamp: Date.now(),
+      })
+      useChatStore.getState().addMessage(convId, {
+        id: uuid(), role: 'assistant', content: res.message, timestamp: Date.now(),
+      })
+      return
+    }
+
     // Review Mode strips every mutating tool. A command whose whole job is to
     // change something would then run to completion narrating work it could not
     // do, with nothing on screen explaining why. Say it and stop.
@@ -374,6 +389,9 @@ export function useCodex() {
         ? `Working directory: ${workDir}\nUse paths relative to it (e.g. \`package.json\`); do not prefix with \`/\` or a drive letter.`
         : 'Working directory: your private sandbox folder. Use relative paths only (e.g. `package.json`, `.`); never a leading `/` or a drive letter like `C:\\`.'
     let systemPrompt = `${baseCodexPrompt}\n\n${workDirLine}`
+    // Standing goal (/goal) — ahead of the rules and the repo map so it frames
+    // everything that follows instead of reading as an afterthought.
+    systemPrompt += renderGoalSection(useAgentGoalStore.getState().getGoal(convId))
 
     // Memory injection — parity with Chat + Agent. Codex was the only
     // surface that ignored the memory system; now it sees remembered

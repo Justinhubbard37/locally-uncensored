@@ -28,6 +28,14 @@ export interface AgentCommand {
   /** Argument hint shown after the name, e.g. "[file | \"changes\"]". */
   argHint?: string
   /**
+   * True when the hook handles the command itself and never calls the model.
+   * `/goal` is the only one: setting an objective is bookkeeping, and spending
+   * a cloud round-trip to have a model acknowledge it would be theatre.
+   * `build()` still returns text for these, used as the confirmation shown in
+   * the transcript.
+   */
+  handledLocally?: true
+  /**
    * True when the command must not touch anything. Enforced by the runner:
    * file_write / file_edit / shell_execute / code_execute / run_tests /
    * git_commit / git_push and the other mutating tools are removed from the
@@ -46,6 +54,41 @@ const ACT = 'Use your tools to do this for real — do not just describe the ste
 const LOOK = 'Read the real code with file_read / file_list / file_search first — never answer from memory. You have no write or shell tools on this turn, so do not plan to use them.'
 
 export const AGENT_COMMANDS: AgentCommand[] = [
+  // ── Steer ─────────────────────────────────────────────────────────────
+  {
+    name: 'goal',
+    summary: 'Set the standing objective for this session',
+    argHint: '[objective | "clear"]',
+    handledLocally: true,
+    // Never reaches a model. The hook writes agentGoalStore and prints this
+    // confirmation; every later turn gets the goal in its system prompt.
+    // build() is only the transcript line, so it is written for the USER.
+    build: (a) => {
+      const arg = a.trim()
+      if (!arg) return 'goal: read'
+      if (/^(clear|off|none|reset)$/i.test(arg)) return 'goal: clear'
+      return `goal: set ${arg}`
+    },
+  },
+  {
+    name: 'loop',
+    summary: 'Keep working until a finish condition is met',
+    argHint: '<task, and how you will know it is done>',
+    build: (a) => {
+      const task = a.trim() || 'the task the user just described'
+      return `Work on this until it is genuinely finished: ${task}
+
+Run it as a loop, not a single pass:
+1) Do the next concrete step.
+2) VERIFY it — run the tests, the build, the command, whatever actually proves it. Reading your own change back is not verification.
+3) If the check fails, fix the cause and go back to step 2.
+
+Stop when the finish condition is met, and say which check proved it.
+
+Stop EARLY and say so plainly if: the same fix fails twice in a row, the next step needs a decision only the user can make, or you would have to guess at something you cannot look up. A loop that reports honest failure after three rounds is worth more than one that keeps going and reports success it did not earn. Never loosen the check to make it pass, and never delete or skip a test to go green. ${ACT}`
+    },
+  },
+
   // ── Understand ────────────────────────────────────────────────────────
   {
     name: 'plan',

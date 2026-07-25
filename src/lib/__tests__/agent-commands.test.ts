@@ -10,6 +10,8 @@ import { MUTATING_TOOLS } from '../mutating-tools'
 // The 2.5.9 set. Kept as an explicit list rather than a count so a rename or an
 // accidental drop fails loudly instead of quietly changing a number.
 const EXPECTED = [
+  // steer
+  'goal', 'loop',
   // understand
   'plan', 'explain', 'find', 'diff', 'log', 'todo',
   // change
@@ -28,8 +30,11 @@ describe('AGENT_COMMANDS registry', () => {
   it('every command has a summary and a non-empty expansion', () => {
     for (const c of AGENT_COMMANDS) {
       expect(c.summary.length).toBeGreaterThan(5)
-      expect(c.build('').length).toBeGreaterThan(40)
-      expect(c.build('src/app.ts').length).toBeGreaterThan(40)
+      // A locally-handled command's build() is a short marker the hook reads,
+      // not a prompt, so it is exempt from the length floor.
+      const floor = c.handledLocally ? 4 : 40
+      expect(c.build('').length, c.name).toBeGreaterThan(floor)
+      expect(c.build('src/app.ts').length, c.name).toBeGreaterThan(floor)
     }
   })
 
@@ -38,10 +43,27 @@ describe('AGENT_COMMANDS registry', () => {
     expect(new Set(names).size).toBe(names.length)
   })
 
-  it('every command tells the model to act via tools', () => {
+  it('every command that reaches a model tells it to act via tools', () => {
     for (const c of AGENT_COMMANDS) {
-      expect(c.build('')).toContain('Use your tools')
+      if (c.handledLocally) continue
+      expect(c.build(''), c.name).toContain('Use your tools')
     }
+  })
+
+  it('marks only /goal as handled locally', () => {
+    // Everything else must reach a model; a second locally-handled command
+    // would need its own branch in three hooks and would silently no-op if it
+    // did not get one.
+    expect(AGENT_COMMANDS.filter((c) => c.handledLocally).map((c) => c.name)).toEqual(['goal'])
+  })
+
+  it('/loop refuses to fake a green result', () => {
+    const t = getAgentCommand('loop')!.build('make the tests pass')
+    expect(t).toContain('Never loosen the check to make it pass')
+    expect(t).toContain('never delete or skip a test to go green')
+    // And it has to stop rather than spin: a loop with no exit burns a cloud
+    // budget until the iteration cap saves it.
+    expect(t).toContain('Stop EARLY')
   })
 
   it('an argument the user typed always reaches the expansion', () => {

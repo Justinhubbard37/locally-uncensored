@@ -161,6 +161,8 @@ export function AppShell() {
     // retention line) claimed in its own comment that it survived an update
     // and did not, because it was never listed here.
     'lu_cloud_notice', 'locally-uncensored-model-health',
+    // The standing goal (/goal) is per conversation and outlives a session.
+    'locally-uncensored-agent-goal',
   ]
   const STORE_KEYS_SET = new Set(STORE_KEYS)
   // These two persist via idbStorage (IndexedDB) since v2.5.0 — the backup

@@ -14,6 +14,7 @@ import { requestGenerationCancel } from "../api/vram-handoff"
 import { effectiveContextWindow } from "../lib/context-window"
 import { useAgentChat } from "./useAgentChat"
 import { parseAgentCommand } from '../lib/agent-commands'
+import { applyGoalCommand } from '../lib/goal-command'
 import { useMemory } from "./useMemory"
 import { useAgentModeStore } from "../stores/agentModeStore"
 import { useGenerationStore } from "../stores/generationStore"
@@ -77,6 +78,14 @@ export function useChat() {
     // text: there is no tool catalog there for the templates to drive.
     if (store.activeConversationId && useAgentModeStore.getState().isActive(store.activeConversationId)) {
       const slash = parseAgentCommand(content)
+      if (slash?.command.handledLocally && slash.command.name === 'goal') {
+        // Bookkeeping, not a prompt — never spend a round-trip on it.
+        const convId = store.activeConversationId
+        const res = applyGoalCommand(convId, slash.args)
+        store.addMessage(convId, { id: uuid(), role: 'user', content, timestamp: Date.now() })
+        store.addMessage(convId, { id: uuid(), role: 'assistant', content: res.message, timestamp: Date.now() })
+        return
+      }
       if (slash) {
         return agentChat.sendAgentMessage(slash.expanded, images, {
           displayContent: content,
