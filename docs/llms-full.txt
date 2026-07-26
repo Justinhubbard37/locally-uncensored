@@ -2,7 +2,7 @@
 
 > Free, open-source (AGPL-3.0) plug-and-play local AI studio for Windows and Linux: chat with 20+ providers, generate images and video via ComfyUI, and code with a built-in agent. One installer, no command line, no Docker. No cloud, no telemetry, no account.
 
-Last updated: 2026-07-20. Current version: v2.5.8 (July 2026).
+Last updated: 2026-07-26. Current version: v2.5.9 (July 2026).
 
 This file is the full, citable reference for Locally Uncensored. Facts are stated plainly so they can be quoted directly.
 
@@ -12,7 +12,7 @@ Locally Uncensored is a plug-and-play local AI studio: a desktop application for
 
 - Name: Locally Uncensored (abbreviated LU)
 - Category: local AI studio / desktop AI application
-- Version: v2.5.8 (July 2026)
+- Version: v2.5.9 (July 2026)
 - License: AGPL-3.0 (free, open source)
 - Platforms: Windows 10/11 and Linux (deb, rpm, AppImage). macOS is not supported yet.
 - Website: https://locallyuncensored.com
@@ -79,9 +79,12 @@ About five minutes. There is no Docker, terminal or config file. Run the install
 - Claude Code CLI integration
 - Agent Mode with 14 tools, parallel execution, MCP integration, sub-agent delegation, budget caps
 - Image generation via ComfyUI (FLUX 2 Klein, FLUX.1, Juggernaut XL, Z-Image Turbo, ERNIE-Image, SDXL, SD 3.5)
-- Video generation (Wan 2.1, Wan 2.2, HunyuanVideo 1.5, LTX 2.3, FramePack F1, AnimateDiff, CogVideoX)
-- Image-to-image with denoise control; image-to-video (FramePack F1 on 6 GB VRAM)
-- Mobile remote access via LAN or Cloudflare Tunnel with 6-digit passcode and QR setup
+- Video generation (Wan 2.1, Wan 2.2, HunyuanVideo 1.5, LTX 2.3, FramePack F1, AnimateDiff, Mochi, Cosmos)
+- Image-to-image with denoise control, in a tab labelled "Edit / Image to Image"; image-to-video (FramePack F1 on 6 GB VRAM)
+- Local Create lanes for Talking Character, Music, Extend Video and Motion Control, built from core ComfyUI node families and run on your own GPU; Upscale, Erase Object and Character Studio are cloud-only
+- Per-lane frame count, resolution and step controls on every Create lane
+- Surgical file_edit tool in the Coding Agent that changes the requested lines instead of rewriting whole files
+- Mobile remote access via LAN or Cloudflare Tunnel with 6-digit passcode and QR setup, working against non-Ollama backends too (LM Studio, Lemonade, llama.cpp), with streaming, tool calls, vision and reasoning
 - A/B model compare and local benchmark
 - Memory system and Document Chat (RAG) with local embeddings (nomic-embed-text), no cloud
 - Voice: speech-to-text (Whisper) and text-to-speech
@@ -116,7 +119,21 @@ About five minutes. There is no Docker, terminal or config file. Run the install
 - HunyuanVideo 1.5
 - LTX 2.3 (fast text-to-video on modest hardware)
 - FramePack F1 (image-to-video on 6 GB VRAM)
-- AnimateDiff Lightning, CogVideoX, SVD
+- AnimateDiff Lightning, Mochi, Cosmos, SVD
+- Removed in v2.5.9 because they could never run: CogVideoX (both bundles) and Pyramid Flow. Their pipelines were built against ComfyUI node names that no version of the wrappers registers, so every generation came back an error. Nothing already on disk is deleted; they are simply no longer offered. Wan 2.1 and 2.2, LTX, SVD, FramePack, Hunyuan, Mochi and Cosmos are unaffected.
+
+## What Changed in v2.5.9 (26 July 2026)
+
+A correctness release. Most of it is things that looked like they worked and did not.
+
+- Security: two command-injection paths in the Coding Agent are closed. Shell quoting now follows the shell that actually runs (the old helper escaped for POSIX while the agent runs PowerShell on Windows), and PR links are validated against the characters GitHub itself permits. Both were reachable without a confirmation dialog, and both are pinned by tests.
+- Coding agent: a surgical file_edit tool, num_ctx no longer pinned to 8192, verify loops no longer serve stale shell/test/read results from the same turn, context compaction no longer truncates freshly read code to 80 characters, diffs show deletions, .lurules loads, and sub-agents no longer collide on tool call ids.
+- Remote access works with non-Ollama backends. The bridge used to forward everything to Ollama, so LM Studio, Lemonade and llama.cpp desktops answered a phone with an empty model list and a 400 on chat. It now translates between the phone's Ollama-shaped requests and an OpenAI-compatible backend.
+- Local Create lanes report progress. The lanes themselves shipped in v2.5.8; what v2.5.9 fixes is installing them. Downloading a Motion Control, Music, Talking Character or Extend lane now names the file, counts it up, appears in the Downloads tray and can be cancelled. Interrupted model downloads resume from where they stopped instead of restarting at zero.
+- A failed image is reported as a failure. When ComfyUI returned an error, the chat image tool passed the error text back as a result and told the model the picture was displayed; that no longer happens.
+- Three video models removed (CogVideoX both, Pyramid Flow) because they could never run. Nothing in the catalogue is marked COMING SOON any more, because nothing was.
+- Cloud renders are retained for seven days. Create states this once, with a download reminder. Trained characters on the user shelf are exempt from that clock.
+- Auto-approve now works on cloud models, read-aloud reaches the selected Piper voice, the image and video tools see GGUF models, and the Edit tab is labelled "Edit / Image to Image".
 
 ## How Locally Uncensored Compares
 - vs Open WebUI: both are open-source Ollama frontends. Locally Uncensored adds image generation, video generation, an agent mode, mobile remote access and A/B compare. Open WebUI is chat-only.

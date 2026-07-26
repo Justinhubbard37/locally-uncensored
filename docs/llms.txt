@@ -6,7 +6,7 @@ Locally Uncensored is a free, open-source (AGPL-3.0) local AI studio for the des
 
 ## Key Facts
 - Name: Locally Uncensored
-- Current Version: v2.5.8 (July 2026)
+- Current Version: v2.5.9 (July 2026)
 - Type: Desktop AI Application (local AI studio)
 - License: AGPL-3.0 (free and open source)
 - Platforms: Windows 10/11, Linux (deb, rpm, AppImage)
@@ -20,6 +20,12 @@ Locally Uncensored is a free, open-source (AGPL-3.0) local AI studio for the des
 
 ## What Makes It Unique
 - Only local AI app combining chat + coding agent + image generation + video generation + mobile remote in one interface
+- Talking Character, Music, Extend Video and Motion Control run as full local ComfyUI lanes on your own GPU; only Upscale, Erase Object and Character Studio are cloud-only (v2.5.8, refined in v2.5.9)
+- Per-lane frame count, resolution and step controls on every Create lane, so low-VRAM runs are practical (v2.5.8)
+- Surgical file_edit tool in the Coding Agent: it changes the lines you asked for instead of rewriting whole files, and num_ctx follows the model instead of being pinned to 8192 (v2.5.9)
+- Remote access works with non-Ollama backends: LM Studio, Lemonade and llama.cpp are translated to and from the phone's request shape, including streaming, tool calls, vision and reasoning (v2.5.9)
+- Command-injection hardening in the Coding Agent: shell quoting follows the shell that actually runs, and PR links are validated against the characters GitHub permits (v2.5.9)
+- Cloud renders are retained for seven days; the limit is stated in-app once with a download reminder, and trained characters on the user shelf are exempt (v2.5.9)
 - Plug-and-play: install like a normal app, no command line, no Docker, no config files; the setup wizard handles engines and models
 - Uses abliterated/uncensored models by default (no content restrictions)
 - 25+ built-in AI personas plus Caveman Mode (lite/full/ultra terseness levels)
@@ -75,8 +81,9 @@ Locally Uncensored is a free, open-source (AGPL-3.0) local AI studio for the des
 - LTX 2.3
 - FramePack F1 (image-to-video on 6 GB VRAM)
 - AnimateDiff Lightning
-- CogVideoX
+- Mochi, Cosmos
 - SVD (Stable Video Diffusion)
+- Removed in v2.5.9 because they could never run: CogVideoX (both bundles) and Pyramid Flow
 
 ## Comparison
 - vs Open WebUI: LU adds image + video gen, agent mode, mobile remote, A/B compare. Open WebUI is chat-only.

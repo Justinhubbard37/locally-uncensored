@@ -60,7 +60,19 @@ Grab the latest release from [**Releases**](https://github.com/PurpleDoubleD/loc
 
 > **Antivirus warning?** Some engines flag unsigned NSIS installers that download other binaries — a **false positive**. The installer is built by GitHub Actions from the public source on `master`, and the auto-update channel is signed against a public minisign key. Verification steps: [SECURITY.md](SECURITY.md#antivirus--browser-false-positives).
 
-**Current release: v2.5.8** (July 2026) — portable-friendly installers for Windows and Linux (no admin rights required), under the short in-app name **LU** by LU Labs. 2.5.8 rebuilds the Model Manager from scratch (the "Model Hub"), refreshes the catalog with 27 verified models, and adds local GPU lanes for four Create categories (talking character, music, extend video, motion control). Full history in [Releases](https://github.com/PurpleDoubleD/locally-uncensored/releases) and [CHANGELOG.md](CHANGELOG.md).
+**Current release: v2.5.9** (July 2026). Portable-friendly installers for Windows and Linux (no admin rights required), under the short in-app name **LU** by LU Labs. Full history in [Releases](https://github.com/PurpleDoubleD/locally-uncensored/releases) and [CHANGELOG.md](CHANGELOG.md).
+
+### What's new in 2.5.9
+
+A correctness release. Most of it is things that looked like they worked and did not.
+
+- **Security fix in the coding agent.** Two ways a crafted commit message, PR title or PR link could get a shell command run without a confirmation dialog are closed, and both are pinned by tests. Worth updating for if you use the agent's git or GitHub tools.
+- **Setting up a local Create lane finally shows what it is doing.** The four local lanes (Talking Character, Music, Extend Video, Motion Control) arrived in 2.5.8, but installing one gave you a spinner and nothing else: no file name, no size, no percentage, nothing in the Downloads tray and no way out. The card now names the file and counts it up, the download appears in the tray like any other, and Cancel really stops the transfer. A dropped connection resumes where it stopped instead of starting over.
+- **The coding agent got a surgical `file_edit` tool** that changes the lines you asked for instead of rewriting whole files, plus a batch of real fixes: `num_ctx` is no longer pinned to 8192, verify loops stop serving stale shell and test results, diffs show deletions, and `.lurules` actually loads.
+- **Remote access works with non-Ollama backends.** A desktop running LM Studio, Lemonade or llama.cpp used to answer your phone with an empty model list and a 400 on chat. The bridge now translates between the phone and any OpenAI-compatible backend, including streaming, tool calls, vision and reasoning.
+- **Three video models are gone: CogVideoX (both) and Pyramid Flow.** They could never run, because their pipelines were built against ComfyUI node names no wrapper registers, and they offered 46 GB of downloads for that. Wan 2.1 and 2.2, LTX, SVD, FramePack, Hunyuan, Mochi and Cosmos are unaffected. Nothing says COMING SOON any more either, because nothing was.
+- **A failed image no longer counts as a delivered one.** When ComfyUI returned an error, the chat image tool handed the error text back as a result and told the model the picture was on screen. Failures are marked as failures now, with the real reason and a retry.
+- **Cloud renders are kept for seven days**, and Create says so once, with a download reminder, so the limit is stated up front. Trained characters on your shelf are not on that clock.
 
 ---
 
@@ -98,16 +110,17 @@ npm run tauri build  # production desktop binary
 
 ### Create — images & video
 - **Image generation** via a bundled, auto-managed ComfyUI: FLUX 2 Klein, FLUX.1, Juggernaut XL, Z-Image Turbo (uncensored), ERNIE-Image, SDXL, SD 3.5. Per-model correct defaults — no node graphs, no config. [How it works](https://locallyuncensored.com/blog/easiest-local-ai-image-generator.html).
-- **Video generation** — Wan 2.1/2.2, HunyuanVideo 1.5, LTX 2.3, AnimateDiff, CogVideoX. **Image-to-video** with FramePack F1 on just 6 GB VRAM. **Image-to-image** with denoise control.
+- **Video generation** with Wan 2.1/2.2, HunyuanVideo 1.5, LTX 2.3, AnimateDiff, Mochi, Cosmos. **Image-to-video** with FramePack F1 on just 6 GB VRAM. **Image-to-image** with denoise control, in a tab now labelled **Edit / Image to Image**.
+- **Talking Character, Music, Extend Video and Motion Control run on your own GPU** as normal local lanes, built from core ComfyUI node families. Only Upscale, Erase Object and Character Studio are cloud only. Per-lane frame, size and step controls let you trade quality for speed.
 - LoRA picker, VAE override, CLIP-skip, and a local gallery for everything you make. No content filter, no watermark, no credits.
 
 ### Code & agents
-- **Coding Agent** — Architect mode, repo-map (Aider-style PageRank), review-before-apply diffs, test-runner loop, typed git/GitHub tools, multi-repo workspaces, per-project `.lurules`.
+- **Coding Agent** with Architect mode, repo-map (Aider-style PageRank), a surgical `file_edit` tool that rewrites only the lines you asked for, review-before-apply diffs, test-runner loop, typed git/GitHub tools, multi-repo workspaces, per-project `.lurules`.
 - **Agent Mode** — 28 tools + MCP: web search/fetch, file I/O, shell, code execution, screenshots, background tasks, parallel sub-agents. **Granular permissions** (7 categories, 3 levels).
 - **Claude Code CLI integration** and universal tool calling — native for supported models, XML fallback for everything else.
 
 ### Everywhere
-- **Remote access from your phone** — full mobile web app over LAN or Cloudflare Tunnel: QR pairing, 6-digit passcode, opt-in, visible connection status. [Details](https://locallyuncensored.com/blog/local-ai-on-your-phone.html).
+- **Remote access from your phone** with a full mobile web app over LAN or Cloudflare Tunnel: QR pairing, 6-digit passcode, opt-in, visible connection status. Works with non-Ollama backends too (LM Studio, Lemonade, llama.cpp), translated to and from the OpenAI-compatible shape, including streaming, tool calls, vision and reasoning. [Details](https://locallyuncensored.com/blog/local-ai-on-your-phone.html).
 - **A/B model compare**, **local benchmark**, hardware-aware model recommendations, model load/unload, auto-update over a signed channel.
 
 ---
