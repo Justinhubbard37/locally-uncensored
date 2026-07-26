@@ -32,6 +32,7 @@ import { CloudGateModal } from '../cloud/CloudGateModal'
 import { CloudTeaserModal } from '../cloud/CloudTeaserModal'
 import { CloudExampleModal } from '../cloud/CloudExampleModal'
 import { ShortcutsModal } from './ShortcutsModal'
+import { CreditsExhaustedModal } from './CreditsExhaustedModal'
 import { Titlebar } from './Titlebar'
 
 // The backup triad must never write %APPDATA%/store_backup.json before the
@@ -818,6 +819,9 @@ export function AppShell() {
           surfaces only) before the gate. */}
       <CloudExampleModal />
       <ShortcutsModal />
+      {/* Out-of-credits purchase prompt: opens when LU Cloud answers
+          code:'credits_exhausted' (monthly budget + top-up wallet empty). */}
+      <CreditsExhaustedModal />
     </div>
   )
 }

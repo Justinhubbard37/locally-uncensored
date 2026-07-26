@@ -16,6 +16,7 @@ import type {
 import { ProviderError } from './types'
 import { parseSSEStream } from '../sse'
 import { repairJson } from '../../lib/tool-call-repair'
+import { signalCreditsExhausted } from '../../lib/credits-exhausted'
 import { localFetch, localFetchStream, isPrivateOrLanHost, hostnameOf, ensureProxyAllowsHost } from '../backend'
 
 // Local/LAN vs cloud routing now lives in the `useLocalProxy` getter (below)
@@ -730,6 +731,13 @@ export class OpenAIProvider implements ProviderClient {
     // honest, user-facing `error` line (already captured as `message`).
     if (serverCode === 'model_no_tools') code = 'tools_unsupported'
     else if (serverCode === 'model_no_vision') code = 'vision_unsupported'
+    else if (serverCode === 'credits_exhausted') {
+      // Out of credits, top-up wallet empty (HTTP 429). Raise the global
+      // signal so the "Load up your credits" dialog opens on top of the
+      // honest error line already carried in `message`.
+      code = 'credits_exhausted'
+      signalCreditsExhausted()
+    }
 
     // LM Studio: model load fails when there's no inference runtime for the
     // model's format installed. The raw API error reads "No LM Runtime found
