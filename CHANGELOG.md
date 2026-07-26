@@ -29,7 +29,7 @@ A correctness release. Most of it is things that looked like they worked and did
 ### Changed
 
 - **Three video models are gone: CogVideoX (both), Pyramid Flow.** They could never run. Their pipelines were built against ComfyUI node names that no version of the wrappers we pointed you at actually registers, so every generation came back as an error, and the install check looked for an invented node too, which is why a correct install was told to go install what it already had. Between them they offered 46 GB of downloads for that. Wan 2.1 and 2.2, LTX, SVD, FramePack, Hunyuan, Mochi and Cosmos are unaffected. Allegro is closed for the same reason. If you already downloaded a CogVideoX model, nothing is deleted from your disk, it simply is not offered any more.
-- **Cloud renders are kept for seven days and then deleted.** Cloud mode now says so once, in Create, with a download reminder. This is enforced on the server, not just claimed.
+- **Cloud renders are kept for seven days.** Cloud mode now says so once, in Create, with a download reminder, so the limit is stated up front instead of surprising you later. Download what you want to keep. Trained characters on your shelf are not on that clock.
 - **Nothing says COMING SOON any more, because nothing was.** AnimateDiff v3, Mochi and Cosmos sat behind a dimmed "COMING SOON" cover while their own download buttons worked fine underneath. The badge came from a flag somebody forgot to set, not from anything being unfinished. Every model in the catalogue downloads, installs and generates.
 - **The interface lost its em-dashes.** Labels, tooltips, errors and onboarding text now read the way the rest of LU is written.
 
