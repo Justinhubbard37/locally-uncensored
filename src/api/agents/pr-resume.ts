@@ -29,7 +29,14 @@ export interface PrResumePayload {
   diff: string
 }
 
-const PR_URL_RE = /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[?#/].*)?$/
+// owner and repo land in a shell command (`gh pr view … --repo owner/repo`),
+// so they are restricted to what GitHub actually allows rather than "anything
+// without a slash". The loose form accepted `o/r;Write-Output PWNED` and the
+// text after the semicolon ran as its own command (proven 2026-07-26). Owners
+// are alphanumeric plus single hyphens, repos add dot and underscore; neither
+// can contain a quote, a semicolon, a backtick or whitespace.
+const PR_URL_RE =
+  /^https?:\/\/github\.com\/([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9._-]{1,100})\/pull\/(\d+)(?:[?#/].*)?$/
 
 export function parsePrUrl(url: string): PrLocator | null {
   const m = (url ?? '').trim().match(PR_URL_RE)

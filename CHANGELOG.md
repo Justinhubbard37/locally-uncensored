@@ -8,6 +8,10 @@ All notable changes to Locally Uncensored are documented here.
 
 A correctness release. Most of it is things that looked like they worked and did not.
 
+### Security
+
+- **The coding agent could be talked into running commands you never approved.** Two paths, both found in this release's security pass and both reachable without a confirmation dialog. First, the helper that wraps text before it goes into a shell escaped for Linux only, while the agent runs PowerShell on Windows, so a crafted commit message or PR title broke out of its quotes and the rest ran as commands. Second, the "continue this PR" tool accepted almost anything as an owner or repo name and pasted it straight into a shell, so a link like `github.com/a/b;<command>/pull/1` ran that command. Either one could be triggered by a poisoned file, PR comment or search result that the agent read, without you typing anything. Quoting now follows the shell that actually runs, PR links are checked against the characters GitHub itself permits, and both are pinned by tests using the exact payloads.
+
 ### Fixed
 
 - **Setting up a local lane shows you what it is doing, and you can stop it.** Hitting "Download & install" on Motion Control, Music, Lipsync or Extend gave you a spinner and nothing else: no size, no percentage, no speed, nothing in the Downloads tray, and no way to cancel. The card now names the file and counts it up, the download appears in the tray like any other, and there is a Cancel that really stops the transfer.

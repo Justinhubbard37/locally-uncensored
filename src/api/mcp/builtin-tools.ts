@@ -35,6 +35,9 @@ function chatCtx(): { chatId?: string; workingDirectory?: string } {
 
 // ── Tool Definitions ────────────────────────────────────────────
 
+// tool-classification.test.ts reads the names out of this array to assert that
+// every one of them is classified as mutating or read-only. It parses the file
+// rather than importing it, because importing pulls in the tool-registry cycle.
 const BUILTIN_TOOLS: MCPToolDefinition[] = [
   // Web
   {
@@ -988,10 +991,15 @@ async function executeProjectInit(args: Record<string, any>): Promise<string> {
 
 async function executePrResume(args: Record<string, any>): Promise<string> {
   const { parsePrUrl, normalisePrJson, renderPrResume } = await import('../agents/pr-resume')
+  const { shellQuote } = await import('../agents/git-tools')
   const loc = parsePrUrl(String(args.url ?? ''))
   if (!loc) return 'pr_resume: not a GitHub PR URL (expected https://github.com/owner/repo/pull/N).'
+  // Quoted as well as validated. parsePrUrl already rejects anything a shell
+  // could act on, but this used to be raw interpolation and the tool is not
+  // behind the shell confirm gate, so it does not get to rely on one check.
+  const repo = shellQuote(`${loc.owner}/${loc.repo}`)
   const view = await runShell(
-    `gh pr view ${loc.number} --repo ${loc.owner}/${loc.repo} --json title,body,state,headRefName,baseRefName,author,comments`,
+    `gh pr view ${loc.number} --repo ${repo} --json title,body,state,headRefName,baseRefName,author,comments`,
     args.cwd,
     60000,
   )
@@ -1006,7 +1014,7 @@ async function executePrResume(args: Record<string, any>): Promise<string> {
   }
   const meta = normalisePrJson(raw, String(args.url))
   const diff = await runShell(
-    `gh pr diff ${loc.number} --repo ${loc.owner}/${loc.repo}`,
+    `gh pr diff ${loc.number} --repo ${repo}`,
     args.cwd,
     60000,
   )
