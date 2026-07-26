@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Sparkles, X, History, SlidersHorizontal, Square } from 'lucide-react'
-import { useCreateStore, MODEL_TYPE_DEFAULTS, type CreateIntent } from '../../../stores/createStore'
+import { useCreateStore, MODEL_TYPE_DEFAULTS } from '../../../stores/createStore'
 import { classifyModel } from '../../../api/comfyui'
 import { useCreateExp } from './CreateContext'
 import { intentToJob } from '../../../lib/render/cloud-jobs'
@@ -14,6 +14,7 @@ import {
   runCredits,
 } from '../../../stores/cloudCatalogStore'
 import { INTENT_MAP } from './intents'
+import { noPromptHint, shouldShowLaneHint } from './laneHint'
 import { ModelChip } from './ModelChip'
 import { SpecialControls } from './SpecialIntentControls'
 import { CreditsMeter } from './CreditsMeter'
@@ -143,13 +144,7 @@ export function Composer({ onOpenAdvanced }: Props) {
     (!meta.needsSource || !!source) &&
     specialReady &&
     creditsOk
-  // The "add X above" captions go stale the moment the chips are filled: mid
-  // run the motion lane still asked for the image and the video it was already
-  // sampling from. They go away once the lane reports ready. The action
-  // captions (cutout, upscale, eraser) stay, because they describe the click
-  // and not a missing input, and the eraser's mask is not part of specialReady.
-  const hintIsAboutInputs = intent === 'character' || intent === 'lipsync' || intent === 'motion'
-  const showNoPromptHint = !needPrompt && !isGenerating && !(hintIsAboutInputs && specialReady)
+  const showNoPromptHint = shouldShowLaneHint({ needPrompt, isGenerating, intent, specialReady })
 
   return (
     // A stable min-height (bottom-anchored) so the prompt window occupies the
@@ -246,26 +241,6 @@ export function Composer({ onOpenAdvanced }: Props) {
       </div>
     </div>
   )
-}
-
-// Caption for prompt-less intents so each reads honestly (the old copy said
-// "remove the background" for every one of them — misleading the eraser into
-// a guaranteed "Paint a mask first" error).
-function noPromptHint(id: CreateIntent): string {
-  switch (id) {
-    case 'upscale':
-      return 'No prompt needed. Just hit Create to enhance the image.'
-    case 'eraser':
-      return 'No prompt needed. Paint a mask over the object to remove, then hit Create.'
-    case 'character':
-      return 'Add 4 to 30 photos of one person or character above, pick a trigger word, then hit Create to train.'
-    case 'lipsync':
-      return 'Add the portrait (or clip) and a voice above, then hit Create to make it speak.'
-    case 'motion':
-      return 'Add a character image and a driving dance/pose video above, then hit Create.'
-    default:
-      return 'No prompt needed. Just hit Create to remove the background.'
-  }
 }
 
 // Quality (proxy over steps) + Aspect (image) + Edit strength (edit).
