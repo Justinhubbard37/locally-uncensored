@@ -51,9 +51,18 @@ export function DownloadBadge() {
   }, [])
 
   // Auto-open when a new download starts
+  const autoOpened = useRef(false)
   useEffect(() => {
-    if (totalActive > 0) setOpen(true)
+    if (totalActive > 0) { setOpen(true); autoOpened.current = true }
   }, [totalActive])
+
+  // An auto-opened tray had no way back: cancel the download (or let the last
+  // one finish) and the panel kept hanging over the app reading "No active
+  // downloads" until you happened to click somewhere else. It only closes
+  // itself when it opened itself, so a tray the user opened by hand stays put.
+  useEffect(() => {
+    if (!hasAny && autoOpened.current) { setOpen(false); autoOpened.current = false }
+  }, [hasAny])
 
   // Self-heal polling: comfy download progress comes from a polled Rust/bridge
   // endpoint, and polling was only ever kicked off from the Discover page. So a
@@ -73,7 +82,7 @@ export function DownloadBadge() {
     <div ref={ref} className="relative">
       {/* Icon trigger */}
       <button
-        onClick={() => setOpen(!open)}
+        onClick={() => { setOpen(!open); autoOpened.current = false }}
         className={`relative p-1 rounded-md transition-colors ${
           hasAny
             ? 'text-blue-400 hover:bg-blue-500/10'

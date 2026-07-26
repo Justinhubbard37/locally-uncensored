@@ -143,6 +143,13 @@ export function Composer({ onOpenAdvanced }: Props) {
     (!meta.needsSource || !!source) &&
     specialReady &&
     creditsOk
+  // The "add X above" captions go stale the moment the chips are filled: mid
+  // run the motion lane still asked for the image and the video it was already
+  // sampling from. They go away once the lane reports ready. The action
+  // captions (cutout, upscale, eraser) stay, because they describe the click
+  // and not a missing input, and the eraser's mask is not part of specialReady.
+  const hintIsAboutInputs = intent === 'character' || intent === 'lipsync' || intent === 'motion'
+  const showNoPromptHint = !needPrompt && !isGenerating && !(hintIsAboutInputs && specialReady)
 
   return (
     // A stable min-height (bottom-anchored) so the prompt window occupies the
@@ -186,7 +193,7 @@ export function Composer({ onOpenAdvanced }: Props) {
             )}
           </AnimatePresence>
 
-          {!needPrompt && (
+          {showNoPromptHint && (
             <div className="px-3.5 py-3 t-body text-gray-500">
               {noPromptHint(meta.id)}
             </div>
