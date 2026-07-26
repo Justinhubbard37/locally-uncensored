@@ -4,12 +4,16 @@ All notable changes to Locally Uncensored are documented here.
 
 ## [Unreleased]
 
-## [2.5.9] - 2026-07-24
+## [2.5.9] - 2026-07-26
 
 A correctness release. Most of it is things that looked like they worked and did not.
 
 ### Fixed
 
+- **Setting up a local lane shows you what it is doing, and you can stop it.** Hitting "Download & install" on Motion Control, Music, Lipsync or Extend gave you a spinner and nothing else: no size, no percentage, no speed, nothing in the Downloads tray, and no way to cancel. The card now names the file and counts it up, the download appears in the tray like any other, and there is a Cancel that really stops the transfer.
+- **A dropped connection during a model download no longer throws the download away.** It failed with the raw text "Stream error: error decoding response body" and stopped there, even though what had already arrived was still on disk. A file that fails now retries by itself, and each retry continues from where the last one stopped instead of starting at zero.
+- **The setup card stopped asking for things you already gave it.** Motion Control kept saying "add a character image and a driving dance/pose video above" while both were loaded and the render was already running.
+- **The Downloads tray closes itself again.** It opens on its own when a download starts, then sat over the app reading "No active downloads" once the download finished or was cancelled.
 - **Auto-approve now works on cloud models.** "Confirm shell & code commands" is off by default, which is how you tell the coding agent to stop asking. On an LU Cloud model it did nothing at all: the confirm dialog was hard-wired on and the switch had no effect. Confirming on a cloud model is still the right default, so it stays the default, but it is now a switch you own: turn the main confirm off and a second option appears for cloud models specifically.
 - **A failed image no longer counts as a delivered one.** When ComfyUI returned a 400 or a 500, the image tool handed the error text back as if it were a result. LU then treated it exactly like a picture: it burned the turn's image budget so the model could not retry, wrote the error into long-term memory, and told the model "the image is now displayed to the user" right next to the error saying it was not. Models believed that line, and the rest of the conversation was built on a picture that never existed. Failures are now marked as failures everywhere, and instead of "Task completed: 1 failed" you get the actual reason and a way to retry.
 - **Read-aloud reaches the Piper voice you picked.** A cold-start probe could cache a false result for the whole session, so every read-aloud silently fell back to a Windows SAPI voice no matter which Piper voice was selected.
