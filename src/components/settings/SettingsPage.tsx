@@ -730,6 +730,13 @@ function CodexAgentSettings() {
         enabled={settings.codexStageMode}
         onChange={() => updateSettings({ codexStageMode: !settings.codexStageMode })}
       />
+      {settings.codexStageMode && (
+        <InlineToggle
+          label="Auto-apply staged changes when the run finishes (no per-file clicking)"
+          enabled={settings.codexAutoApply}
+          onChange={() => updateSettings({ codexAutoApply: !settings.codexAutoApply })}
+        />
+      )}
       <InlineToggle
         label="Code-Review mode (read-only)"
         enabled={settings.codexReviewMode}

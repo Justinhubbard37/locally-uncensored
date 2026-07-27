@@ -1,8 +1,7 @@
 import { useState } from 'react'
 import { Check, X, ChevronDown, ChevronRight, FileText } from 'lucide-react'
 import { useStagedChangesStore, type StagedChange } from '../../stores/stagedChangesStore'
-import { useChatStore } from '../../stores/chatStore'
-import { backendCall } from '../../api/backend'
+import { applyStagedChange } from '../../lib/staged-apply'
 import { DiffView } from './DiffView'
 import { log } from '../../lib/logger'
 
@@ -42,36 +41,10 @@ export function StagedChangesPanel({ chatId }: Props) {
     if (!chatId) return
     setApplying((prev) => new Set(prev).add(change.id))
     try {
-      // Write via fs_write DIRECTLY, not the `file_write` model tool. Two
-      // reasons: (1) by apply time the loop's finally has cleared the active
-      // chat/workspace, so file_write's chatCtx() is empty and the write jails
-      // to agent-workspace/default — which REJECTS the absolute project path and
-      // every apply silently fails. (2) file_write deliberately does NOT let its
-      // caller pick the jail root (2.5.7 security review: a prompt-injected model
-      // could set workingDirectory to escape the sandbox). Apply is a trusted,
-      // user-gated UI action, so it is safe for the UI to pass the workspace root
-      // captured at stage time as the jail root.
-      const res = await backendCall<{ status?: string; path?: string }>('fs_write', {
-        path: change.resolvedPath || change.path,
-        content: change.newContent,
-        chatId,
-        workingDirectory: change.workingDirectory,
-      })
-      // 'saved' and 'unchanged' are both success ('unchanged' = the file already
-      // matched byte-for-byte). Anything else is a real failure worth retrying.
-      if (res?.status && res.status !== 'saved' && res.status !== 'unchanged') {
-        throw new Error(`fs_write returned status "${res.status}"`)
-      }
-      remove(chatId, change.id)
-      // Mirror the apply in the chat log so the user sees a confirmation
-      // in the main pane, not just the side-pane disappearing.
-      useChatStore.getState().addMessage(chatId, {
-        id: crypto.randomUUID(),
-        role: 'system',
-        content: `Applied staged change: ${change.path}`,
-        timestamp: Date.now(),
-        hidden: true,
-      })
+      // Shared trusted write path (lib/staged-apply) — the same call Codex
+      // auto-apply uses, so the reviewed diff and the auto-applied diff can
+      // never diverge.
+      await applyStagedChange(chatId, change)
     } catch (e) {
       // Apply failures leave the entry in the queue so the user can retry.
       log.error('[StagedChangesPanel] apply failed', { err: e })
