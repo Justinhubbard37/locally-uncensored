@@ -17,7 +17,7 @@ import { retrieveContext } from '../api/rag'
 import { toolRegistry } from '../api/mcp'
 import { usePermissionStore } from '../stores/permissionStore'
 import { isThinkingCompatible, isPlainTextPlanner } from '../lib/model-compatibility'
-import { getToolCallingStrategy, type ToolCallingStrategy } from '../lib/model-compatibility'
+import { getToolCallingStrategy, isNativeToolProvider, type ToolCallingStrategy } from '../lib/model-compatibility'
 import { isMultimodalUnsupportedError, MULTIMODAL_UNSUPPORTED_MESSAGE } from '../lib/ollama-errors'
 import { log } from '../lib/logger'
 import { buildHermesToolPrompt, buildHermesToolResult, parseHermesToolCalls, stripToolCallTags, hasToolCallTags } from '../api/hermes-tool-calling'
@@ -270,7 +270,7 @@ export function useAgentChat() {
     let modelToUse = modelId
     let strategy: ToolCallingStrategy
 
-    if (providerId === 'openai' || providerId === 'anthropic') {
+    if (isNativeToolProvider(providerId)) {
       // Cloud providers always support native tool calling
       strategy = 'native'
     } else {
