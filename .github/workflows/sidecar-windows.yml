@@ -20,6 +20,14 @@ on:
 
 env:
   VULKAN_SDK_VERSION: '1.4.313.2'
+  # Short build root, exactly like the release lane. llama.cpp's Vulkan backend
+  # configures vulkan-shaders-gen as a nested ExternalProject, whose TryCompile
+  # .tlog paths run ~250 chars deep on their own; under the default workspace
+  # path (D:\a\locally-uncensored\locally-uncensored\.llama-build, 52 chars)
+  # they cross MAX_PATH and MSBuild FileTracker dies with FTK1011 — which is
+  # exactly how this lane broke on 2026-07-27 while release.yml (already fixed)
+  # kept building. Keep the two lanes in sync.
+  LLAMA_BUILD_CACHE: 'D:/lb'
 
 jobs:
   sidecar-windows:
@@ -32,7 +40,7 @@ jobs:
       - name: Sidecar build cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: .llama-build
+          path: D:/lb
           key: llama-${{ hashFiles('scripts/build-llama.sh') }}-x86_64-pc-windows-msvc-v1
 
       - name: Install Vulkan SDK
@@ -58,9 +66,9 @@ jobs:
           & $bin --version
           if ($LASTEXITCODE -ne 0) { throw "llama-server --version exited $LASTEXITCODE" }
           # Tiny (~1.2 MB) public GGUF so /health proves a real model load,
-          # not just the HTTP layer. Lands in .llama-build, so the sidecar
-          # cache step keeps it across runs.
-          $model = ".llama-build\stories260K.gguf"
+          # not just the HTTP layer. Lands in the cached build root, so the
+          # sidecar cache step keeps it across runs.
+          $model = "D:\lb\stories260K.gguf"
           if (-not (Test-Path $model)) {
             curl.exe -fsSL --retry 3 -o $model `
               "https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories260K.gguf"

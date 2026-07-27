@@ -96,7 +96,10 @@ jobs:
       - name: Sidecar build cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: .llama-build
+          # Must match LLAMA_BUILD_CACHE below, or Windows caches an empty
+          # ./.llama-build while the real build sits in D:/lb — every run then
+          # recompiles llama.cpp from scratch (~20 min) on a "cache hit".
+          path: ${{ matrix.platform == 'windows-latest' && 'D:/lb' || '.llama-build' }}
           key: llama-${{ hashFiles('scripts/build-llama.sh') }}-${{ matrix.sidecar_triple }}-v1
 
       - name: Install Vulkan SDK (Windows)
