@@ -49,8 +49,10 @@ import { selectRelevantTools, selectRelevantToolsAsync } from '../lib/tool-selec
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
 import { compactMessages, getModelMaxTokens, estimateTokens } from '../lib/context-compaction'
-import { effectiveContextWindow } from '../lib/context-window'
-import { getModelContextCached } from '../api/ollama'
+import { resolveAgentNumCtx } from '../lib/agent-num-ctx'
+import { AgentLoopGuard } from '../lib/agent-loop-guard'
+import { findStagedForPath, stagedReadResult, stagedListingNote } from '../lib/staged-overlay'
+import { applyAllStagedChanges } from '../lib/staged-apply'
 import { useMemoryStore } from '../stores/memoryStore'
 import { extractMemoriesFromPair } from './useMemory'
 import type { OllamaChatMessage } from '../types/agent-mode'
@@ -636,31 +638,27 @@ export function useCodex() {
     // "done" and printed a false "Task completed" (David 2026-06-04). A later
     // fix pinned a flat 8192 — but that hard cap throttled 32k-capable coding
     // models (qwen2.5-coder 32k) down to 8k AND drove compaction to trim their
-    // history to ~6.5k. Mirror useAgentChat (David: "muss immer stimmen"): the
-    // user override wins, else the model's REAL context capped for VRAM
-    // (effectiveContextWindow → 16384 on Ollama), floored at 8192 so a
-    // 4k-default model never overflows. Both the num_ctx we send and the
-    // compaction target below derive from this one value, so they always agree.
-    let numCtx: number = settings.contextWindowOverride || 8192
-    if (providerId === 'ollama' && !settings.contextWindowOverride) {
-      try {
-        numCtx = Math.max(effectiveContextWindow(await getModelContextCached(modelToUse), 0), 8192)
-      } catch {
-        // Keep the 8192 floor when the model's context can't be probed.
-      }
-    }
+    // history to ~6.5k. Shared resolver (David: "muss immer stimmen"): the
+    // user override wins, Ollama models probe their REAL context capped for
+    // VRAM, and cloud models resolve their REAL window from the catalog —
+    // 2.5.9 left cloud at the flat 8192, so a 262k model was trimmed to ~6.5k
+    // every iteration, forgot the files it had just read, and looped on the
+    // same file_read for minutes (Morgan, 2026-07-26). Both the num_ctx we
+    // send and the compaction target below derive from this one value.
+    const numCtx: number = await resolveAgentNumCtx(
+      modelToUse, providerId, settings.contextWindowOverride, activeModel,
+    )
 
     try {
       // Agent loop — max 20 iterations (legacy cap) AND AgentBudget cap,
       // whichever is tighter.
-      // Loop-detection: small / 3B models (qwen2.5-coder:3b, llama3.2:1b)
-      // often get stuck repeating the same file_write+shell_execute sequence
-      // because a test fails and they "fix" it by rewriting the same file.
-      // Track the signature of each iteration's tool-call batch; if the same
-      // signature appears twice in a row we abort with a clear message
-      // instead of burning budget on a no-op loop.
-      let prevBatchSig: string | null = null
-      let sameBatchRepeats = 0
+      // Loop-detection (2.5.10, agent-loop-guard): windowed batch-signature
+      // repeats, identical-read counting per mutation epoch, and repeated
+      // narration. The old detector only saw the same batch 3× IN A ROW —
+      // alternating calls, an injected nudge, or one varying argument reset
+      // it forever while the budget allowed 200 iterations of the loop
+      // (Morgan's 5-minute file_read loop, 2026-07-26).
+      const loopGuard = new AgentLoopGuard()
       // Echo guard — small models occasionally re-emit the system prompt
       // ("Hello, I am the Coding Agent, an autonomous coding agent…") after a
       // tool error. The user asked to silence those silently rather than
@@ -1156,22 +1154,26 @@ export function useCodex() {
         // Phase 5b (v2.4.0), parallel tool execution via tool-executor.
         if (!runningRef.current || abort.signal.aborted) break
 
-        // Loop-detector: compute batch signature (sorted name+args pairs).
-        // Two identical batches in a row → 3 means we're definitely stuck.
-        const batchSig = toolCalls
-          .map(tc => tc.function.name + ':' + JSON.stringify(tc.function.arguments))
-          .sort()
-          .join('|')
-        if (batchSig === prevBatchSig) {
-          sameBatchRepeats++
-          if (sameBatchRepeats >= 2) {
-            const msg = `\n\n_(halted: same tool sequence repeated ${sameBatchRepeats + 1}×, model is looping. Try a larger model like Qwen 3.6 for multi-step code tasks.)_`
-            useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent + msg)
-            break
-          }
-        } else {
-          sameBatchRepeats = 0
-          prevBatchSig = batchSig
+        // Loop-detector: narration first (the same line re-emitted every
+        // iteration), then the batch itself (windowed signature repeats +
+        // identical reads against an unchanged workspace).
+        const narrationVerdict = loopGuard.recordNarration(turnContent)
+        const batchVerdict = narrationVerdict.action === 'halt'
+          ? narrationVerdict
+          : loopGuard.recordBatch(
+              toolCalls.map((tc) => ({ name: tc.function.name, args: JSON.stringify(tc.function.arguments) })),
+            )
+        if (batchVerdict.action === 'halt') {
+          void diagLog('loop-guard-halt', { iter: i, reason: batchVerdict.reason })
+          const msg = `\n\n_(halted: ${batchVerdict.reason}. The model is looping — try a stronger model for multi-step code tasks, or rephrase the instruction.)_`
+          useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent + msg)
+          break
+        }
+        if (batchVerdict.action === 'steer') {
+          // Let this batch still run (the in-turn cache serves it instantly),
+          // but put the anti-repeat instruction in front of the NEXT turn.
+          void diagLog('loop-guard-steer', { iter: i })
+          messages.push({ role: 'user', content: batchVerdict.message })
         }
 
         type BatchEntry = { tc: typeof toolCalls[number]; ac: AgentToolCall; blockId: string; injectedArgs: Record<string, any> }
@@ -1331,13 +1333,21 @@ export function useCodex() {
             : `${workDir.replace(/[\\/]+$/, '')}${workDir.includes('\\') ? '\\' : '/'}${path.replace(/^[\\/]+/, '')}`
           const stageReadCtx: { chatId?: string; workingDirectory?: string } =
             workDir && workDir !== '.' ? { chatId: convId, workingDirectory: workDir } : { chatId: convId }
+          // A prior staged entry for this path already knows the DISK state —
+          // reuse it so the reviewed diff stays disk → latest even when the
+          // model writes the same file twice in one run.
+          const priorWrite = findStagedForPath(useStagedChangesStore.getState().list(convId!), path)
           let oldContent = ''
-          try {
-            const r = await backendCall<{ content?: string }>('fs_read', { path: resolvedPath, ...stageReadCtx })
-            oldContent = r?.content ?? ''
-          } catch {
-            // New file — leave oldContent empty so the diff renders an
-            // all-add hunk and the apply path creates the file.
+          if (priorWrite) {
+            oldContent = priorWrite.oldContent
+          } else {
+            try {
+              const r = await backendCall<{ content?: string }>('fs_read', { path: resolvedPath, ...stageReadCtx })
+              oldContent = r?.content ?? ''
+            } catch {
+              // New file — leave oldContent empty so the diff renders an
+              // all-add hunk and the apply path creates the file.
+            }
           }
           const diff = computeUnifiedDiff(path, oldContent, newContent)
           useStagedChangesStore.getState().stage(convId!, {
@@ -1370,15 +1380,27 @@ export function useCodex() {
             : `${workDir.replace(/[\\/]+$/, '')}${workDir.includes('\\') ? '\\' : '/'}${path.replace(/^[\\/]+/, '')}`
           const stageReadCtx: { chatId?: string; workingDirectory?: string } =
             workDir && workDir !== '.' ? { chatId: convId, workingDirectory: workDir } : { chatId: convId }
-          let oldContent = ''
-          try {
-            const r = await backendCall<{ content?: string; encoding?: string }>('fs_read', { path: resolvedPath, ...stageReadCtx })
-            if (r?.encoding === 'base64') return `file_edit: cannot edit a binary file (${path}).`
-            oldContent = r?.content ?? ''
-          } catch {
-            return `file_edit: could not read ${path}. To create a new file use file_write.`
+          // Read-your-writes: chain onto the STAGED content when this path is
+          // already pending. Without this the base was re-read from DISK —
+          // which never saw the staged write — so a second edit to the same
+          // file silently clobbered the first, and an edit to a staged NEW
+          // file failed with "could not read".
+          const priorEdit = findStagedForPath(useStagedChangesStore.getState().list(convId!), path)
+          let baseContent = ''
+          let diskContent = ''
+          if (priorEdit) {
+            baseContent = priorEdit.newContent
+            diskContent = priorEdit.oldContent
+          } else {
+            try {
+              const r = await backendCall<{ content?: string; encoding?: string }>('fs_read', { path: resolvedPath, ...stageReadCtx })
+              if (r?.encoding === 'base64') return `file_edit: cannot edit a binary file (${path}).`
+              baseContent = diskContent = r?.content ?? ''
+            } catch {
+              return `file_edit: could not read ${path}. To create a new file use file_write.`
+            }
           }
-          const applied = applyUniqueEdit(oldContent, oldString, newString)
+          const applied = applyUniqueEdit(baseContent, oldString, newString)
           if (!applied.ok) {
             switch (applied.reason) {
               case 'empty_old': return 'file_edit: old_string must be non-empty. Use file_write to create a new file.'
@@ -1389,12 +1411,14 @@ export function useCodex() {
             }
           }
           const newContent = applied.content ?? ''
-          const diff = computeUnifiedDiff(path, oldContent, newContent)
+          // Diff and oldContent stay anchored on the DISK state, so the user
+          // reviews (and apply writes) disk → final, not staged → staged.
+          const diff = computeUnifiedDiff(path, diskContent, newContent)
           useStagedChangesStore.getState().stage(convId!, {
             path,
             resolvedPath,
             workingDirectory: workDir && workDir !== '.' ? workDir : undefined,
-            oldContent,
+            oldContent: diskContent,
             newContent,
             diff,
           })
@@ -1405,6 +1429,23 @@ export function useCodex() {
           if (settings.codexStageMode) {
             if (name === 'file_write') return stageFileWrite(args)
             if (name === 'file_edit') return stageFileEdit(args)
+            // Read-your-writes: staged content is invisible on disk, so reads
+            // MUST be answered from the queue — otherwise the model reads the
+            // old bytes (or a not-found), concludes its write failed, and
+            // stages the same file forever (Morgan's file_read loop,
+            // 2026-07-26). The in-turn cache composes correctly: every staged
+            // write is audited as a file_write mutation, which invalidates
+            // cached reads, so a pre-stage result is never replayed.
+            const staged = convId ? useStagedChangesStore.getState().list(convId) : []
+            if (staged.length > 0) {
+              if (name === 'file_read') {
+                const hit = findStagedForPath(staged, String(args.path ?? ''))
+                if (hit) return Promise.resolve(stagedReadResult(hit))
+              }
+              if (name === 'file_list' || name === 'file_search') {
+                return withTimeout(name, args).then((r) => r + stagedListingNote(staged))
+              }
+            }
           }
           return withTimeout(name, args)
         }
@@ -1561,10 +1602,14 @@ export function useCodex() {
               : r.errorHint
                 ? `${r.error ?? 'Tool failed'}, ${r.errorHint}`
                 : (r.error ?? 'Tool failed')
-          // Small-Model Mode (Knob 3): truncate long tool outputs (head+tail)
-          // before they re-enter the model history. Long results cost small
-          // models ~30% accuracy (LongFuncEval). No-op for big models.
-          return settings.smallModelMode ? truncateToolResult(text) : text
+          // Head+tail truncation before results re-enter the model history.
+          // Small-Model Mode (Knob 3) keeps its tight 1500-char budget (long
+          // results cost small models ~30% accuracy, LongFuncEval). Big models
+          // get a generous 60k-char cap (~15k tokens): uncapped, one giant
+          // file_read rode along VERBATIM in every following request via
+          // compaction's KEEP_RECENT window — live 225k-token prompts per
+          // iteration, slow turns and a drained wallet (Morgan, 2026-07-26).
+          return truncateToolResult(text, settings.smallModelMode ? 1500 : 60000)
         }
 
         // lu-cloud is OpenAI-compatible (DeepInfra) and STRICTLY validates the
@@ -1641,6 +1686,25 @@ export function useCodex() {
           fullContent = parts.length > 0 ? `Done: ${parts.join(', ')}.` : 'Done.'
         }
         useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent)
+      }
+
+      // Auto-apply (2.5.10): with the user's opt-in, staged changes land on
+      // disk the moment the run ends — same trusted write path as the panel's
+      // Apply button, so "auto on everything" really means auto (first
+      // customer feedback, Morgan 2026-07-26). Failures stay in the queue for
+      // manual retry via the Pending panel.
+      if (settings.codexStageMode && settings.codexAutoApply && convId) {
+        const pending = useStagedChangesStore.getState().list(convId)
+        if (pending.length > 0) {
+          const applied = await applyAllStagedChanges(convId)
+          if (applied.applied.length > 0) {
+            fullContent += `\n\n_(auto-applied ${applied.applied.length} staged change${applied.applied.length === 1 ? '' : 's'}: ${applied.applied.join(', ')})_`
+          }
+          if (applied.failed.length > 0) {
+            fullContent += `\n\n_(could not auto-apply: ${applied.failed.join(', ')} — review them in the Pending panel)_`
+          }
+          useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent)
+        }
       }
 
       // Final update

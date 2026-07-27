@@ -96,6 +96,7 @@ export async function extractMemoriesFromPair(
       modelId,
       getProviderIdFromModel(activeModel),
       useSettingsStore.getState().settings.contextWindowOverride,
+      activeModel,
     )
 
     // Collect full response via streaming

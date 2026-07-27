@@ -162,6 +162,13 @@ export interface Settings {
    */
   codexStageMode: boolean
   /**
+   * Auto-apply staged changes when the run finishes. Only meaningful while
+   * codexStageMode is on: every diff is still recorded and visible, but the
+   * user is not asked to click Apply per file — "auto on everything" then
+   * really means auto (first customer feedback, Morgan 2026-07-26).
+   */
+  codexAutoApply: boolean
+  /**
    * Code-Review mode. When on, Codex runs read-only — every `file_write`
    * and `shell_execute`-style call is blocked with a friendly message and
    * the model is steered into "inline comments only" by a switched system

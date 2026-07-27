@@ -11,6 +11,7 @@
 import { getModelContext } from '../api/ollama'
 import { getProviderForModel, getProviderIdFromModel } from '../api/providers'
 import { useModelStore } from '../stores/modelStore'
+import { truncateToolResult } from './truncate-tool-result'
 import type { OllamaChatMessage } from '../types/agent-mode'
 
 // ── Token Estimation ────────────────────────────────────────────
@@ -125,15 +126,29 @@ export function compactMessages(
   const systemTokens = systemMsg ? estimateMessageTokens([systemMsg]) : 0
   const budget = Math.max(0, maxTokens - systemTokens)
 
+  // Cap oversized TOOL RESULTS before fitting the suffix. KEEP_RECENT below
+  // keeps the newest messages even when they exceed the budget — without this
+  // cap a single giant file_read result rode along VERBATIM in every request
+  // (live 2026-07-26: ~225k-token prompts against a 6.5k trim target, every
+  // iteration slow and expensive). Only tool results are capped; user and
+  // assistant text is never touched. The cap adapts to the budget (chars ≈
+  // tokens × 4), floored so tiny budgets still keep a useful head+tail.
+  const perResultCap = Math.max(4000, Math.min(32000, Math.floor(budget * 4 * 0.35)))
+  const capped = nonSystem.map((m) =>
+    isToolResultMessage(m) && typeof m.content === 'string' && m.content.length > perResultCap
+      ? { ...m, content: truncateToolResult(m.content, perResultCap) }
+      : m,
+  )
+
   // Accumulate a recent suffix that fits, newest-first. Keep at least
   // KEEP_RECENT messages even when that exceeds budget (recent context is the
   // most valuable), otherwise stop as soon as the next message would overflow.
   const kept: OllamaChatMessage[] = []
   let used = 0
-  for (let i = nonSystem.length - 1; i >= 0; i--) {
-    const t = estimateMessageTokens([nonSystem[i]])
+  for (let i = capped.length - 1; i >= 0; i--) {
+    const t = estimateMessageTokens([capped[i]])
     if (used + t > budget && kept.length >= KEEP_RECENT) break
-    kept.unshift(nonSystem[i])
+    kept.unshift(capped[i])
     used += t
   }
 
@@ -143,13 +158,17 @@ export function compactMessages(
     kept.shift()
   }
 
-  const droppedCount = nonSystem.length - kept.length
+  const droppedCount = capped.length - kept.length
   const compacted: OllamaChatMessage[] = []
   if (systemMsg) compacted.push(systemMsg)
   if (droppedCount > 0) {
+    // Wording matters here: the old notice ("Re-read any file you still need
+    // with file_read.") actively FED a re-read loop — every iteration the
+    // model was told to read again what it had just read. Keep the honest
+    // recovery path but make it single-shot and anti-repeat.
     compacted.push({
       role: 'system',
-      content: `[${droppedCount} earlier message${droppedCount === 1 ? '' : 's'} were trimmed to fit the context window. Re-read any file you still need with file_read.]`,
+      content: `[${droppedCount} earlier message${droppedCount === 1 ? '' : 's'} were trimmed to fit the context window. Results you already saw still hold. If a detail is genuinely missing, re-read that specific file once; never repeat a call that already ran.]`,
     })
   }
   compacted.push(...kept)

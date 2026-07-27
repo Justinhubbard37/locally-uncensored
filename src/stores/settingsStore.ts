@@ -46,7 +46,10 @@ import { DEFAULT_SETTINGS, BUILT_IN_PERSONAS } from '../lib/constants'
 // keeps the field undefined and the Settings number box renders empty, which
 // is how this was caught on the ship exe (2026-07-25). Behaviour was already
 // correct via `?? 0`; this is so the UI shows the real value.
-const STORE_VERSION = 16
+// v17 (2.5.10): added settings.codexAutoApply (default false) — auto-apply
+// staged changes when the run finishes. Additive merge backfills the default;
+// stage-mode behaviour is unchanged until the user turns the new switch on.
+const STORE_VERSION = 17
 
 interface SettingsState {
   settings: Settings

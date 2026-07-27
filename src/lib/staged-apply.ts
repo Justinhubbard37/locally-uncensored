@@ -1,0 +1,62 @@
+/**
+ * Applying staged changes to disk — shared by the StagedChangesPanel buttons
+ * and Codex auto-apply (settings.codexAutoApply), so both paths write through
+ * the exact same trusted call.
+ *
+ * Writes go via fs_write DIRECTLY, not the `file_write` model tool. Two
+ * reasons: (1) by apply time the loop's finally may have cleared the active
+ * chat/workspace, so file_write's chatCtx() is empty and the write would jail
+ * to agent-workspace/default — rejecting the absolute project path. (2)
+ * file_write deliberately does NOT let its caller pick the jail root (2.5.7
+ * security review: a prompt-injected model could set workingDirectory to
+ * escape the sandbox). Apply is a trusted, user-gated action, so it is safe
+ * to pass the workspace root captured at stage time as the jail root.
+ */
+
+import { backendCall } from '../api/backend'
+import { useStagedChangesStore, type StagedChange } from '../stores/stagedChangesStore'
+import { useChatStore } from '../stores/chatStore'
+
+export async function applyStagedChange(chatId: string, change: StagedChange): Promise<void> {
+  const res = await backendCall<{ status?: string; path?: string }>('fs_write', {
+    path: change.resolvedPath || change.path,
+    content: change.newContent,
+    chatId,
+    workingDirectory: change.workingDirectory,
+  })
+  // 'saved' and 'unchanged' are both success ('unchanged' = the file already
+  // matched byte-for-byte). Anything else is a real failure worth retrying.
+  if (res?.status && res.status !== 'saved' && res.status !== 'unchanged') {
+    throw new Error(`fs_write returned status "${res.status}"`)
+  }
+  useStagedChangesStore.getState().remove(chatId, change.id)
+  // Mirror the apply in the chat log so the user sees a confirmation in the
+  // main pane, not just the side-pane entry disappearing.
+  useChatStore.getState().addMessage(chatId, {
+    id: crypto.randomUUID(),
+    role: 'system',
+    content: `Applied staged change: ${change.path}`,
+    timestamp: Date.now(),
+    hidden: true,
+  })
+}
+
+/** Apply every pending change for a chat, sequentially (fs_write serializes
+ *  per path anyway). Failures stay in the queue for manual retry and are
+ *  reported by path instead of throwing, so one bad write never blocks the
+ *  rest. */
+export async function applyAllStagedChanges(
+  chatId: string,
+): Promise<{ applied: string[]; failed: string[] }> {
+  const applied: string[] = []
+  const failed: string[] = []
+  for (const change of [...useStagedChangesStore.getState().list(chatId)]) {
+    try {
+      await applyStagedChange(chatId, change)
+      applied.push(change.path)
+    } catch {
+      failed.push(change.path)
+    }
+  }
+  return { applied, failed }
+}

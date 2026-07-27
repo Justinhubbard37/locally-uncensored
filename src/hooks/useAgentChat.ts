@@ -68,7 +68,7 @@ async function extractMemories(userMsg: string, assistantMsg: string, conversati
   // nothing here dropped the user's context back to Ollama's default and cost a
   // second model load on every single turn (seen live 2026-07-25).
   const numCtx = await resolveAgentNumCtx(
-    modelId, getProviderIdFromModel(activeModel), useSettingsStore.getState().settings.contextWindowOverride,
+    modelId, getProviderIdFromModel(activeModel), useSettingsStore.getState().settings.contextWindowOverride, activeModel,
   )
   let fullResponse = ''
   const stream = provider.chatStream(modelId, messages, { temperature: 0.1, maxTokens: 500, contextWindow: numCtx })
@@ -650,7 +650,7 @@ export function useAgentChat() {
         // extraction that runs after this turn sends the SAME value and Ollama
         // does not reload the model at its default between the two.
         const agentCtx: number = await resolveAgentNumCtx(
-          modelId, providerId, settings.contextWindowOverride,
+          modelId, providerId, settings.contextWindowOverride, activeModel,
         )
         const chatOptions = {
           // Small-Model Mode (Knob 6): gently clamp temperature for tool turns.
@@ -964,6 +964,7 @@ export function useAgentChat() {
           let allowImg = maxImageGen - imageGenDone
           let allowVid = maxVideoGen - videoGenDone
           let blocked = false
+          let blockedNonMedia = false
           const kept: ToolCall[] = []
           for (const tc of toolCalls) {
             const name = tc.function.name
@@ -973,6 +974,7 @@ export function useAgentChat() {
               if (allowVid > 0) { allowVid--; kept.push(tc) } else { blocked = true }
             } else if (executedCallKeys.has(callKey(tc))) {
               blocked = true
+              blockedNonMedia = true
             } else {
               kept.push(tc)
             }
@@ -995,10 +997,14 @@ export function useAgentChat() {
                   id: uuid(), phase: 'reflection', content: turnContent, timestamp: Date.now(),
                 })
               }
+              // Tool-aware wording: telling a coding model "the media is
+              // already created" when its duplicate file_read got dropped
+              // reads like nonsense and derails it further.
               agentMessages.push({
                 role: 'user',
-                content:
-                  'Stop, the media you were asked for is already created and shown. Write ONLY a short, friendly closing line to the user in their own language (e.g. that their picture/clip is ready). Do not output JSON, do not repeat this note, and do not call any tool.',
+                content: blockedNonMedia
+                  ? 'Stop: you are repeating tool calls that already ran this turn — their results are shown above and have not changed. Do not call the same tool with the same arguments again. Use the results you already have and write your final answer now, without calling any tool.'
+                  : 'Stop, the media you were asked for is already created and shown. Write ONLY a short, friendly closing line to the user in their own language (e.g. that their picture/clip is ready). Do not output JSON, do not repeat this note, and do not call any tool.',
               } as ChatMessage)
               continue
             }
@@ -1283,7 +1289,11 @@ export function useAgentChat() {
           // Small-Model Mode (Knob 3): truncate long tool outputs (head+tail)
           // before re-injecting into history. No-op for big models. The short
           // mediaNote appended at the push sites is left intact.
-          return settings.smallModelMode ? truncateToolResult(text) : text
+          // Head+tail cap for everyone: small-model mode keeps its tight 1500
+          // chars, big models get 60k (~15k tokens) so one giant tool result
+          // can never ride along verbatim in every following request via
+          // compaction's KEEP_RECENT window (225k-token prompts, 2026-07-26).
+          return truncateToolResult(text, settings.smallModelMode ? 1500 : 60000)
         }
         // After a successful image/video gen, nudge a NATURAL closing comment so
         // the model doesn't silently loop another generation (David 2026-06-04).

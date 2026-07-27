@@ -1,21 +1,30 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-// The Ollama probe is the only I/O in the resolver.
+// The Ollama probe and the catalog lookup are the only I/O in the resolver.
 vi.mock('../../api/ollama', () => ({
   getModelContextCached: vi.fn(),
+}))
+vi.mock('../context-compaction', () => ({
+  getModelMaxTokens: vi.fn(),
 }))
 
 import { resolveAgentNumCtx } from '../agent-num-ctx'
 import { getModelContextCached } from '../../api/ollama'
+import { getModelMaxTokens } from '../context-compaction'
 
 const probe = getModelContextCached as unknown as ReturnType<typeof vi.fn>
+const catalog = getModelMaxTokens as unknown as ReturnType<typeof vi.fn>
 
 describe('resolveAgentNumCtx — one num_ctx per model, per turn', () => {
-  beforeEach(() => probe.mockReset())
+  beforeEach(() => {
+    probe.mockReset()
+    catalog.mockReset()
+  })
 
   it('lets an explicit override win without probing the model', async () => {
     expect(await resolveAgentNumCtx('qwen2.5-coder:14b', 'ollama', 32768)).toBe(32768)
     expect(probe).not.toHaveBeenCalled()
+    expect(catalog).not.toHaveBeenCalled()
   })
 
   it('uses the model context capped for VRAM when there is no override', async () => {
@@ -36,9 +45,29 @@ describe('resolveAgentNumCtx — one num_ctx per model, per turn', () => {
   // three report identically while the returned value is correct. Left
   // uncovered rather than shipping a red test for working code.
 
-  it('does not probe Ollama for a cloud model', async () => {
+  // 2.5.10 — the Morgan bug: cloud models used to fall through to the flat
+  // 8192, so a 262k model was compaction-trimmed to ~6.5k every iteration and
+  // the coding agent looped on the files it kept forgetting.
+  it('resolves a cloud model to its REAL window from the catalog', async () => {
+    catalog.mockResolvedValue(262144)
+    expect(
+      await resolveAgentNumCtx('Qwen/Qwen3-Coder-480B', 'lu-cloud', 0, 'lu-cloud:Qwen/Qwen3-Coder-480B'),
+    ).toBe(262144)
+    // The catalog is asked with the FULL model name (prefix included) — the
+    // model store indexes by it.
+    expect(catalog).toHaveBeenCalledWith('lu-cloud:Qwen/Qwen3-Coder-480B')
+    expect(probe).not.toHaveBeenCalled()
+  })
+
+  it('keeps the 8192 floor for a cloud model the catalog does not know', async () => {
+    catalog.mockResolvedValue(4096) // getModelMaxTokens' own catch-all value
     expect(await resolveAgentNumCtx('Qwen/Qwen3-Coder-480B', 'lu-cloud', 0)).toBe(8192)
     expect(probe).not.toHaveBeenCalled()
+  })
+
+  it('keeps the floor when the catalog returns nothing usable', async () => {
+    catalog.mockResolvedValue(undefined)
+    expect(await resolveAgentNumCtx('some/model', 'openai', 0)).toBe(8192)
   })
 
   // The reason this resolver exists: the chat request and the memory-extraction
