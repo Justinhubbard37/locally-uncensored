@@ -22,6 +22,28 @@ export interface SSEEvent {
  * Parse an SSE stream into individual events.
  * Handles multi-line data fields, event types, and the [DONE] sentinel.
  */
+/** One `event:`/`data:` block into an SSEEvent, or null if it carries no data. */
+function parseEventBlock(block: string): SSEEvent | null {
+  const trimmed = block.trim()
+  if (!trimmed) return null
+
+  let event: string | undefined
+  let data = ''
+
+  for (const line of trimmed.split('\n')) {
+    if (line.startsWith('event:')) {
+      event = line.slice(6).trim()
+    } else if (line.startsWith('data:')) {
+      // Accumulate data lines (multi-line data support)
+      if (data) data += '\n'
+      data += line.slice(5).trim()
+    }
+    // Ignore other fields (id:, retry:, comments starting with :)
+  }
+
+  return data ? { event, data } : null
+}
+
 export async function* parseSSEStream(response: Response): AsyncGenerator<SSEEvent> {
   const reader = response.body?.getReader()
   if (!reader) throw new Error('No response body')
@@ -36,52 +58,28 @@ export async function* parseSSEStream(response: Response): AsyncGenerator<SSEEve
 
       buffer += decoder.decode(value, { stream: true })
 
+      // The SSE spec allows CRLF and lone CR as line terminators, and some
+      // servers and proxies use them. Splitting on '\n\n' alone glued every
+      // event of such a stream into one block whose JSON never parsed — the
+      // whole answer came back silently empty.
+      // A trailing '\r' may be the first half of a CRLF split across two reads,
+      // so it waits in the buffer until we can see what follows it.
+      const carry = buffer.endsWith('\r') ? '\r' : ''
+      const normalized = (carry ? buffer.slice(0, -1) : buffer).replace(/\r\n?/g, '\n')
+
       // SSE events are separated by double newline
-      const parts = buffer.split('\n\n')
-      buffer = parts.pop() || ''
+      const parts = normalized.split('\n\n')
+      buffer = (parts.pop() || '') + carry
 
       for (const part of parts) {
-        const trimmed = part.trim()
-        if (!trimmed) continue
-
-        let event: string | undefined
-        let data = ''
-
-        for (const line of trimmed.split('\n')) {
-          if (line.startsWith('event:')) {
-            event = line.slice(6).trim()
-          } else if (line.startsWith('data:')) {
-            // Accumulate data lines (multi-line data support)
-            if (data) data += '\n'
-            data += line.slice(5).trim()
-          }
-          // Ignore other fields (id:, retry:, comments starting with :)
-        }
-
-        if (data) {
-          yield { event, data }
-        }
+        const parsed = parseEventBlock(part)
+        if (parsed) yield parsed
       }
     }
 
     // Process any remaining buffer
-    if (buffer.trim()) {
-      let event: string | undefined
-      let data = ''
-
-      for (const line of buffer.trim().split('\n')) {
-        if (line.startsWith('event:')) {
-          event = line.slice(6).trim()
-        } else if (line.startsWith('data:')) {
-          if (data) data += '\n'
-          data += line.slice(5).trim()
-        }
-      }
-
-      if (data) {
-        yield { event, data }
-      }
-    }
+    const tail = parseEventBlock(buffer.replace(/\r\n?/g, '\n'))
+    if (tail) yield tail
   } finally {
     reader.releaseLock()
   }

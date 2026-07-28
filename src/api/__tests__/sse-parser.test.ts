@@ -92,6 +92,41 @@ describe('parseSSEStream', () => {
     expect(events[0].data).toBe('{"content":"hello"}')
   })
 
+  // The spec allows CRLF and lone CR as terminators. Splitting on '\n\n' only
+  // glued a CRLF stream into a single block whose JSON never parsed, so the
+  // answer arrived silently empty.
+  it('parses events separated by CRLF', async () => {
+    const res = mockResponse('data: {"a":1}\r\n\r\ndata: {"a":2}\r\n\r\ndata: [DONE]\r\n\r\n')
+    const events = []
+    for await (const event of parseSSEStream(res)) {
+      events.push(event)
+    }
+    expect(events.map(e => e.data)).toEqual(['{"a":1}', '{"a":2}', '[DONE]'])
+  })
+
+  it('parses events separated by lone CR', async () => {
+    const res = mockResponse('data: {"a":1}\r\rdata: {"a":2}\r\r')
+    const events = []
+    for await (const event of parseSSEStream(res)) {
+      events.push(event)
+    }
+    expect(events.map(e => e.data)).toEqual(['{"a":1}', '{"a":2}'])
+  })
+
+  it('does not split an event when a CRLF straddles two reads', async () => {
+    const res = mockChunkedResponse([
+      'event: content_block_delta\r',
+      '\ndata: {"a":1}\r\n\r\n',
+    ])
+    const events = []
+    for await (const event of parseSSEStream(res)) {
+      events.push(event)
+    }
+    expect(events).toHaveLength(1)
+    expect(events[0].event).toBe('content_block_delta')
+    expect(events[0].data).toBe('{"a":1}')
+  })
+
   it('ignores comment lines', async () => {
     const res = mockResponse(': this is a comment\ndata: {"a":1}\n\n')
     const events = []
