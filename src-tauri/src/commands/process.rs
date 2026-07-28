@@ -1965,10 +1965,12 @@ pub fn offload_local_models(
 
     // 2) Bundled llama.cpp chat + embeddings sidecars (managed GGUF in RAM).
     //    Both are graceful no-ops when not running, and lazy-start on next use.
-    if crate::commands::engine::stop_bundled_engine(state.clone()).is_ok() {
+    // Call the lifecycle helpers directly — the #[command] wrappers are async
+    // now (they moved off the Tauri main thread) and this caller is sync.
+    if crate::commands::engine::stop_engine_locked(&state) {
         freed.push("bundled-engine");
     }
-    if crate::commands::engine::stop_bundled_embed(state.clone()).is_ok() {
+    if crate::commands::engine::stop_embed_locked(&state) {
         freed.push("bundled-embed");
     }
 

@@ -243,10 +243,30 @@ fn wait_for_health(port: u16) -> Result<(), String> {
 /// Start (or reuse) the managed chat engine for `model_path`. Idempotent: if
 /// the same model is already loaded and healthy, returns `already_running`.
 /// A different model in flight is stopped first (single-process engine).
+/// Freeze fix: loading a GGUF takes seconds to a minute, and `wait_for_health`
+/// blocks for all of it. As a plain sync `#[command]` that ran on the Tauri main
+/// thread, so the whole window sat frozen while the built-in engine started —
+/// the same class already fixed for the ComfyUI probes and the custom-node
+/// install. The blocking half runs on the blocking pool; the JS caller still
+/// awaits exactly as before.
 #[tauri::command]
-pub fn start_bundled_engine(
+pub async fn start_bundled_engine(
     app: AppHandle,
-    state: State<'_, AppState>,
+    model_path: String,
+    ctx: Option<u32>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        start_bundled_engine_blocking(&app, &state, model_path, ctx, port)
+    })
+    .await
+    .map_err(|e| format!("Engine start task failed to run: {e}"))?
+}
+
+fn start_bundled_engine_blocking(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
     model_path: String,
     ctx: Option<u32>,
     port: Option<u16>,
@@ -273,9 +293,9 @@ pub fn start_bundled_engine(
     }
 
     // Different model (or dead) → stop the old process before spawning.
-    stop_engine_locked(&state);
+    stop_engine_locked(state);
 
-    let binary = resolve_engine_binary(&app).ok_or_else(|| {
+    let binary = resolve_engine_binary(app).ok_or_else(|| {
         format!(
             "Bundled engine binary not found ({}). Run scripts/build-llama.sh to produce the sidecar.",
             sidecar_binary_name()
@@ -309,7 +329,7 @@ pub fn start_bundled_engine(
     // Wait for the model to load. On failure, reap the child so we don't leave
     // a zombie half-loaded server behind.
     if let Err(e) = wait_for_health(port) {
-        stop_engine_locked(&state);
+        stop_engine_locked(state);
         return Err(e);
     }
 
@@ -323,33 +343,48 @@ pub fn start_bundled_engine(
 
 /// Stop the managed engine, killing the child. Idempotent.
 #[tauri::command]
-pub fn stop_bundled_engine(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let was_running = stop_engine_locked(&state);
-    Ok(serde_json::json!({ "status": if was_running { "stopped" } else { "idle" } }))
+pub async fn stop_bundled_engine(app: AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // kill + wait on a server that is mid-load is not instant.
+        let state = app.state::<AppState>();
+        let was_running = stop_engine_locked(&state);
+        serde_json::json!({ "status": if was_running { "stopped" } else { "idle" } })
+    })
+    .await
+    .map_err(|e| format!("Engine stop task failed to run: {e}"))
 }
 
 /// Report whether the engine is up, which model, on which port, and a live
 /// health probe. `running` reflects the child handle; `healthy` the HTTP probe
 /// (they diverge briefly during cold load).
+/// Async because of the health probe: it is a blocking HTTP call with a 400 ms
+/// timeout, and the UI polls this. On the main thread that was a stutter on
+/// every poll and a 400 ms stall whenever the engine was starting or gone.
 #[tauri::command]
-pub fn bundled_engine_status(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
-    let guard = state.bundled_engine.lock().unwrap();
-    match guard.as_ref() {
-        Some(engine) => Ok(serde_json::json!({
-            "running": true,
-            "healthy": engine_healthy(engine.port),
-            "port": engine.port,
-            "model_path": engine.model_path,
-        })),
-        None => Ok(serde_json::json!({
-            "running": false,
-            "healthy": false,
-            "port": DEFAULT_ENGINE_PORT,
-            "model_path": null,
-        })),
-    }
+pub async fn bundled_engine_status(app: AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let probe = {
+            let guard = state.bundled_engine.lock().unwrap();
+            guard.as_ref().map(|e| (e.port, e.model_path.clone()))
+        };
+        match probe {
+            Some((port, model_path)) => serde_json::json!({
+                "running": true,
+                "healthy": engine_healthy(port),
+                "port": port,
+                "model_path": model_path,
+            }),
+            None => serde_json::json!({
+                "running": false,
+                "healthy": false,
+                "port": DEFAULT_ENGINE_PORT,
+                "model_path": null,
+            }),
+        }
+    })
+    .await
+    .map_err(|e| format!("Engine status task failed to run: {e}"))
 }
 
 /// Swap the loaded model: stop the current process and start `model_path` on
@@ -357,20 +392,24 @@ pub fn bundled_engine_status(
 /// stops a mismatched model), kept as a distinct command so the intent reads
 /// clearly at the call site and the port is preserved.
 #[tauri::command]
-pub fn swap_bundled_model(
+pub async fn swap_bundled_model(
     app: AppHandle,
-    state: State<'_, AppState>,
     model_path: String,
     ctx: Option<u32>,
 ) -> Result<serde_json::Value, String> {
-    let port = state
-        .bundled_engine
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|e| e.port)
-        .unwrap_or(DEFAULT_ENGINE_PORT);
-    start_bundled_engine(app, state, model_path, ctx, Some(port))
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let port = state
+            .bundled_engine
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|e| e.port)
+            .unwrap_or(DEFAULT_ENGINE_PORT);
+        start_bundled_engine_blocking(&app, &state, model_path, ctx, Some(port))
+    })
+    .await
+    .map_err(|e| format!("Engine swap task failed to run: {e}"))?
 }
 
 /// List `*.gguf` files in the built-in models dir, marking the one currently
@@ -407,7 +446,7 @@ pub fn list_bundled_models(
 
 /// Kill the managed engine child if present. Returns whether one was running.
 /// Takes the state lock internally; callers must not already hold it.
-fn stop_engine_locked(state: &State<'_, AppState>) -> bool {
+pub(crate) fn stop_engine_locked(state: &State<'_, AppState>) -> bool {
     let mut guard = state.bundled_engine.lock().unwrap();
     if let Some(mut engine) = guard.take() {
         let _ = engine.child.kill();
@@ -431,9 +470,22 @@ fn stop_engine_locked(state: &State<'_, AppState>) -> bool {
 /// for the same model + healthy. A different embed model in flight is stopped
 /// first (single-process server).
 #[tauri::command]
-pub fn start_bundled_embed(
+pub async fn start_bundled_embed(
     app: AppHandle,
-    state: State<'_, AppState>,
+    model_path: String,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        start_bundled_embed_blocking(&app, &state, model_path, port)
+    })
+    .await
+    .map_err(|e| format!("Embeddings start task failed to run: {e}"))?
+}
+
+fn start_bundled_embed_blocking(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
     model_path: String,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
@@ -457,9 +509,9 @@ pub fn start_bundled_embed(
         }
     }
 
-    stop_embed_locked(&state);
+    stop_embed_locked(state);
 
-    let binary = resolve_engine_binary(&app).ok_or_else(|| {
+    let binary = resolve_engine_binary(app).ok_or_else(|| {
         format!(
             "Bundled engine binary not found ({}). Run scripts/build-llama.sh to produce the sidecar.",
             sidecar_binary_name()
@@ -489,7 +541,7 @@ pub fn start_bundled_embed(
     });
 
     if let Err(e) = wait_for_health(port) {
-        stop_embed_locked(&state);
+        stop_embed_locked(state);
         return Err(e);
     }
 
@@ -503,36 +555,49 @@ pub fn start_bundled_embed(
 
 /// Stop the managed embeddings server, killing the child. Idempotent.
 #[tauri::command]
-pub fn stop_bundled_embed(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let was_running = stop_embed_locked(&state);
-    Ok(serde_json::json!({ "status": if was_running { "stopped" } else { "idle" } }))
+pub async fn stop_bundled_embed(app: AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let was_running = stop_embed_locked(&state);
+        serde_json::json!({ "status": if was_running { "stopped" } else { "idle" } })
+    })
+    .await
+    .map_err(|e| format!("Embeddings stop task failed to run: {e}"))
 }
 
 /// Report whether the embeddings server is up, which model, on which port.
 #[tauri::command]
-pub fn bundled_embed_status(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
-    let guard = state.bundled_embed.lock().unwrap();
-    match guard.as_ref() {
-        Some(embed) => Ok(serde_json::json!({
-            "running": true,
-            "healthy": engine_healthy(embed.port),
-            "port": embed.port,
-            "model_path": embed.model_path,
-        })),
-        None => Ok(serde_json::json!({
-            "running": false,
-            "healthy": false,
-            "port": DEFAULT_EMBED_PORT,
-            "model_path": null,
-        })),
-    }
+pub async fn bundled_embed_status(app: AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        // Probe OUTSIDE the lock: holding it across a blocking HTTP call made
+        // every other engine command queue behind the status poll.
+        let probe = {
+            let guard = state.bundled_embed.lock().unwrap();
+            guard.as_ref().map(|e| (e.port, e.model_path.clone()))
+        };
+        match probe {
+            Some((port, model_path)) => serde_json::json!({
+                "running": true,
+                "healthy": engine_healthy(port),
+                "port": port,
+                "model_path": model_path,
+            }),
+            None => serde_json::json!({
+                "running": false,
+                "healthy": false,
+                "port": DEFAULT_EMBED_PORT,
+                "model_path": null,
+            }),
+        }
+    })
+    .await
+    .map_err(|e| format!("Embeddings status task failed to run: {e}"))
 }
 
 /// Kill the managed embeddings child if present. Returns whether one was
 /// running. Takes the state lock internally; callers must not already hold it.
-fn stop_embed_locked(state: &State<'_, AppState>) -> bool {
+pub(crate) fn stop_embed_locked(state: &State<'_, AppState>) -> bool {
     let mut guard = state.bundled_embed.lock().unwrap();
     if let Some(mut embed) = guard.take() {
         let _ = embed.child.kill();
