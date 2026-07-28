@@ -48,6 +48,8 @@ import { RemoteAccessDocs } from './RemoteAccessDocs'
 import { HardwareSettings } from './HardwareSettings'
 import { ChatbotImporter } from '../import/ChatbotImporter'
 import { ProviderSettings } from './ProviderConfig'
+import { BuiltinEngineSettings } from './BuiltinEngineSettings'
+import { useProviderStore } from '../../stores/providerStore'
 import { PermissionSettings } from './PermissionSettings'
 import { MCPServerSettings } from './MCPServerSettings'
 import { WorkflowList } from '../agents/WorkflowList'
@@ -868,6 +870,9 @@ function ResetSection({ tab }: { tab: SettingsTab }) {
 
 export function SettingsPage() {
   const { settings, updateSettings } = useSettingsStore()
+  // ENG-2 — the expert panel only exists when the openai slot IS the
+  // app-managed built-in engine (same gate as the send-path self-heal).
+  const builtinManaged = useProviderStore((s) => !!s.providers.openai?.enabled && s.providers.openai?.managed === true)
   const { setView } = useUIStore()
   const voiceSettings = useVoiceStore()
   const [whisperStatus, setWhisperStatus] = useState<{ available: boolean; backend: string | null; error?: string } | null>(null)
@@ -1276,6 +1281,12 @@ export function SettingsPage() {
           <Section title="Model Storage">
             <HfDownloadPathSetting />
           </Section>
+
+          {builtinManaged && (
+            <Section title="Built-in Engine (expert)">
+              <BuiltinEngineSettings />
+            </Section>
+          )}
 
           <Section title="ComfyUI (Image & Video)">
             {settings.appMode === 'cloud' && (
