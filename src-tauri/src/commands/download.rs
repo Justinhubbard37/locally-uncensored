@@ -282,6 +282,19 @@ pub async fn download_model(
     Ok(serde_json::json!({"status": "started", "id": id}))
 }
 
+/// Bytes already on disk that count toward this download. Only a 206 means the
+/// server honoured the Range request; a 200 carries the whole body, the partial
+/// file is truncated and restarted, and nothing may be counted.
+fn resumed_bytes(resume_offset: u64, status: u16) -> u64 {
+    if resume_offset > 0 && status == 206 { resume_offset } else { 0 }
+}
+
+/// True when the body stopped before Content-Length was reached. `total == 0`
+/// means the server declared no length — there is nothing to check against.
+fn ended_early(total: u64, downloaded: u64) -> bool {
+    total > 0 && downloaded < total
+}
+
 async fn do_download(
     url: &str,
     dest: &PathBuf,
@@ -321,9 +334,12 @@ async fn do_download(
         return Err(format!("HTTP {}", status));
     }
 
+    let already_on_disk = resumed_bytes(resume_offset, status.as_u16());
+    let resumed = already_on_disk > 0;
+
     // For resumed downloads, total = content_length + offset
     let content_length = response.content_length().unwrap_or(0);
-    let total = if resume_offset > 0 && status.as_u16() == 206 {
+    let total = if resumed {
         content_length + resume_offset
     } else {
         content_length
@@ -340,7 +356,7 @@ async fn do_download(
     let tmp_path = dest.with_extension("download");
 
     // Open file for writing (append if resuming)
-    let mut file = if resume_offset > 0 && status.as_u16() == 206 {
+    let mut file = if resumed {
         tokio::fs::OpenOptions::new()
             .append(true)
             .open(&tmp_path)
@@ -353,7 +369,7 @@ async fn do_download(
     };
 
     let mut stream = response.bytes_stream();
-    let mut downloaded: u64 = resume_offset;
+    let mut downloaded: u64 = already_on_disk;
     let start = Instant::now();
     let mut last_update = Instant::now();
 
@@ -395,7 +411,7 @@ async fn do_download(
                             last_update = Instant::now();
                             let elapsed = start.elapsed().as_secs_f64();
                             let speed = if elapsed > 0.0 {
-                                (downloaded - resume_offset) as f64 / elapsed
+                                (downloaded - already_on_disk) as f64 / elapsed
                             } else {
                                 0.0
                             };
@@ -422,6 +438,19 @@ async fn do_download(
 
     file.flush().await.map_err(|e| format!("Flush: {}", e))?;
     drop(file);
+
+    // A body can end early without ever erroring — a CDN cutting the connection,
+    // a laptop going to sleep, an antivirus dropping the stream. Renaming a short
+    // file into place is the worst outcome: the Models page tolerates rough
+    // catalog sizes (50%), so the truncated model would read as "Installed" and
+    // only blow up much later, when the backend tries to load it. Keep the
+    // .download part instead — the next attempt resumes from there.
+    if ended_early(total, downloaded) {
+        return Err(format!(
+            "Download ended early: {} of {} bytes received. Start it again to resume.",
+            downloaded, total
+        ));
+    }
 
     tokio::fs::rename(&tmp_path, dest)
         .await
@@ -887,4 +916,25 @@ pub async fn check_model_sizes(
     }
 
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_short_body_is_never_renamed_into_place() {
+        assert!(ended_early(6_000_000_000, 3_500_000_000));
+        assert!(!ended_early(6_000_000_000, 6_000_000_000));
+        // Server declared no length: nothing to compare against, trust the stream.
+        assert!(!ended_early(0, 17));
+    }
+
+    #[test]
+    fn only_a_206_lets_the_partial_file_count() {
+        assert_eq!(resumed_bytes(4096, 206), 4096);
+        // Range ignored — the whole body arrives and the part file is restarted.
+        assert_eq!(resumed_bytes(4096, 200), 0);
+        assert_eq!(resumed_bytes(0, 206), 0);
+    }
 }
