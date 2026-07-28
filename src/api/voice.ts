@@ -241,26 +241,60 @@ export async function transcribeAudioCloud(audioBlob: Blob): Promise<string> {
 // boundaries (hard-splitting any single oversized run) so long messages read
 // aloud instead of 400ing and silently degrading to the local/browser voice.
 const TTS_MAX_CHARS = 1400;
+/** Last resort for a run with no sentence end in it: cut at `max`, but never
+ *  through a surrogate pair (a split emoji becomes two lone surrogates, which
+ *  is invalid in the JSON the cloud TTS request carries) and, where the text
+ *  has spaces, never through a word. */
+function hardSlice(s: string, max: number): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < s.length) {
+    let end = Math.min(i + max, s.length);
+    if (end < s.length) {
+      const lead = s.charCodeAt(end - 1);
+      if (lead >= 0xd800 && lead <= 0xdbff) end -= 1; // keep the pair together
+      const ws = s.lastIndexOf(" ", end - 1);
+      // Only back off to a space if it does not shrink the chunk drastically —
+      // CJK has none, and a 60% floor keeps the clip count sane.
+      if (ws > i + max * 0.6) end = ws + 1;
+    }
+    const piece = s.slice(i, end).trim();
+    if (piece) out.push(piece);
+    i = end;
+  }
+  return out;
+}
+
 export function chunkForTts(text: string, max = TTS_MAX_CHARS): string[] {
   const clean = text.trim();
   if (clean.length <= max) return clean ? [clean] : [];
-  const parts = clean.split(/(?<=[.!?。！？\n])\s+/);
+  // Split AFTER a sentence terminator. This used to require whitespace to
+  // FOLLOW it (`\s+`), which never fires for CJK — Chinese and Japanese put no
+  // space after 。！？, so a long answer stayed a single part and fell into the
+  // blind slicer below: measured, 200 Japanese sentences came out as one part
+  // and the cut landed inside a word.
+  // Parts stay VERBATIM — the separator (a space in Latin prose, nothing in
+  // CJK) rides along at the head of the next part, so concatenating restores
+  // the original exactly. Joining with a space instead would insert one into
+  // Japanese where none belongs.
+  const parts = clean.split(/(?<=[.!?。！？\n])/).filter(Boolean);
   const chunks: string[] = [];
   let cur = "";
+  const flush = () => {
+    const t = cur.trim();
+    if (t) chunks.push(t);
+    cur = "";
+  };
   for (const p of parts) {
     if (p.length > max) {
-      if (cur) { chunks.push(cur); cur = ""; }
-      for (let i = 0; i < p.length; i += max) chunks.push(p.slice(i, i + max));
+      flush();
+      for (const piece of hardSlice(p, max)) chunks.push(piece);
       continue;
     }
-    if ((cur ? cur.length + 1 + p.length : p.length) > max) {
-      if (cur) chunks.push(cur);
-      cur = p;
-    } else {
-      cur = cur ? `${cur} ${p}` : p;
-    }
+    if (cur.length + p.length > max) flush();
+    cur += p;
   }
-  if (cur) chunks.push(cur);
+  flush();
   return chunks;
 }
 
