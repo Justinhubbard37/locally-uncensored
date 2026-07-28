@@ -5,6 +5,7 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { getProviderIdFromModel, displayModelName } from '../../api/providers'
 import { getModelContextCached, warmupOllamaContext } from '../../api/ollama'
 import { loadLmStudioModel } from '../../api/lmstudio'
+import { bundledEngineStatus, swapBundledModel } from '../../api/engine'
 import { effectiveContextWindow } from '../../lib/context-window'
 import { useActiveContextWindow } from '../../hooks/useActiveContextWindow'
 
@@ -21,6 +22,8 @@ const fmt = (n: number) =>
  * and AUTO-RELOADS the model so the change takes effect immediately:
  *   - Ollama:    warm the model with the new num_ctx (Ollama reloads its runner).
  *   - LM Studio: `lms load -c <N>` (unload + reload — context is load-time there).
+ *   - Built-in:  ctx lives in settings.builtinEngine (expert tuning), the
+ *                engine relaunches with the new -c via swapBundledModel.
  * Hidden for cloud models (their context is fixed and not adjustable here).
  */
 export function ContextDropdown() {
@@ -31,6 +34,10 @@ export function ContextDropdown() {
   const [busy, setBusy] = useState(false)
   const [tick, setTick] = useState(0)
   const ctx = useActiveContextWindow(tick)
+  const builtinCtx = useSettingsStore((s) => s.settings.builtinEngine.ctx)
+  // The check-mark anchor: built-in reads its own tuning field, not the
+  // Ollama/LM Studio override.
+  const selected = ctx.provider === 'builtin' ? builtinCtx : override
 
   if (!activeModel || !ctx.adjustable) return null
 
@@ -40,6 +47,27 @@ export function ContextDropdown() {
 
   const apply = async (value: number) => {
     setOpen(false)
+    // Built-in engine: ctx lives in the expert tuning, NOT contextWindowOverride
+    // (that's the Ollama num_ctx lever). Persist, then relaunch the running
+    // engine so the new -c is live immediately; a stopped engine simply picks
+    // the value up on its next start.
+    if (ctx.provider === 'builtin') {
+      const tuning = useSettingsStore.getState().settings.builtinEngine
+      if (value === tuning.ctx) return
+      setBusy(true)
+      updateSettings({ builtinEngine: { ...tuning, ctx: value } })
+      try {
+        const status = await bundledEngineStatus()
+        if (status?.running && status.model_path) await swapBundledModel(status.model_path)
+      } catch {
+        /* non-fatal — the next engine start uses the new value */
+      } finally {
+        setBusy(false)
+        setTick((t) => t + 1)
+        window.dispatchEvent(new Event('lu-context-reloaded'))
+      }
+      return
+    }
     if (value === override) return
     setBusy(true)
     updateSettings({ contextWindowOverride: value }) // 0 = Auto
@@ -76,7 +104,7 @@ export function ContextDropdown() {
       <button
         onClick={() => setOpen((o) => !o)}
         disabled={busy}
-        title={`Context window: ${ctx.provider === 'lmstudio' ? "LM Studio's loaded context" : 'Ollama num_ctx'}. Changing it reloads the model so it takes effect now.`}
+        title={`Context window: ${ctx.provider === 'lmstudio' ? "LM Studio's loaded context" : ctx.provider === 'builtin' ? "the built-in engine's loaded context" : 'Ollama num_ctx'}. Changing it reloads the model so it takes effect now.`}
         className="flex items-center gap-1 px-1.5 py-0.5 rounded border border-gray-200 dark:border-white/[0.06] hover:border-gray-400 dark:hover:border-white/15 text-gray-500 transition-colors text-[0.55rem] font-mono tabular-nums disabled:opacity-60"
       >
         {busy ? <Loader2 size={9} className="animate-spin" /> : null}
@@ -87,20 +115,20 @@ export function ContextDropdown() {
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
           <div className="absolute right-0 top-full mt-1 z-50 min-w-[140px] rounded-lg bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-white/10 shadow-xl p-1 flex flex-col gap-0.5">
-            <button onClick={() => apply(0)} className={rowCls(override === 0)}>
-              <span>Auto{ctx.provider === 'ollama' ? ` · ${fmt(effectiveContextWindow(ctx.modelMax, 0))}` : ''}</span>
-              {override === 0 && <Check size={10} />}
+            <button onClick={() => apply(0)} className={rowCls(selected === 0)}>
+              <span>Auto{ctx.provider === 'ollama' ? ` · ${fmt(effectiveContextWindow(ctx.modelMax, 0))}` : ctx.provider === 'builtin' ? ' · 8K' : ''}</span>
+              {selected === 0 && <Check size={10} />}
             </button>
             {options.map((p) => (
-              <button key={p} onClick={() => apply(p)} className={rowCls(override === p)}>
+              <button key={p} onClick={() => apply(p)} className={rowCls(selected === p)}>
                 <span>{fmt(p)}</span>
-                {override === p && <Check size={10} />}
+                {selected === p && <Check size={10} />}
               </button>
             ))}
             {showMax && (
-              <button onClick={() => apply(ctx.modelMax)} className={rowCls(override === ctx.modelMax)}>
+              <button onClick={() => apply(ctx.modelMax)} className={rowCls(selected === ctx.modelMax)}>
                 <span>{fmt(ctx.modelMax)} · max</span>
-                {override === ctx.modelMax && <Check size={10} />}
+                {selected === ctx.modelMax && <Check size={10} />}
               </button>
             )}
             <div className="mt-0.5 px-2 pt-1 border-t border-gray-100 dark:border-white/[0.06] text-[0.5rem] text-gray-400 leading-snug">
