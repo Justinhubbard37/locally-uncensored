@@ -24,11 +24,21 @@ interface JsonRpcResponse {
 }
 
 export class MCPExternalClient {
-  private process: any = null
+  /** The Command — owns the stdout/stderr/close events. */
+  private command: any = null
+  /**
+   * The Child that spawn() hands back — owns stdin and kill(). These live on
+   * two different objects in @tauri-apps/plugin-shell, and keeping only the
+   * Command meant `stdin.write` hit undefined on the very first request: every
+   * external server failed to connect with "Cannot read properties of
+   * undefined (reading 'write')".
+   */
+  private child: any = null
   private requestId = 0
   private pendingRequests = new Map<number, {
     resolve: (value: any) => void
     reject: (error: Error) => void
+    timer: ReturnType<typeof setTimeout>
   }>()
   private outputBuffer = ''
   private connected = false
@@ -49,26 +59,27 @@ export class MCPExternalClient {
       // to their .cmd shim here.
       const resolvedCommand = resolveCommandForPlatform(this.config.command)
 
-      this.process = Command.create(resolvedCommand, this.config.args, {
+      this.command = Command.create(resolvedCommand, this.config.args, {
         env: this.config.env,
       })
 
       // Handle stdout — parse JSON-RPC responses
-      this.process.stdout.on('data', (data: string) => {
+      this.command.stdout.on('data', (data: string) => {
         this.outputBuffer += data
         this.processBuffer()
       })
 
-      this.process.stderr.on('data', (data: string) => {
+      this.command.stderr.on('data', (data: string) => {
         log.warn(`[MCP:${this.config.name}] stderr`, { data })
       })
 
-      this.process.on('close', () => {
+      this.command.on('close', () => {
         this.connected = false
+        this.child = null
         this.rejectAllPending('Server process exited')
       })
 
-      await this.process.spawn()
+      this.child = await this.command.spawn()
       this.connected = true
 
       // Initialize the MCP connection
@@ -92,6 +103,13 @@ export class MCPExternalClient {
       return tools
     } catch (err) {
       this.connected = false
+      // A failure after spawn (handshake refused, tools/list timed out) leaves
+      // the server process running with nobody holding a handle to it — the
+      // caller never gets a client it could disconnect. Take it down here.
+      if (this.child) {
+        try { await this.child.kill() } catch { /* already gone */ }
+        this.child = null
+      }
       throw new Error(`Failed to connect to MCP server "${this.config.name}": ${err instanceof Error ? err.message : String(err)}`)
     }
   }
@@ -117,14 +135,15 @@ export class MCPExternalClient {
   async disconnect() {
     this.connected = false
     this.rejectAllPending('Disconnecting')
-    if (this.process) {
+    if (this.child) {
       try {
-        await this.process.kill()
+        await this.child.kill()
       } catch {
         // Process may already be dead
       }
-      this.process = null
+      this.child = null
     }
+    this.command = null
   }
 
   isConnected() {
@@ -135,6 +154,10 @@ export class MCPExternalClient {
 
   private sendRequest(method: string, params?: any): Promise<any> {
     return new Promise((resolve, reject) => {
+      if (!this.child) {
+        reject(new Error('Not connected'))
+        return
+      }
       const id = ++this.requestId
       const request: JsonRpcRequest = {
         jsonrpc: '2.0',
@@ -143,18 +166,23 @@ export class MCPExternalClient {
         params,
       }
 
-      this.pendingRequests.set(id, { resolve, reject })
-
-      const msg = JSON.stringify(request) + '\n'
-      this.process.stdin.write(msg)
-
-      // Timeout after 30 seconds
-      setTimeout(() => {
-        if (this.pendingRequests.has(id)) {
-          this.pendingRequests.delete(id)
+      const timer = setTimeout(() => {
+        if (this.pendingRequests.delete(id)) {
           reject(new Error(`Request ${method} timed out`))
         }
       }, 30000)
+
+      this.pendingRequests.set(id, { resolve, reject, timer })
+
+      // Child.write is async: a failed write has to fail the request instead
+      // of becoming an unhandled rejection and letting it sit for 30 s.
+      const msg = JSON.stringify(request) + '\n'
+      Promise.resolve(this.child.write(msg)).catch((err: unknown) => {
+        if (this.pendingRequests.delete(id)) {
+          clearTimeout(timer)
+          reject(err instanceof Error ? err : new Error(String(err)))
+        }
+      })
     })
   }
 
@@ -170,6 +198,7 @@ export class MCPExternalClient {
         const pending = this.pendingRequests.get(response.id)
         if (pending) {
           this.pendingRequests.delete(response.id)
+          clearTimeout(pending.timer)
           if (response.error) {
             pending.reject(new Error(response.error.message))
           } else {
@@ -183,9 +212,11 @@ export class MCPExternalClient {
   }
 
   private rejectAllPending(reason: string) {
-    for (const [id, { reject }] of this.pendingRequests) {
+    const pending = [...this.pendingRequests.values()]
+    this.pendingRequests.clear()
+    for (const { reject, timer } of pending) {
+      clearTimeout(timer)
       reject(new Error(reason))
-      this.pendingRequests.delete(id)
     }
   }
 }
