@@ -99,3 +99,68 @@ describe('applyAllStagedChanges', () => {
     expect(left[0].path).toBe('bad.py')
   })
 })
+
+// A staged change carries the file as it looked at stage time. The user reviews
+// the diff, edits the file themselves in the meantime, then clicks Apply — the
+// write used to silently revert their edit, with no undo.
+describe('applyStagedChange refuses to overwrite a file that moved on', () => {
+  beforeEach(() => {
+    fsWrite.mockReset()
+    addMessage.mockClear()
+    useStagedChangesStore.getState().clear(CHAT)
+  })
+
+  const route = (disk: string | Error) =>
+    fsWrite.mockImplementation((cmd: string) => {
+      if (cmd === 'fs_read') {
+        return disk instanceof Error ? Promise.reject(disk) : Promise.resolve({ content: disk })
+      }
+      return Promise.resolve({ status: 'saved' })
+    })
+
+  it('throws and keeps the entry when the file changed since staging', async () => {
+    route('the user edited this')
+    stage('a.py', { resolvedPath: '/proj/a.py', workingDirectory: '/proj', oldContent: 'as staged' })
+    const change = useStagedChangesStore.getState().list(CHAT)[0]
+
+    await expect(applyStagedChange(CHAT, change)).rejects.toThrow(/changed on disk/)
+    expect(fsWrite).not.toHaveBeenCalledWith('fs_write', expect.anything())
+    expect(useStagedChangesStore.getState().list(CHAT)).toHaveLength(1)
+  })
+
+  it('writes when the file still matches the stage-time content', async () => {
+    route('as staged')
+    stage('a.py', { resolvedPath: '/proj/a.py', workingDirectory: '/proj', oldContent: 'as staged' })
+    await applyStagedChange(CHAT, useStagedChangesStore.getState().list(CHAT)[0])
+    expect(useStagedChangesStore.getState().list(CHAT)).toHaveLength(0)
+  })
+
+  it('does not read at all for a new file (no baseline to compare against)', async () => {
+    fsWrite.mockResolvedValue({ status: 'saved' })
+    stage('new.py', { oldContent: '' })
+    await applyStagedChange(CHAT, useStagedChangesStore.getState().list(CHAT)[0])
+    expect(fsWrite).toHaveBeenCalledTimes(1)
+    expect(fsWrite.mock.calls[0][0]).toBe('fs_write')
+  })
+
+  it('still writes when the file is gone — the write recreates it', async () => {
+    route(new Error('no such file'))
+    stage('a.py', { oldContent: 'as staged' })
+    await applyStagedChange(CHAT, useStagedChangesStore.getState().list(CHAT)[0])
+    expect(useStagedChangesStore.getState().list(CHAT)).toHaveLength(0)
+  })
+
+  it('one drifted file never blocks the rest of an apply-all', async () => {
+    stage('good.py', { oldContent: 'base' })
+    stage('drifted.py', { oldContent: 'base' })
+    fsWrite.mockImplementation((cmd: string, args: { path: string }) => {
+      if (cmd === 'fs_read') {
+        return Promise.resolve({ content: args.path.includes('drifted') ? 'moved on' : 'base' })
+      }
+      return Promise.resolve({ status: 'saved' })
+    })
+    const res = await applyAllStagedChanges(CHAT)
+    expect(res.applied).toEqual(['good.py'])
+    expect(res.failed).toEqual(['drifted.py'])
+  })
+})

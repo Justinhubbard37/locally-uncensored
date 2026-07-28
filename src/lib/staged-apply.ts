@@ -17,7 +17,41 @@ import { backendCall } from '../api/backend'
 import { useStagedChangesStore, type StagedChange } from '../stores/stagedChangesStore'
 import { useChatStore } from '../stores/chatStore'
 
+/**
+ * Refuse to apply on top of someone else's edit.
+ *
+ * A staged change carries the file as it looked when the model wrote it. The
+ * user reviews the diff and clicks Apply minutes later — and in between they may
+ * well have touched the file themselves ("I'll just fix that one line"). Writing
+ * `newContent` then silently reverts their work, with no undo. We already hold
+ * the stage-time baseline, so the check is a single read.
+ *
+ * Only enforced when we HAVE a baseline: `oldContent` is also empty when the
+ * stage-time read failed for any reason (useCodex treats a failed read as "new
+ * file"), and blocking on that would break applies that are perfectly fine.
+ */
+async function assertNoDrift(chatId: string, change: StagedChange): Promise<void> {
+  if (!change.oldContent) return
+  let current: string
+  try {
+    const res = await backendCall<{ content?: string }>('fs_read', {
+      path: change.resolvedPath || change.path,
+      chatId,
+      workingDirectory: change.workingDirectory,
+    })
+    current = res?.content ?? ''
+  } catch {
+    return // gone or unreadable — the write recreates it, which is what the user asked for
+  }
+  if (current !== change.oldContent) {
+    throw new Error(
+      `${change.path} changed on disk after this edit was staged — applying would overwrite those changes. Reject it and let the model read the file again.`,
+    )
+  }
+}
+
 export async function applyStagedChange(chatId: string, change: StagedChange): Promise<void> {
+  await assertNoDrift(chatId, change)
   const res = await backendCall<{ status?: string; path?: string }>('fs_write', {
     path: change.resolvedPath || change.path,
     content: change.newContent,

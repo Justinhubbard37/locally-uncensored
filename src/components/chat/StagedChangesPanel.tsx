@@ -34,20 +34,31 @@ export function StagedChangesPanel({ chatId }: Props) {
   const clear = useStagedChangesStore((s) => s.clear)
   const [expanded, setExpanded] = useState(true)
   const [applying, setApplying] = useState<Set<string>>(new Set())
+  const [errors, setErrors] = useState<Record<string, string>>({})
 
   if (!chatId || changes.length === 0) return null
 
   async function applyOne(change: StagedChange) {
     if (!chatId) return
     setApplying((prev) => new Set(prev).add(change.id))
+    setErrors((prev) => {
+      if (!(change.id in prev)) return prev
+      const { [change.id]: _gone, ...rest } = prev
+      return rest
+    })
     try {
       // Shared trusted write path (lib/staged-apply) — the same call Codex
       // auto-apply uses, so the reviewed diff and the auto-applied diff can
       // never diverge.
       await applyStagedChange(chatId, change)
     } catch (e) {
-      // Apply failures leave the entry in the queue so the user can retry.
+      // Apply failures leave the entry in the queue so the user can retry — and
+      // the reason has to reach the row, not just the log. The row simply
+      // staying put looked like a dead button (and now that a stale-file apply
+      // is REFUSED, the reason is the whole point).
       log.error('[StagedChangesPanel] apply failed', { err: e })
+      const message = e instanceof Error ? e.message : String(e)
+      setErrors((prev) => ({ ...prev, [change.id]: message }))
     } finally {
       setApplying((prev) => {
         const next = new Set(prev)
@@ -131,6 +142,14 @@ export function StagedChangesPanel({ chatId }: Props) {
                     </button>
                   </span>
                 </div>
+                {errors[change.id] && (
+                  <div
+                    className="px-1.5 py-1 text-[0.5rem] leading-snug text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-500/10"
+                    data-testid="staged-change-error"
+                  >
+                    {errors[change.id]}
+                  </div>
+                )}
                 {change.diff && (
                   <div className="text-[0.5rem]">
                     <DiffView diff={change.diff} maxLines={40} />
