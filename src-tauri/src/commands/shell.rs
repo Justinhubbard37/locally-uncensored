@@ -90,6 +90,50 @@ fn captured_text(buf: &Arc<Mutex<Captured>>) -> String {
     text
 }
 
+/// Every process descending from `root`, deepest last.
+fn descendants(root: u32, sys: &sysinfo::System) -> Vec<u32> {
+    let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    for (pid, proc_) in sys.processes() {
+        if let Some(parent) = proc_.parent() {
+            children.entry(parent.as_u32()).or_default().push(pid.as_u32());
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(pid) = stack.pop() {
+        if !seen.insert(pid) {
+            continue; // PID reuse can't be allowed to make this loop forever
+        }
+        if pid != root {
+            out.push(pid);
+        }
+        if let Some(kids) = children.get(&pid) {
+            stack.extend(kids.iter().copied());
+        }
+    }
+    out
+}
+
+/// Kill the shell AND everything it started. `Child::kill()` signals only the
+/// shell itself, so a timed-out `npm run dev`, build script or spawned server
+/// kept running after the tool call gave up — still holding its port and CPU,
+/// and still writing into a pipe nobody reads.
+fn kill_tree(root: u32) {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    // Leaves first: a parent that is still alive can't respawn what we killed.
+    let mut order = descendants(root, &sys);
+    order.reverse();
+    order.push(root);
+    for pid in order {
+        if let Some(p) = sys.process(Pid::from_u32(pid)) {
+            p.kill();
+        }
+    }
+}
+
 /// Give the reader threads a moment to hit EOF after the child is gone. Never
 /// joins them: a grandchild can keep the pipe open (a spawned dev server), and
 /// joining would hang the command instead of returning what we already have.
@@ -213,7 +257,9 @@ fn shell_execute_sync(
             }
             Ok(None) => {
                 if start.elapsed() > timeout_dur {
+                    kill_tree(child.id());
                     let _ = child.kill();
+                    let _ = child.wait(); // reap, or the shell lingers as a zombie
                     settle(&out_done, &err_done, std::time::Duration::from_millis(200));
                     // Hand back whatever the command managed to print. A build
                     // that dies on the timeout still tells the model where it got.
@@ -267,5 +313,49 @@ mod tests {
     fn small_output_comes_back_whole_and_unannotated() {
         let text = capture(b"hello\n".to_vec());
         assert_eq!(text, "hello\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_timeout_takes_the_grandchildren_with_it() {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("bash")
+            .arg("-c")
+            .arg("sleep 40 & sleep 40")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn bash");
+        let pid = child.id();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+
+        let mut sys = sysinfo::System::new();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        let spawned = descendants(pid, &sys);
+        assert!(!spawned.is_empty(), "bash spawned nothing — test setup is wrong");
+
+        kill_tree(pid);
+        let _ = child.wait();
+
+        // The grandchildren are reparented to init, which reaps them.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let mut check = sysinfo::System::new();
+            check.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+            let alive: Vec<u32> = spawned
+                .iter()
+                .copied()
+                .filter(|p| check.process(sysinfo::Pid::from_u32(*p)).is_some())
+                .collect();
+            if alive.is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "these survived the kill: {:?}",
+                alive
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 }
