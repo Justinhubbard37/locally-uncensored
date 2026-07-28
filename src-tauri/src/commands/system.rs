@@ -63,46 +63,70 @@ pub async fn screenshot() -> Result<serde_json::Value, String> {
 }
 
 fn screenshot_blocking() -> Result<serde_json::Value, String> {
-    // Use PowerShell to capture screen on Windows
-    #[cfg(target_os = "windows")]
-    {
-        let tmp = std::env::temp_dir().join("lu-screenshot.png");
-        let ps_script = format!(
-            r#"
-            Add-Type -AssemblyName System.Windows.Forms
-            Add-Type -AssemblyName System.Drawing
-            $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-            $bitmap = New-Object System.Drawing.Bitmap($screen.Width, $screen.Height)
-            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-            $graphics.CopyFromScreen($screen.Location, [System.Drawing.Point]::Empty, $screen.Size)
-            $bitmap.Save('{}')
-            $graphics.Dispose()
-            $bitmap.Dispose()
-            "#,
-            tmp.to_string_lossy().replace('\\', "\\\\")
-        );
+    // Unique per call. The capture used to land on a fixed `lu-screenshot.png`,
+    // and TWO callers reach this: the agent's screenshot tool and the phone
+    // bridge (remote.rs). Overlapping calls read each other's half-written PNG,
+    // or one deleted the file the other was about to read ("Read screenshot: no
+    // such file"), or a caller simply got the other one's screen.
+    let tmp = std::env::temp_dir().join(format!("lu-screenshot-{}.png", uuid::Uuid::new_v4()));
+    let captured = capture_screen_to(&tmp)
+        .and_then(|()| std::fs::read(&tmp).map_err(|e| format!("Read screenshot: {}", e)));
+    // Always — the old code returned early on a read error and left a full
+    // picture of the user's screen sitting in the temp directory.
+    let _ = std::fs::remove_file(&tmp);
 
-        let output = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-            .output()
-            .map_err(|e| format!("Screenshot failed: {}", e))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&captured?);
+    Ok(serde_json::json!({ "image": b64, "format": "png", "encoding": "base64" }))
+}
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Screenshot failed: {}", stderr));
-        }
+/// Quote a path for a PowerShell SINGLE-quoted string literal: only `'` is
+/// special there, and it escapes by doubling.
+///
+/// The old code doubled BACKSLASHES instead, which is C/JSON escaping, not
+/// PowerShell — inside single quotes that produced a literal `C:\\Users\\…`
+/// and only worked because Windows collapses repeated separators. It also left
+/// `'` untouched, so any user whose profile contains an apostrophe
+/// (C:\Users\O'Brien\AppData\Local\Temp) ended the string early and the script
+/// died with a parse error.
+fn ps_single_quoted(s: &str) -> String {
+    s.replace('\'', "''")
+}
 
-        let bytes = std::fs::read(&tmp).map_err(|e| format!("Read screenshot: {}", e))?;
-        let _ = std::fs::remove_file(&tmp);
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        Ok(serde_json::json!({ "image": b64, "format": "png", "encoding": "base64" }))
+#[cfg(target_os = "windows")]
+fn capture_screen_to(tmp: &std::path::Path) -> Result<(), String> {
+    let ps_script = format!(
+        r#"
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Drawing
+        $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+        $bitmap = New-Object System.Drawing.Bitmap($screen.Width, $screen.Height)
+        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+        $graphics.CopyFromScreen($screen.Location, [System.Drawing.Point]::Empty, $screen.Size)
+        $bitmap.Save('{}')
+        $graphics.Dispose()
+        $bitmap.Dispose()
+        "#,
+        ps_single_quoted(&tmp.to_string_lossy())
+    );
+
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .output()
+        .map_err(|e| format!("Screenshot failed: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Screenshot failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
+    Ok(())
+}
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        Err("Screenshot not implemented for this platform yet".to_string())
-    }
+#[cfg(not(target_os = "windows"))]
+fn capture_screen_to(_tmp: &std::path::Path) -> Result<(), String> {
+    Err("Screenshot not implemented for this platform yet".to_string())
 }
 
 #[tauri::command]
@@ -272,6 +296,45 @@ mod tests {
     /// The old implementation spawned a process for the UTC offset and fell
     /// back to 0 when that failed, so it could report UTC as local time. These
     /// assert the three values stay consistent with each other.
+    /// Two callers reach the screenshot tool (agent + phone bridge). A fixed
+    /// temp name meant they clobbered each other; the name must differ per call
+    /// and the file must be gone afterwards.
+    #[test]
+    fn every_screenshot_gets_its_own_temp_file() {
+        let seen: std::collections::HashSet<String> = (0..50)
+            .map(|_| format!("lu-screenshot-{}.png", uuid::Uuid::new_v4()))
+            .collect();
+        assert_eq!(seen.len(), 50);
+
+        // The capture fails on this platform, but the temp file must still be
+        // cleaned up rather than left behind on the early return.
+        let before = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("lu-screenshot-"))
+            .count();
+        let _ = screenshot_blocking();
+        let after = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("lu-screenshot-"))
+            .count();
+        assert_eq!(before, after, "screenshot left a temp file behind");
+    }
+
+    /// PowerShell single-quoted strings escape `'` by doubling it, and treat a
+    /// backslash as an ordinary character. C:\Users\O'Brien used to end the
+    /// string early and kill the script.
+    #[test]
+    fn powershell_paths_survive_an_apostrophe() {
+        assert_eq!(
+            ps_single_quoted(r"C:\Users\O'Brien\AppData\Local\Temp\a.png"),
+            r"C:\Users\O''Brien\AppData\Local\Temp\a.png"
+        );
+        // A plain path is passed through untouched — no backslash doubling.
+        assert_eq!(ps_single_quoted(r"C:\Users\dave\a.png"), r"C:\Users\dave\a.png");
+    }
+
     #[test]
     fn current_time_is_internally_consistent() {
         let v = get_current_time().expect("get_current_time");
