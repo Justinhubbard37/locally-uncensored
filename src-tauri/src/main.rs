@@ -404,8 +404,23 @@ fn main() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            // Every quit path ends here, including the ones nothing else
+            // covered: Cmd+Q, the Apple menu, an `osascript quit`, a logout.
+            // Only the tray's Quit item and the `exit_app` command called
+            // shutdown_subprocesses; macOS quits fell through to `Drop for
+            // AppState`, which Tauri v2 does not reliably run — so a normal
+            // Cmd+Q left Ollama, ComfyUI, llama-server, the embeddings
+            // server, the trainer and the MLX sidecar all running. Proved
+            // live on 2026-07-28: app gone, the MLX Python still resident.
+            if let tauri::RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.shutdown_subprocesses();
+                }
+            }
+        });
 }
 
 #[cfg(test)]
