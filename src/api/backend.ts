@@ -109,6 +109,10 @@ export async function localFetch(
       // does NOT auto-convert camelCase here — the Rust command spec uses
       // explicit field names.
       timeout_ms: options?.timeoutMs ?? null,
+      // Forward caller headers (Authorization for keyed OpenAI-compat
+      // backends). The proxy silently dropped them before, so a LAN vLLM/
+      // TabbyAPI with an api key always got 401 through this path.
+      headers: options?.headers ?? null,
     }) as string;
 
     return new Response(text, { status: 200, headers: { "Content-Type": "application/json" } });
@@ -147,7 +151,10 @@ export async function localFetch(
     try {
       return await fetch(url, {
         method,
-        headers: options?.body ? { "Content-Type": "application/json" } : undefined,
+        headers: {
+          ...(options?.body ? { "Content-Type": "application/json" } : {}),
+          ...(options?.headers ?? {}),
+        },
         body: options?.body,
         signal,
       });
@@ -171,11 +178,14 @@ export async function localFetch(
  */
 export async function localFetchStream(
   url: string,
-  options?: { method?: string; body?: string; signal?: AbortSignal }
+  options?: { method?: string; body?: string; headers?: Record<string, string>; signal?: AbortSignal }
 ): Promise<Response> {
   const method = options?.method || "GET";
   const body = options?.body;
-  const headers = body ? { "Content-Type": "application/json" } : undefined;
+  const extraHeaders = options?.headers;
+  const headers = body || extraHeaders
+    ? { ...(body ? { "Content-Type": "application/json" } : {}), ...(extraHeaders ?? {}) }
+    : undefined;
 
   // Transport order (rikki Discord 2026-06-10, Win11 "agent error"):
   // on WebView2 the direct fetch to a loopback backend is dead on arrival —
@@ -210,7 +220,7 @@ export async function localFetchStream(
     }
   }
 
-  const proxied = await proxyStreamChunked(url, method, body, options?.signal);
+  const proxied = await proxyStreamChunked(url, method, body, extraHeaders, options?.signal);
   if (proxied) return proxied;
 
   // Proxy layer itself unavailable (invoke/Channel import died) — give the
@@ -242,7 +252,7 @@ export async function localFetchStream(
  * Returns null when the invoke/Channel layer itself is unavailable so the
  * caller can decide on a last-resort transport.
  */
-async function proxyStreamChunked(url: string, method: string, body?: string, signal?: AbortSignal): Promise<Response | null> {
+async function proxyStreamChunked(url: string, method: string, body?: string, headers?: Record<string, string>, signal?: AbortSignal): Promise<Response | null> {
   let invoke: Awaited<ReturnType<typeof getInvoke>>;
   let ChannelCtor: typeof import("@tauri-apps/api/core").Channel;
   try {
@@ -313,7 +323,7 @@ async function proxyStreamChunked(url: string, method: string, body?: string, si
       settleStreaming();
     };
 
-    void invoke("proxy_localhost_stream_chunked", { url, method, body: body || null, onChunk: channel, streamId })
+    void invoke("proxy_localhost_stream_chunked", { url, method, body: body || null, headers: headers ?? null, onChunk: channel, streamId })
       .then(() => {
         // Do NOT close here — the EOF marker does that (it may arrive after
         // this resolves; see above). Grace fallback so a lost EOF can't leak
@@ -347,6 +357,7 @@ async function proxyStreamChunked(url: string, method: string, body?: string, si
         url,
         method,
         body: body || null,
+        headers: headers ?? null,
       }) as number[];
       const uint8 = new Uint8Array(bytes);
       return new Response(uint8, { status: 200, headers: { "Content-Type": "application/x-ndjson" } });

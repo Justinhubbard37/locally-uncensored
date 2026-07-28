@@ -360,6 +360,7 @@ pub async fn proxy_localhost(
     method: Option<String>,
     body: Option<String>,
     timeout_ms: Option<u64>,
+    headers: Option<std::collections::HashMap<String, String>>,
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<String, String> {
     validate_proxy_url(&url, &state)?;
@@ -385,6 +386,14 @@ pub async fn proxy_localhost(
         request = request.header("Content-Type", "application/json").body(body_str);
     }
 
+    // Caller headers (Authorization for keyed backends) — dropping them made
+    // every proxied request to an authed OpenAI-compat server 401.
+    if let Some(hdrs) = headers {
+        for (k, v) in hdrs {
+            request = request.header(k.as_str(), v.as_str());
+        }
+    }
+
     let resp = request
         .send()
         .await
@@ -403,7 +412,7 @@ pub async fn proxy_localhost(
 /// non-streaming callers (e.g. proxy-download). For chat, use the chunked variant
 /// below so a long generation doesn't look like a multi-minute "model loading" hang.
 #[tauri::command]
-pub async fn proxy_localhost_stream(url: String, method: Option<String>, body: Option<String>, state: tauri::State<'_, crate::state::AppState>) -> Result<Vec<u8>, String> {
+pub async fn proxy_localhost_stream(url: String, method: Option<String>, body: Option<String>, headers: Option<std::collections::HashMap<String, String>>, state: tauri::State<'_, crate::state::AppState>) -> Result<Vec<u8>, String> {
     validate_proxy_url(&url, &state)?;
 
     let client = reqwest::Client::builder()
@@ -423,6 +432,12 @@ pub async fn proxy_localhost_stream(url: String, method: Option<String>, body: O
 
     if let Some(body_str) = body {
         request = request.header("Content-Type", "application/json").body(body_str);
+    }
+
+    if let Some(hdrs) = headers {
+        for (k, v) in hdrs {
+            request = request.header(k.as_str(), v.as_str());
+        }
     }
 
     let resp = request
@@ -454,6 +469,7 @@ pub async fn proxy_localhost_stream_chunked(
     url: String,
     method: Option<String>,
     body: Option<String>,
+    headers: Option<std::collections::HashMap<String, String>>,
     on_chunk: tauri::ipc::Channel<Vec<u8>>,
     // Optional id so the JS side can deterministically cancel THIS stream via
     // `cancel_proxy_stream(stream_id)`. Without it, aborting only broke the JS
@@ -493,6 +509,12 @@ pub async fn proxy_localhost_stream_chunked(
 
         if let Some(body_str) = body {
             request = request.header("Content-Type", "application/json").body(body_str);
+        }
+
+        if let Some(hdrs) = headers {
+            for (k, v) in hdrs {
+                request = request.header(k.as_str(), v.as_str());
+            }
         }
 
         // Race the request against cancellation even during connect/headers.
