@@ -190,36 +190,65 @@ fn keychain_disabled() -> bool {
     }
 }
 
+// The OS keychain can BLOCK for minutes: macOS shows a password prompt when
+// the login keychain is locked (or, in dev, after every re-sign), Windows can
+// stall on a locked vault. As sync commands these ran on the platform main
+// thread, so one pending prompt froze the entire app — window never shown,
+// even the force-show fallback deadlocked behind it (its is_visible()/show()
+// dispatch to the same blocked thread). async + spawn_blocking keeps the UI
+// alive; only the caller's own invoke waits.
+//
+// The lock preserves the serialization the main thread used to provide for
+// free: the chunked write protocol (chunks first, marker last, sweep tail)
+// assumes writes to one account never interleave.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-#[tauri::command]
-pub fn secret_set(account: String, value: String) -> Result<(), String> {
-    if keychain_disabled() {
-        return Err("keychain unavailable (LU_NO_KEYCHAIN test mode)".into());
-    }
-    // An empty value means "no key" — delete rather than store an empty secret,
-    // so a cleared key never lingers in the vault.
-    if value.is_empty() {
-        return chunked::delete(&account);
-    }
-    chunked::set(&account, &value)
+static KEYCHAIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+async fn run_keychain<T: Send + 'static>(
+    op: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _serialized = KEYCHAIN_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        op()
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 #[tauri::command]
-pub fn secret_get(account: String) -> Result<Option<String>, String> {
+pub async fn secret_set(account: String, value: String) -> Result<(), String> {
     if keychain_disabled() {
         return Err("keychain unavailable (LU_NO_KEYCHAIN test mode)".into());
     }
-    chunked::get(&account)
+    run_keychain(move || {
+        // An empty value means "no key" — delete rather than store an empty
+        // secret, so a cleared key never lingers in the vault.
+        if value.is_empty() {
+            return chunked::delete(&account);
+        }
+        chunked::set(&account, &value)
+    })
+    .await
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 #[tauri::command]
-pub fn secret_delete(account: String) -> Result<(), String> {
+pub async fn secret_get(account: String) -> Result<Option<String>, String> {
     if keychain_disabled() {
         return Err("keychain unavailable (LU_NO_KEYCHAIN test mode)".into());
     }
-    chunked::delete(&account)
+    run_keychain(move || chunked::get(&account)).await
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[tauri::command]
+pub async fn secret_delete(account: String) -> Result<(), String> {
+    if keychain_disabled() {
+        return Err("keychain unavailable (LU_NO_KEYCHAIN test mode)".into());
+    }
+    run_keychain(move || chunked::delete(&account)).await
 }
 
 // ── Non-keychain platforms (Linux desktop) ──────────────────────────────
