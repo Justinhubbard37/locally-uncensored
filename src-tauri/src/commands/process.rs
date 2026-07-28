@@ -762,8 +762,20 @@ fn kill_port_owner(port: u16) {
 /// ComfyUI always carries `--enable-cors-header`, so direct media loads and
 /// the native progress feed work again. Requires a known install path; on a
 /// remote host LU can't manage the process at all.
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn fix_comfyui_cors(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn fix_comfyui_cors(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        fix_comfyui_cors_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("fix_comfyui_cors task: {e}"))?
+}
+
+fn fix_comfyui_cors_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     let host = state.comfy_host.lock().unwrap().clone();
     if !is_local_host(&host) {
         return Err(
@@ -813,11 +825,23 @@ pub fn fix_comfyui_cors(state: State<'_, AppState>) -> Result<serde_json::Value,
         std::thread::sleep(std::time::Duration::from_millis(400));
     }
 
-    start_comfyui(state)
+    start_comfyui_blocking(state)
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn start_ollama(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn start_ollama(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        start_ollama_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("start_ollama task: {e}"))?
+}
+
+fn start_ollama_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     // Check if already running
     {
         let mut cmd = Command::new("tasklist");
@@ -1019,8 +1043,20 @@ pub(crate) fn probe_comfy_gpu(python: &str) -> Option<bool> {
 // (module `flash_attn_3`) is a different API ComfyUI does not consume, so the
 // FA2 import probe is the correct signal.
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn start_comfyui(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn start_comfyui(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        start_comfyui_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("start_comfyui task: {e}"))?
+}
+
+fn start_comfyui_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     // If user pointed LU at a remote ComfyUI, we have no local process to spawn.
     // Just report status — the remote side is responsible for running ComfyUI.
     {
@@ -1233,8 +1269,20 @@ pub fn start_comfyui(state: State<'_, AppState>) -> Result<serde_json::Value, St
     Ok(serde_json::json!({"status": "started", "path": comfy_path}))
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn stop_comfyui(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn stop_comfyui(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        stop_comfyui_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("stop_comfyui task: {e}"))?
+}
+
+fn stop_comfyui_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     let mut proc = state.comfy_process.lock().unwrap();
     if let Some(ref mut child) = *proc {
         let pid = child.id();
@@ -1629,8 +1677,20 @@ pub fn set_ollama_host(host: String, state: State<'_, AppState>) -> Result<serde
     Ok(serde_json::json!({"status": "saved", "base": final_base, "isLocal": is_local}))
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn get_ollama_host(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn get_ollama_host(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_ollama_host_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("get_ollama_host task: {e}"))?
+}
+
+fn get_ollama_host_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     let base = state.ollama_base.lock().unwrap().clone();
     let is_local = url::Url::parse(&base)
         .ok()
@@ -1946,11 +2006,20 @@ mod tests {
 /// it wants the chat LLMs out of VRAM to make room, but ComfyUI keeps its own
 /// checkpoint cached across consecutive Create runs (freeing it here would force
 /// a slow reload between every generate).
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn offload_local_models(
-    state: State<'_, AppState>,
-    include_comfyui: Option<bool>,
-) -> Result<serde_json::Value, String> {
+pub async fn offload_local_models(app: tauri::AppHandle, include_comfyui: Option<bool>) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        offload_local_models_blocking(&state, include_comfyui)
+    })
+    .await
+    .map_err(|e| format!("offload_local_models task: {e}"))?
+}
+
+fn offload_local_models_blocking(state: &AppState, include_comfyui: Option<bool>) -> Result<serde_json::Value, String> {
     let free_comfy = include_comfyui.unwrap_or(true);
     let mut freed: Vec<&str> = Vec::new();
 

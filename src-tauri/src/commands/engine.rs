@@ -462,7 +462,7 @@ pub fn list_bundled_models(
 
 /// Kill the managed engine child if present. Returns whether one was running.
 /// Takes the state lock internally; callers must not already hold it.
-pub(crate) fn stop_engine_locked(state: &State<'_, AppState>) -> bool {
+pub(crate) fn stop_engine_locked(state: &AppState) -> bool {
     let mut guard = state.bundled_engine.lock().unwrap();
     if let Some(mut engine) = guard.take() {
         let _ = engine.child.kill();
@@ -617,7 +617,7 @@ pub async fn bundled_embed_status(app: AppHandle) -> Result<serde_json::Value, S
 
 /// Kill the managed embeddings child if present. Returns whether one was
 /// running. Takes the state lock internally; callers must not already hold it.
-pub(crate) fn stop_embed_locked(state: &State<'_, AppState>) -> bool {
+pub(crate) fn stop_embed_locked(state: &AppState) -> bool {
     let mut guard = state.bundled_embed.lock().unwrap();
     if let Some(mut embed) = guard.take() {
         let _ = embed.child.kill();
