@@ -73,7 +73,10 @@ export function AppShell() {
   useEffect(() => {
     void (async () => {
       try {
-        const { backendCall, setComfyPort, setComfyHost } = await import('../../api/backend')
+        const { backendCall, setComfyPort, setComfyHost, isMacOS } = await import('../../api/backend')
+        // Not on the Mac: ComfyUI is never started and never renders there, so
+        // mirroring its host/port can only teach the app a wrong address.
+        if (isMacOS()) return
         const s = await backendCall<{ port?: number; host?: string }>('comfyui_status')
         if (typeof s?.port === 'number' && s.port > 0) setComfyPort(s.port)
         if (typeof s?.host === 'string' && s.host.trim()) setComfyHost(s.host)

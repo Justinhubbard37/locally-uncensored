@@ -143,7 +143,15 @@ export function useCreate() {
       // `connected` to false is exactly what makes the Stage cover a working
       // MLX catalog with the ComfyUI "Download & install" card. Left at null
       // ("not applicable"), which every ComfyUI-gated surface treats as neutral.
-      const comfyOk = await checkComfyConnection()
+      // On the Mac the answer is decided, not probed. ComfyUI is never started
+      // there and never renders there, so asking port 8188 can only produce a
+      // wrong answer: anything that happens to reply — a manual install, another
+      // app — used to drag the whole tab into the ComfyUI path, where the model
+      // queries then failed and left the store's list EMPTY while the picker
+      // still displayed the MLX catalog. Pressing Create in that state said
+      // "No image model selected. Add checkpoints or FLUX models to ComfyUI."
+      // (caught by the MLX e2e, MAC-5.)
+      const comfyOk = mlxHost ? false : await checkComfyConnection()
       if (!mlxHost) {
         setConnected(comfyOk)
         useCreateStore.getState().setComfyRunning(comfyOk)
@@ -470,6 +478,18 @@ export function useCreate() {
       : []
     const localOpModel = localOp ? resolveLocalOpPick(state.localOpModel, localOpList) : ''
 
+    // Chip↔run agreement for IMAGE, the same rule the video path already
+    // applies further down. ModelChip shows `list[0]` whenever the stored pick
+    // isn't in the current list — which includes the empty pick a fresh
+    // profile has. Reading the raw store here meant a first-run Mac saw
+    // "MLX SD Turbo" in the picker, pressed Create, and got
+    // "No image model selected. Add checkpoints or FLUX models to ComfyUI."
+    // — a ComfyUI message on the one platform that never runs ComfyUI.
+    const effImageModel =
+      state.imageModelList.some((m) => m.name === imageModel)
+        ? imageModel
+        : (state.imageModelList[0]?.name ?? imageModel)
+
     // ── MLX image pipeline (Apple Silicon) — hard rule: Mac local image is the
     // in-process MLX path, never ComfyUI. Gated on the derived `image` intent
     // (which already means: no cloudOp, no utilityOp, no removebg, text2img)
@@ -477,7 +497,7 @@ export function useCreate() {
     // checkpoint from a manual install is never hijacked. Generation returns a
     // base64 PNG stored as a data URL on the gallery item, so display +
     // download work with no ComfyUI /view route. ──
-    if (intent === 'image' && isMlxImageHost() && isMlxImageModel(imageModel)) {
+    if (intent === 'image' && isMlxImageHost() && isMlxImageModel(effImageModel)) {
       setError(null)
       if (!prompt.trim()) { setError('Please enter a prompt.'); return }
       setIsGenerating(true)
@@ -490,7 +510,7 @@ export function useCreate() {
         setProgress(40, 'Generating with MLX...')
         const { dataUrl, width: outW, height: outH } = await generateMlxImageDataUrl({
           prompt, steps, seed, width, height,
-          model: mlxModelIdFor(imageModel),
+          model: mlxModelIdFor(effImageModel),
           negativePrompt: negativePrompt || undefined,
         })
         const elapsed = Math.round((Date.now() - startTime) / 1000)
@@ -636,7 +656,7 @@ export function useCreate() {
     }
 
     setError(null)
-    let activeModel = localOp ? localOpModel : (mode === 'image' ? imageModel : videoModel)
+    let activeModel = localOp ? localOpModel : (mode === 'image' ? effImageModel : videoModel)
     // Chip↔run agreement (live-caught on the extend E2E): the picker DISPLAYS
     // the first capable model when the stored pick can't run the current
     // intent, but submit read the raw store — the run then used a model the
