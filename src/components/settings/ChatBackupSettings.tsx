@@ -46,7 +46,7 @@ export function ChatBackupSettings() {
         setMsg(
           added > 0
             ? `Imported ${added} chat${added === 1 ? '' : 's'}${skipped ? `, skipped ${skipped} already present` : ''}.`
-            : `Nothing new — all ${skipped} chat${skipped === 1 ? '' : 's'} were already here.`,
+            : `Nothing new, all ${skipped} chat${skipped === 1 ? '' : 's'} were already here.`,
         )
       } catch (err) {
         setMsg(err instanceof Error ? err.message : 'Could not import that file.')

@@ -31,8 +31,7 @@ export const SETTINGS_STORAGE_KEYS = [
   'workflow-store',
   'lu-update-checker-v2',
   'lu-benchmark-store',
-  'lu_cloud_teaser',
-  'lu_image_tool_noti',
+  'lu_cloud_notice',
 ]
 
 /** Force the (initially hidden) Tauri window visible so recovery UI is seen. */

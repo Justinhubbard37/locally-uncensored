@@ -4,13 +4,14 @@ import { X, Sparkles } from 'lucide-react'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
 import { runCredits } from '../../../stores/cloudCatalogStore'
 import { useCreateExp } from './CreateContext'
-import { galleryItemUrl, recoverGalleryUrl } from './galleryUrl'
+import { useComfyMedia } from './useComfyMedia'
 import { cn } from '../ui/cn'
 
 export function Lightbox({ item, onClose }: { item: GalleryItem | null; onClose: () => void }) {
   const backend = useCreateStore((s) => s.backend)
   const isGenerating = useCreateStore((s) => s.isGenerating)
   const { enhanceVideo, quota } = useCreateExp()
+  const { src: mediaUrl, onError: onMediaError } = useComfyMedia(item)
 
   useEffect(() => {
     if (!item) return
@@ -67,16 +68,27 @@ export function Lightbox({ item, onClose }: { item: GalleryItem | null; onClose:
               <Sparkles size={13} /> Enhance
             </button>
           )}
-          {item.type === 'video' ? (
+          {item.type === 'audio' ? (
+            <motion.div
+              initial={{ scale: 0.95 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0.95 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-[480px] max-w-[90vw] flex flex-col items-center gap-4 p-8 rounded-lg bg-white/[0.04] border border-white/[0.08]"
+            >
+              {item.prompt && <p className="t-body text-gray-300 text-center">{item.prompt}</p>}
+              <audio src={mediaUrl} controls autoPlay onError={onMediaError} className="w-full" />
+            </motion.div>
+          ) : item.type === 'video' ? (
             <motion.video
               initial={{ scale: 0.95 }}
               animate={{ scale: 1 }}
               exit={{ scale: 0.95 }}
-              src={galleryItemUrl(item)}
+              src={mediaUrl}
               controls
               autoPlay
               loop
-              onError={() => recoverGalleryUrl(item)}
+              onError={onMediaError}
               onClick={(e) => e.stopPropagation()}
               className="max-w-full max-h-full object-contain rounded-lg"
             />
@@ -85,9 +97,9 @@ export function Lightbox({ item, onClose }: { item: GalleryItem | null; onClose:
               initial={{ scale: 0.95 }}
               animate={{ scale: 1 }}
               exit={{ scale: 0.95 }}
-              src={galleryItemUrl(item)}
+              src={mediaUrl}
               alt={item.prompt}
-              onError={() => recoverGalleryUrl(item)}
+              onError={onMediaError}
               onClick={(e) => e.stopPropagation()}
               className={cn('max-w-full max-h-full object-contain rounded-lg', item.intent === 'removebg' && 'lu-checker')}
             />

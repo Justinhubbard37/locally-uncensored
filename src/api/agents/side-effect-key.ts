@@ -14,9 +14,11 @@
  *   - file_write → key is `file_write:<normalized-path>`. Two writes to
  *     the SAME path serialize; writes to DIFFERENT paths remain parallel.
  *
- *   - shell_execute, code_execute → key 'exec'. We do not know what a
- *     shell command touches, so batch all exec-class calls onto a single
- *     queue.
+ *   - shell_execute, code_execute, shell_execute_background, run_tests,
+ *     git_commit, git_push → key 'exec'. We do not know what a shell command
+ *     touches, and concurrent repo writes race on `.git/index.lock`, so batch
+ *     all exec-class + repo-mutating calls onto a single queue. Read-only git_*
+ *     (git_status/git_log/git_diff) stay parallel.
  *
  *   - image_generate, video_generate, run_workflow → key 'comfyui'. ComfyUI
  *     serializes internally and workflows do heavy I/O; running in parallel
@@ -34,6 +36,16 @@ export function deriveSideEffectKey(
     }
     case 'shell_execute':
     case 'code_execute':
+    case 'shell_execute_background':
+    case 'run_tests':
+    case 'git_commit':
+    case 'git_push':
+      // Everything that shells out or mutates the repo shares ONE serial queue.
+      // We can't know what a command touches, and two concurrent git writes
+      // (e.g. git_commit + a `git push`, or two git_commits) race on
+      // `.git/index.lock` and one fails. run_tests and shell_execute_background
+      // also shell out, so they must not run against a repo mid-commit. Only the
+      // read-only git_* tools (git_status/git_log/git_diff) stay parallel.
       return 'exec'
     case 'image_generate':
     case 'video_generate':

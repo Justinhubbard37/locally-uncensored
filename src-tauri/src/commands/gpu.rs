@@ -48,10 +48,10 @@ fn run_cmd(program: &str, args: &[&str]) -> Option<String> {
     cmd.args(args);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
-    match cmd.output() {
-        Ok(out) if out.status.success() => Some(String::from_utf8_lossy(&out.stdout).to_string()),
-        _ => None,
-    }
+    // Bounded — nvidia-smi on a wedged driver, wmic on a busy WMI service and
+    // lspci on a slow bus scan all block indefinitely, and Command::output()
+    // would wait for all of it while the hardware picker shows a spinner.
+    crate::commands::shell::output_bounded(cmd, std::time::Duration::from_secs(5))
 }
 
 fn detect_nvidia() -> Vec<DetectedGpu> {

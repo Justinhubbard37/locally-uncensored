@@ -2,8 +2,9 @@ import { Gauge, Boxes, FlaskConical, RotateCcw, HelpCircle } from 'lucide-react'
 import { useCreateStore } from '../../../stores/createStore'
 import { useCreateExp } from './CreateContext'
 import { cloudModelById, defaultCloudModel } from '../../../stores/cloudCatalogStore'
-import { INTENT_MAP } from './intents'
+import { classifyModel } from '../../../api/comfyui'
 import { isMlxImageHost } from '../../../api/mlx-image'
+import { INTENT_MAP } from './intents'
 import { SAMPLERS as SAMPLERS_FALLBACK, SCHEDULERS as SCHEDULERS_FALLBACK } from './badges'
 import { Section } from '../ui/Section'
 import { Slider } from '../ui/Slider'
@@ -12,6 +13,13 @@ import { NumberField } from '../ui/NumberField'
 import { Button } from '../ui/Button'
 import { Tooltip } from '../ui/Tooltip'
 import { cn } from '../ui/cn'
+
+// Video families whose dynamic-workflow strategy actually wires a LoRA node:
+// the generic UNET path (wan/hunyuan/ltx/mochi/cosmos) plus Wan 2.2's dedicated
+// builder (LoraLoaderModelOnly insert). The remaining families (cogvideo/svd/
+// framepack/pyramidflow/allegro) use wrapper nodes with no LoRA seam, so we hide
+// the stack for them rather than offer a control that silently does nothing.
+const VIDEO_LORA_FAMILIES = new Set(['wan', 'wan22', 'hunyuan', 'ltx', 'mochi', 'cosmos'])
 
 // The full param surface, reorganized into 3 frequency-ranked Sections.
 // Sampler/scheduler/LoRA/VAE lists come live from ComfyUI via CreateContext,
@@ -24,17 +32,21 @@ export function ParamGroups() {
   const isEdit = meta.id === 'edit'
   const isCloud = s.backend === 'cloud'
   // The Mac's MLX pipeline only honours prompt/steps/seed/size/negative — every
-  // Expert knob (sampler, scheduler, VAE, clip-skip; LoRA/denoise/mask are
-  // already hidden locally) is silently dropped there, so the whole Expert
-  // section is dead on the local Mac. Keep it on Mac-cloud and Windows/Linux.
+  // Expert knob (sampler, scheduler, VAE, clip-skip; LoRA has no list without
+  // ComfyUI, and denoise/mask belong to intents that aren't local there) is
+  // silently dropped, so the whole Expert section is dead on the local Mac.
+  // Keep it on Mac-cloud and on the ComfyUI hosts (Windows/Linux).
   const isMlxLocal = !isCloud && isMlxImageHost()
+  // LoRA is a local-only knob; for video it's offered only on families whose
+  // builder actually applies it (see VIDEO_LORA_FAMILIES). Image always qualifies.
+  const loraSupported = !isCloud && (!isVideo || VIDEO_LORA_FAMILIES.has(classifyModel(s.videoModel)))
 
   // On cloud the worker only honours steps for images and guidance_scale for
   // the flux family — hide the sliders elsewhere rather than show a dead
   // control. Sampler/scheduler/LoRA/VAE/clip-skip/batch have no cloud path at
   // all (useCloudCreate never sends them), so they're local-only knobs.
   const cloudModelId =
-    (isVideo ? s.cloudVideoModel : s.cloudImageModel) || defaultCloudModel(isVideo ? 'video' : 'image').id
+    (isVideo ? s.cloudVideoModel : s.cloudImageModel) || defaultCloudModel(isVideo ? 'video' : 'image')?.id || ''
   const showSteps = !(isCloud && isVideo)
   const showCfg = isCloud ? cloudModelById(cloudModelId)?.cfg === true : true
 
@@ -70,8 +82,8 @@ export function ParamGroups() {
         )}
       </Section>
 
-      {/* EXPERT — every control here is dropped by the Mac MLX pipeline, so the
-          whole section is hidden on the local Mac (shown on cloud + ComfyUI). */}
+      {/* EXPERT — every control in here is dropped by the Mac MLX pipeline, so
+          the whole section is hidden on the local Mac (kept on cloud + ComfyUI). */}
       {!isMlxLocal && (
       <Section title="Expert" icon={FlaskConical} defaultOpen={false}>
         {/* Sampler/Scheduler are ComfyUI-only knobs — the hosted WaveSpeed
@@ -95,7 +107,7 @@ export function ParamGroups() {
           <Slider label="Mask edge feather" min={0} max={64} step={1} value={s.growMaskBy} onChange={s.setGrowMaskBy} unit="px" />
         )}
 
-        {!isCloud && !isVideo && loraList.length > 0 && (
+        {loraSupported && loraList.length > 0 && (
           <div className="space-y-1.5">
             <div className="t-control text-gray-400">LoRA stack {s.selectedLoras.length > 0 && <span className="t-mono text-gray-600">· {s.selectedLoras.length} active</span>}</div>
             <div className="space-y-1 max-h-44 overflow-y-auto scrollbar-thin">

@@ -1,12 +1,11 @@
 use std::fs;
-use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::state::AppState;
 
@@ -267,13 +266,33 @@ mod path_tests {
     }
 }
 
+/// Runs on the blocking pool: the poll loop below waits for the Python process
+/// for up to `timeout_ms`, and a sync #[command] would spend all of that on the
+/// Tauri main thread with the window frozen (same class as install.rs and the
+/// built-in engine). The shell tool next door already did it this way.
 #[tauri::command]
-pub fn execute_code(
+pub async fn execute_code(
+    app: AppHandle,
     code: String,
     timeout: Option<u64>,
     #[allow(non_snake_case)] chatId: Option<String>,
     #[allow(non_snake_case)] workingDirectory: Option<String>,
-    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        execute_code_blocking(code, timeout, chatId, workingDirectory, &state)
+    })
+    .await
+    .map_err(|e| format!("Code execution task failed to run: {e}"))?
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn execute_code_blocking(
+    code: String,
+    timeout: Option<u64>,
+    chatId: Option<String>,
+    workingDirectory: Option<String>,
+    state: &State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let timeout_ms = timeout.unwrap_or(30000);
 
@@ -315,6 +334,13 @@ pub fn execute_code(
     let mut child = cmd.spawn()
         .map_err(|e| format!("Spawn Python: {}", e))?;
 
+    // Both pipes are drained on their own threads from here on. A script that
+    // prints more than a pipe buffer would otherwise block on write and never
+    // exit — the tool call ate the full timeout and returned nothing. Same
+    // machinery as the shell tool (commands/shell.rs).
+    let (out_buf, out_done) = super::shell::drain(child.stdout.take().expect("stdout is piped"));
+    let (err_buf, err_done) = super::shell::drain(child.stderr.take().expect("stderr is piped"));
+
     // Poll-based timeout since std::process::Child has no wait_timeout
     let start = std::time::Instant::now();
     let timeout_dur = std::time::Duration::from_millis(timeout_ms);
@@ -322,30 +348,30 @@ pub fn execute_code(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stdout_str = String::new();
-                let mut stderr_str = String::new();
-                if let Some(mut stdout) = child.stdout.take() {
-                    let _ = stdout.read_to_string(&mut stdout_str);
-                }
-                if let Some(mut stderr) = child.stderr.take() {
-                    let _ = stderr.read_to_string(&mut stderr_str);
-                }
-
+                super::shell::settle(&out_done, &err_done, std::time::Duration::from_millis(500));
                 let _ = fs::remove_file(&script_path);
                 return Ok(serde_json::json!({
-                    "stdout": stdout_str,
-                    "stderr": stderr_str,
+                    "stdout": super::shell::captured_text(&out_buf),
+                    "stderr": super::shell::captured_text(&err_buf),
                     "exitCode": status.code().unwrap_or(-1),
                     "timedOut": false,
                 }));
             }
             Ok(None) => {
                 if start.elapsed() > timeout_dur {
+                    super::shell::kill_tree(child.id());
                     let _ = child.kill();
+                    let _ = child.wait();
+                    super::shell::settle(&out_done, &err_done, std::time::Duration::from_millis(200));
                     let _ = fs::remove_file(&script_path);
+                    let mut stderr_str = super::shell::captured_text(&err_buf);
+                    if !stderr_str.is_empty() {
+                        stderr_str.push('\n');
+                    }
+                    stderr_str.push_str(&format!("Execution timed out after {}ms", timeout_ms));
                     return Ok(serde_json::json!({
-                        "stdout": "",
-                        "stderr": format!("Execution timed out after {}ms", timeout_ms),
+                        "stdout": super::shell::captured_text(&out_buf),
+                        "stderr": stderr_str,
                         "exitCode": -1,
                         "timedOut": true,
                     }));
@@ -371,8 +397,22 @@ pub fn file_read(
     if !full_path.exists() {
         return Err(format!("File not found: {}", full_path.display()));
     }
-    let content = fs::read_to_string(&full_path)
-        .map_err(|e| format!("Read error: {}", e))?;
+    // A file that is not valid UTF-8 used to come back as a raw
+    // "stream did not contain valid UTF-8" error, leaving the caller with no
+    // way forward — and that hits more than images: a legacy CP1252 source file
+    // is enough. The desktop path (fs_read + builtin-tools) answers with a
+    // marker instead, so the model knows to leave the file alone rather than
+    // writing mangled text back over it. Same answer here, same wording.
+    let content = match fs::read_to_string(&full_path) {
+        Ok(c) => c,
+        Err(_) => {
+            let bytes = fs::metadata(&full_path).map(|m| m.len()).unwrap_or(0);
+            format!(
+                "[binary file — {}, not shown. This tool reads text only; do not write binary content back through file_write.]",
+                format_bytes(bytes)
+            )
+        }
+    };
     Ok(serde_json::json!({"content": content}))
 }
 
@@ -388,7 +428,23 @@ pub fn file_write(
     if let Some(parent) = full_path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Create dir: {}", e))?;
     }
-    fs::write(&full_path, &content).map_err(|e| format!("Write error: {}", e))?;
+    // Same treatment the desktop path (fs_write) already gets: keep the file's
+    // EOL/BOM convention, skip an identical write, and swap the new bytes in
+    // atomically. A plain fs::write here could leave a user's source file
+    // truncated if the app died mid-write, and it rewrote a CRLF repo as LF —
+    // which shows up as "every line changed" in git.
+    let existing = fs::read(&full_path).ok();
+    let out_bytes = crate::commands::filesystem::normalize_to_existing_style(
+        existing.as_deref(),
+        &content,
+    );
+    if existing.as_deref() == Some(out_bytes.as_slice()) {
+        return Ok(serde_json::json!({
+            "status": "unchanged",
+            "path": full_path.to_string_lossy(),
+        }));
+    }
+    crate::commands::filesystem::write_atomic(&full_path, &out_bytes)?;
     Ok(serde_json::json!({"status": "saved", "path": full_path.to_string_lossy()}))
 }
 
@@ -433,4 +489,34 @@ pub fn get_chat_workspace_override(
 ) -> Result<Option<String>, String> {
     let map = state.chat_workspace_overrides.lock().map_err(|e| e.to_string())?;
     Ok(map.get(chatId.trim()).map(|p| p.to_string_lossy().to_string()))
+}
+
+
+/// Human byte size for tool messages. Mirrors formatBytes in builtin-tools.ts
+/// so the desktop and relay paths say the same thing about the same file.
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < KB {
+        format!("{} B", bytes)
+    } else if b < KB * KB {
+        format!("{:.1} KB", b / KB)
+    } else if b < KB * KB * KB {
+        format!("{:.1} MB", b / (KB * KB))
+    } else {
+        format!("{:.1} GB", b / (KB * KB * KB))
+    }
+}
+
+#[cfg(test)]
+mod read_tests {
+    use super::format_bytes;
+
+    #[test]
+    fn byte_sizes_read_like_the_desktop_path() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(2048), "2.0 KB");
+        assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
+    }
 }

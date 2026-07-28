@@ -14,19 +14,19 @@ import { checkWhisperAvailable, checkTtsAvailable, downloadPiperVoice, listInsta
 // Curated local neural (Piper) voices the user can pick. Selecting one not yet
 // on disk downloads it (~63 MB). Ids match rhasspy/piper-voices.
 const PIPER_VOICES: { id: string; label: string }[] = [
-  { id: 'en_US-lessac-medium', label: 'Lessac — US, neutral' },
-  { id: 'en_US-amy-medium', label: 'Amy — US, female' },
-  { id: 'en_US-ryan-high', label: 'Ryan — US, male (high)' },
-  { id: 'en_US-hfc_female-medium', label: 'HFC — US, female' },
-  { id: 'en_GB-alba-medium', label: 'Alba — UK, female' },
-  { id: 'en_GB-northern_english_male-medium', label: 'Northern — UK, male' },
+  { id: 'en_US-lessac-medium', label: 'Lessac, US, neutral' },
+  { id: 'en_US-amy-medium', label: 'Amy, US, female' },
+  { id: 'en_US-ryan-high', label: 'Ryan, US, male (high)' },
+  { id: 'en_US-hfc_female-medium', label: 'HFC, US, female' },
+  { id: 'en_GB-alba-medium', label: 'Alba, UK, female' },
+  { id: 'en_GB-northern_english_male-medium', label: 'Northern, UK, male' },
 ]
 
 // MiniMax Speech-02 system voices for the hosted cloud TTS. The server route
 // (/api/voice/tts) forwards the id verbatim as voice_id and only validates the
 // character set; default is Wise_Woman.
 const CLOUD_TTS_VOICES: { id: string; label: string }[] = [
-  { id: 'Wise_Woman', label: 'Wise Woman — default' },
+  { id: 'Wise_Woman', label: 'Wise Woman, default' },
   { id: 'Calm_Woman', label: 'Calm Woman' },
   { id: 'Lively_Girl', label: 'Lively Girl' },
   { id: 'Lovely_Girl', label: 'Lovely Girl' },
@@ -48,12 +48,15 @@ import { RemoteAccessDocs } from './RemoteAccessDocs'
 import { HardwareSettings } from './HardwareSettings'
 import { ChatbotImporter } from '../import/ChatbotImporter'
 import { ProviderSettings } from './ProviderConfig'
+import { BuiltinEngineSettings } from './BuiltinEngineSettings'
+import { MlxMediaSettings } from './MlxMediaSettings'
+import { useProviderStore } from '../../stores/providerStore'
 import { PermissionSettings } from './PermissionSettings'
 import { MCPServerSettings } from './MCPServerSettings'
 import { WorkflowList } from '../agents/WorkflowList'
 import { WorkflowBuilder } from '../agents/WorkflowBuilder'
 import { useUpdateStore, isNewerVersion } from '../../stores/updateStore'
-import { backendCall, isCloudOnly } from '../../api/backend'
+import { backendCall } from '../../api/backend'
 import { isMlxImageHost } from '../../api/mlx-image'
 import { ArrowUpCircle } from 'lucide-react'
 
@@ -263,7 +266,7 @@ function HfDownloadPathSetting() {
   return (
     <div className="space-y-2 py-1">
       <div className="text-[0.6rem] text-gray-500 leading-relaxed">
-        Custom location for downloaded GGUFs. Leave empty to auto-detect from your active provider's models folder (e.g. <code className="font-mono">~/.lmstudio/models</code> for LM Studio). Ollama is unaffected — it manages its own blob store; LU pulls Ollama models via <code className="font-mono">ollama pull</code> regardless of this setting.
+        Custom location for downloaded GGUFs. Leave empty to auto-detect from your active provider's models folder (e.g. <code className="font-mono">~/.lmstudio/models</code> for LM Studio). Ollama is unaffected, it manages its own blob store; LU pulls Ollama models via <code className="font-mono">ollama pull</code> regardless of this setting.
       </div>
       <div className="flex items-center gap-2">
         <input
@@ -320,7 +323,7 @@ function ComfyUISettings() {
         if (!cancelled) {
           setStatus(s)
           // Mirror backend truth into the frontend URL builder so subsequent
-          // fetch() calls hit the right machine immediately — no restart needed.
+          // fetch() calls hit the right machine immediately, no restart needed.
           if (typeof s?.port === 'number' && s.port > 0) setComfyPort(s.port)
           if (typeof s?.host === 'string' && s.host.trim()) setComfyHost(s.host)
         }
@@ -359,7 +362,7 @@ function ComfyUISettings() {
       setStatus(prev => prev ? { ...prev, found: true, path: customPath.trim() } : { running: false, found: true, path: customPath.trim() })
       setTimeout(() => setPathSuccess(false), 3000)
     } catch (err) {
-      setPathError(err instanceof Error ? err.message : 'Invalid path — main.py not found')
+      setPathError(err instanceof Error ? err.message : 'Invalid path, main.py not found')
     }
   }
 
@@ -417,7 +420,7 @@ function ComfyUISettings() {
         {hostError && <p className="text-[0.55rem] text-red-400">{hostError}</p>}
         {hostSuccess && <p className="text-[0.55rem] text-green-400">Host saved. Restart ComfyUI to apply.</p>}
         {status?.host && !status?.isLocal && (
-          <p className="text-[0.55rem] text-amber-400">Remote ComfyUI — start/stop/install not available from LU. Manage the process on the server.</p>
+          <p className="text-[0.55rem] text-amber-400">Remote ComfyUI, start/stop/install not available from LU. Manage the process on the server.</p>
         )}
       </div>
 
@@ -478,7 +481,7 @@ function ComfyUISettings() {
         {portSuccess && <p className="text-[0.55rem] text-green-400">Port saved. Restart ComfyUI to apply.</p>}
       </div>
 
-      {/* Controls — local host only (can't manage a remote process) */}
+      {/* Controls, local host only (can't manage a remote process) */}
       {status?.isLocal !== false && (
       <div className="flex items-center gap-1.5">
         {status?.found && !status.running && (
@@ -548,7 +551,13 @@ function ComfyUISettings() {
               setInstallPhase('comfyui')
               setInstallLogs(['Installing ComfyUI…'])
               try {
-                await backendCall('install_comfyui')
+                // andy_38747 (Discord): let the Path field double as the install
+                // target so the multi-GB install can land on another drive.
+                // Empty field → backend default (~/ComfyUI). On a carcass
+                // re-install with no override, reuse the detected path so the
+                // repair happens where the broken install lives.
+                const installTarget = customPath.trim() || status?.path || ''
+                await backendCall('install_comfyui', installTarget ? { installPath: installTarget } : {})
                 const poll = setInterval(async () => {
                   try {
                     const data: any = await backendCall('install_comfyui_status')
@@ -573,6 +582,48 @@ function ComfyUISettings() {
           >
             {status?.complete === false ? 'Re-install ComfyUI' : 'Install ComfyUI'}
           </button>
+        )}
+        {status?.found && status?.complete !== false && installPhase === 'idle' && (
+          // 2.5.8: the specialized local lanes (music / talking character /
+          // motion) need node families that ship with current cores — this is
+          // the one-click git pull + dependency refresh the lane errors point
+          // to. Reuses the installer's status channel and log panel.
+          <button
+            onClick={async () => {
+              setInstallPhase('comfyui')
+              setInstallErr('')
+              setInstallLogs(['Updating ComfyUI…'])
+              try {
+                await backendCall('update_comfyui')
+                const poll = setInterval(async () => {
+                  try {
+                    const data: any = await backendCall('install_comfyui_status')
+                    setInstallLogs(data.logs || [])
+                    if (data.status === 'complete') {
+                      clearInterval(poll)
+                      setInstallPhase('idle')
+                    } else if (data.status === 'error') {
+                      clearInterval(poll)
+                      const lastLog = (data.logs?.length ? data.logs[data.logs.length - 1] : '') as string
+                      setInstallErr(lastLog || 'ComfyUI update failed')
+                      setInstallPhase('error')
+                    }
+                  } catch { /* keep polling */ }
+                }, 2000)
+              } catch (err) {
+                setInstallPhase('error')
+                setInstallErr(err instanceof Error ? err.message : 'Failed to start the update')
+              }
+            }}
+            className="px-2 py-1 rounded text-[0.6rem] bg-white/5 text-gray-400 hover:text-gray-200 hover:bg-white/10 transition-colors"
+          >
+            Update ComfyUI
+          </button>
+        )}
+        {(!status?.found || status?.complete === false) && installPhase === 'idle' && (
+          <p className="w-full text-[0.55rem] text-gray-600">
+            Installs to your home folder by default. Set Path above (e.g. D:\ComfyUI) to install on another drive.
+          </p>
         )}
         {installPhase !== 'idle' && (
           <div className="w-full mt-2 space-y-1">
@@ -606,7 +657,7 @@ function CodexAgentSettings() {
     <div className="space-y-3">
       <div className="text-[0.6rem] text-gray-500 leading-relaxed pb-1">
         v2.5.0 coding-agent capabilities ported from the companion repo. All
-        local-first by default — cloud usage requires the explicit toggle below.
+        local-first by default. Cloud usage requires the explicit toggle below.
       </div>
 
       {/* Architect / Editor split */}
@@ -656,6 +707,26 @@ function CodexAgentSettings() {
         />
       </div>
 
+      {/* /loop — unlimited by default. The stop button and the loop bar above
+          the composer are the brake; a number here is only for people who want
+          a hard stop after N passes. */}
+      <div className="pt-1.5 border-t border-white/[0.04]" />
+      <div className="flex items-center justify-between gap-3 py-1">
+        <div className="min-w-0">
+          <div className="text-[0.7rem] text-gray-700 dark:text-gray-300">Maximum /loop passes</div>
+          <div className="text-[0.6rem] text-gray-500">
+            0 means unlimited: the loop keeps checking until it reports done or you stop it.
+          </div>
+        </div>
+        <input
+          type="number"
+          min={0}
+          value={settings.loopMaxPasses}
+          onChange={(e) => updateSettings({ loopMaxPasses: Math.max(0, parseInt(e.target.value, 10) || 0) })}
+          className="w-16 shrink-0 px-1.5 py-0.5 rounded border border-gray-200 dark:border-white/10 bg-transparent text-[0.7rem] text-right text-gray-800 dark:text-gray-200"
+        />
+      </div>
+
       {/* Stage + Review */}
       <div className="pt-1.5 border-t border-white/[0.04]" />
       <InlineToggle
@@ -663,6 +734,13 @@ function CodexAgentSettings() {
         enabled={settings.codexStageMode}
         onChange={() => updateSettings({ codexStageMode: !settings.codexStageMode })}
       />
+      {settings.codexStageMode && (
+        <InlineToggle
+          label="Auto-apply staged changes when the run finishes (no per-file clicking)"
+          enabled={settings.codexAutoApply}
+          onChange={() => updateSettings({ codexAutoApply: !settings.codexAutoApply })}
+        />
+      )}
       <InlineToggle
         label="Code-Review mode (read-only)"
         enabled={settings.codexReviewMode}
@@ -673,6 +751,17 @@ function CodexAgentSettings() {
         enabled={settings.codexConfirmShell}
         onChange={() => updateSettings({ codexConfirmShell: !settings.codexConfirmShell })}
       />
+      {/* Cloud arm of the same gate. Until 2.5.9 this was hard-wired on and
+          invisible, so the toggle above appeared to do nothing whenever the
+          coding agent ran on a cloud model. Shown only while the toggle above is
+          off, because that is the only case where it changes anything. */}
+      {!settings.codexConfirmShell && (
+        <InlineToggle
+          label="Also confirm when the coding agent runs on an LU Cloud model (recommended)"
+          enabled={settings.codexCloudConfirmShell}
+          onChange={() => updateSettings({ codexCloudConfirmShell: !settings.codexCloudConfirmShell })}
+        />
+      )}
     </div>
   )
 }
@@ -783,6 +872,9 @@ function ResetSection({ tab }: { tab: SettingsTab }) {
 
 export function SettingsPage() {
   const { settings, updateSettings } = useSettingsStore()
+  // ENG-2 — the expert panel only exists when the openai slot IS the
+  // app-managed built-in engine (same gate as the send-path self-heal).
+  const builtinManaged = useProviderStore((s) => !!s.providers.openai?.enabled && s.providers.openai?.managed === true)
   const { setView } = useUIStore()
   const voiceSettings = useVoiceStore()
   const [whisperStatus, setWhisperStatus] = useState<{ available: boolean; backend: string | null; error?: string } | null>(null)
@@ -828,7 +920,7 @@ export function SettingsPage() {
 
   const refreshTts = () => {
     setTtsLoading(true)
-    return checkTtsAvailable()
+    return checkTtsAvailable(voiceSettings.piperVoice)
       .then((s) => {
         setTtsStatus(s)
         // Same as STT: drive the read-aloud button availability from this probe
@@ -870,7 +962,7 @@ export function SettingsPage() {
           break
         }
         if (Date.now() - start > 600_000) {
-          setWhisperInstallError('Install is taking unusually long — check the logs / try again.')
+          setWhisperInstallError('Install is taking unusually long, check the logs / try again.')
           break
         }
       }
@@ -904,7 +996,7 @@ export function SettingsPage() {
           break
         }
         if (Date.now() - start > 600_000) {
-          setTtsInstallError('Install is taking unusually long — check the logs / try again.')
+          setTtsInstallError('Install is taking unusually long, check the logs / try again.')
           break
         }
       }
@@ -916,11 +1008,15 @@ export function SettingsPage() {
     }
   }
 
-  // Pick a Piper voice. If it isn't on disk yet, download it (~63 MB) first,
-  // then re-check the installed list + TTS availability.
+  // Pick a Piper voice. If it isn't on disk yet, download it (~63 MB), then
+  // re-check the installed list + TTS availability. The selection is applied
+  // optimistically (so the dropdown reflects the pick) but REVERTED if the
+  // download fails — otherwise piperVoice pointed at a missing model and every
+  // read fell back to the Windows SAPI voice (#77, ElBiggus).
   const handlePickVoice = async (id: string) => {
-    voiceSettings.setPiperVoice(id)
     setVoiceError(null)
+    const prev = voiceSettings.piperVoice
+    voiceSettings.setPiperVoice(id)
     if (installedVoices.includes(id)) return
     setVoiceBusy(true)
     try {
@@ -928,6 +1024,7 @@ export function SettingsPage() {
       await refreshVoices()
       await refreshTts()
     } catch (e) {
+      voiceSettings.setPiperVoice(prev)
       setVoiceError(e instanceof Error ? e.message : String(e))
     } finally {
       setVoiceBusy(false)
@@ -970,6 +1067,32 @@ export function SettingsPage() {
         {tab === 'general' && (<>
           <Section title="LU Cloud Account" defaultOpen>
             <AccountPanel />
+            {/* Local-mode discovery layer (2.5.8): the locked Create tabs +
+                hosted-model rows. The teaser sheet's "Hide Cloud features"
+                link flips this off; this is the way back on. */}
+            <div className="flex items-center justify-between pt-1">
+              <div className="min-w-0 pr-3">
+                <span className="text-[0.7rem] text-gray-700 dark:text-gray-400">Show Cloud features in Local mode</span>
+                <p className="text-[0.6rem] text-gray-500 dark:text-gray-600 leading-snug">
+                  Cloud previews on Create tools and model lists, plus Try cloud tags on the tools that run both ways. Never blocks a local flow.
+                </p>
+              </div>
+              <button
+                onClick={() => updateSettings({ cloudTeasersEnabled: !settings.cloudTeasersEnabled })}
+                className={`relative w-8 h-[18px] rounded-full transition-colors shrink-0 ${
+                  settings.cloudTeasersEnabled ? 'bg-violet-500/70' : 'bg-gray-300 dark:bg-white/10'
+                }`}
+                role="switch"
+                aria-checked={settings.cloudTeasersEnabled}
+                aria-label="Show Cloud features in Local mode"
+              >
+                <span
+                  className={`absolute top-[2px] w-3.5 h-3.5 rounded-full bg-white shadow transition-all ${
+                    settings.cloudTeasersEnabled ? 'left-[16px]' : 'left-[2px]'
+                  }`}
+                />
+              </button>
+            </div>
           </Section>
           <Section title="Appearance">
             <div className="flex items-center justify-between">
@@ -1005,7 +1128,7 @@ export function SettingsPage() {
               <input
                 type="number"
                 value={settings.maxTokens}
-                onChange={(e) => updateSettings({ maxTokens: parseInt(e.target.value) || 0 })}
+                onChange={(e) => updateSettings({ maxTokens: Math.max(0, parseInt(e.target.value) || 0) })}
                 min={0}
                 placeholder="0"
                 className="w-20 px-1.5 py-0.5 rounded bg-transparent border border-white/8 text-[0.65rem] text-right text-gray-300 font-mono focus:outline-none focus:border-white/20"
@@ -1055,7 +1178,7 @@ export function SettingsPage() {
           {settings.appMode !== 'cloud' && !isMlxImageHost() && (
           <Section title="Image / Video Generation Timeouts">
             <div className="text-[0.6rem] text-gray-500 dark:text-gray-500 leading-relaxed pb-1.5">
-              Maximum minutes a ComfyUI generation can run before LU aborts it. Bump these up if you run on iGPU or CPU only — a 1024px image on integrated graphics can take 30+ min.
+              Maximum minutes a ComfyUI generation can run before LU aborts it. Bump these up if you run on iGPU or CPU only, because a 1024px image on integrated graphics can take 30+ min.
             </div>
             <div className="flex items-center justify-between">
               <span className="text-[0.7rem] text-gray-700 dark:text-gray-400">Image timeout (min)</span>
@@ -1092,15 +1215,15 @@ export function SettingsPage() {
                 <div className="flex items-start gap-2">
                   <Lock size={12} className="mt-0.5 shrink-0 text-sky-500" />
                   <div>
-                    <p className="text-gray-700 dark:text-gray-300 font-medium mb-0.5">{isCloudOnly() ? 'The Mac app runs on the cloud.' : 'Cloud mode is active.'}</p>
-                    <p>Chat, Create renders and voice run on lu-labs.ai against your LU account and are metered against your credits; generated media and job records are stored with your account. {isCloudOnly() ? 'Local mode — running everything on your own Mac — is coming to the Mac app soon; the 100%-local pledge below is what it will bring.' : 'Switch to Local in the header to run everything on your machine — the 100%-local pledge below then applies.'}</p>
+                    <p className="text-gray-700 dark:text-gray-300 font-medium mb-0.5">Cloud mode is active.</p>
+                    <p>Chat, Create renders and voice run on lu-labs.ai against your LU account and are metered against your credits; generated media and job records are stored with your account. Switch to Local in the header to run everything on your machine, and the 100% local pledge below then applies.</p>
                   </div>
                 </div>
                 <div className="flex items-start gap-2 pt-1.5">
                   <Shield size={12} className="mt-0.5 shrink-0 text-emerald-500" />
                   <div>
-                    <p className="text-gray-700 dark:text-gray-300 font-medium mb-0.5">Local mode{isCloudOnly() ? ' (coming soon)' : ''}: 100% local.</p>
-                    <p>In local mode chat, agent runs, and image &amp; video generation all execute on your machine — no telemetry, no analytics, no model pings home. Your local data lives in <code className="px-1 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-[0.6rem]">%APPDATA%/Locally Uncensored</code> on Windows (or the equivalent on Linux/macOS).</p>
+                    <p className="text-gray-700 dark:text-gray-300 font-medium mb-0.5">Local mode: 100% local.</p>
+                    <p>In local mode chat, agent runs, and image &amp; video generation all execute on your machine. No telemetry, no analytics, no model pings home. Your local data lives in <code className="px-1 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-[0.6rem]">%APPDATA%/Locally Uncensored</code> on Windows (or the equivalent on Linux/macOS).</p>
                   </div>
                 </div>
               </div>
@@ -1117,7 +1240,7 @@ export function SettingsPage() {
                   <Shield size={12} className="mt-0.5 shrink-0 text-emerald-500" />
                   <div>
                     <p className="text-gray-700 dark:text-gray-300 font-medium mb-0.5">You own your data.</p>
-                    <p>Conversations, memories, and generated media live in <code className="px-1 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-[0.6rem]">%APPDATA%/Locally Uncensored</code> on Windows (or the equivalent on Linux/macOS). Back up the folder, move it between machines, or delete it — LU writes nothing else.</p>
+                    <p>Conversations, memories, and generated media live in <code className="px-1 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-[0.6rem]">%APPDATA%/Locally Uncensored</code> on Windows (or the equivalent on Linux/macOS). Back up the folder, move it between machines, or delete it. LU writes nothing else.</p>
                   </div>
                 </div>
               </div>
@@ -1162,16 +1285,33 @@ export function SettingsPage() {
             <HfDownloadPathSetting />
           </Section>
 
+          {builtinManaged && (
+            <Section title="Built-in Engine (expert)">
+              <BuiltinEngineSettings />
+            </Section>
+          )}
+
           {/* ComfyUI never runs on the Mac (MLX-only local media) — hide the whole
-              panel there so it isn't a dead Install/Start surface. */}
-          {!isMlxImageHost() && (
+              panel there so it isn't a dead Install/Start surface. The Mac gets
+              the MLX installer in its place; without it a fresh Mac has no way
+              to set up local image/video at all (MAC-3). */}
+          {!isMlxImageHost() ? (
             <Section title="ComfyUI (Image & Video)">
               {settings.appMode === 'cloud' && (
                 <p className="text-[0.55rem] text-gray-500 leading-snug pb-1">
-                  Local mode only — cloud renders run on lu-labs.ai and never use ComfyUI.
+                  Local mode only. Cloud renders run on lu-labs.ai and never use ComfyUI.
                 </p>
               )}
               <ComfyUISettings />
+            </Section>
+          ) : (
+            <Section title="Local Media (Apple MLX)">
+              {settings.appMode === 'cloud' && (
+                <p className="text-[0.55rem] text-gray-500 leading-snug pb-1">
+                  Local mode only. Cloud renders run on lu-labs.ai and never touch these models.
+                </p>
+              )}
+              <MlxMediaSettings />
             </Section>
           )}
         </>)}
@@ -1274,7 +1414,10 @@ export function SettingsPage() {
               <p className="text-[0.55rem] text-gray-500 leading-snug">
                 Cloud mode: dictation and read-aloud run on lu-labs.ai (hosted Whisper speech-to-text + MiniMax text-to-speech) and are metered against your credits. No local installs needed.
               </p>
-              <InlineToggle label="Read responses aloud" enabled={voiceSettings.ttsEnabled} onChange={() => voiceSettings.updateVoiceSettings({ ttsEnabled: !voiceSettings.ttsEnabled })} icon={<Volume2 size={11} className="text-gray-500" />} />
+              <InlineToggle label="Enable read-aloud" enabled={voiceSettings.ttsEnabled} onChange={() => voiceSettings.updateVoiceSettings({ ttsEnabled: !voiceSettings.ttsEnabled })} icon={<Volume2 size={11} className="text-gray-500" />} />
+              {voiceSettings.ttsEnabled && (
+                <InlineToggle label="Auto-read new responses" enabled={voiceSettings.autoReadAloud} onChange={() => voiceSettings.updateVoiceSettings({ autoReadAloud: !voiceSettings.autoReadAloud })} icon={<Volume2 size={11} className="text-gray-500" />} />
+              )}
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[0.7rem] text-gray-500">Voice</span>
                 <select
@@ -1289,7 +1432,7 @@ export function SettingsPage() {
               </div>
             </>) : (<>
             <p className="text-[0.55rem] text-gray-500 leading-snug">
-              Voice runs 100% locally — no cloud. Each engine is a one-time local install.
+              Voice runs 100% locally, no cloud. Each engine is a one-time local install.
             </p>
 
             {/* Speech-to-Text — faster-whisper (powers the microphone / dictation) */}
@@ -1323,7 +1466,7 @@ export function SettingsPage() {
               </p>
             )}
 
-            {/* Text-to-Speech — Piper neural (read responses aloud) */}
+            {/* Text-to-Speech, Piper neural (read responses aloud) */}
             <div className="flex items-center gap-2 text-[0.65rem] pt-1">
               <span className="flex items-center gap-1.5">
                 {ttsLoading
@@ -1348,16 +1491,30 @@ export function SettingsPage() {
             {ttsInstallError && (
               <p className="text-[0.55rem] text-red-400/90 leading-snug">{ttsInstallError}</p>
             )}
+            {/* #77: read-aloud silently fell back to the system voice while this
+                row showed a healthy green check — surface the recorded reason. */}
+            {voiceSettings.ttsMode === 'piper' && voiceSettings.ttsFallbackReason && (
+              <p className="text-[0.55rem] text-amber-400/90 leading-snug">
+                {voiceSettings.ttsFallbackReason} If an antivirus quarantined Piper, whitelist it or reinstall the voice below.
+              </p>
+            )}
             {!ttsLoading && ttsStatus && !ttsStatus.available && !ttsInstalling && !ttsInstallError && (
               <p className="text-[0.55rem] text-gray-500 leading-snug">
                 Required for read-aloud. Installs Piper + a neural voice locally (~63 MB).
               </p>
             )}
 
-            <InlineToggle label="Read responses aloud" enabled={voiceSettings.ttsEnabled} onChange={() => voiceSettings.updateVoiceSettings({ ttsEnabled: !voiceSettings.ttsEnabled })} icon={<Volume2 size={11} className="text-gray-500" />} />
-            {/* Neural voice picker (Piper) — replaces the old Microsoft/browser
+            <InlineToggle label="Enable read-aloud" enabled={voiceSettings.ttsEnabled} onChange={() => voiceSettings.updateVoiceSettings({ ttsEnabled: !voiceSettings.ttsEnabled })} icon={<Volume2 size={11} className="text-gray-500" />} />
+            {/* Auto-read is a SEPARATE opt-in (default OFF). The toggle above only
+                surfaces the per-message Speaker button; this one also reads each
+                finished response aloud (#77, ElBiggus, the old single toggle was
+                labelled "Read responses aloud" but never auto-read). */}
+            {voiceSettings.ttsEnabled && (
+              <InlineToggle label="Auto-read new responses" enabled={voiceSettings.autoReadAloud} onChange={() => voiceSettings.updateVoiceSettings({ autoReadAloud: !voiceSettings.autoReadAloud })} icon={<Volume2 size={11} className="text-gray-500" />} />
+            )}
+            {/* Neural voice picker (Piper), replaces the old Microsoft/browser
                 voices (David 2026-06-06). Picking one not yet on disk downloads
-                it (~63 MB). Browser-only rate/pitch knobs dropped — they didn't
+                it (~63 MB). Browser-only rate/pitch knobs dropped, they didn't
                 apply to Piper. */}
             <div className="flex items-center justify-between gap-2">
               <span className="text-[0.7rem] text-gray-500 flex items-center gap-1">
@@ -1371,7 +1528,7 @@ export function SettingsPage() {
               >
                 {PIPER_VOICES.map((v) => (
                   <option key={v.id} value={v.id}>
-                    {v.label}{installedVoices.includes(v.id) ? '' : ' — download'}
+                    {v.label}{installedVoices.includes(v.id) ? '' : ', download'}
                   </option>
                 ))}
               </select>
@@ -1509,7 +1666,7 @@ function UpdateSection() {
 
         {/* Manual check */}
         <button
-          onClick={() => { useUpdateStore.setState({ lastChecked: null }); checkForUpdate() }}
+          onClick={() => { void checkForUpdate(true) }}
           disabled={isChecking}
           className="text-[0.6rem] text-gray-500 hover:text-gray-300 transition-colors disabled:opacity-40"
         >
@@ -1597,8 +1754,7 @@ function TroubleshootSection() {
     <div className="space-y-3 py-2">
       <p className="text-[0.6rem] text-gray-500 leading-relaxed">
         One-shot probe of the local backends and host facts. Use this when
-        the app behaves oddly — most "model not found" / "ComfyUI doesn't
-        respond" issues become obvious here.
+        the app behaves oddly. Most "model not found" / {isMlxImageHost() ? '"backend doesn\'t respond"' : '"ComfyUI doesn\'t respond"'} issues become obvious here.
       </p>
 
       {error && (
@@ -1660,7 +1816,7 @@ function TroubleshootSection() {
                   ? (report.host.vram_free_gb != null
                       ? `${report.host.vram_free_gb} / ${report.host.vram_total_gb} GB free`
                       : `${report.host.vram_total_gb} GB`)
-                  : '—'}
+                  : 'not detected'}
               </span>
             </div>
           </div>

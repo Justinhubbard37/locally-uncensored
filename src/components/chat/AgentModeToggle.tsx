@@ -7,13 +7,12 @@ import { useChatStore } from '../../stores/chatStore'
 import { useModelStore } from '../../stores/modelStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { isAgentCompatible } from '../../lib/model-compatibility'
+import { getToolCapability } from '../../api/tool-capability'
 import { FEATURE_FLAGS } from '../../lib/constants'
-import { AgentTutorial } from './AgentTutorial'
 import { AgentWorkspaceDialog } from './AgentWorkspaceDialog'
 import type { AgentWorkspace } from '../../types/agent-workspace'
 
 export function AgentModeToggle() {
-  const [showTutorial, setShowTutorial] = useState(false)
   const [showNewChatModal, setShowNewChatModal] = useState(false)
   const [neverShowChecked, setNeverShowChecked] = useState(false)
   // Workspace picker — opens after a fresh agent-mode activation when
@@ -26,12 +25,25 @@ export function AgentModeToggle() {
   const conversations = useChatStore((s) => s.conversations)
   const createConversation = useChatStore((s) => s.createConversation)
   const activeModel = useModelStore((s) => s.activeModel)
-  const { agentModeActive, toggleAgentMode, tutorialCompleted, newChatHintDismissed } = useAgentModeStore()
+  const activeModelMeta = useModelStore((s) => s.models.find((m) => m.name === s.activeModel))
+  const { agentModeActive, toggleAgentMode, newChatHintDismissed } = useAgentModeStore()
 
   if (!FEATURE_FLAGS.AGENT_MODE || !activeConversationId) return null
 
   const isActive = agentModeActive[activeConversationId] ?? false
-  const isCompatible = activeModel ? isAgentCompatible(activeModel) : false
+  // Tool-capability precedence, same order the dropdown icon uses so the toggle
+  // and the marker never disagree:
+  //   1. a run PROVED it rejects tools (reactive cache, cloud 405 / ollama
+  //      "does not support tools") → disabled, even if the name looks capable
+  //   2. server-declared capability (LU Cloud /models → supports_tools): false
+  //      keeps Agent disabled up front so the user never eats a mid-run 400 on
+  //      the cloud models without function calling (Hermes 3, Euryale, …)
+  //   3. otherwise the family name heuristic, unchanged for every local model
+  const serverTools = activeModelMeta && 'supportsTools' in activeModelMeta ? activeModelMeta.supportsTools : undefined
+  const isCompatible =
+    (activeModel && getToolCapability(activeModel) === 'unsupported') ? false
+    : serverTools !== undefined ? serverTools
+    : (activeModel ? isAgentCompatible(activeModel) : false)
 
   const conversation = conversations.find((c) => c.id === activeConversationId)
   const hasMessages = (conversation?.messages?.length ?? 0) > 0
@@ -55,9 +67,6 @@ export function AgentModeToggle() {
     if (!activeModel) return
     const persona = useSettingsStore.getState().getActivePersona()
     const newId = createConversation(activeModel, persona?.systemPrompt || '')
-    if (!tutorialCompleted) {
-      useAgentModeStore.getState().setTutorialCompleted()
-    }
     useAgentModeStore.getState().toggleAgentMode(newId)
     maybeOpenWorkspaceDialog(newId)
   }
@@ -76,23 +85,12 @@ export function AgentModeToggle() {
       return
     }
 
-    // First time → show tutorial
-    if (!isActive && !tutorialCompleted) {
-      setShowTutorial(true)
-      return
-    }
-
+    // 2.5.9 dropped the first-run Agent tutorial modal — flipping the switch
+    // just flips it now.
     toggleAgentMode(activeConversationId)
     // If the user just turned agent ON (was inactive, now active) and
     // hasn't picked a workspace for this conversation, prompt for one.
     if (!isActive) maybeOpenWorkspaceDialog(activeConversationId)
-  }
-
-  const handleTutorialComplete = () => {
-    setShowTutorial(false)
-    useAgentModeStore.getState().setTutorialCompleted()
-    toggleAgentMode(activeConversationId)
-    maybeOpenWorkspaceDialog(activeConversationId)
   }
 
   const handleNewAgentChat = () => {
@@ -129,8 +127,8 @@ export function AgentModeToggle() {
           !isCompatible
             ? 'This model is not agent-compatible'
             : isActive
-              ? 'Agent Mode is on — click to turn off'
-              : 'Agent Mode is off — click to turn on'
+              ? 'Agent Mode is on. Click to turn off'
+              : 'Agent Mode is off. Click to turn on'
         }
         className={
           'flex items-center gap-1 px-2 py-0.5 rounded border transition-colors text-[0.55rem] ' +
@@ -199,14 +197,6 @@ export function AgentModeToggle() {
           </div>
         </div>
       </Modal>
-
-      {showTutorial && (
-        <AgentTutorial
-          open={showTutorial}
-          onClose={() => setShowTutorial(false)}
-          onComplete={handleTutorialComplete}
-        />
-      )}
 
       {showWorkspaceDialog && workspaceDialogConvId && (
         <AgentWorkspaceDialog

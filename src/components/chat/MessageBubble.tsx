@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { User, Copy, Check, Pencil, RefreshCw, X, Wrench } from 'lucide-react'
+import { User, Copy, Check, Pencil, RefreshCw, X, Wrench, Trash2 } from 'lucide-react'
 import { useState, useRef, useEffect, useMemo } from 'react'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ThinkingBlock } from './ThinkingBlock'
@@ -9,6 +9,7 @@ import { VramSwitchCard } from './VramSwitchCard'
 import { SpeakerButton } from './SpeakerButton'
 import { ChatArtifactCard } from './ChatArtifactCard'
 import type { Message } from '../../types/chat'
+import { stripModelNoise } from '../../lib/strip-model-noise'
 import { useAgentModeStore } from '../../stores/agentModeStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useModelStore } from '../../stores/modelStore'
@@ -35,6 +36,7 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
   const [copied, setCopied] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
   const [editContent, setEditContent] = useState('')
+  const [confirmDelete, setConfirmDelete] = useState(false)
   const editRef = useRef<HTMLTextAreaElement>(null)
   const isUser = message.role === 'user'
 
@@ -43,6 +45,7 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
   // agent mode on. Detect the JSON pattern and show a one-click "Enable
   // agent" banner instead of leaving the user staring at a JSON dump.
   const activeConversationId = useChatStore((s) => s.activeConversationId)
+  const deleteMessage = useChatStore((s) => s.deleteMessage)
   const isAgentActive = useAgentModeStore((s) =>
     activeConversationId ? s.agentModeActive[activeConversationId] ?? false : false
   )
@@ -78,6 +81,33 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
   // banner can't flash mid-stream while a visible thinking phase runs.
   const thoughtOnly = !isUser && !(message.content || '').trim() && !!(message.thinking || '').trim()
     && (!isLast || !!message.usage)
+
+  // Orchestration strip for everything this bubble renders (2.5.9). Memoised:
+  // the regex set is not cheap and a long agent chat re-renders these bubbles
+  // often. Aggressive tier only while a tool loop drives the turn — in plain
+  // chat a {"name": …, "arguments": …} block is often the answer itself.
+  // Signature, not the array itself: a streaming turn may grow a block's
+  // content in place, leaving the array reference identical. Keying on the
+  // total length re-runs the strip on every token while still skipping the
+  // work on unrelated re-renders.
+  const blockSig = (message.agentBlocks ?? []).reduce((n, b) => n + b.content.length, 0)
+    + ':' + (message.agentBlocks?.length ?? 0)
+  const cleanBlocks = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const b of message.agentBlocks ?? []) {
+      if (b.phase === 'answer') map.set(b.id, stripModelNoise(b.content, { aggressive: true }))
+    }
+    return map
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blockSig])
+  // Aggressive while a tool loop drives the turn, same as Code. In plain chat
+  // the gentle tier only, because a {"name": …, "arguments": …} block there can
+  // be exactly the answer the user asked the model to print.
+  const toolLoopDriven = isAgentActive || !!message.agentBlocks?.length
+  const cleanContent = useMemo(
+    () => (isUser ? '' : stripModelNoise(message.content || '', { aggressive: toolLoopDriven })),
+    [isUser, message.content, toolLoopDriven],
+  )
   const thoughtOnlyToolIntent = useMemo(
     () => thoughtOnly && !isAgentActive && !chatToolsEnabled && looksLikeToolIntent(message.thinking || ''),
     [thoughtOnly, isAgentActive, chatToolsEnabled, message.thinking],
@@ -113,6 +143,19 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
   const cancelEdit = () => {
     setIsEditing(false)
     setEditContent('')
+  }
+
+  // Two-step delete (D#81): first click arms (icon turns red), second within 3s
+  // removes the single message. Guards against an accidental one-click nuke of a
+  // line the user meant to keep.
+  const handleDelete = () => {
+    if (!activeConversationId) return
+    if (!confirmDelete) {
+      setConfirmDelete(true)
+      setTimeout(() => setConfirmDelete(false), 3000)
+      return
+    }
+    deleteMessage(activeConversationId, message.id)
   }
 
   return (
@@ -179,10 +222,14 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
                   return <ReflectionBlock key={block.id} content={block.content} />
                 }
                 if (block.phase === 'answer') {
+                  // A block that was ONLY orchestration (a bare LOOP_DONE line,
+                  // a stray ool_call>) renders nothing, not an empty bubble.
+                  const clean = cleanBlocks.get(block.id) ?? ''
+                  if (!clean) return null
                   return (
                     <div key={block.id} className="px-1 py-0.5">
                       <div className="text-[0.8rem] leading-relaxed">
-                        <MarkdownRenderer content={block.content} />
+                        <MarkdownRenderer content={clean} />
                       </div>
                     </div>
                   )
@@ -260,19 +307,20 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
             // a duplicate dump at the bottom. Falls back to message.content
             // for legacy chats / non-agent messages without answer blocks.
             (() => {
-              const hasAnswerBlock = !!message.agentBlocks?.some(
-                (b) => b.phase === 'answer' && b.content.trim(),
-              )
+              // Judge "has a real answer block" on the STRIPPED text: a block
+              // holding nothing but a LOOP_DONE line must not suppress the
+              // fallback, or the turn renders blank.
+              const hasAnswerBlock = [...cleanBlocks.values()].some(Boolean)
               if (hasAnswerBlock) return null
               return (
                 <div className="text-[0.78rem] leading-relaxed">
-                  <MarkdownRenderer content={message.content} />
+                  <MarkdownRenderer content={cleanContent} />
                   {thoughtOnly && (
                     thoughtOnlyToolIntent && activeModel && isAgentCompatible(activeModel) ? (
                       <div className="mt-1 flex items-start gap-2 px-2 py-1.5 rounded-md border border-amber-400/30 bg-amber-500/10 text-[0.65rem] text-amber-700 dark:text-amber-200">
                         <Wrench size={11} className="mt-0.5 shrink-0" />
                         <div className="flex-1">
-                          <p className="font-medium">The model spent its whole reply deciding to call a tool — but Agent Mode is off, so it never said anything.</p>
+                          <p className="font-medium">The model spent its whole reply deciding to call a tool, but Agent Mode is off, so it never said anything.</p>
                           <p className="opacity-80 mt-0.5">Turn Agent Mode on and ask again to let it actually run the tool (search the web, generate media, read files). Its reasoning is in the thinking block above.</p>
                         </div>
                         <button
@@ -284,7 +332,7 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
                       </div>
                     ) : (
                       <p className="mt-1 text-[0.65rem] italic text-gray-500 dark:text-gray-400">
-                        The model only produced internal reasoning and no answer — see the thinking block above, or rephrase and try again.
+                        The model only produced internal reasoning and no answer. See the thinking block above, or rephrase and try again.
                       </p>
                     )
                   )}
@@ -311,7 +359,7 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
         </div>
 
         {/* Chat-tools artifacts (David 2026-06-12): files the model "wrote" in
-            plain chat — rendered inline with preview + Download, never on disk. */}
+            plain chat, rendered inline with preview + Download, never on disk. */}
         {!isUser && message.artifacts && message.artifacts.length > 0 && (
           <div className="space-y-1">
             {message.artifacts.map((a) => (
@@ -335,6 +383,9 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
               {copied ? <Check size={12} className="text-green-500" /> : <Copy size={12} />}
             </button>
             {!isUser && <SpeakerButton text={message.content} />}
+            <button onClick={handleDelete} className={'p-1 rounded-md transition-colors hover:bg-gray-100 dark:hover:bg-white/10 ' + (confirmDelete ? 'text-red-500' : 'text-gray-400 dark:text-gray-500 hover:text-red-500')} aria-label="Delete message" title={confirmDelete ? 'Click again to delete' : 'Delete message'}>
+              <Trash2 size={12} />
+            </button>
           </div>
         )}
 
@@ -344,7 +395,7 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
             <p className="text-[0.5rem] text-gray-500 mb-0.5">Sources:</p>
             {message.sources.map((s, i) => (
               <p key={i} className="text-[0.5rem] text-gray-600 truncate">
-                [{i + 1}] {s.documentName} — {s.preview.slice(0, 60)}...
+                [{i + 1}] {s.documentName}, {s.preview.slice(0, 60)}...
               </p>
             ))}
           </div>

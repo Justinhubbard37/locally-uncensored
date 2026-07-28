@@ -5,17 +5,25 @@ import { useModelStore } from '../stores/modelStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useChatStore } from '../stores/chatStore'
 import { getProviderForModel, getProviderIdFromModel } from '../api/providers'
+import { markToolsUnsupported } from '../api/tool-capability'
 import { toolRegistry } from '../api/mcp'
 import { usePermissionStore } from '../stores/permissionStore'
-import { getToolCallingStrategy } from '../lib/model-compatibility'
-import { CODEX_CONFIRM_TOOLS } from './codexShellGate'
+import { toolStrategyFor } from '../lib/tool-support'
+import { MUTATING_TOOLS } from '../lib/mutating-tools'
+import { applyGoalCommand } from '../lib/goal-command'
+import { useAgentGoalStore, renderGoalSection } from '../stores/agentGoalStore'
+import { useAgentLoopStore } from '../stores/agentLoopStore'
+import { CODEX_CONFIRM_TOOLS, codexConfirmEnabled } from './codexShellGate'
 import { buildHermesToolPrompt, buildHermesToolResult, parseHermesToolCalls, stripToolCallTags, hasToolCallTags } from '../api/hermes-tool-calling'
 import { chatNonStreaming } from '../api/agents'
 import { setActiveChatId, clearActiveChatId, chatWorkspaceSlug, setActiveWorkspace, setActiveAgentModel } from '../api/agent-context'
 import { resolveWorkspace } from '../api/agents/workspace-resolve'
 import { useAgentModeStore } from '../stores/agentModeStore'
 import { loadLurules, renderRulesSection, type RulesReader } from '../lib/lurules'
-import { parseAgentCommand } from '../lib/agent-commands'
+import {
+  parseAgentCommand, parseLoopSpec, buildLoopRecheck,
+  loopPassSaysDone,
+} from '../lib/agent-commands'
 import { useGenerationStore } from '../stores/generationStore'
 import { backendCall, isOllamaLocal } from '../api/backend'
 import { planWithArchitect, renderArchitectPlanSection } from '../api/agents/architect'
@@ -23,6 +31,7 @@ import { fetchRepoMap, renderRepoMapSection } from '../api/agents/repo-map'
 import { isLocalModelByName } from '../api/agents/model-locality'
 import { useStagedChangesStore } from '../stores/stagedChangesStore'
 import { computeUnifiedDiff } from '../lib/diff'
+import { applyUniqueEdit } from '../lib/surgical-edit'
 import { log } from '../lib/logger'
 import type { AgentBlock, AgentToolCall } from '../types/agent-mode'
 import { isThinkingCompatible, isPlainTextPlanner } from '../lib/model-compatibility'
@@ -35,13 +44,19 @@ import { budgetFromSettings } from '../api/agents/budget'
 import { finalStripThinkingTags } from '../lib/thinking-stripper'
 import { streamOllamaChatWithTools } from '../lib/ollama-stream-tools'
 import { extractToolCallsWithRanges, stripRanges } from '../lib/tool-call-repair'
+import { canonicalToolName } from '../lib/loose-tool-parse'
 import { selectRelevantTools, selectRelevantToolsAsync } from '../lib/tool-selection'
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
 import { compactMessages, getModelMaxTokens, estimateTokens } from '../lib/context-compaction'
+import { resolveAgentNumCtx } from '../lib/agent-num-ctx'
+import { AgentLoopGuard } from '../lib/agent-loop-guard'
+import { findStagedForPath, stagedReadResult, stagedListingNote } from '../lib/staged-overlay'
+import { applyAllStagedChanges } from '../lib/staged-apply'
 import { useMemoryStore } from '../stores/memoryStore'
 import { extractMemoriesFromPair } from './useMemory'
 import type { OllamaChatMessage } from '../types/agent-mode'
+import { useCodexConfirmStore } from '../stores/codexConfirmStore'
 
 // No-op diagnostic hook. Kept as a call site so future debugging can swap
 // this for a file logger without re-editing every iter-point in the loop.
@@ -54,22 +69,22 @@ function diagLog(_tag: string, _data: unknown): void {
 // Review-mode system prompt (B13). In review mode this REPLACES the base
 // CODEX_SYSTEM_PROMPT entirely — the autonomy/build contract is the wrong
 // framing for a read-only reviewer and would fight the executor gate. The
-// list-stripping below (REVIEW_MODE_FORBIDDEN_TOOLS) still enforces
+// list-stripping below (MUTATING_TOOLS) still enforces
 // read-only programmatically even if the model tries a write tool anyway.
-const CODEX_REVIEW_SYSTEM_PROMPT = `You are the Coding Agent in REVIEW MODE — a read-only code reviewer inside LU. You DO NOT modify any files, run any commands, or change any state. Your job is to read code with file_read / file_list / file_search / git_diff / git_log and return INLINE COMMENTS only.
+const CODEX_REVIEW_SYSTEM_PROMPT = `You are the Coding Agent in REVIEW MODE, a read-only code reviewer inside LU. You DO NOT modify any files, run any commands, or change any state. Your job is to read code with file_read / file_list / file_search / git_diff / git_log and return INLINE COMMENTS only.
 
 REVIEW MODE CONTRACT (binding):
 - You MAY call: file_read, file_list, file_search, git_status, git_log, git_diff, system_info, process_list, get_current_time, web_fetch, web_search.
-- You MUST NOT call: file_write, shell_execute, code_execute, run_tests, git_commit, git_push, gh_pr_create, image_generate, video_generate, run_workflow, screenshot, delegate_task. If you call them, the harness will reject the call and tell the model "review-only mode" — wasted budget.
+- You MUST NOT call: file_write, file_edit, shell_execute, code_execute, run_tests, git_commit, git_push, gh_pr_create, image_generate, video_generate, run_workflow, screenshot, delegate_task. If you call them, the harness will reject the call and tell the model "review-only mode", wasted budget.
 - Output format: a markdown report with sections "## Summary", "## Findings (priority order)", "## Suggested follow-ups". For each finding cite the file + line range (path:line or path:start-end).
 - Be direct. No flattery, no boilerplate. If the code is fine, say so in one sentence and stop.`
 
-const CODEX_SYSTEM_PROMPT = `You are the Coding Agent, an autonomous coding agent inside LU. You execute coding tasks end-to-end by reading files, writing code, and running shell commands. You MUST use tools — never guess file contents.
+const CODEX_SYSTEM_PROMPT = `You are the Coding Agent, an autonomous coding agent inside LU. You execute coding tasks end-to-end by reading files, writing code, and running shell commands. You MUST use tools, never guess file contents.
 
 AUTONOMY CONTRACT (read carefully):
 - You are expected to COMPLETE multi-step tasks without the user prompting between steps.
 - NEVER say "Now I will create X" or "Next I'll write Y" as plain text and then stop. That is a FAILURE.
-- When your plan has N steps, execute ALL N steps in one session — each step as a concrete tool call.
+- When your plan has N steps, execute ALL N steps in one session, each step as a concrete tool call.
 - The ONLY reasons to finish without calling another tool are:
     (a) the task is 100% complete AND verified, or
     (b) you hit an error you cannot recover from after trying.
@@ -77,19 +92,20 @@ AUTONOMY CONTRACT (read carefully):
 
 Workflow per task:
 1. Understand the task (optional brief sentence)
-2. Explore the codebase — file_list / file_read / file_search
-3. Implement ALL required changes — file_write, as many calls as needed in one go
-4. Verify — shell_execute to run tests, lint, or build
+2. Explore the codebase, file_list / file_read / file_search
+3. Implement ALL required changes, file_edit to change existing files, file_write for new ones; as many calls as needed in one go
+4. Verify, shell_execute to run tests, lint, or build
 5. Only THEN write a short summary of what you did
 
 Rules:
 - Always read a file before modifying it
-- PATHS: use paths relative to the working directory shown below (e.g. \`package.json\`, \`src/app.ts\`, \`.\` for the current folder). Never start a path with \`/\` or a drive letter (\`C:\\\`) — that escapes the workspace and fails.
+- To CHANGE part of an existing file, use file_edit (replace a UNIQUE old_string with new_string), it is far cheaper and safer than rewriting the whole file with file_write, and never truncates a large file. Use file_write only to CREATE a new file or fully replace one. If file_edit reports the old_string is missing or not unique, read the file and retry with more surrounding lines.
+- PATHS: use paths relative to the working directory shown below (e.g. \`package.json\`, \`src/app.ts\`, \`.\` for the current folder). Never start a path with \`/\` or a drive letter (\`C:\\\`), that escapes the workspace and fails.
 - Chain tool calls: after each tool result, if there is another step left, IMMEDIATELY call the next tool
-- If a command fails, diagnose and retry with a different approach — don't hand back to the user unless truly stuck
+- If a command fails, diagnose and retry with a different approach, don't hand back to the user unless truly stuck
 - Be concise in text. All the work happens in tool calls.
-- Asset generation: when the task needs an image or a short video (placeholder art, hero image, demo clip), call image_generate / video_generate as a real tool call — they run on-device (Apple MLX on macOS, ComfyUI elsewhere). To animate a generated image, call video_generate with inputImage set to that image's filename.
-- FINISH with a short natural-language sentence summarising what you did or found. NEVER end your turn with only a raw JSON object or a bare code block — the user needs a human-readable answer, not a data dump.`
+- Asset generation: when the task needs an image or a short video (placeholder art, hero image, demo clip), call image_generate / video_generate as a real tool call, they run on-device (Apple MLX on macOS, ComfyUI elsewhere). To animate a generated image, call video_generate with inputImage set to that image's filename.
+- FINISH with a short natural-language sentence summarising what you did or found. NEVER end your turn with only a raw JSON object or a bare code block, the user needs a human-readable answer, not a data dump.`
 
 // Small-Model Mode (Knob 2): a lean Codex prompt (~500 chars vs ~1700 above)
 // for 3B-8B models. Research (LongFuncEval, arXiv 2505.10570) shows long
@@ -98,12 +114,13 @@ Rules:
 // workflow prose costs more than it buys. Keep only the essentials and stay
 // faithful to the native tool-call format. Selected at the injection point
 // below when settings.smallModelMode is on (review mode still wins).
-const CODEX_SYSTEM_PROMPT_LEAN = `You are a coding agent in LU. Use tools to do the work — never guess file contents.
+const CODEX_SYSTEM_PROMPT_LEAN = `You are a coding agent in LU. Use tools to do the work, never guess file contents.
 
 Rules:
 - Read a file before you edit it.
-- PATHS: use relative paths (e.g. \`package.json\`, \`.\`). Never start with \`/\` or a drive letter — it escapes the workspace and fails.
-- Emit the tool call as your FIRST output — no "Okay, let me…" preamble. One step at a time, as valid JSON.
+- To change an existing file use file_edit (replace a unique old_string with new_string), not file_write. Use file_write only to create a new file.
+- PATHS: use relative paths (e.g. \`package.json\`, \`.\`). Never start with \`/\` or a drive letter, it escapes the workspace and fails.
+- Emit the tool call as your FIRST output, no "Okay, let me…" preamble. One step at a time, as valid JSON.
 - After each tool result, if more steps remain, immediately call the next tool. Do not narrate "I will now…" and then stop.
 - When the task is done and verified, reply with one short sentence. Never end with only raw JSON or a bare code block.`
 
@@ -118,48 +135,30 @@ const streamWithTools = streamOllamaChatWithTools
 // pure coding turns keep the same lean tool list as before.
 const CODEX_CATEGORIES = ['filesystem', 'terminal', 'system', 'web', 'image', 'video'] as const
 
-// Tools blocked in Code-Review Mode (B13). The agent goes read-only —
-// it inspects the codebase and writes inline comments, but never
-// mutates the filesystem, the shell, or remote state. Anything that
-// could change a file, run a command, or push to git/GitHub goes here.
-// Read-only inspectors (git_status / git_log / git_diff, pr_resume,
-// shell_task_status / shell_task_list, file_read / file_list / file_search)
-// stay allowed so the agent can do its job.
-const REVIEW_MODE_FORBIDDEN_TOOLS = new Set([
-  'file_write',
-  'shell_execute',
-  'code_execute',
-  'shell_execute_background',
-  'shell_task_kill',
-  'git_commit',
-  'git_push',
-  'project_init',
-  'gh_pr_create',
-  'run_tests',
-  'image_generate',
-  'video_generate',
-  'run_workflow',
-  // Parity with uselu's review blocklist — a reviewer must not capture the
-  // screen or hand work off to a sub-agent that could mutate state.
-  'screenshot',
-  'delegate_task',
-])
 
-// `.lurules` reader — backendCall wraps the desktop Tauri `file_read`
-// command. Resolves absolute paths as-is (Bug "doubled path" fix in
-// v2.3 made the drive-letter detection robust), so the absolute lurules
-// path we compute below lands at the user's real `.lurules` file. The
-// reader swallows errors to a null return so loadLurules() can treat
-// "missing file" and "fs error" identically.
-const lurulesReader: RulesReader = {
-  async read(path: string): Promise<string | null> {
-    try {
-      const r = await backendCall<{ content?: string }>('file_read', { path })
-      return r?.content ?? null
-    } catch {
-      return null
-    }
-  },
+// `.lurules` reader. MUST go through `fs_read` (the workspace-aware command)
+// with the run's chatId + workingDirectory — NOT the older `file_read`, which
+// jails every path to the per-chat sandbox (agent-workspace/<id>) and so
+// REJECTS the absolute `<workDir>/.lurules` path with "escapes the allowed
+// workspace". That silent rejection meant per-repo rules never loaded in a real
+// folder workspace. Threading workingDirectory sets the jail root to the actual
+// project folder, so the absolute rules path resolves. Errors still swallow to
+// null so loadLurules() treats "missing file" and "fs error" identically.
+function makeLurulesReader(chatId: string, workDir: string): RulesReader {
+  return {
+    async read(path: string): Promise<string | null> {
+      try {
+        const r = await backendCall<{ content?: string }>('fs_read', {
+          path,
+          chatId,
+          workingDirectory: workDir,
+        })
+        return r?.content ?? null
+      } catch {
+        return null
+      }
+    },
+  }
 }
 
 // Detect when the model emits a re-introduction of itself ("Hello, I am
@@ -184,7 +183,7 @@ function isSystemPromptEcho(content: string): boolean {
 }
 
 // Server-declared think capability (LU Cloud models carry thinkMode from
-// /models) wins over the local name-heuristic — same precedence as
+// /models) wins over the local name-heuristic, same precedence as
 // useChat/useAgentChat: 'always' reasoners keep their native channel,
 // 'never' models get no think prompting or knobs.
 function codexThinkMode(model: string) {
@@ -200,13 +199,25 @@ export function useCodex() {
   const [isRunning, setIsRunning] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const runningRef = useRef(false)
+  /** True once the user pressed stop, so the /loop driver does not start
+   *  another pass on the run they just killed. Cleared when a new run starts. */
+  const userStoppedRef = useRef(false)
+  /** The pending next /loop pass, so stop can cancel it mid-interval. */
+  const loopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const sendInstruction = useCallback(async (rawInstruction: string, opts?: { displayContent?: string }) => {
+  const sendInstruction = useCallback(async (
+    rawInstruction: string,
+    opts?: {
+      displayContent?: string
+      /** Set by the /loop driver when this run is pass 2 or later. */
+      loop?: { pass: number; intervalMs: number; task: string; startedAt: number }
+    },
+  ) => {
     const { activeModel } = useModelStore.getState()
     if (!activeModel) return
 
     // Coding-Agent slash commands (David 2026-06-12): "/review", "/commit",
-    // "/test", … live HERE, in the Code view — its full file_*/shell/git tools
+    // "/test", … live HERE, in the Code view, its full file_*/shell/git tools
     // + working directory are exactly what these templates drive. Expand the
     // command to the full instruction the model acts on; the raw "/cmd args" is
     // shown as the user's message (displayContent). A non-command input passes
@@ -215,6 +226,23 @@ export function useCodex() {
     const slash = parseAgentCommand(rawInstruction)
     const instruction = slash ? slash.expanded : rawInstruction
     const displayInstruction = slash ? rawInstruction : opts?.displayContent
+    // `readOnly` used to be documentation. Now it strips the mutating tools for
+    // this turn, so /review and /security physically cannot rewrite the files
+    // they were asked to look at.
+    const readOnlyTurn = slash?.command.readOnly === true
+    // A brand-new instruction clears a previous stop; a /loop pass inherits it.
+    if (!opts?.loop) userStoppedRef.current = false
+    // `/loop [30s] …` — the interval is the PAUSE BETWEEN PASSES, and the
+    // driver at the end of this function is what actually brings the model back.
+    // The value of a loop is the re-check: a model that declares victory early
+    // gets asked to prove it, with its own work in front of it.
+    const loopState = opts?.loop ??
+      (slash?.command.name === 'loop'
+        ? (() => {
+            const { intervalMs, rest } = parseLoopSpec(slash.args)
+            return { pass: 1, intervalMs, task: rest || rawInstruction, startedAt: Date.now() }
+          })()
+        : null)
 
     const store = useChatStore.getState()
     const codexStore = useCodexStore.getState()
@@ -282,6 +310,33 @@ export function useCodex() {
       })
     }
 
+    // `/goal` is bookkeeping, not a prompt. Handle it here and show the result;
+    // every LATER turn picks the goal up from the system prompt below.
+    if (slash?.command.handledLocally && slash.command.name === 'goal') {
+      const res = applyGoalCommand(convId, slash.args)
+      useChatStore.getState().addMessage(convId, {
+        id: uuid(), role: 'user', content: rawInstruction, timestamp: Date.now(),
+      })
+      useChatStore.getState().addMessage(convId, {
+        id: uuid(), role: 'assistant', content: res.message, timestamp: Date.now(),
+      })
+      return
+    }
+
+    // Review Mode strips every mutating tool. A command whose whole job is to
+    // change something would then run to completion narrating work it could not
+    // do, with nothing on screen explaining why. Say it and stop.
+    if (settings.codexReviewMode && slash && !slash.command.readOnly) {
+      useChatStore.getState().addMessage(convId, {
+        id: uuid(), role: 'user', content: rawInstruction, timestamp: Date.now(),
+      })
+      useChatStore.getState().addMessage(convId, {
+        id: uuid(), role: 'assistant', timestamp: Date.now(),
+        content: `Review Mode is on, so I cannot write files or run commands, and /${slash.command.name} needs both. Turn Review Mode off in Settings, or use a read-only command such as /review, /plan, /diff or /explain.`,
+      })
+      return
+    }
+
     // Add instruction event
     codexStore.addEvent(convId, {
       id: uuid(), type: 'instruction', content: instruction, timestamp: Date.now(),
@@ -319,9 +374,16 @@ export function useCodex() {
     // Resolve provider
     const { provider, modelId } = getProviderForModel(activeModel)
     const providerId = getProviderIdFromModel(activeModel)
-    const strategy = providerId === 'ollama'
-      ? getToolCallingStrategy(activeModel)
-      : 'native'
+    // Every non-Ollama provider used to be hardcoded to 'native' here, which
+    // ignored both the server's `supports_tools` answer and the cache of models
+    // a previous run watched reject a `tools` payload. The request went out
+    // anyway, came back 405, and the negative expired 24 h later so the user
+    // paid for the same discovery again. toolStrategyFor applies the same
+    // precedence the dropdown and the Agent toggle use.
+    const strategy = toolStrategyFor({
+      name: activeModel,
+      supportsTools: useModelStore.getState().models.find((m) => m.name === activeModel)?.supportsTools,
+    })
     const modelToUse = activeModel.includes('::') ? activeModel.split('::')[1] : activeModel
 
     // Pin the text model driving this Codex run — parity with useAgentChat.
@@ -340,7 +402,7 @@ export function useCodex() {
 
     // System prompt with working directory. Review mode swaps the base
     // prompt to lock the model into read-only behaviour — the
-    // list-stripping below (REVIEW_MODE_FORBIDDEN_TOOLS) still enforces it
+    // list-stripping below (MUTATING_TOOLS) still enforces it
     // programmatically even if the model tries to call a write tool anyway.
     const reviewMode = settings.codexReviewMode === true
     // Review mode always wins; otherwise Small-Model Mode swaps in the lean
@@ -358,6 +420,9 @@ export function useCodex() {
         ? `Working directory: ${workDir}\nUse paths relative to it (e.g. \`package.json\`); do not prefix with \`/\` or a drive letter.`
         : 'Working directory: your private sandbox folder. Use relative paths only (e.g. `package.json`, `.`); never a leading `/` or a drive letter like `C:\\`.'
     let systemPrompt = `${baseCodexPrompt}\n\n${workDirLine}`
+    // Standing goal (/goal) — ahead of the rules and the repo map so it frames
+    // everything that follows instead of reading as an afterthought.
+    systemPrompt += renderGoalSection(useAgentGoalStore.getState().getGoal(convId))
 
     // Memory injection — parity with Chat + Agent. Codex was the only
     // surface that ignored the memory system; now it sees remembered
@@ -387,7 +452,7 @@ export function useCodex() {
     // by the reader so the codex loop still starts.
     if (workDir && workDir !== '.') {
       try {
-        const rules = await loadLurules(workDir, lurulesReader)
+        const rules = await loadLurules(workDir, makeLurulesReader(convId, workDir))
         if (rules) {
           systemPrompt += renderRulesSection(rules)
         }
@@ -406,7 +471,7 @@ export function useCodex() {
     // Code-Review Mode (B13) — the dedicated CODEX_REVIEW_SYSTEM_PROMPT
     // above already replaced the base prompt with the read-only contract,
     // so no extra banner append is needed here. The list-stripping in the
-    // tool-build path (REVIEW_MODE_FORBIDDEN_TOOLS) remains the
+    // tool-build path (MUTATING_TOOLS) remains the
     // belt-and-braces programmatic guard.
 
     // Caveman mode: append as response style modifier after Codex instructions
@@ -486,7 +551,7 @@ export function useCodex() {
           id: uuid(),
           phase: 'reflection',
           content:
-            `🏗️ Architect skipped — \`${archModel}\` is a cloud model and "Allow cloud architect" is off. Enable it in Settings → Coding Agent, or pick a local model.`,
+            `🏗️ Architect skipped, \`${archModel}\` is a cloud model and "Allow cloud architect" is off. Enable it in Settings → Coding Agent, or pick a local model.`,
           timestamp: Date.now(),
         })
         useChatStore.getState().updateMessageAgentBlocks(convId, assistantMsg.id, [...blocks])
@@ -540,7 +605,7 @@ export function useCodex() {
           blocks.push({
             id: uuid(),
             phase: 'reflection',
-            content: `🗺️ Repo map: top ${repoMap.files.length} files (of ${repoMap.count}) — ${repoMap.files.slice(0, 5).map((f) => f.path).join(', ')}${repoMap.files.length > 5 ? '…' : ''}`,
+            content: `🗺️ Repo map: top ${repoMap.files.length} files (of ${repoMap.count}), ${repoMap.files.slice(0, 5).map((f) => f.path).join(', ')}${repoMap.files.length > 5 ? '…' : ''}`,
             timestamp: Date.now(),
           })
           useChatStore.getState().updateMessageAgentBlocks(convId, assistantMsg.id, [...blocks])
@@ -570,24 +635,30 @@ export function useCodex() {
     // Ollama used its small default (~4k) while compaction trimmed to the
     // model's max → the history overflowed the real window and weak models
     // (gemma4 with Think on) returned EMPTY turns, which the loop misread as
-    // "done" and printed a false "Task completed" (David 2026-06-04). Pin a
-    // sane floor (user override wins) and compact to it so both agree.
-    const numCtx =
-      settings.contextWindowOverride && settings.contextWindowOverride > 0
-        ? settings.contextWindowOverride
-        : 8192
+    // "done" and printed a false "Task completed" (David 2026-06-04). A later
+    // fix pinned a flat 8192 — but that hard cap throttled 32k-capable coding
+    // models (qwen2.5-coder 32k) down to 8k AND drove compaction to trim their
+    // history to ~6.5k. Shared resolver (David: "muss immer stimmen"): the
+    // user override wins, Ollama models probe their REAL context capped for
+    // VRAM, and cloud models resolve their REAL window from the catalog —
+    // 2.5.9 left cloud at the flat 8192, so a 262k model was trimmed to ~6.5k
+    // every iteration, forgot the files it had just read, and looped on the
+    // same file_read for minutes (Morgan, 2026-07-26). Both the num_ctx we
+    // send and the compaction target below derive from this one value.
+    const numCtx: number = await resolveAgentNumCtx(
+      modelToUse, providerId, settings.contextWindowOverride, activeModel,
+    )
 
     try {
       // Agent loop — max 20 iterations (legacy cap) AND AgentBudget cap,
       // whichever is tighter.
-      // Loop-detection: small / 3B models (qwen2.5-coder:3b, llama3.2:1b)
-      // often get stuck repeating the same file_write+shell_execute sequence
-      // because a test fails and they "fix" it by rewriting the same file.
-      // Track the signature of each iteration's tool-call batch; if the same
-      // signature appears twice in a row we abort with a clear message
-      // instead of burning budget on a no-op loop.
-      let prevBatchSig: string | null = null
-      let sameBatchRepeats = 0
+      // Loop-detection (2.5.10, agent-loop-guard): windowed batch-signature
+      // repeats, identical-read counting per mutation epoch, and repeated
+      // narration. The old detector only saw the same batch 3× IN A ROW —
+      // alternating calls, an injected nudge, or one varying argument reset
+      // it forever while the budget allowed 200 iterations of the loop
+      // (Morgan's 5-minute file_read loop, 2026-07-26).
+      const loopGuard = new AgentLoopGuard()
       // Echo guard — small models occasionally re-emit the system prompt
       // ("Hello, I am the Coding Agent, an autonomous coding agent…") after a
       // tool error. The user asked to silence those silently rather than
@@ -612,7 +683,14 @@ export function useCodex() {
       // Raised again 50 → 200 (v2.5.0 — uselu live-test 1af958b2):
       // scaffold-install-fix-verify on 35B local model legitimately
       // needs 100+ iterations across multi-file refactors.
-      const MAX_CODEX_ITERATIONS = 200
+      // 2.5.9: derive the outer bound from the configured cap instead of a
+      // hardcoded 200 that shadowed it — setting agentMaxIterations above 200
+      // used to do nothing (loop exited at 200) and the budget's halt message
+      // told the user to raise a cap that had no effect. The AgentBudget below
+      // (same cap) still fires its halt message on the final iteration, since it
+      // is checked at the top of the loop body; this bound is the runaway
+      // backstop. Floor of 1 so a stray 0 setting can't zero the loop.
+      const MAX_CODEX_ITERATIONS = Math.max(settings.agentMaxIterations ?? 200, 1)
       for (let i = 0; i < MAX_CODEX_ITERATIONS && runningRef.current && !abort.signal.aborted; i++) {
         budget.addIteration()
         const bx = budget.exceeded()
@@ -678,8 +756,12 @@ export function useCodex() {
           // physically cannot fire them. Belt-and-braces with the
           // system-prompt banner above — covers the case where the model
           // ignores the instruction and tries anyway.
-          const codexTools = settings.codexReviewMode
-            ? codexToolsAll.filter((t) => !REVIEW_MODE_FORBIDDEN_TOOLS.has(t.name))
+          // Two reasons to strip the mutating tools: Code-Review Mode is on, or
+          // this turn was started by a read-only slash command. Belt-and-braces
+          // with the system prompt — covers the model ignoring the instruction
+          // and trying anyway.
+          const codexTools = (settings.codexReviewMode || readOnlyTurn)
+            ? codexToolsAll.filter((t) => !MUTATING_TOOLS.has(t.name))
             : codexToolsAll
           // Keep the tool list LEAN — exactly like the uselu reference. A small
           // model (qwen2.5-coder:7b) handed the full ~24-tool category set every
@@ -889,7 +971,7 @@ export function useCodex() {
               const def = toolRegistry.getToolByName(t.name)
               if (!def) return true
               if (!(CODEX_CATEGORIES as readonly string[]).includes(def.category)) return false
-              if (settings.codexReviewMode && REVIEW_MODE_FORBIDDEN_TOOLS.has(t.name)) return false
+              if ((settings.codexReviewMode || readOnlyTurn) && MUTATING_TOOLS.has(t.name)) return false
               return true
             },
           )
@@ -972,6 +1054,47 @@ export function useCodex() {
           })
         }
 
+        // Enforce read-only at EXECUTION, not just at offer time.
+        //
+        // Stripping the mutating tools from the catalog was supposed to be
+        // belt-and-braces, and it was not: the loose-parse fallback lifts a call
+        // the model WROTE AS TEXT and hands the name straight to
+        // toolRegistry.execute, which resolves by name and never asks whether
+        // this turn was allowed to offer it. Live on the ship exe 2026-07-25:
+        // /plan (read-only) was offered file_read/file_list/file_search only, on
+        // every one of its six requests, and still created a file on disk.
+        // Review Mode carried the identical hole since 2.5.6.
+        if (settings.codexReviewMode || readOnlyTurn) {
+          const blocked = toolCalls.filter((tc) => MUTATING_TOOLS.has(tc.function?.name ?? ''))
+          if (blocked.length) {
+            toolCalls = toolCalls.filter((tc) => !MUTATING_TOOLS.has(tc.function?.name ?? ''))
+            const names = [...new Set(blocked.map((tc) => tc.function.name))].join(', ')
+            messages.push({
+              role: 'user',
+              content: `${names} is not available on this turn, it is ${readOnlyTurn ? `a read-only command (/${slash!.command.name})` : 'Code Review Mode'}. Do not try to change anything. Finish with the written answer using what you have already read.`,
+            })
+          }
+        }
+
+        // Repair near-miss tool names before anything tries to resolve them.
+        // The chat agent has done this since 2026-06-03 (gemma4 calling
+        // `video_generation`); Code never did, so the same class of miss ended
+        // as "Unknown tool" here. Live on the ship exe 2026-07-24, gpt-oss on
+        // LU Cloud sent `file_edit<|channel|>commentary` — a harmony control
+        // token welded onto the recipient — and every write call died while the
+        // model retried the identical name for a minute before falling back to
+        // a full-file rewrite that failed the same way. canonicalToolName only
+        // rewrites a name when the repaired form is a REGISTERED tool, so a
+        // genuinely unknown tool still errors instead of being rerouted.
+        if (toolCalls.length > 0) {
+          const knownToolNames = toolRegistry.getAll().map((t) => t.name)
+          toolCalls = toolCalls.map((tc) => {
+            const raw = tc.function?.name ?? ''
+            const fixed = canonicalToolName(raw, knownToolNames)
+            return fixed === raw ? tc : { ...tc, function: { ...tc.function, name: fixed } }
+          })
+        }
+
         // No tool calls in this turn. For a strong model that means "task
         // done". For a small local model it's usually a PREMATURE stop — it
         // narrated the next step or asked for info instead of acting. Nudge it
@@ -1002,7 +1125,7 @@ export function useCodex() {
           const emptyTurn = turnContent.trim().length === 0
           // Only nudge an empty turn when NOTHING has been produced yet (a true
           // early stall). An empty turn AFTER a real answer means the model is
-          // finished — break immediately instead of spinning slow no-op nudge
+          // finished, break immediately instead of spinning slow no-op nudge
           // iterations that keep the typing dots up long after the answer is
           // done (David 2026-06-12: "die punkte bleiben so lange obwohl keine
           // antwort mehr kam"). Read-only report commands (/review, /explain …)
@@ -1013,8 +1136,14 @@ export function useCodex() {
             void diagLog('continue-nudge', { iter: i, remaining: continueNudgesRemaining, turnContentLen: turnContent.length })
             messages.push({
               role: 'user',
-              content:
-                'Continue working autonomously until the task is fully done. Do NOT narrate what you are about to do, and do NOT ask me for paths or details you can discover yourself — use file_list / file_search / file_read to find them. Emit the NEXT step as an actual tool call right now. Only stop once everything is finished and verified.',
+              // A read-only command's deliverable IS the text. Demanding "the
+              // NEXT step as an actual tool call" there sent the model back for
+              // more searching until the budget ran out, and the user got
+              // "Done: 2 other operation(s) completed." instead of the answer
+              // they asked for (live /find on the ship exe, 2026-07-25).
+              content: readOnlyTurn
+                ? 'You have read enough. Write the answer now, in text, using what you found. Do not call any more tools and do not ask me for details you can look up. If something genuinely could not be determined, say which part and why.'
+                : 'Continue working autonomously until the task is fully done. Do NOT narrate what you are about to do, and do NOT ask me for paths or details you can discover yourself — use file_list / file_search / file_read to find them. Emit the NEXT step as an actual tool call right now. Only stop once everything is finished and verified.',
             })
             continue
           }
@@ -1022,25 +1151,29 @@ export function useCodex() {
           break
         }
 
-        // Phase 5b (v2.4.0) — parallel tool execution via tool-executor.
+        // Phase 5b (v2.4.0), parallel tool execution via tool-executor.
         if (!runningRef.current || abort.signal.aborted) break
 
-        // Loop-detector: compute batch signature (sorted name+args pairs).
-        // Two identical batches in a row → 3 means we're definitely stuck.
-        const batchSig = toolCalls
-          .map(tc => tc.function.name + ':' + JSON.stringify(tc.function.arguments))
-          .sort()
-          .join('|')
-        if (batchSig === prevBatchSig) {
-          sameBatchRepeats++
-          if (sameBatchRepeats >= 2) {
-            const msg = `\n\n_(halted: same tool sequence repeated ${sameBatchRepeats + 1}× — model is looping. Try a larger model like Qwen 3.6 for multi-step code tasks.)_`
-            useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent + msg)
-            break
-          }
-        } else {
-          sameBatchRepeats = 0
-          prevBatchSig = batchSig
+        // Loop-detector: narration first (the same line re-emitted every
+        // iteration), then the batch itself (windowed signature repeats +
+        // identical reads against an unchanged workspace).
+        const narrationVerdict = loopGuard.recordNarration(turnContent)
+        const batchVerdict = narrationVerdict.action === 'halt'
+          ? narrationVerdict
+          : loopGuard.recordBatch(
+              toolCalls.map((tc) => ({ name: tc.function.name, args: JSON.stringify(tc.function.arguments) })),
+            )
+        if (batchVerdict.action === 'halt') {
+          void diagLog('loop-guard-halt', { iter: i, reason: batchVerdict.reason })
+          const msg = `\n\n_(halted: ${batchVerdict.reason}. The model is looping — try a stronger model for multi-step code tasks, or rephrase the instruction.)_`
+          useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent + msg)
+          break
+        }
+        if (batchVerdict.action === 'steer') {
+          // Let this batch still run (the in-turn cache serves it instantly),
+          // but put the anti-repeat instruction in front of the NEXT turn.
+          void diagLog('loop-guard-steer', { iter: i })
+          messages.push({ role: 'user', content: batchVerdict.message })
         }
 
         type BatchEntry = { tc: typeof toolCalls[number]; ac: AgentToolCall; blockId: string; injectedArgs: Record<string, any> }
@@ -1077,7 +1210,7 @@ export function useCodex() {
           //   workDir=D:/Pictures/foo, p=D:/Pictures/foo/bar.html →
           //   D:/Pictures/foo/D:/Pictures/foo/bar.html
           // which then grew further on retry as the model re-emitted the path.
-          if ((toolName === 'file_read' || toolName === 'file_write' || toolName === 'file_list' || toolName === 'file_search') && toolArgs.path) {
+          if ((toolName === 'file_read' || toolName === 'file_write' || toolName === 'file_edit' || toolName === 'file_list' || toolName === 'file_search') && toolArgs.path) {
             const p: string = toolArgs.path
             const isAbsolute =
               /^[a-zA-Z]:[/\\]/.test(p) ||  // Windows drive letter: C:/ D:\ etc.
@@ -1114,13 +1247,21 @@ export function useCodex() {
         // renders as a pure insert). Errors are swallowed — a failing
         // pre-read just means the file_change event won't carry a diff,
         // never blocks the write.
+        //
+        // MUST use `fs_read` with the run's chatId + workingDirectory. The
+        // older `file_read` jails to the per-chat sandbox and REJECTS the
+        // absolute project path, so every pre-read returned '' and every diff
+        // rendered as a 100% insert — hiding exactly the deletions/overwrites
+        // the user needs to see before approving a staged change.
+        const readCtx: { chatId?: string; workingDirectory?: string } =
+          workDir && workDir !== '.' ? { chatId: convId, workingDirectory: workDir } : { chatId: convId }
         const oldContents = new Map<string, string>()
         await Promise.all(
           batch
-            .filter((e) => e.ac.toolName === 'file_write' && typeof e.injectedArgs.path === 'string')
+            .filter((e) => (e.ac.toolName === 'file_write' || e.ac.toolName === 'file_edit') && typeof e.injectedArgs.path === 'string')
             .map(async (e) => {
               try {
-                const r = await backendCall<{ content?: string }>('file_read', { path: e.injectedArgs.path })
+                const r = await backendCall<{ content?: string }>('fs_read', { path: e.injectedArgs.path, ...readCtx })
                 oldContents.set(e.ac.id, r?.content ?? '')
               } catch {
                 oldContents.set(e.ac.id, '')
@@ -1182,23 +1323,41 @@ export function useCodex() {
           // happens later, after this turn's finally clears the active
           // chat/workspace context, so a relative path would otherwise route to
           // agent-workspace/default/ instead of the real project folder. The
-          // bridge uses an absolute path as-is. (v2.5.0 audit fix.)
+          // bridge jails absolute paths to the workspace root, so the pre-read
+          // MUST pass the run's workingDirectory (as its root) — otherwise the
+          // absolute project path is rejected and the staged diff shows a 100%
+          // insert, hiding what will be overwritten. (v2.5.0 + 2.5.9 audit fix.)
           const isAbs = /^([a-zA-Z]:[\\/]|[\\/]|\\\\)/.test(path)
           const resolvedPath = isAbs || !workDir || workDir === '.'
             ? path
             : `${workDir.replace(/[\\/]+$/, '')}${workDir.includes('\\') ? '\\' : '/'}${path.replace(/^[\\/]+/, '')}`
+          const stageReadCtx: { chatId?: string; workingDirectory?: string } =
+            workDir && workDir !== '.' ? { chatId: convId, workingDirectory: workDir } : { chatId: convId }
+          // A prior staged entry for this path already knows the DISK state —
+          // reuse it so the reviewed diff stays disk → latest even when the
+          // model writes the same file twice in one run.
+          const priorWrite = findStagedForPath(useStagedChangesStore.getState().list(convId!), path)
           let oldContent = ''
-          try {
-            const r = await backendCall<{ content?: string }>('file_read', { path: resolvedPath })
-            oldContent = r?.content ?? ''
-          } catch {
-            // New file — leave oldContent empty so the diff renders an
-            // all-add hunk and the apply path creates the file.
+          if (priorWrite) {
+            oldContent = priorWrite.oldContent
+          } else {
+            try {
+              const r = await backendCall<{ content?: string }>('fs_read', { path: resolvedPath, ...stageReadCtx })
+              oldContent = r?.content ?? ''
+            } catch {
+              // New file — leave oldContent empty so the diff renders an
+              // all-add hunk and the apply path creates the file.
+            }
           }
           const diff = computeUnifiedDiff(path, oldContent, newContent)
           useStagedChangesStore.getState().stage(convId!, {
             path,
             resolvedPath,
+            // Capture the workspace root so Apply (which runs after the loop's
+            // finally clears the active context) can jail the write to the real
+            // project folder instead of agent-workspace/default. Undefined in
+            // sandbox mode — the per-chat sandbox is the right root there.
+            workingDirectory: workDir && workDir !== '.' ? workDir : undefined,
             oldContent,
             newContent,
             diff,
@@ -1206,9 +1365,87 @@ export function useCodex() {
           return `Staged for review: ${path}. The user will apply or reject the change before it lands on disk.`
         }
 
+        // Stage-mode counterpart for surgical edits: resolve old_string ->
+        // new_string against the current file NOW and stage the resulting full
+        // content, so the staged diff and the applied write are the real change
+        // (and a bad edit is reported the same way whether staged or not).
+        const stageFileEdit = async (args: Record<string, any>): Promise<string> => {
+          const path = String(args.path ?? '')
+          if (!path) return 'file_edit: missing path'
+          const oldString = typeof args.old_string === 'string' ? args.old_string : ''
+          const newString = typeof args.new_string === 'string' ? args.new_string : ''
+          const isAbs = /^([a-zA-Z]:[\\/]|[\\/]|\\\\)/.test(path)
+          const resolvedPath = isAbs || !workDir || workDir === '.'
+            ? path
+            : `${workDir.replace(/[\\/]+$/, '')}${workDir.includes('\\') ? '\\' : '/'}${path.replace(/^[\\/]+/, '')}`
+          const stageReadCtx: { chatId?: string; workingDirectory?: string } =
+            workDir && workDir !== '.' ? { chatId: convId, workingDirectory: workDir } : { chatId: convId }
+          // Read-your-writes: chain onto the STAGED content when this path is
+          // already pending. Without this the base was re-read from DISK —
+          // which never saw the staged write — so a second edit to the same
+          // file silently clobbered the first, and an edit to a staged NEW
+          // file failed with "could not read".
+          const priorEdit = findStagedForPath(useStagedChangesStore.getState().list(convId!), path)
+          let baseContent = ''
+          let diskContent = ''
+          if (priorEdit) {
+            baseContent = priorEdit.newContent
+            diskContent = priorEdit.oldContent
+          } else {
+            try {
+              const r = await backendCall<{ content?: string; encoding?: string }>('fs_read', { path: resolvedPath, ...stageReadCtx })
+              if (r?.encoding === 'binary' || r?.encoding === 'base64') return `file_edit: cannot edit a binary file (${path}).`
+              baseContent = diskContent = r?.content ?? ''
+            } catch {
+              return `file_edit: could not read ${path}. To create a new file use file_write.`
+            }
+          }
+          const applied = applyUniqueEdit(baseContent, oldString, newString)
+          if (!applied.ok) {
+            switch (applied.reason) {
+              case 'empty_old': return 'file_edit: old_string must be non-empty. Use file_write to create a new file.'
+              case 'noop': return 'file_edit: old_string and new_string are identical, nothing to change.'
+              case 'not_found': return `file_edit: old_string not found in ${path}. Read the file and copy the exact text you want to replace.`
+              case 'not_unique': return `file_edit: old_string matches ${applied.matches} places in ${path}. Add surrounding lines so it is unique.`
+              default: return 'file_edit: failed.'
+            }
+          }
+          const newContent = applied.content ?? ''
+          // Diff and oldContent stay anchored on the DISK state, so the user
+          // reviews (and apply writes) disk → final, not staged → staged.
+          const diff = computeUnifiedDiff(path, diskContent, newContent)
+          useStagedChangesStore.getState().stage(convId!, {
+            path,
+            resolvedPath,
+            workingDirectory: workDir && workDir !== '.' ? workDir : undefined,
+            oldContent: diskContent,
+            newContent,
+            diff,
+          })
+          return `Staged for review: ${path} (surgical edit). The user will apply or reject the change before it lands on disk.`
+        }
+
         const dispatchTool = (name: string, args: Record<string, any>): Promise<string> => {
-          if (name === 'file_write' && settings.codexStageMode) {
-            return stageFileWrite(args)
+          if (settings.codexStageMode) {
+            if (name === 'file_write') return stageFileWrite(args)
+            if (name === 'file_edit') return stageFileEdit(args)
+            // Read-your-writes: staged content is invisible on disk, so reads
+            // MUST be answered from the queue — otherwise the model reads the
+            // old bytes (or a not-found), concludes its write failed, and
+            // stages the same file forever (Morgan's file_read loop,
+            // 2026-07-26). The in-turn cache composes correctly: every staged
+            // write is audited as a file_write mutation, which invalidates
+            // cached reads, so a pre-stage result is never replayed.
+            const staged = convId ? useStagedChangesStore.getState().list(convId) : []
+            if (staged.length > 0) {
+              if (name === 'file_read') {
+                const hit = findStagedForPath(staged, String(args.path ?? ''))
+                if (hit) return Promise.resolve(stagedReadResult(hit))
+              }
+              if (name === 'file_list' || name === 'file_search') {
+                return withTimeout(name, args).then((r) => r + stagedListingNote(staged))
+              }
+            }
           }
           return withTimeout(name, args)
         }
@@ -1226,19 +1463,33 @@ export function useCodex() {
           // arbitrary-exec tools for an explicit confirm — the mitigation for a
           // prompt-injected model auto-running shell/code. window.confirm works
           // in this Tauri webview (the app uses it elsewhere, e.g. Gallery).
-          awaitApproval: settings.codexConfirmShell
+          //
+          // Security review 2.5.7 force-gated the CLOUD provider here regardless
+          // of the setting: a remote/semi-trusted model (or a compromised cloud
+          // endpoint) reaching unattended local shell is a materially bigger
+          // blast radius than a local model the user deliberately trusts.
+          //
+          // 2.5.9 (David 2026-07-24 "auto approve bei cloud modellen setting
+          // nicht funktional"): that override was invisible, so the confirm
+          // toggle looked broken on cloud models. Same default, but the cloud arm
+          // is now settings.codexCloudConfirmShell — a real switch the user owns.
+          // See codexConfirmEnabled for the whole rule.
+          awaitApproval: codexConfirmEnabled({
+            confirmShell: settings.codexConfirmShell,
+            cloudConfirmShell: settings.codexCloudConfirmShell,
+            providerId,
+          })
             ? async (req) => {
                 if (!CODEX_CONFIRM_TOOLS.has(req.toolName)) return true
                 const a = req.args || {}
-                const preview = String(a.command ?? a.code ?? a.script ?? '').slice(0, 800)
-                const msg =
-                  `Coding agent wants to run "${req.toolName}":\n\n` +
-                  `${preview || '(no command preview)'}\n\n` +
-                  `Allow it to run?`
-                if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
-                  return window.confirm(msg)
-                }
-                return true
+                // In-app popup, not window.confirm. The native dialog carried OS
+                // chrome and the app origin in its title bar, could not be
+                // styled, and had no way to say "stop asking" (David 2026-07-24).
+                return useCodexConfirmStore.getState().ask({
+                  toolName: req.toolName,
+                  command: String(a.command ?? a.code ?? a.script ?? '').slice(0, 800),
+                  cloudReason: !settings.codexConfirmShell && providerId === 'lu-cloud',
+                })
               }
             : undefined,
           recordAudit: (entry) => {
@@ -1316,6 +1567,26 @@ export function useCodex() {
               diff: diff || undefined,
               timestamp: Date.now(),
             })
+          } else if (entry.ac.toolName === 'file_edit') {
+            // Surgical edit — the tool only received old_string/new_string, so
+            // reconstruct the new content from the pre-read + the unique
+            // replacement to attach a real diff. If the edit did not apply
+            // uniquely the executor already returned an error; skip the diff.
+            const oldText = oldContents.get(entry.ac.id) ?? ''
+            const applied = applyUniqueEdit(
+              oldText,
+              typeof entry.injectedArgs.old_string === 'string' ? entry.injectedArgs.old_string : '',
+              typeof entry.injectedArgs.new_string === 'string' ? entry.injectedArgs.new_string : '',
+            )
+            const diff = applied.ok
+              ? computeUnifiedDiff(entry.injectedArgs.path, oldText, applied.content ?? '')
+              : undefined
+            codexStore.addEvent(convId, {
+              id: uuid(), type: 'file_change', content: resultStr,
+              filePath: entry.injectedArgs.path,
+              diff: diff || undefined,
+              timestamp: Date.now(),
+            })
           } else if (isError) {
             codexStore.addEvent(convId, {
               id: uuid(), type: 'error', content: resultStr, timestamp: Date.now(),
@@ -1329,12 +1600,16 @@ export function useCodex() {
             r.status === 'completed' || r.status === 'cached'
               ? (r.result ?? '')
               : r.errorHint
-                ? `${r.error ?? 'Tool failed'} — ${r.errorHint}`
+                ? `${r.error ?? 'Tool failed'}, ${r.errorHint}`
                 : (r.error ?? 'Tool failed')
-          // Small-Model Mode (Knob 3): truncate long tool outputs (head+tail)
-          // before they re-enter the model history. Long results cost small
-          // models ~30% accuracy (LongFuncEval). No-op for big models.
-          return settings.smallModelMode ? truncateToolResult(text) : text
+          // Head+tail truncation before results re-enter the model history.
+          // Small-Model Mode (Knob 3) keeps its tight 1500-char budget (long
+          // results cost small models ~30% accuracy, LongFuncEval). Big models
+          // get a generous 60k-char cap (~15k tokens): uncapped, one giant
+          // file_read rode along VERBATIM in every following request via
+          // compaction's KEEP_RECENT window — live 225k-token prompts per
+          // iteration, slow turns and a drained wallet (Morgan, 2026-07-26).
+          return truncateToolResult(text, settings.smallModelMode ? 1500 : 60000)
         }
 
         // lu-cloud is OpenAI-compatible (DeepInfra) and STRICTLY validates the
@@ -1398,14 +1673,38 @@ export function useCodex() {
         // nothing failed.
         if (completed.length === 0) {
           fullContent = failed.length
-            ? `I couldn't complete the task — ${failed.length} operation(s) failed and nothing succeeded. Check the tool errors above, then refine the instruction or try a stronger model.`
-            : `I stopped without completing the task — the model ended its turn without doing any work. Try rephrasing the instruction, or turn Think off and resend.`
+            ? `I couldn't complete the task, ${failed.length} operation(s) failed and nothing succeeded. Check the tool errors above, then refine the instruction or try a stronger model.`
+            : `I stopped without completing the task, the model ended its turn without doing any work. Try rephrasing the instruction, or turn Think off and resend.`
         } else if (failed.length > 0) {
-          fullContent = `Partially done: ${parts.join(', ')}. Some steps failed — see the errors above; the result may be incomplete.`
+          fullContent = `Partially done: ${parts.join(', ')}. Some steps failed, see the errors above; the result may be incomplete.`
+        } else if (readOnlyTurn) {
+          // An operations count is not an answer. A read-only command was asked
+          // a question, so say plainly that the question went unanswered rather
+          // than dressing up a tool tally as success.
+          fullContent = `I looked (${parts.join(', ') || 'no steps recorded'}) but the model ended without writing the answer. Send the command again, or switch to a stronger model for this one.`
         } else {
           fullContent = parts.length > 0 ? `Done: ${parts.join(', ')}.` : 'Done.'
         }
         useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent)
+      }
+
+      // Auto-apply (2.5.10): with the user's opt-in, staged changes land on
+      // disk the moment the run ends — same trusted write path as the panel's
+      // Apply button, so "auto on everything" really means auto (first
+      // customer feedback, Morgan 2026-07-26). Failures stay in the queue for
+      // manual retry via the Pending panel.
+      if (settings.codexStageMode && settings.codexAutoApply && convId) {
+        const pending = useStagedChangesStore.getState().list(convId)
+        if (pending.length > 0) {
+          const applied = await applyAllStagedChanges(convId)
+          if (applied.applied.length > 0) {
+            fullContent += `\n\n_(auto-applied ${applied.applied.length} staged change${applied.applied.length === 1 ? '' : 's'}: ${applied.applied.join(', ')})_`
+          }
+          if (applied.failed.length > 0) {
+            fullContent += `\n\n_(could not auto-apply: ${applied.failed.join(', ')} — review them in the Pending panel)_`
+          }
+          useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent)
+        }
       }
 
       // Final update
@@ -1432,8 +1731,9 @@ export function useCodex() {
         let hint = ''
         if (/Failed to fetch|NetworkError|net::ERR/i.test(msg)) {
           hint = '\n\nHint: the Ollama server is unreachable. Is `ollama serve` running on localhost:11434?'
-        } else if (/does not support tools|tool.*not.*support/i.test(msg)) {
-          hint = '\n\nHint: this model does not support native tool calling. Pick a tool-capable model (Qwen 3, Llama 3.1+, Gemma 4) or switch to a model without the coder-only restriction.'
+        } else if (e?.code === 'tools_unsupported' || /does not support tools|tool.*not.*support/i.test(msg)) {
+          markToolsUnsupported(modelToUse)
+          hint = '\n\nHint: this model does not support tool calling, so Code mode cannot use it. Pick a model that supports tool calling (Qwen 3, Llama 3.1+, Gemma 4) or an LU Cloud model shown with the tools badge.'
         } else if (/timed out/i.test(msg)) {
           hint = '\n\nHint: a tool call exceeded its time budget. For long builds, raise the command timeout, split the work, or run it via shell_execute_background.'
         }
@@ -1488,10 +1788,72 @@ export function useCodex() {
       abortRef.current = null
       clearActiveChatId()
       codexStore.setThreadStatus(convId, 'idle')
+
+      // ── /loop driver ───────────────────────────────────────────────────
+      // The pass is over. A loop is not "one long turn": it is the model being
+      // brought BACK with its own work in front of it and asked to prove the
+      // claim. That is the whole value, and it is why the interval is a pause
+      // between passes rather than a deadline for the task.
+      //
+      // It stops on LOOP_DONE, on the user's pass cap if they set one, or when
+      // they hit stop. There is NO built-in ceiling: a loop someone asked to
+      // keep going keeps going (David 2026-07-25). The stop button is the
+      // brake, and the loop bar above the composer makes sure it is never
+      // running invisibly.
+      if (loopState && convId && !userStoppedRef.current) {
+        const saidDone = loopPassSaysDone(fullContent.trim())
+        const cap = Math.max(0, settings.loopMaxPasses ?? 0)
+        const nextPass = loopState.pass + 1
+
+        if (saidDone) {
+          // Nothing to do — the marker is stripped from the display by
+          // cleanCodexText, so the user just sees the answer.
+          useAgentLoopStore.getState().clear()
+        } else if (cap > 0 && nextPass > cap) {
+          useAgentLoopStore.getState().clear()
+          useChatStore.getState().addMessage(convId, {
+            id: uuid(), role: 'assistant', timestamp: Date.now(),
+            content: `Stopped after ${cap} passes, which is the limit set in Settings. What is above is where it got to. Raise the limit or set it to unlimited to keep going.`,
+          })
+        } else {
+          const convForLoop = convId
+          useAgentLoopStore.getState().start({
+            conversationId: convForLoop, pass: nextPass, cap,
+            task: loopState.task, intervalMs: loopState.intervalMs,
+            nextAt: Date.now() + loopState.intervalMs,
+          })
+          loopTimerRef.current = setTimeout(() => {
+            loopTimerRef.current = null
+            // Bail if the user moved on or started something else meanwhile.
+            if (runningRef.current) return
+            if (useChatStore.getState().activeConversationId !== convForLoop) {
+              useAgentLoopStore.getState().clear()
+              return
+            }
+            void sendRef.current?.(buildLoopRecheck(loopState.task, nextPass), {
+              displayContent: cap > 0 ? `pass ${nextPass} of ${cap}` : `pass ${nextPass}`,
+              loop: { ...loopState, pass: nextPass },
+            })
+          }, loopState.intervalMs)
+        }
+      }
     }
   }, [])
 
+  // Self-reference so the /loop driver can start the next pass. A plain
+  // recursive call is not possible inside the useCallback that defines it.
+  const sendRef = useRef<typeof sendInstruction | null>(null)
+  sendRef.current = sendInstruction
+
   const stopCodex = useCallback(() => {
+    // Stop means stop: also cancel a /loop pass that is waiting out its
+    // interval, otherwise the run the user just killed comes back by itself.
+    userStoppedRef.current = true
+    if (loopTimerRef.current) {
+      clearTimeout(loopTimerRef.current)
+      loopTimerRef.current = null
+    }
+    useAgentLoopStore.getState().clear()
     runningRef.current = false
     abortRef.current?.abort()
     abortRef.current = null

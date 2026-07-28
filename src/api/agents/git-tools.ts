@@ -107,11 +107,28 @@ export function parseGitLog(raw: string): GitLogEntry[] {
 }
 
 /**
- * Shell-quotes a string for POSIX shells. We use single quotes + literal
- * escaping for embedded single quotes — bullet-proof against most input,
- * including the model emitting backticks or `$()` it shouldn't.
+ * Shell-quote a string for the shell that will actually run it.
+ *
+ * `shell_execute_sync` picks the shell by OS: PowerShell on Windows, bash
+ * everywhere else. The two disagree about how a single quote is escaped inside
+ * a single-quoted string, and the difference is not cosmetic. The POSIX form
+ * `'\''` CLOSES the string in PowerShell, so everything after it is parsed as
+ * script. Proven on Windows 2026-07-26: a commit message of
+ * `x'; Write-Output PWNED; '` ran Write-Output as its own command.
+ *
+ * Both branches are safe against the rest of what a model might emit, because
+ * neither shell expands `$`, backticks or `$()` inside single quotes.
  */
-export function shellQuote(s: string): string {
+/** The platform string the quoting decision is made from. Split out so the
+ *  builders can pass it down and tests can pin both shells. */
+export function defaultPlatform(): string {
+  return typeof navigator !== 'undefined' ? navigator.platform : ''
+}
+
+export function shellQuote(s: string, platform: string = defaultPlatform()): string {
+  // PowerShell: a literal single quote is written by doubling it.
+  if (/Win/i.test(platform)) return `'${s.replace(/'/g, "''")}'`
+  // POSIX: leave the string, emit an escaped quote, reopen.
   return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
@@ -122,14 +139,15 @@ export interface GitCommitArgs {
   allTracked?: boolean
 }
 
-export function buildGitCommitCommand(args: GitCommitArgs): string {
+export function buildGitCommitCommand(args: GitCommitArgs, platform?: string): string {
   if (!args.message?.trim()) return ''
+  const q = (s: string) => shellQuote(s, platform ?? defaultPlatform())
   const stage = args.allTracked
     ? 'git add -A'
     : args.files?.length
-      ? `git add -- ${args.files.map(shellQuote).join(' ')}`
+      ? `git add -- ${args.files.map(q).join(' ')}`
       : ''
-  const commit = `git commit -m ${shellQuote(args.message)}`
+  const commit = `git commit -m ${q(args.message)}`
   return stage ? `${stage} && ${commit}` : commit
 }
 
@@ -139,12 +157,13 @@ export interface GhPrCreateArgs {
   base?: string
 }
 
-export function buildGhPrCreateCommand(args: GhPrCreateArgs): string {
+export function buildGhPrCreateCommand(args: GhPrCreateArgs, platform?: string): string {
   if (!args.title?.trim()) return ''
+  const q = (s: string) => shellQuote(s, platform ?? defaultPlatform())
   const flags = [
-    `--title ${shellQuote(args.title)}`,
-    `--body ${shellQuote(args.body ?? '')}`,
+    `--title ${q(args.title)}`,
+    `--body ${q(args.body ?? '')}`,
   ]
-  if (args.base) flags.push(`--base ${shellQuote(args.base)}`)
+  if (args.base) flags.push(`--base ${q(args.base)}`)
   return `gh pr create ${flags.join(' ')}`
 }

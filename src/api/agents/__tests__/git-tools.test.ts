@@ -113,7 +113,10 @@ describe('shellQuote', () => {
   })
 
   it('escapes embedded single quotes', () => {
-    expect(shellQuote(`it's`)).toBe(`'it'\\''s'`)
+    // Pinned to POSIX. The escape differs per shell (see shell-injection.test.ts),
+    // so leaving this on the ambient platform made the result depend on whoever
+    // ran the suite.
+    expect(shellQuote(`it's`, 'Linux x86_64')).toBe(`'it'\\''s'`)
   })
 
   it('keeps quoted variables literal', () => {
@@ -162,8 +165,12 @@ describe('buildGhPrCreateCommand', () => {
   })
 
   it('quotes multi-line bodies safely', () => {
+    // Both shells, explicitly, so the assertion does not depend on the host.
     expect(
-      buildGhPrCreateCommand({ title: 'T', body: "line1\nline2 's quote" }),
+      buildGhPrCreateCommand({ title: 'T', body: "line1\nline2 's quote" }, 'Linux x86_64'),
     ).toMatch(/--body 'line1\nline2 '\\''s quote'/)
+    expect(
+      buildGhPrCreateCommand({ title: 'T', body: "line1\nline2 's quote" }, 'Win32'),
+    ).toMatch(/--body 'line1\nline2 ''s quote'/)
   })
 })

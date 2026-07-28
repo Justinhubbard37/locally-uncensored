@@ -737,28 +737,30 @@ describe('createStore', () => {
       expect(after.intent()).not.toBe('upscale')
     })
 
-    it('clears edit (img2img falls back to text2img, source dropped)', () => {
+    it('keeps edit — it has a local lane via checkpoint inpaint (2.5.7)', () => {
       const s = useCreateStore.getState()
       s.setBackend('cloud')
       s.setIntent('edit')
       s.setSource(ref)
       useCreateStore.getState().setBackend('local')
       const after = useCreateStore.getState()
-      expect(after.imageSubMode).toBe('text2img')
-      expect(after.source).toBeNull()
-      expect(after.intent()).toBe('image')
+      expect(after.intent()).toBe('edit')
+      expect(after.source).not.toBeNull()
     })
 
-    it('clears animate (i2v falls back to t2v)', () => {
+    it('keeps animate — its local I2V lane is back (2026-07-17)', () => {
+      // The lu-labs port cleared i2v on every local flip ("no local lane");
+      // with the lane restored, a cloud → local switch must keep the user's
+      // animate setup (sub-mode AND source) exactly like edit/removebg do.
       const s = useCreateStore.getState()
       s.setBackend('cloud')
       s.setIntent('animate')
       s.setSource(ref)
       useCreateStore.getState().setBackend('local')
       const after = useCreateStore.getState()
-      expect(after.videoSubMode).toBe('t2v')
-      expect(after.source).toBeNull()
-      expect(after.intent()).toBe('video')
+      expect(after.videoSubMode).toBe('i2v')
+      expect(after.source).not.toBeNull()
+      expect(after.intent()).toBe('animate')
     })
 
     it('keeps removebg — it has a local lane via the RMBG node', () => {
@@ -770,6 +772,26 @@ describe('createStore', () => {
       const after = useCreateStore.getState()
       expect(after.intent()).toBe('removebg')
       expect(after.source).not.toBeNull()
+    })
+
+    it('clears character — training is cloud-first (David 2026-07-19), no local lane in 2.5.8', () => {
+      const s = useCreateStore.getState()
+      s.setBackend('cloud')
+      s.setIntent('character')
+      useCreateStore.getState().setBackend('local')
+      const after = useCreateStore.getState()
+      expect(after.cloudOp).toBeNull()
+      expect(after.intent()).not.toBe('character')
+    })
+
+    it('keeps motion — its DWPose + VACE local lane shipped in 2.5.8', () => {
+      const s = useCreateStore.getState()
+      s.setBackend('cloud')
+      s.setIntent('motion')
+      useCreateStore.getState().setBackend('local')
+      const after = useCreateStore.getState()
+      expect(after.cloudOp).toBe('motion')
+      expect(after.intent()).toBe('motion')
     })
 
     it('flipping to cloud never resets anything', () => {

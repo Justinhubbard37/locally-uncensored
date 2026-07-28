@@ -100,8 +100,8 @@ fn main() {
             // Process management
             commands::process::start_ollama,
             commands::process::start_comfyui,
-            commands::process::check_flash_attention,
             commands::process::stop_comfyui,
+            commands::process::fix_comfyui_cors,
             commands::process::comfyui_status,
             commands::process::find_comfyui,
             commands::process::detect_all_comfyui_installs,
@@ -113,9 +113,13 @@ fn main() {
             commands::process::set_ollama_host,
             commands::process::get_ollama_host,
             commands::process::offload_local_models,
+            // ComfyUI progress WebSocket via Rust (0.19+ origin-check bypass)
+            commands::comfy_ws::comfy_ws_connect,
+            commands::comfy_ws::comfy_ws_disconnect,
             // Installation
             commands::install::install_comfyui,
             commands::install::install_comfyui_status,
+            commands::install::update_comfyui,
             commands::install::cancel_comfyui_install,
             commands::install::install_ollama,
             commands::install::install_ollama_status,
@@ -136,6 +140,14 @@ fn main() {
             commands::install::install_tts,
             commands::install::install_tts_status,
             commands::install::check_git_installed,
+            // Local character trainer (musubi-tuner)
+            commands::trainer::install_character_trainer,
+            commands::trainer::character_trainer_status,
+            commands::trainer::stage_training_image,
+            commands::trainer::clear_training_set,
+            commands::trainer::start_character_training,
+            commands::trainer::character_training_status,
+            commands::trainer::cancel_character_training,
             // Whisper STT
             commands::whisper::whisper_status,
             commands::whisper::transcribe,
@@ -183,6 +195,7 @@ fn main() {
             commands::download::resume_download,
             commands::download::detect_model_path,
             commands::download::check_model_sizes,
+            commands::download::delete_comfy_model,
             // Built-in inference engine (bundled llama-server, P1)
             commands::engine::start_bundled_engine,
             commands::engine::stop_bundled_engine,
@@ -227,12 +240,6 @@ fn main() {
             commands::search::install_searxng,
             commands::search::searxng_status,
             // Claude Code
-            commands::claude_code::detect_claude_code,
-            commands::claude_code::install_claude_code,
-            commands::claude_code::install_claude_code_status,
-            commands::claude_code::start_claude_code,
-            commands::claude_code::stop_claude_code,
-            commands::claude_code::send_claude_code_input,
             // Remote Access
             commands::remote::start_remote_server,
             commands::remote::stop_remote_server,

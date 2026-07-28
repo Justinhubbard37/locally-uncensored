@@ -36,6 +36,8 @@ interface Props {
    * ModelSelector so the prompt window owns the model choice (web parity).
    */
   composerModel?: ReactNode
+  /** Rendered directly above the prompt box (the standing-goal bar). */
+  composerAbove?: ReactNode
   /**
    * View-specific action buttons (Docs · Plugins · Tools) shown in the action
    * bar between Think and the model picker. Chat and Code pass different sets.
@@ -56,7 +58,7 @@ function fileToImageAttachment(file: File): Promise<ImageAttachment> {
   })
 }
 
-export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApprove, onReject, disabled, slashCommands, onAttachDocs, composerModel, composerActions }: Props) {
+export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApprove, onReject, disabled, slashCommands, onAttachDocs, composerModel, composerActions, composerAbove }: Props) {
   const [input, setInput] = useState('')
   const [images, setImages] = useState<ImageAttachment[]>([])
   const [isDragOver, setIsDragOver] = useState(false)
@@ -261,7 +263,7 @@ export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApp
         {cmdMenu.length > 0 && (
           <div className="absolute bottom-full left-0 right-0 mb-1.5 z-50 max-h-64 overflow-y-auto scrollbar-thin rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-[#1f1f1f] shadow-xl py-1">
             <div className="px-2.5 py-1 flex items-center gap-1 text-[0.5rem] uppercase tracking-widest text-gray-400 dark:text-gray-600">
-              <Terminal size={9} /> Coding commands
+              <Terminal size={9} /> Agent commands
             </div>
             {cmdMenu.map((cmd, i) => (
               <button
@@ -279,6 +281,10 @@ export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApp
             ))}
           </div>
         )}
+
+        {/* The standing goal sits above everything else in the composer, so an
+            instruction that steers every turn is never invisible. */}
+        {composerAbove}
 
         {/* Prompt area — hints, image previews, then the textarea (buttons live
             in the action bar below, web-parity two-row composer). */}
@@ -354,7 +360,7 @@ export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApp
           />
         </div>
 
-        {/* Action bar — attach · voice · think · view actions · model · send.
+        {/* Action bar, attach · voice · think · view actions · model · send.
             Same in Chat, Code and Remote; each surface passes its own
             composerActions + composerModel (David 2026-07-11, web parity). */}
         <div className="flex items-center gap-1 px-2 py-1.5 border-t border-gray-200 dark:border-white/[0.05] flex-wrap">
@@ -363,7 +369,7 @@ export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApp
             onClick={() => fileInputRef.current?.click()}
             disabled={isGenerating}
             className="p-1.5 rounded-md text-gray-500 hover:text-gray-300 hover:bg-white/5 disabled:opacity-20 transition-all shrink-0"
-            title="Attach images — for PDFs and documents use the Documents panel"
+            title="Attach images. For PDFs and documents use the Documents panel"
           >
             <Paperclip size={14} />
           </button>
@@ -378,7 +384,7 @@ export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApp
 
           <VoiceButton
             // Streaming dictation: interim chunks arrive while talking, the final
-            // transcript replaces them on stop — both via applyDictation, which
+            // transcript replaces them on stop, both via applyDictation, which
             // writes base + transcript and NEVER sends (user presses Send).
             onInterim={applyDictation}
             onTranscript={applyDictation}
@@ -418,7 +424,7 @@ export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApp
 
           <div className="flex-1" />
 
-          {/* Model picker — opens upward from the composer */}
+          {/* Model picker, opens upward from the composer */}
           {composerModel}
 
           {isGenerating ? (

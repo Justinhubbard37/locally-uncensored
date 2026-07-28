@@ -12,6 +12,8 @@ import { SmallModelModeToggle } from './SmallModelModeToggle'
 import { RealtimeCounter } from './RealtimeCounter'
 import { PluginsDropdown } from './PluginsDropdown'
 import { ModelSelector } from '../models/ModelSelector'
+import { GoalBar } from './GoalBar'
+import { LoopBar } from './LoopBar'
 import { TypingIndicator } from './TypingIndicator'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useModelStore } from '../../stores/modelStore'
@@ -20,95 +22,17 @@ import { SlashStepsBlock } from './SlashStepsBlock'
 import { User, Code, Eye, GitBranch, Download, RefreshCw, RotateCcw, Folder, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { checkGitInstalled, openExternal, type GitStatus } from '../../api/backend'
-import { extractToolCallsWithRanges, stripRanges } from '../../lib/tool-call-repair'
+import { CodexConfirmDialog } from './CodexConfirmDialog'
+import { stripModelNoise } from '../../lib/strip-model-noise'
 
-function stripChannelTags(text: string): string {
-  let t = text
-    .replace(/<\|?channel>?\s*thought\s*/gi, '')
-    .replace(/<\|?channel\|?>/gi, '')
-    .replace(/<channel\|>/gi, '')
-  // ChatML / special-token delimiters. A degenerating local model can spew its
-  // own template tokens as content — qwen2.5-coder:14b emitted a burst of
-  // <|im_start|> mid-stream 2026-06-02. <|im_start|>, <|im_end|>, <|endoftext|>,
-  // <|assistant|> etc. are NEVER real answer text, so strip any <|word|> token.
-  t = t.replace(/<\|[a-z0-9_]+\|>/gi, '')
-  // Display safety net (David 2026-06-02): the user must only ever see real
-  // prose answers + the rendered tool-call BLOCKS — never raw tool-call JSON,
-  // hermes orchestration tags, or our own continue-nudge echoed back as prose.
-  // The engine strips most of this upstream, but this guarantees a leak can
-  // never surface in the chat regardless of which weak model is driving.
-  //
-  // 1) tool_call / tool_response / tool_result tags + their content. qwen2.5-
-  //    coder:7b (confirmed live 2026-06-02) HALLUCINATES hermes-style
-  //    <tool_response> Error: … </tool_response> blocks INTO its prose. Native
-  //    tool results are role:'tool' messages and never reach assistant content,
-  //    so anything matching these tags is noise meant only for the model.
-  t = t.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '').replace(/<\/?tool_call>/gi, '')
-  t = t.replace(/<tool_response>[\s\S]*?<\/tool_response>/gi, '').replace(/<\/?tool_response>/gi, '')
-  t = t.replace(/<tool_result>[\s\S]*?<\/tool_result>/gi, '').replace(/<\/?tool_result>/gi, '')
-  // 2) The autonomous-continue NUDGE, if a weak model parrots it back as its
-  //    own answer (qwen2.5-coder:7b did this verbatim). It is OUR fixed
-  //    instruction from useCodex — strip from its opening clause ("…continue
-  //    working autonomously…") through the closing "finished and verified."
-  //    so the orchestration sentence never reads as a real LLM answer.
-  t = t.replace(/(?:please wait[,;:]?\s*(?:while\s+)?i\s+(?:will\s+)?)?continue working autonomously[\s\S]*?finished and verified\.?/gi, '')
-  // 3) Tool-call JSON the model emitted as CONTENT, PARSE-FREE. The structured
-  //    extractor below relies on JSON.parse via repairJson — which FAILS when
-  //    the model puts LITERAL newlines inside a string value (qwen2.5-coder:14b
-  //    emitted ```json {"name":"file_write","arguments":{"content":"line1<real
-  //    newline>line2"}}``` 2026-06-02), so that whole blob would leak as the
-  //    "answer". Strip it by pattern, no parsing:
-  //    (a) a fenced ```…``` block whose body is a "name"+"arguments" tool call.
-  t = t.replace(/```[a-z]*\s*\n?\s*\{[\s\S]*?["']name["']\s*:[\s\S]*?["']arguments["']\s*:[\s\S]*?```/gi, '')
-  //    (b) an unfenced / truncated {"name":"…","arguments": … blob — strip from
-  //        the header to end of text (a tool-call dump is never real prose, and
-  //        a truncated one has no clean close for the brace-balancer to find).
-  t = t.replace(/\{\s*["']?(?:name|tool|function)["']?\s*:\s*["'][a-z0-9_]+["']\s*,\s*["']?(?:arguments|args|parameters|input)["']?\s*:[\s\S]*$/i, '')
-  try {
-    const { ranges } = extractToolCallsWithRanges(t)
-    if (ranges.length) t = stripRanges(t, ranges)
-  } catch { /* ignore — never let a strip error hide the answer */ }
-  return t.trim()
-}
+// Code always drives a tool loop, so the aggressive tier applies here.
+const stripChannelTags = (text: string) => stripModelNoise(text, { aggressive: true })
 
 // Code-Mode renders EVERY between-tool answer as normal, always-visible prose
 // now (David 2026-06-04: "kein Collapse, das soll ganz normal wie eine Antwort
 // angezeigt werden"). The render path below dedupes verbatim repeats so a
 // chatty small model can't stack the same line. (The old CollapsibleAnswer
 // one-line-preview component was removed.)
-
-// One-time hint that "/" opens the coding commands (David 2026-06-12: "kleiner
-// hinweis über dem prompt fenster … nur im coding bereich … mit x zum wegdrücken,
-// soll nur einmal erscheinen"). Persisted in localStorage so it never returns
-// after dismissal. Code-view only — it's rendered solely inside CodexView.
-const SLASH_HINT_KEY = 'lu-coding-slash-hint-dismissed'
-function CodingCommandsHint() {
-  const [dismissed, setDismissed] = useState(() => {
-    try { return localStorage.getItem(SLASH_HINT_KEY) === '1' } catch { return false }
-  })
-  if (dismissed) return null
-  // Outer matches the ChatInput container (max-w-[70%] mx-auto) so the inner
-  // w-[60%] is 60 % of the REAL prompt width, centered (David 2026-06-12: "60%
-  // so breit wie das prompt fenster, in der mitte"). Monochrome — no colour, no
-  // icon — and an English UI string (David 2026-06-12: "in deutsch? … farbe weg
-  // … emoji weg").
-  return (
-    <div className="w-full max-w-[70%] mx-auto px-3 pt-1 flex justify-center">
-      <div className="w-[60%] flex items-center gap-1.5 px-2 py-1 rounded-md border border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-white/[0.03]">
-        <span className="flex-1 text-center text-[0.55rem] text-gray-500 dark:text-gray-400 leading-tight">
-          New — type <span className="font-mono px-1 rounded bg-gray-200/70 dark:bg-white/10">/</span> for coding commands: /review, /commit, /test, /fix …
-        </span>
-        <button
-          onClick={() => { try { localStorage.setItem(SLASH_HINT_KEY, '1') } catch { /* private mode — just hide it for this session */ } setDismissed(true) }}
-          title="Dismiss"
-          className="flex items-center justify-center w-4 h-4 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/5 transition-colors shrink-0"
-        >
-          <X size={11} />
-        </button>
-      </div>
-    </div>
-  )
-}
 
 export function CodexView() {
   const { sendInstruction, stopCodex, isRunning } = useCodex()
@@ -283,7 +207,7 @@ export function CodexView() {
             <div className="py-1">
               {messages.filter(msg => !msg.hidden).map((msg) => {
                 // Slash commands: the user typed "/review", but msg.content holds
-                // the expanded instruction the model ran on — show displayContent.
+                // the expanded instruction the model ran on, show displayContent.
                 const rawForDisplay = msg.role === 'user' ? (msg.displayContent || msg.content) : msg.content
                 const cleanContent = rawForDisplay ? stripChannelTags(rawForDisplay) : ''
                 return (
@@ -317,7 +241,7 @@ export function CodexView() {
                         const stepCount = msg.agentBlocks?.filter((b) => b.phase === 'tool_call' && b.toolCall).length ?? 0
                         const hasAnswerBlock = !!(msg.agentBlocks && msg.agentBlocks.some((b) => b.phase === 'answer' && b.content.trim()))
 
-                        // Reflection blocks (Architect plan, RepoMap context) —
+                        // Reflection blocks (Architect plan, RepoMap context) ,
                         // shown above the tool calls so the user sees what context
                         // primed the editor model before it started fetching tools.
                         const reflection = hasBlocks ? (
@@ -329,7 +253,7 @@ export function CodexView() {
                                   key={block.id}
                                   className="px-2 py-1.5 rounded border border-gray-200 dark:border-white/10 bg-gray-50/60 dark:bg-white/[0.02] text-[0.7rem] text-gray-700 dark:text-gray-300"
                                 >
-                                  <MarkdownRenderer content={block.content} />
+                                  <MarkdownRenderer content={stripModelNoise(block.content)} />
                                 </div>
                               ))}
                           </div>
@@ -337,7 +261,7 @@ export function CodexView() {
 
                         // Interleaved tool_call + answer blocks (Codex 2026-05) so
                         // commentary sits BETWEEN tool calls, else the legacy
-                        // tool-only split. Identical logic to before — just hoisted
+                        // tool-only split. Identical logic to before, just hoisted
                         // into a value so a slash run can wrap it in the window.
                         const transcript = !hasBlocks
                           ? null
@@ -395,7 +319,7 @@ export function CodexView() {
                                 </div>
                               )
 
-                        // Text content — user bubble always; assistant only when
+                        // Text content, user bubble always; assistant only when
                         // there are no per-iteration answer blocks (interleave
                         // already rendered those). Assistant drops the bubble to
                         // match the regular Chat view; user keeps the right anchor.
@@ -417,7 +341,7 @@ export function CodexView() {
 
                         // Slash command (David 2026-06-12): the STEPS (tool calls +
                         // intermediate commentary) go in the collapsible window;
-                        // the FINAL answer renders OUTSIDE it, normal + readable —
+                        // the FINAL answer renders OUTSIDE it, normal + readable ,
                         // "die finale antwort soll nicht im tool call sein, nur die
                         // letzte". Same block shape for Ollama + LM Studio, so this
                         // is backend-agnostic. The final answer = the last 'answer'
@@ -498,6 +422,11 @@ export function CodexView() {
                   the per-conversation flag so switching to another (idle) chat
                   doesn't show its dots — David 2026-06-12 ("die drei ladepunkte
                   kommen in vorherigen chats auch"). */}
+              {/* Shell/code approval, inline in the stream so it reads as the
+                  next step of the run instead of covering it (David 2026-07-24:
+                  "ich hätte das gerne im chat, wie ein tool call"). Renders
+                  nothing while no request is pending. */}
+              <CodexConfirmDialog />
               {codexGenerating && (
                 <TypingIndicator />
               )}
@@ -509,7 +438,6 @@ export function CodexView() {
         <RealtimeCounter isRunning={codexGenerating} />
 
         {/* One-time "/" hint, directly above the prompt (Code view only). */}
-        <CodingCommandsHint />
 
         {/* Input */}
         <ChatInput
@@ -517,7 +445,8 @@ export function CodexView() {
           onStop={stopCodex}
           isGenerating={isRunning}
           slashCommands
-          composerModel={<ModelSelector openUpward />}
+          composerModel={<ModelSelector openUpward surface="code" />}
+          composerAbove={<><LoopBar onStop={stopCodex} /><GoalBar /></>}
           composerActions={<PluginsDropdown openUpward />}
         />
       </div>

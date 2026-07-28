@@ -139,7 +139,7 @@ export function AgentWorkspaceDialog({
           <p className="text-[0.7rem] text-gray-500">
             {phase === 'pick'
               ? 'Pick a folder to edit your real files, or use a sandbox to keep this chat isolated. You can change this later.'
-              : 'Primary anchors relative paths. Extras give the agent absolute access — perfect for "sync the API in repo-A with the client in repo-B".'}
+              : 'Primary anchors relative paths. Extras give the agent absolute access, perfect for "sync the API in repo-A with the client in repo-B".'}
           </p>
         </div>
 
@@ -167,7 +167,7 @@ export function AgentWorkspaceDialog({
             <WorkspaceOption
               icon={<Folder size={16} className="text-amber-500" />}
               title={picking ? 'Opening picker…' : 'Pick a folder…'}
-              body="Choose a real directory. The agent edits files in there directly — like the Coding Agent."
+              body="Choose a real directory. The agent edits files in there directly, like the Coding Agent."
               onClick={handlePick}
               disabled={picking}
             />
@@ -221,7 +221,7 @@ export function AgentWorkspaceDialog({
                 data-testid="agent-workspace-remember-default"
               />
               <span className="text-[0.65rem] text-gray-600 dark:text-gray-400">
-                Remember as default — future chats open here without asking.
+                Remember as default. Future chats open here without asking.
               </span>
             </label>
           </div>

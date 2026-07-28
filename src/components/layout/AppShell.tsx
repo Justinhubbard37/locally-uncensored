@@ -21,7 +21,7 @@ import { useRemoteStore } from '../../stores/remoteStore'
 import { useModelHealthStore } from '../../stores/modelHealthStore'
 import { extractMemoriesFromPair } from '../../hooks/useMemory'
 import { detectLocalBackends, type DetectedBackend } from '../../lib/backend-detector'
-import { backendCall, isTauri, isCloudOnly } from '../../api/backend'
+import { backendCall, isTauri } from '../../api/backend'
 import { idbStorage } from '../../lib/idbStorage'
 import type { AIModel } from '../../types/models'
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts'
@@ -29,8 +29,10 @@ import { useCloudAuth } from '../../hooks/useCloudAuth'
 import { useCloudAuthStore, deriveCloudAvailable } from '../../stores/cloudAuthStore'
 import { useCreateStore } from '../../stores/createStore'
 import { CloudGateModal } from '../cloud/CloudGateModal'
-import { CloudOnboardingModal } from '../cloud/CloudOnboardingModal'
+import { CloudTeaserModal } from '../cloud/CloudTeaserModal'
+import { CloudExampleModal } from '../cloud/CloudExampleModal'
 import { ShortcutsModal } from './ShortcutsModal'
+import { CreditsExhaustedModal } from './CreditsExhaustedModal'
 import { Titlebar } from './Titlebar'
 
 // The backup triad must never write %APPDATA%/store_backup.json before the
@@ -61,31 +63,32 @@ export function AppShell() {
   // ── Global Local/Cloud mode (2.5.7) — appMode drives everything ──
   const appMode = settings.appMode
   const cloudAvailable = useCloudAuthStore(deriveCloudAvailable)
-  const cloudStatus = useCloudAuthStore((s) => s.status)
-  const setCloudGateOpen = useUIStore((s) => s.setCloudGateOpen)
 
-  // macOS launch build is Cloud-ONLY (David 2026-07-11): the app behaves like
-  // the web app — hosted models everywhere, no Local/Cloud switch, no
-  // local-hardware surfaces. Pin appMode to 'cloud' permanently, and when the
-  // cloud axis isn't usable yet (signed out / unlicensed / gated) open the
-  // CloudGateModal so the user logs in. There is no Local to fall back to; the
-  // full local version returns in a later release.
-  const cloudOnly = isCloudOnly()
+  // Boot-sync the configured ComfyUI host/port into the FE URL builder.
+  // The backend loads them from config.json at startup, but the only FE
+  // mirror lived in SettingsPage's mount effect — so after an app restart
+  // every comfyuiUrl() (gallery media, control plane) pointed at localhost
+  // until the user happened to open Settings. On a remote-host setup (#82)
+  // that made the app look dead after every launch. Found live 2026-07-17.
   useEffect(() => {
-    if (!cloudOnly) return
-    if (appMode !== 'cloud') { updateSettings({ appMode: 'cloud' }); return }
-    if (cloudStatus !== 'probing' && !cloudAvailable) setCloudGateOpen(true)
-  }, [cloudOnly, appMode, cloudStatus, cloudAvailable, updateSettings, setCloudGateOpen])
+    void (async () => {
+      try {
+        const { backendCall, setComfyPort, setComfyHost } = await import('../../api/backend')
+        const s = await backendCall<{ port?: number; host?: string }>('comfyui_status')
+        if (typeof s?.port === 'number' && s.port > 0) setComfyPort(s.port)
+        if (typeof s?.host === 'string' && s.host.trim()) setComfyHost(s.host)
+      } catch { /* backend not up yet — Settings' own mirror still applies later */ }
+    })()
+  }, [])
 
   // Create renders where the mode says: the global switch owns the axis the
-  // Composer's per-surface toggle used to. On the Cloud-only build Create is
-  // always cloud (the gate covers the not-yet-signed-in state).
+  // Composer's per-surface toggle used to.
   useEffect(() => {
-    const target = appMode === 'cloud' && (cloudAvailable || cloudOnly) ? 'cloud' : 'local'
+    const target = appMode === 'cloud' && cloudAvailable ? 'cloud' : 'local'
     if (useCreateStore.getState().backend !== target) {
       useCreateStore.getState().setBackend(target)
     }
-  }, [appMode, cloudAvailable, cloudOnly])
+  }, [appMode, cloudAvailable])
 
   // Never leave an out-of-mode model active: flipping the switch moves the
   // chat selection onto the first model of the new mode (cloud ↔ local).
@@ -154,10 +157,13 @@ export function AppShell() {
     'locally-uncensored-agent-workflows', 'locally-uncensored-agent',
     'locally-uncensored-voice', 'lu-benchmark-store', 'lu-update-checker-v2',
     'rag-store', 'workflow-store', 'lu-cloud-catalog',
-    // v2.5.0 launch teasers — back these up so an auto-updater who clicked
-    // "Don't show me again" / dismissed the image-tool noti keeps that choice
-    // across the NSIS update (which wipes WebView2 localStorage).
-    'lu_cloud_teaser', 'lu_image_tool_noti',
+    // One-shot notices — back these up so "seen it once" survives an NSIS
+    // update that wipes WebView2 localStorage. `lu_cloud_notice` (the Create
+    // retention line) claimed in its own comment that it survived an update
+    // and did not, because it was never listed here.
+    'lu_cloud_notice', 'locally-uncensored-model-health',
+    // The standing goal (/goal) is per conversation and outlives a session.
+    'locally-uncensored-agent-goal',
   ]
   const STORE_KEYS_SET = new Set(STORE_KEYS)
   // These two persist via idbStorage (IndexedDB) since v2.5.0 — the backup
@@ -684,8 +690,7 @@ export function AppShell() {
   // capabilities refresh). Populates useModelHealthStore → StaleModelsBanner
   // surfaces the result as a top-of-app notice with one-click Refresh All.
   useEffect(() => {
-    // Cloud-only build never touches local Ollama — skip the stale-manifest scan.
-    if (!onboardingDone || !isTauri() || isCloudOnly()) return
+    if (!onboardingDone || !isTauri()) return
     if (sessionStorage.getItem('lu-model-health-scan-done')) return
     sessionStorage.setItem('lu-model-health-scan-done', '1')
 
@@ -711,8 +716,7 @@ export function AppShell() {
 
   // Auto-detect local backends on startup (once per session)
   useEffect(() => {
-    // Cloud-only build has no local backends to detect (David 2026-07-11).
-    if (!onboardingDone || isCloudOnly()) return
+    if (!onboardingDone) return
     if (sessionStorage.getItem('lu-backend-detection-done')) return
 
     sessionStorage.setItem('lu-backend-detection-done', '1')
@@ -777,10 +781,7 @@ export function AppShell() {
   // While restoring from backup, show nothing (prevents onboarding flash)
   if (restoring) return null
 
-  // The local first-run onboarding (backend picker, hardware setup) is
-  // meaningless on the Cloud-only build — the CloudGateModal drives sign-in
-  // instead (David 2026-07-11). Windows/Linux keep the local onboarding.
-  if (!onboardingDone && !cloudOnly) {
+  if (!onboardingDone) {
     return <Onboarding />
   }
 
@@ -811,9 +812,16 @@ export function AppShell() {
       />
       {/* Cloud gate: login → plan → beta wall, opened by the header switch. */}
       <CloudGateModal />
-      {/* One-time cloud onboarding — first successful switch flip. */}
-      <CloudOnboardingModal />
+      {/* Cloud discovery sheet: opened by the Local-mode teaser surfaces
+          (locked Create tabs, hosted model rows). */}
+      <CloudTeaserModal />
+      {/* Example video popup: teaser "See plans" detours here (intent
+          surfaces only) before the gate. */}
+      <CloudExampleModal />
       <ShortcutsModal />
+      {/* Out-of-credits purchase prompt: opens when LU Cloud answers
+          code:'credits_exhausted' (monthly budget + top-up wallet empty). */}
+      <CreditsExhaustedModal />
     </div>
   )
 }

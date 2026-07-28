@@ -43,13 +43,9 @@ jobs:
             args: ''
             rust_targets: ''
             sidecar_triple: x86_64-pc-windows-msvc
-          # macOS lane (new in 2.5.7 — earlier releases shipped no mac assets
-          # on this endpoint). Unsigned/ad-hoc until Apple Developer ID creds
-          # land as secrets; the updater artifacts are still minisign-signed.
-          - platform: macos-14
-            args: '--target aarch64-apple-darwin'
-            rust_targets: 'aarch64-apple-darwin'
-            sidecar_triple: aarch64-apple-darwin
+          # No macOS lane: LU ships Windows + Linux only (the 2.5.7 mac assets
+          # were unsigned/ad-hoc and pulled post-release). Re-add a macos-14
+          # entry here once Apple Developer ID signing creds land as secrets.
 
     runs-on: ${{ matrix.platform }}
 
@@ -100,7 +96,10 @@ jobs:
       - name: Sidecar build cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: .llama-build
+          # Must match LLAMA_BUILD_CACHE below, or Windows caches an empty
+          # ./.llama-build while the real build sits in D:/lb — every run then
+          # recompiles llama.cpp from scratch (~20 min) on a "cache hit".
+          path: ${{ matrix.platform == 'windows-latest' && 'D:/lb' || '.llama-build' }}
           key: llama-${{ hashFiles('scripts/build-llama.sh') }}-${{ matrix.sidecar_triple }}-v1
 
       - name: Install Vulkan SDK (Windows)
@@ -131,6 +130,17 @@ jobs:
 
       - name: Build llama-server sidecar
         shell: bash
+        env:
+          # Cap parallelism: bare `-j` (unlimited) OOM-kills the Linux runner mid
+          # llama.cpp.o compile (SIGTERM 143). 2 fits every hosted runner's RAM.
+          BUILD_JOBS: 2
+          # Windows only: the vulkan-shaders-gen ExternalProject nests build paths
+          # ~250 chars deep under the workspace, tripping MSBuild FileTracker
+          # (FTK1011, MAX_PATH) so the CMake compiler check "is broken". Relocate
+          # the llama build to a short root ('D:/lb') so the deepest TryCompile
+          # .tlog path stays under 260. Empty elsewhere -> the script falls back
+          # to ./.llama-build (which the sidecar cache step handles).
+          LLAMA_BUILD_CACHE: ${{ matrix.platform == 'windows-latest' && 'D:/lb' || '' }}
         run: bash scripts/build-llama.sh ${{ matrix.sidecar_triple }}
 
       - name: Assert sidecar exists
@@ -159,8 +169,6 @@ jobs:
             ## Download
 
             **Windows:** Download the `.exe` installer. During setup, choose "Install for current user only" for a portable/no-install experience. Or use the `.msi` for system-wide installation.
-
-            **macOS:** Download the `.dmg` and drag the app to any folder.
 
             **Linux:** Download the `.AppImage`, make it executable (`chmod +x`), and run. No installation needed.
 

@@ -14,10 +14,8 @@ import { cn } from '../create/ui/cn'
 
 export function CloudSwitch() {
   const appMode = useSettingsStore((s) => s.settings.appMode)
-  const cloudOnboardingSeen = useSettingsStore((s) => s.settings.cloudOnboardingSeen)
   const updateSettings = useSettingsStore((s) => s.updateSettings)
   const setCloudGateOpen = useUIStore((s) => s.setCloudGateOpen)
-  const setCloudOnboardingOpen = useUIStore((s) => s.setCloudOnboardingOpen)
   const available = useCloudAuthStore(deriveCloudAvailable)
   const on = appMode === 'cloud'
 
@@ -30,10 +28,7 @@ export function CloudSwitch() {
       setCloudGateOpen(true)
       return
     }
-    if (!cloudOnboardingSeen) {
-      setCloudOnboardingOpen(true)
-      return
-    }
+    // The cloud onboarding modal was dropped in 2.5.9 — the switch just flips.
     updateSettings({ appMode: 'cloud' })
   }
 
@@ -43,7 +38,7 @@ export function CloudSwitch() {
       aria-checked={on}
       aria-label="Cloud"
       title={on
-        ? "Cloud mode is on — chat, image and video run on LU's hosted GPUs. Click to go back to Local."
+        ? "Cloud mode is on. Chat, image and video run on LU's hosted GPUs. Click to go back to Local."
         : "Run LU on hosted GPUs with your lu-labs.ai account"}
       onClick={toggle}
       className={cn(
@@ -53,7 +48,14 @@ export function CloudSwitch() {
           : 'border-gray-200 dark:border-white/10 text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 hover:border-gray-300 dark:hover:border-white/20',
       )}
     >
-      <img src="/LU-monogram-bw.png" alt="" width={12} height={12} draggable={false} className="shrink-0 pointer-events-none select-none dark:invert-0 invert" />
+      <img
+        src="/LU-monogram-bw.png"
+        alt=""
+        width={12}
+        height={12}
+        draggable={false}
+        className="shrink-0 select-none dark:invert-0 invert"
+      />
       <span className="text-[0.65rem] font-medium leading-none">Cloud</span>
       <span
         aria-hidden

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronDown, MessageSquare } from 'lucide-react'
 import { MarkdownRenderer } from './MarkdownRenderer'
+import { stripModelNoise } from '../../lib/strip-model-noise'
 
 interface Props {
   content: string
@@ -18,7 +19,9 @@ interface Props {
  */
 export function ReflectionBlock({ content }: Props) {
   const [open, setOpen] = useState(false)
-  const trimmed = content.trim()
+  // Strip orchestration BEFORE the guard and the preview headline, or a
+  // reflection that was only a stray tag still shows a header full of noise.
+  const trimmed = stripModelNoise(content || '')
   if (!trimmed) return null
 
   const firstLine = trimmed.split('\n', 1)[0]

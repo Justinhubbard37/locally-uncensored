@@ -13,7 +13,7 @@
 
 use crate::state::AppState;
 use serde::Serialize;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 use sysinfo::{Disks, System};
 use tauri::State;
@@ -176,16 +176,14 @@ fn query_nvidia_vram() -> Option<(f64, f64)> {
     cmd.args([
         "--query-gpu=memory.total,memory.free",
         "--format=csv,noheader,nounits",
-    ])
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    ]);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
-    let out = cmd.output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout);
+    // Bounded: every OTHER probe in this report has a timeout, but this one
+    // used Command::output() and a wedged driver makes nvidia-smi hang for
+    // minutes — leaving the Troubleshoot panel spinning on exactly the machine
+    // whose owner opened it because something was wrong.
+    let s = crate::commands::shell::output_bounded(cmd, Duration::from_secs(3))?;
     parse_nvidia_vram_csv(&s)
 }
 

@@ -5,12 +5,17 @@ import { useModelStore } from "../stores/modelStore"
 import { useSettingsStore } from "../stores/settingsStore"
 import { useRAGStore } from "../stores/ragStore"
 import { useMemoryStore } from "../stores/memoryStore"
+import { useVoiceStore } from "../stores/voiceStore"
+import { autoSpeak } from "../lib/ttsBridge"
 import { retrieveContext } from "../api/rag"
 import { getModelMaxTokens } from "../lib/context-compaction"
 import { getModelContextCached } from "../api/ollama"
 import { requestGenerationCancel } from "../api/vram-handoff"
 import { effectiveContextWindow } from "../lib/context-window"
 import { useAgentChat } from "./useAgentChat"
+import { parseAgentCommand, parseLoopSpec } from '../lib/agent-commands'
+import { planResend } from '../lib/resend-plan'
+import { applyGoalCommand } from '../lib/goal-command'
 import { useMemory } from "./useMemory"
 import { useAgentModeStore } from "../stores/agentModeStore"
 import { useGenerationStore } from "../stores/generationStore"
@@ -64,14 +69,39 @@ export function useChat() {
     const store = useChatStore.getState()
     const persona = useSettingsStore.getState().getActivePersona()
 
-    // NB: slash commands ("/review", "/commit", …) are NOT handled here — they
-    // belong to the Coding Agent (Code view), not the normal chat/agent (David
-    // 2026-06-12). useCodex.sendInstruction expands them there; in plain chat a
-    // "/cmd" is just ordinary text. The normal Agent gets its own commands later
-    // (slash loop / remember / scheduler).
-
-    // Agent mode delegation: if active for this conversation, use agent chat
+    // Agent mode delegation: if active for this conversation, use agent chat.
+    //
+    // 2.5.9: slash commands work here too. They were Code-only, which meant the
+    // Agent — same tool catalog, same executor — could not use a single one of
+    // them. The expansion goes to the model, the raw "/cmd" stays on screen, and
+    // a read-only command has the mutating tools stripped for the turn exactly
+    // like it does in Code. In PLAIN chat (no agent mode) a "/cmd" is still just
+    // text: there is no tool catalog there for the templates to drive.
     if (store.activeConversationId && useAgentModeStore.getState().isActive(store.activeConversationId)) {
+      const slash = parseAgentCommand(content)
+      if (slash?.command.handledLocally && slash.command.name === 'goal') {
+        // Bookkeeping, not a prompt — never spend a round-trip on it.
+        const convId = store.activeConversationId
+        const res = applyGoalCommand(convId, slash.args)
+        store.addMessage(convId, { id: uuid(), role: 'user', content, timestamp: Date.now() })
+        store.addMessage(convId, { id: uuid(), role: 'assistant', content: res.message, timestamp: Date.now() })
+        return
+      }
+      if (slash) {
+        // /loop seeds the driver so pass 2 onward fires by itself, exactly as
+        // it does in Code. Nobody should have to re-type a loop.
+        const loop = slash.command.name === 'loop'
+          ? (() => {
+              const { intervalMs, rest } = parseLoopSpec(slash.args)
+              return { pass: 1, intervalMs, task: rest || content, startedAt: Date.now() }
+            })()
+          : undefined
+        return agentChat.sendAgentMessage(slash.expanded, images, {
+          displayContent: content,
+          readOnly: slash.command.readOnly === true,
+          ...(loop ? { loop } : {}),
+        })
+      }
       return agentChat.sendAgentMessage(content, images)
     }
 
@@ -195,17 +225,24 @@ export function useChat() {
       // Memory injection is non-critical
     }
 
-    // For non-Ollama providers, inject thinking via system prompt — but only
-    // for models where the Think toggle actually applies. Server-declared
-    // think capability (LU Cloud models carry thinkMode from /models) wins
-    // over the local name-heuristic: 'always' reasoners use their native
-    // channel untouched, 'never' instruct models get nothing (the blanket
-    // injection made them burn billed tokens on reasoning we then discard).
+    // For non-Ollama providers, inject thinking via system prompt — but ONLY
+    // for endpoints that declared nothing about think capability (generic
+    // OpenAI-compat: LM Studio, vLLM, …). Models with a server-declared
+    // thinkMode (LU Cloud /models carries `think`) must NOT get the tag
+    // injection on top of reasoning_effort: the upstream already runs its
+    // native reasoning template/parser (reasoning_content channel), and a
+    // second, conflicting "write <think> tags, answer outside them"
+    // instruction can trap the model in a reasoning loop until the budget is
+    // gone — David's cloud Qwen3.6 burned 40k chars of thinking on "6×9" and
+    // never answered (2026-07-12). 'always' reasoners use their native
+    // channel untouched; 'never' instruct models get nothing (the blanket
+    // injection made them burn billed tokens on reasoning we then discard);
+    // 'toggle' models get reasoning_effort only.
     const providerId = getProviderIdFromModel(activeModel)
     const activeMeta = useModelStore.getState().models.find((m) => m.name === activeModel)
     const thinkMode = activeMeta && 'thinkMode' in activeMeta ? activeMeta.thinkMode : undefined
     const canThink = thinkMode ? thinkMode === 'toggle' : isThinkingCompatible(activeModel)
-    if (settings.thinkingEnabled && providerId !== 'ollama' && canThink) {
+    if (settings.thinkingEnabled && providerId !== 'ollama' && canThink && thinkMode === undefined) {
       systemPrompt = (systemPrompt || '') + '\n\nBefore answering, reason through your thinking inside <think></think> tags. Your thinking will be hidden from the user. After thinking, provide your answer outside the tags.'
     }
 
@@ -338,6 +375,9 @@ export function useChat() {
       // can still explain itself instead of rendering as a silent empty
       // bubble (live find 2026-06-11: gemma4 + remembered tool results).
       let hiddenThinking = ""
+      // Why the backend said generation ended ('length', 'disconnect', …) —
+      // drives the honest empty-reply explanation below.
+      let finishReason: string | undefined
 
       for await (const chunk of stream) {
         // Abort fast-path: if the user hit Stop while a thinking-heavy model
@@ -419,6 +459,7 @@ export function useChat() {
         }
 
         if (chunk.done) {
+          if (chunk.finishReason) finishReason = chunk.finishReason
           // Final safety pass — catches any orphan tags that leaked through
           // mid-stream (partial chunks, provider restarts, etc.).
           contentRef.current = finalStripThinkingTags(contentRef.current, keepThinking)
@@ -456,12 +497,30 @@ export function useChat() {
       // leaving the user staring at silent dead air forever.
       if (!abort.signal.aborted && contentRef.current.trim() === "") {
         const captured = (thinkingRef.current || finalStripThinkingTags(hiddenThinking, false)).trim()
+        // Honest, reason-specific note for the empty bubble. Before this, a
+        // thought-only turn with Thinking ON stored the reasoning but left
+        // content EMPTY — the user saw a collapsed Thinking pill and nothing
+        // else, which reads as a hang/crash (David, cloud Qwen3.6 2026-07-12:
+        // 40k chars of looped reasoning, token budget gone, zero answer).
+        const explanation =
+          finishReason === 'length'
+            ? (captured
+                ? 'The model spent its entire token budget thinking and never wrote the answer. Try again, reasoning is not deterministic, or turn Thinking off for this question.'
+                : 'The model hit its token limit before writing an answer. Try again, or raise Max Tokens in Settings.')
+            : finishReason === 'disconnect'
+              ? 'The connection dropped before the model finished its answer. Check your network and try again.'
+              : captured && keepThinking
+                ? 'The model finished thinking but never wrote an answer. Try again, or turn Thinking off for this question.'
+                : "I didn't return a visible answer that time, please try again."
         if (captured && keepThinking) {
-          // Thinking ON: surface the reasoning so the empty bubble explains
-          // itself (MessageBubble renders it + a nudge) instead of dead air.
+          // Thinking ON: surface the reasoning AND say why there's no answer
+          // (the collapsed thinking pill alone reads as dead air).
           useChatStore
             .getState()
             .updateMessageThinking(convId!, assistantMessage.id, captured)
+          useChatStore
+            .getState()
+            .updateMessageContent(convId!, assistantMessage.id, explanation)
         } else if (captured) {
           // Thinking OFF but the model still reasoned (Gemma keeps reasoning when
           // we pass `think:undefined`) and produced no visible answer. David
@@ -471,11 +530,14 @@ export function useChat() {
           // won't reach here; this covers a plain Q&A that thought itself out.)
           useChatStore
             .getState()
-            .updateMessageContent(
-              convId!,
-              assistantMessage.id,
-              "I didn't return a visible answer that time — please try again.",
-            )
+            .updateMessageContent(convId!, assistantMessage.id, explanation)
+        } else if (finishReason === 'length' || finishReason === 'disconnect') {
+          // No reasoning captured either — the turn produced literally
+          // nothing because the budget ran out / the stream was cut. Still
+          // explain instead of leaving dead air.
+          useChatStore
+            .getState()
+            .updateMessageContent(convId!, assistantMessage.id, explanation)
         }
       }
     } catch (err) {
@@ -523,9 +585,16 @@ export function useChat() {
       useModelStore.getState().setIsModelLoading(false)
       abortRef.current = null
 
-      // No auto-speak. Reading a response aloud is manual-only via the
-      // per-message Speaker button (David 2026-06-07: "nicht immer automatisch
-      // vorlesen"). Enabling TTS only surfaces that button; it never auto-reads.
+      // Auto-read the finished response when the user opted in (#77, ElBiggus).
+      // Default OFF and additionally gated on ttsEnabled; getState() (not the
+      // hook) so this callback never subscribes to the voice store's isSpeaking
+      // churn during playback.
+      {
+        const voice = useVoiceStore.getState()
+        if (voice.ttsEnabled && voice.autoReadAloud && contentRef.current.trim()) {
+          autoSpeak(contentRef.current)
+        }
+      }
 
       // Auto-extract memories (fire-and-forget)
       const memSettings = useMemoryStore.getState().settings
@@ -543,38 +612,31 @@ export function useChat() {
     requestGenerationCancel()
   }, [])
 
-  const regenerateMessage = useCallback((conversationId: string, assistantMessageId: string) => {
+  /**
+   * Regenerate and Edit both replace the turn: the question leaves the thread
+   * together with everything after it and goes back in through sendMessage,
+   * attachments included. Deleting only the ANSWER left the question in place
+   * for sendMessage to add a second time — the thread grew one more copy of it
+   * per click and the model was asked it twice.
+   */
+  const resend = useCallback((conversationId: string, targetId: string, override?: string) => {
+    // sendMessage bails without a model; deleting first would eat the question.
+    if (!useModelStore.getState().activeModel) return
     const conv = useChatStore.getState().conversations.find(c => c.id === conversationId)
     if (!conv) return
-
-    // Find the assistant message and the preceding user message
-    const msgIndex = conv.messages.findIndex(m => m.id === assistantMessageId)
-    if (msgIndex < 1) return
-
-    const userMsg = conv.messages[msgIndex - 1]
-    if (userMsg.role !== 'user') return
-
-    // Delete from the assistant message onward, then resend
-    useChatStore.getState().deleteMessagesAfter(conversationId, assistantMessageId)
-    sendMessage(userMsg.content)
+    const plan = planResend(conv.messages, targetId, override)
+    if (!plan) return
+    useChatStore.getState().deleteMessagesAfter(conversationId, plan.deleteFromId)
+    sendMessage(plan.content, plan.images)
   }, [sendMessage])
+
+  const regenerateMessage = useCallback((conversationId: string, assistantMessageId: string) => {
+    resend(conversationId, assistantMessageId)
+  }, [resend])
 
   const editAndResend = useCallback((conversationId: string, messageId: string, newContent: string) => {
-    const conv = useChatStore.getState().conversations.find(c => c.id === conversationId)
-    if (!conv) return
-
-    const msgIndex = conv.messages.findIndex(m => m.id === messageId)
-    if (msgIndex < 0) return
-
-    // Update content and delete everything after this message
-    useChatStore.getState().updateMessageContent(conversationId, messageId, newContent)
-    // Find next message to delete from
-    const nextMsg = conv.messages[msgIndex + 1]
-    if (nextMsg) {
-      useChatStore.getState().deleteMessagesAfter(conversationId, nextMsg.id)
-    }
-    sendMessage(newContent)
-  }, [sendMessage])
+    resend(conversationId, messageId, newContent)
+  }, [resend])
 
   return {
     sendMessage,

@@ -1,5 +1,6 @@
 import { getImageUrl } from '../../../api/comfyui'
-import { refreshResultUrl } from '../../../api/cloud/jobs'
+import { refreshResultUrl, resolveResultUrl } from '../../../api/cloud/jobs'
+import { fetchLocalhostBytes, isTauri } from '../../../api/backend'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
 
 /** Resolve a gallery item's display URL. Priority mirrors MediaViewer/Gallery:
@@ -33,19 +34,62 @@ export function recoverGalleryUrl(item: GalleryItem): void {
   const last = recovered.get(item.id)
   if (last !== undefined && (last === 0 || Date.now() - last < RESIGN_TTL_MS)) return
   recovered.set(item.id, 0)
-  void refreshResultUrl(item.jobId).then((url) => {
-    if (url) {
+  void resolveResultUrl(item.jobId).then((state) => {
+    if (state.kind === 'ok') {
       recovered.set(item.id, Date.now())
-      useCreateStore.getState().updateGalleryItem(item.id, { remoteUrl: url, unavailable: undefined })
-    } else {
-      recovered.delete(item.id)
+      useCreateStore.getState().updateGalleryItem(item.id, { remoteUrl: state.url, unavailable: undefined })
+      return
     }
+    if (state.kind === 'gone') {
+      // Cloud renders are kept seven days and then deleted, which the Create
+      // banner says up front. Once one is gone, re-signing can never succeed,
+      // so mark the tile the same honest way a local item marks a missing
+      // output instead of retrying into a blank square on every remount.
+      useCreateStore.getState().updateGalleryItem(item.id, { unavailable: true })
+      return
+    }
+    // Could not ask. Release the guard so the next remount tries again.
+    recovered.delete(item.id)
   })
 }
 
 /** Clear a tile's offline flag once its media actually loads (onLoad). */
 export function markGalleryItemAvailable(item: GalleryItem): void {
   if (item.unavailable) useCreateStore.getState().updateGalleryItem(item.id, { unavailable: undefined })
+}
+
+function guessMime(filename: string): string {
+  const ext = filename.toLowerCase().split('.').pop() || ''
+  if (ext === 'mp4') return 'video/mp4'
+  if (ext === 'webm') return 'video/webm'
+  if (ext === 'gif') return 'image/gif'
+  if (ext === 'webp') return 'image/webp'
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg'
+  return 'image/png'
+}
+
+/**
+ * ComfyUI 0.19+ (portable, user-managed) blocks the WebView's cross-origin
+ * `<video>`/`<img>` /view load with a Sec-Fetch-Site 403, while download +
+ * history keep working because those ride the Rust proxy (no Origin header).
+ * The user sees "can't view the result" even though the render exists (#75,
+ * cinemazverev). Re-fetch the bytes THROUGH the proxy (no Origin → not blocked)
+ * and hand back a blob: URL the element can display. Local items only — cloud
+ * media has its own re-sign path (recoverGalleryUrl). Returns null when the
+ * fallback doesn't apply or the proxy fetch fails.
+ *
+ * Tradeoff: a blob loads the whole clip into memory (no native Range/seek), so
+ * this is a recovery path, not the default — the fast direct <video> stays in
+ * use whenever ComfyUI allows the origin.
+ */
+export async function proxiedComfyBlobUrl(item: GalleryItem): Promise<string | null> {
+  if (!isTauri() || item.jobId || item.remoteUrl || item.dataUrl) return null
+  try {
+    const bytes = await fetchLocalhostBytes(getImageUrl(item.filename, item.subfolder))
+    return URL.createObjectURL(new Blob([bytes], { type: guessMime(item.filename) }))
+  } catch {
+    return null
+  }
 }
 
 /** Fetch a gallery item's media bytes for adoption as an op source.
@@ -71,10 +115,10 @@ export async function fetchGalleryItemBlob(item: GalleryItem): Promise<Blob> {
         useCreateStore.getState().updateGalleryItem(item.id, { remoteUrl: fresh, unavailable: undefined })
         return tryFetch(fresh)
       }
-      throw new Error('The cloud copy of this render is no longer available — pick another image or upload one from disk.')
+      throw new Error('The cloud copy of this render is no longer available. Pick another image, or upload one from disk.')
     }
     if (!item.remoteUrl && !item.dataUrl) {
-      throw new Error('This image lives in your local ComfyUI output, which is not running right now — switch to Local (or start ComfyUI) to use it, or upload the file from disk.')
+      throw new Error('This image lives in your local ComfyUI output, which is not running right now. Switch to Local (or start ComfyUI) to use it, or upload the file from disk.')
     }
     throw err
   }

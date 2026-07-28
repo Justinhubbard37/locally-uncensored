@@ -1,16 +1,19 @@
 import { usePermissionStore } from '../../stores/permissionStore'
 import type { ToolCategory, PermissionLevel } from '../../api/mcp/types'
-import { isTauri } from '../../api/backend'
-import { FolderOpen, Terminal, Monitor, Globe, Cpu, Image, GitBranch, Lock } from 'lucide-react'
+import { FolderOpen, Terminal, Monitor, Globe, Cpu, Image, Film, GitBranch } from 'lucide-react'
 
-// Image generation is fully wired in the chat agent path — it shares the exact
-// confirm-gate the live `video` category already uses — but this settings
-// selector was still locked ("Coming Soon"), so users could not switch image
-// gen to Auto. That is konata's "you cannot change image generation to auto
-// accept" (web app, 2026-06-23). Unlock it in the WEB build only for now; the
-// desktop .exe keeps the shipped 2.5.5 behavior until a desktop release flips
-// it there too. Computed per-render inside the component so the Tauri global is
-// reliably set by the time it is read.
+// Image generation is fully wired in the chat agent path and shares the exact
+// confirm-gate the live `video` category uses, but this selector stayed locked
+// ("Coming Soon") on the desktop, so users could not switch image gen to Auto.
+// That was konata's "you cannot change image generation to auto accept" (web
+// app, 2026-06-23), unlocked for WEB only at the time with the note that the
+// desktop .exe keeps 2.5.5 behavior "until a desktop release flips it there
+// too". 2.5.9 is that release: the lock is gone on both surfaces, matching
+// PermissionOverrideBar, which has had an empty LOCKED set all along.
+//
+// `video` was missing from this list entirely even though it is a real category
+// with a real permission (live since 2.5.3) — so the chat bar could toggle it
+// while Settings could not see it. Added.
 
 const CATEGORIES: {
   key: ToolCategory
@@ -22,7 +25,8 @@ const CATEGORIES: {
   { key: 'web', label: 'Web Access', description: 'Search & fetch web pages', icon: Globe, risk: 'low' },
   { key: 'system', label: 'System Info', description: 'OS info, process list', icon: Cpu, risk: 'low' },
   { key: 'filesystem', label: 'Filesystem', description: 'Read, write, search files anywhere', icon: FolderOpen, risk: 'medium' },
-  { key: 'image', label: 'Image Generation', description: 'Generate images and video', icon: Image, risk: 'medium' },
+  { key: 'image', label: 'Image Generation', description: 'Generate images', icon: Image, risk: 'medium' },
+  { key: 'video', label: 'Video Generation', description: 'Generate video', icon: Film, risk: 'medium' },
   { key: 'workflow', label: 'Workflows', description: 'Execute saved agent workflows', icon: GitBranch, risk: 'medium' },
   { key: 'terminal', label: 'Terminal / Shell', description: 'Execute commands, run code', icon: Terminal, risk: 'high' },
   { key: 'desktop', label: 'Desktop Control', description: 'Screenshots, screen interaction', icon: Monitor, risk: 'high' },
@@ -42,7 +46,6 @@ const LEVEL_OPTIONS: { value: PermissionLevel; label: string }[] = [
 
 export function PermissionSettings() {
   const { globalPermissions, setGlobalPermission, resetToDefaults } = usePermissionStore()
-  const lockedCategories: Set<ToolCategory> = isTauri() ? new Set<ToolCategory>(['image']) : new Set<ToolCategory>()
 
   return (
     <div className="space-y-2">
@@ -51,16 +54,10 @@ export function PermissionSettings() {
       </p>
 
       {CATEGORIES.map(({ key, label, description, icon: Icon, risk }) => {
-        const isLocked = lockedCategories.has(key)
-
         return (
           <div
             key={key}
-            className={`flex items-center gap-3 px-3 py-2 rounded-lg border transition-colors ${
-              isLocked
-                ? 'bg-white/[0.01] border-white/[0.04] opacity-50'
-                : 'bg-white/[0.02] border-white/[0.06] hover:border-white/10'
-            }`}
+            className="flex items-center gap-3 px-3 py-2 rounded-lg border transition-colors bg-white/[0.02] border-white/[0.06] hover:border-white/10"
           >
             {/* Risk dot */}
             <div className={`w-1.5 h-1.5 rounded-full ${RISK_COLORS[risk]} shrink-0`} />
@@ -74,36 +71,29 @@ export function PermissionSettings() {
               <p className="text-[0.55rem] text-gray-600 truncate">{description}</p>
             </div>
 
-            {/* Locked badge or Permission Level Selector */}
-            {isLocked ? (
-              <div className="flex items-center gap-1 shrink-0">
-                <Lock size={10} className="text-gray-600" />
-                <span className="text-[0.55rem] text-gray-600 font-medium">Coming Soon</span>
-              </div>
-            ) : (
-              <div className="flex gap-0.5 shrink-0">
-                {LEVEL_OPTIONS.map(({ value, label: lvlLabel }) => {
-                  const isActive = globalPermissions[key] === value
-                  return (
-                    <button
-                      key={value}
-                      onClick={() => setGlobalPermission(key, value)}
-                      className={`px-2 py-0.5 rounded text-[0.55rem] font-medium transition-all ${
-                        isActive
-                          ? value === 'blocked'
-                            ? 'bg-red-500/15 text-red-400 border border-red-500/30'
-                            : value === 'confirm'
-                              ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
-                              : 'bg-green-500/15 text-green-400 border border-green-500/30'
-                          : 'text-gray-600 hover:text-gray-400 border border-transparent'
-                      }`}
-                    >
-                      {lvlLabel}
-                    </button>
-                  )
-                })}
-              </div>
-            )}
+            {/* Permission Level Selector */}
+            <div className="flex gap-0.5 shrink-0">
+              {LEVEL_OPTIONS.map(({ value, label: lvlLabel }) => {
+                const isActive = globalPermissions[key] === value
+                return (
+                  <button
+                    key={value}
+                    onClick={() => setGlobalPermission(key, value)}
+                    className={`px-2 py-0.5 rounded text-[0.55rem] font-medium transition-all ${
+                      isActive
+                        ? value === 'blocked'
+                          ? 'bg-red-500/15 text-red-400 border border-red-500/30'
+                          : value === 'confirm'
+                            ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+                            : 'bg-green-500/15 text-green-400 border border-green-500/30'
+                        : 'text-gray-600 hover:text-gray-400 border border-transparent'
+                    }`}
+                  >
+                    {lvlLabel}
+                  </button>
+                )
+              })}
+            </div>
           </div>
         )
       })}

@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Locally Uncensored v2.5.9: Local Create Lanes and a Rebuilt Coding Agent</title>
+<meta name="description" content="v2.5.9 release notes: four Create categories running on your own GPU, a rebuilt coding agent, two command injections closed, remote access for LM Studio and llama.cpp.">
+<meta name="keywords" content="locally uncensored 2.5.9, local talking character, local ai music generation, motion control local, coding agent file edit, remote access lm studio, cogvideox removed">
+<meta property="og:title" content="Locally Uncensored v2.5.9: Local Create Lanes, a Rebuilt Coding Agent, and a Security Fix">
+<meta property="og:description" content="Talking Character, Music, Extend Video and Motion Control install and run on your own GPU. The coding agent was rebuilt. Two command injections are closed. Three video models that never worked are gone.">
+<meta property="og:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<meta property="og:url" content="https://locallyuncensored.com/blog/locally-uncensored-2-5-9.html">
+<meta property="og:type" content="article">
+<meta property="article:published_time" content="2026-07-26">
+<meta property="article:author" content="PurpleDoubleD">
+<meta property="article:tag" content="Release">
+<meta property="article:tag" content="Create">
+<meta property="article:tag" content="Coding Agent">
+<meta property="article:tag" content="Security">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Locally Uncensored v2.5.9: Local Create Lanes and a Rebuilt Coding Agent">
+<meta name="twitter:description" content="Four Create categories on your own GPU, a rebuilt coding agent, two command injections closed, and three video models that never worked removed.">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<link rel="canonical" href="https://locallyuncensored.com/blog/locally-uncensored-2-5-9.html">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="../favicon.png">
+<!-- Privacy: No external fonts loaded. Using system fonts. -->
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BlogPosting","headline":"Locally Uncensored v2.5.9: Local Create Lanes, a Rebuilt Coding Agent, and a Security Fix","description":"Locally Uncensored v2.5.9 makes the local lanes for Talking Character, Music, Extend Video and Motion Control installable, rebuilds the coding agent, closes two command injections, brings remote access to non-Ollama backends, and removes three video models whose pipelines could never run.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-07-26","dateModified":"2026-07-26","inLanguage":"en","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/locally-uncensored-2-5-9.html"},"keywords":"locally uncensored 2.5.9, local talking character, local ai music generation, motion control local, coding agent file edit, remote access lm studio, cogvideox removed"}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"What changed in Locally Uncensored 2.5.9?","acceptedAnswer":{"@type":"Answer","text":"The local lanes for Talking Character, Music, Extend Video and Motion Control are now actually installable: the setup card shows the file, the size and the progress, the download appears in the Downloads tray, and Cancel stops it. The coding agent was rebuilt around a surgical file_edit tool with fresh verify results and real context limits. Two command injections in the coding agent are closed. Remote access now works with LM Studio, Lemonade and llama.cpp. CogVideoX and Pyramid Flow are removed."}},{"@type":"Question","name":"Why were CogVideoX and Pyramid Flow removed?","acceptedAnswer":{"@type":"Answer","text":"Their pipelines were built against ComfyUI node names that no version of the referenced wrappers registers, so every generation failed and the install check looked for an invented node as well. They could never have produced a video. Between them they offered 46 GB of downloads for that. Allegro is closed for the same reason."}},{"@type":"Question","name":"Do I lose the CogVideoX files I already downloaded?","acceptedAnswer":{"@type":"Answer","text":"No. Nothing is deleted from your disk. The models are simply no longer offered in the catalogue. Wan 2.1 and 2.2, LTX, SVD, FramePack, Hunyuan, Mochi and Cosmos are unaffected."}},{"@type":"Question","name":"Is 2.5.9 a security update?","acceptedAnswer":{"@type":"Answer","text":"Yes, in part. Two command injection paths in the coding agent are closed. Both could be triggered by text the agent read rather than text you typed, and neither went through a confirmation dialog. If you use the coding agent, update."}},{"@type":"Question","name":"How long does LU Cloud keep my renders?","acceptedAnswer":{"@type":"Answer","text":"Seven days, then they are deleted. Cloud mode says so once in Create with a download reminder, and the deletion is enforced on the server. Download anything you want to keep."}},{"@type":"Question","name":"Does remote access work if I use LM Studio or llama.cpp instead of Ollama?","acceptedAnswer":{"@type":"Answer","text":"Yes, from 2.5.9 on. The remote bridge used to forward everything to Ollama, so a desktop running LM Studio, Lemonade or llama.cpp answered a phone with an empty model list. The server now translates between the phone requests and an OpenAI compatible backend, including streaming, tool calls, vision and reasoning."}}]}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/lu.css">
+<script defer src="/assets/lu.js"></script>
+  <script data-goatcounter="https://lu-uncensored.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+<nav class="lu-nav">
+  <a class="lu-nav-brand" href="/" aria-label="Locally Uncensored">
+    <span class="lu-mono" data-mono="nav" data-size="40" aria-hidden="true"></span>
+    <span class="lu-nav-word">Locally <span class="accent">Uncensored</span></span>
+  </a>
+  <div class="lu-nav-links" id="lu-nav-links">
+    <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/blog/">Blog</a>
+    <a class="lu-nav-link" href="/guide/">Guide</a>
+    <a class="lu-nav-link" href="/remote-access/">Remote</a>
+  </div>
+  <div class="lu-nav-right">
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">908&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">300+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <span class="lu-nav-sep"></span>
+    <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
+    <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</nav>
+<div class="container lu-doc">
+  <div class="breadcrumb"><a href="../">Locally Uncensored</a> / <a href="./">Blog</a> / This Post</div>
+
+  <div class="post-meta">
+    <span class="post-tag">Release</span>
+    <span>July 26, 2026</span>
+    <span>&middot;</span>
+    <span>7 min read</span>
+  </div>
+
+  <article>
+    <h1>v2.5.9: Four Create Categories on Your Own GPU, and a Rebuilt Coding Agent</h1>
+
+    <p><a href="https://github.com/PurpleDoubleD/locally-uncensored">Locally Uncensored</a> 2.5.9 is a correctness release. Most of what is in it was things that looked like they worked and did not: a setup card that spun forever, a coding agent that rewrote whole files to change one line, three video models whose pipelines could never have produced a single frame. The two headline items are the four Create categories that now genuinely run on your own GPU, and a coding agent that was taken apart and put back together.</p>
+
+    <p>Quick TL;DR before we dig in:</p>
+
+    <ul>
+      <li><strong>Talking Character, Music, Extend Video and Motion Control</strong> install and run locally, with a download you can watch, cancel and resume</li>
+      <li><strong>Coding agent overhaul</strong>: surgical edits instead of whole-file rewrites, fresh verify results, real context sizes</li>
+      <li><strong>Security</strong>: two command injection paths in the coding agent are closed. If you use the agent, update</li>
+      <li><strong>Remote access</strong> works with LM Studio, Lemonade and llama.cpp, not only Ollama</li>
+      <li><strong>Removed</strong>: CogVideoX (both) and Pyramid Flow. They never ran. Nothing is deleted from your disk</li>
+      <li><strong>LU Cloud renders are kept seven days</strong>, then deleted. Download what you want to keep</li>
+    </ul>
+
+    <h2>Four Create Categories, Running Locally</h2>
+
+    <p><strong>Talking Character, Music, Extend Video and Motion Control</strong> each have a local lane: in Local mode they build a ComfyUI graph out of core node families and run on your card, no hosted endpoint involved. The lanes themselves arrived in 2.5.8. What 2.5.9 fixes is the part that decides whether you ever get to use them, which is getting the model files onto your disk.</p>
+
+    <p>Before this release, pressing <strong>Download &amp; install</strong> on one of those cards gave you a spinner and nothing else. No file name, no size, no percentage, no speed, no entry in the Downloads tray, and no way to stop it. Now:</p>
+
+    <ul>
+      <li>The card names the file it is fetching and counts it up, with size and speed</li>
+      <li>The download shows up in the Downloads tray like any other download</li>
+      <li><strong>Cancel</strong> exists and really stops the transfer</li>
+      <li>A dropped connection no longer throws away what already arrived. A failed file retries by itself and each retry continues where the last one stopped, instead of restarting at zero. The old behaviour was a raw "Stream error: error decoding response body" and a dead end</li>
+      <li>The Downloads tray closes itself again instead of sitting over the app reading "No active downloads"</li>
+    </ul>
+
+    <p>Two smaller things in the same area were quietly costing people renders. The Motion Control card kept insisting you "add a character image and a driving dance/pose video above" while both were loaded and the render was already running, and the image and video tools could not see GGUF models at all, because they only read the two ComfyUI loaders that list <code>.safetensors</code> files. Several catalogue bundles ship as GGUF, so you could install one, watch it finish, ask for a picture, and be told nothing was installed. Both fixed.</p>
+
+    <div class="callout tip">
+    <div class="callout-title">What each lane does</div>
+    <strong>Talking Character</strong> animates a portrait from a voice clip, with the length following your audio. <strong>Music</strong> runs ACE-Step and returns a real audio tile with an inline player. <strong>Extend Video</strong> continues a clip you already have by extracting its last frame and feeding the regular image-to-video path. <strong>Motion Control</strong> reads the skeleton out of a driving dance or pose video and re-renders your character following it.
+    </div>
+
+    <h2>The Coding Agent, Rebuilt</h2>
+
+    <p>The coding agent was rebuilt in the places that were quietly burning turns. The headline change is a surgical <code>file_edit</code> tool: it changes the lines you asked for instead of rewriting the whole file, which is both faster and far less likely to lose something on the way through.</p>
+
+    <p>The rest of the pass, in order of how often it bit people:</p>
+
+    <ul>
+      <li>Verify loops no longer serve stale shell, test and read results from the same turn, so "did my change work" gets a fresh answer</li>
+      <li>Context compaction stopped truncating code you had just read to 80 characters</li>
+      <li><code>num_ctx</code> is no longer pinned to 8192, so a 32k model actually gets its context</li>
+      <li>The tool router stopped sending "search", "current" and "latest" to the web when you meant the codebase</li>
+      <li>Diffs show deletions, <code>.lurules</code> actually loads, and stage-and-approve applies in a real folder instead of failing silently</li>
+      <li>Sub-agents no longer collide on tool call ids, which used to produce a cloud 400 whenever a turn used the same tool twice</li>
+      <li>Plus <code>run_tests</code> auto-detect, encoding flags, atomic writes, parallel git safety, an iteration cap, and an embedding cache keyed by model</li>
+    </ul>
+
+    <p>One permission fix belongs here too. "Confirm shell &amp; code commands" is how you tell the agent to stop asking, and on an LU Cloud model it did nothing at all: the confirm dialog was hard-wired on and the switch had no effect. Confirming on a cloud model is still the right default, so it stays the default, but it is a switch you own now. Turn the main confirm off and a second option appears for cloud models specifically.</p>
+
+    <h2>Security: Two Command Injections Closed</h2>
+
+    <p>This release closes two command injection paths in the coding agent, both found during its security pass. In both cases text that the agent had merely <em>read</em> could escape the quoting around it and be executed as a shell command, and neither path went through a confirmation dialog. The trigger did not have to come from you: a poisoned file, a pull request comment or a search result was enough.</p>
+
+    <p>The fixes: quoting now follows the shell that actually runs on your platform rather than assuming one, pull request links are validated against the characters GitHub itself permits, and both paths are pinned by regression tests. We are not publishing the payloads.</p>
+
+    <div class="callout warn">
+    <div class="callout-title">If you use the coding agent, update</div>
+    This is the one item in 2.5.9 that is worth updating for on its own. The rest of the release is correctness work you can take at your own pace.
+    </div>
+
+    <h2>Remote Access Beyond Ollama</h2>
+
+    <p>Remote access forwarded everything to Ollama. That was invisible if Ollama was your backend and total if it was not: a desktop running <strong>LM Studio, Lemonade or llama.cpp</strong> answered your phone with an empty model list and a 400 on every chat.</p>
+
+    <p>The remote server now translates between the Ollama-shaped requests the phone sends and an OpenAI compatible backend, including streaming, tool calls, vision and reasoning. Set up your desktop with whichever backend you prefer and the phone follows.</p>
+
+    <p>Create still stays on the desktop. Remote sessions are text and coding, and the <a href="/remote-access/">remote access guide</a> says so now instead of promising image generation it could not deliver.</p>
+
+    <h2>Three Video Models Are Gone, and Why</h2>
+
+    <p><strong>CogVideoX (both sizes) and Pyramid Flow have been removed from the catalogue.</strong> Not deprecated, not paused: removed, because they could never have produced a video. Their pipelines were built against ComfyUI node names that no version of the wrappers we pointed you at actually registers. Every generation came back as an error, and the install check looked for an invented node too, which is why a correct install was told to go and install what it already had. Between them, those entries offered 46 GB of downloads for that. Allegro is closed for the same reason.</p>
+
+    <p>Two things worth stating plainly:</p>
+
+    <ul>
+      <li><strong>Nothing is deleted from your disk.</strong> If you already downloaded a CogVideoX or Pyramid Flow model, the files stay exactly where they are. They are simply no longer offered in the catalogue</li>
+      <li><strong>Wan 2.1 and 2.2, LTX, SVD, FramePack, Hunyuan, Mochi and Cosmos are unaffected.</strong> The removal is specific to pipelines that were wired to node names that do not exist</li>
+    </ul>
+
+    <p>The same honesty pass took the COMING SOON covers off AnimateDiff v3, Mochi and Cosmos. That badge came from a flag somebody forgot to set, not from anything being unfinished, and their download buttons worked fine underneath the dimmed cover the whole time. Every model in the catalogue now downloads, installs and generates. Error messages also quote model names that exist: the "no video model" message used to send people hunting for a Wan 2.1 entry under a name the Model Manager does not use, and the SVD message did the same. Both now name the entry exactly as the catalogue lists it.</p>
+
+    <h2>Cloud Renders Are Kept Seven Days</h2>
+
+    <p>If you use LU Cloud: renders are kept for <strong>seven days</strong> and then deleted. Cloud mode now says so once, in Create, with a download reminder. This is enforced on the server, not just written on a page. Local generation is untouched by this. Anything you rendered on your own GPU lives in your own gallery for as long as you keep it.</p>
+
+    <h2>Hardware, Honestly</h2>
+
+    <p>The audience for these lanes is every tier of card, and the copy in the app says so. That cuts both ways. The heavy 14B video lanes, Talking Character and Motion Control in particular, are genuinely slow on smaller GPUs even at low step counts. Nobody is served by pretending otherwise.</p>
+
+    <p>What you do about it is the per-lane <strong>Frame</strong>, <strong>Size</strong> and <strong>Step</strong> controls sitting right in the lane. Fewer frames, a smaller output and fewer steps trade quality for time, and on a modest card that trade is the difference between a clip and a timeout. The lighter options are real options, not consolation prizes: Music starts around 4 GB, and Motion Control has a light Wan VACE 1.3B path next to the 14B one. Where a lane needs a node pack your box does not have, it says which one instead of failing silently.</p>
+
+    <h2>Smaller Fixes Worth Naming</h2>
+
+    <ul>
+      <li><strong>A failed image no longer counts as a delivered one.</strong> When ComfyUI returned a 400 or a 500, the image tool handed the error text back as though it were a result: it burned the turn's image budget so the model could not retry, wrote the error into long-term memory, and told the model "the image is now displayed to the user" directly next to the error saying it was not. Models believed that line and built the rest of the conversation on a picture that never existed. Failures are marked as failures everywhere now, and instead of "Task completed: 1 failed" you get the actual reason and a way to retry</li>
+      <li><strong>Read-aloud reaches the Piper voice you picked.</strong> A cold-start probe could cache a false result for a whole session, so every read-aloud quietly fell back to a Windows SAPI voice no matter what you had selected</li>
+      <li><strong>The Edit tab says what it is.</strong> It is called <strong>Edit / Image to Image</strong> now, and the wording makes plain image-to-image obvious: load a source image, leave the mask empty, and it restyles the whole picture. Paint an area and it edits just that. The old name sounded like it was for touch-ups only</li>
+      <li><strong>Image generation is no longer locked to Ask on desktop</strong>, and video generation has a permission row at all. Both settings existed in the agent but not in the interface</li>
+      <li><strong>The interface lost its em-dashes.</strong> Labels, tooltips, errors and onboarding text now read the way the rest of LU is written</li>
+    </ul>
+
+    <h2>Download</h2>
+
+    <p>2.5.9 is on <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/tag/v2.5.9">GitHub Releases</a>, with installers for Windows and Linux. The signed auto-update channel picks it up on next launch if you are already on 2.5.x. New here? The <a href="/guide/">getting started guide</a> takes you from installer to first generation.</p>
+
+    <h2>Related</h2>
+
+    <ul>
+      <li><a href="how-to-generate-ai-videos-locally.html">How to generate AI videos locally</a>, the setup walkthrough for the video lanes</li>
+      <li><a href="local-ai-on-your-phone.html">Local AI on your phone</a>, what remote access does and does not do</li>
+      <li><a href="image-to-image-local-ai.html">Image to image with local AI</a>, the tab that just got a clearer name</li>
+      <li><a href="locally-uncensored-v2-4-0-release.html">v2.4.0 release notes</a>, the previous release write-up on this site</li>
+    </ul>
+
+    <hr>
+
+    <p><em>Locally Uncensored 2.5.9. AGPL-3.0 licensed. Built by <a href="https://github.com/PurpleDoubleD">PurpleDoubleD</a>. Bug reports and feature requests on <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">GitHub Issues</a> or in the <a href="https://locallyuncensored.com/discord">Discord</a>.</em></p>
+  </article>
+
+  <div class="post-footer">
+    <p>Four local Create lanes, a rebuilt coding agent, two injections closed</p>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/tag/v2.5.9" class="cta-btn" target="_blank">
+      Download 2.5.9
+    </a>
+  </div>
+</div>
+
+<footer>
+  <div class="footer-row footer-meta"><span>&copy; 2026 &middot; Locally Uncensored &middot; AGPL-3.0</span></div>
+  <div class="footer-row footer-links">
+    <a href="https://locallyuncensored.com/blog/">Blog</a>
+    <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
+    <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions">Discussions</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
+    <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
+    <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+  </div>
+</footer>
+</body>
+</html>

@@ -13,6 +13,8 @@ import {
   repairJson,
   repairToolCallArgs,
   extractToolCallsFromContent,
+  extractToolCallsWithRanges,
+  stripRanges,
 } from '../tool-call-repair'
 
 describe('tool-call-repair', () => {
@@ -319,5 +321,82 @@ And after.`
       expect(calls).toHaveLength(1)
       expect(calls[0].name).toBe('process_list')
     })
+  })
+})
+
+// Live Agent run on the ship exe, 2026-07-25: a model wrapped its call in the
+// Hermes tags, stripRanges removed only the JSON, and the leftover `<tool_call>`
+// rendered as a stray `ool_call>` in the transcript (the renderer eats the first
+// two chars of an unknown tag).
+describe('stripRanges clears the tool-call wrapper, not just the JSON', () => {
+  const strip = (content: string) => {
+    const { ranges } = extractToolCallsWithRanges(content)
+    return stripRanges(content, ranges)
+  }
+
+  it('leaves no Hermes tag behind', () => {
+    const out = strip('Let me look.\n<tool_call>\n{"name": "file_list", "arguments": {"path": "."}}\n</tool_call>')
+    expect(out).not.toContain('tool_call')
+    expect(out).toBe('Let me look.')
+  })
+
+  it('handles the pipe and bracket spellings too', () => {
+    expect(strip('<|tool_call|>{"name": "file_read", "arguments": {"path": "a"}}<|/tool_call|>')).toBe('')
+    expect(strip('[TOOL_CALL]{"name": "file_read", "arguments": {"path": "a"}}[/TOOL_CALL]')).toBe('')
+  })
+
+  it('does not touch ordinary prose that merely mentions the words', () => {
+    const prose = 'the tool call failed, try again'
+    expect(stripRanges(prose, [])).toBe(prose)
+  })
+})
+
+// Measured 2026-07-28: repairJson rewrote the whole text blindly, so the repairs
+// destroyed the payloads they were meant to rescue. Every case below produced
+// `null` before the string-aware rewrite — the tool call was dropped and the
+// model got no error it could react to.
+describe('repairJson does not corrupt the payload it repairs', () => {
+  it('keeps single-quoted code inside a double-quoted string', () => {
+    expect(repairJson(`{"path":"hello.py","content":"print('hello')",}`)).toEqual({
+      path: 'hello.py',
+      content: "print('hello')",
+    })
+  })
+
+  it('keeps an apostrophe in prose', () => {
+    expect(repairJson(`{"path":"note.md","content":"It doesn't matter",}`)).toEqual({
+      path: 'note.md',
+      content: "It doesn't matter",
+    })
+  })
+
+  it('keeps a CSS block that looks like a bare key', () => {
+    expect(repairJson(`{"path":"a.css","content":"a { color: red }",}`)).toEqual({
+      path: 'a.css',
+      content: 'a { color: red }',
+    })
+  })
+
+  it('counts only structural braces when closing an unterminated object', () => {
+    expect(repairJson(`{"path":"a.js","content":"const re = /\\\\{/"`)).toEqual({
+      path: 'a.js',
+      content: 'const re = /\\{/',
+    })
+  })
+
+  it('closes nested containers innermost first', () => {
+    expect(repairJson('{"a": [1, 2')).toEqual({ a: [1, 2] })
+  })
+
+  it('still converts genuinely single-quoted JSON', () => {
+    expect(repairJson(`{'name': 'web_search', 'arguments': {'query': "it's fine"}}`)).toEqual({
+      name: 'web_search',
+      arguments: { query: "it's fine" },
+    })
+  })
+
+  it('picks the first balanced object out of prose instead of spanning both', () => {
+    const out = repairJson('First {"name":"a","arguments":{"x":1}} then {"name":"b"}')
+    expect(out).toEqual({ name: 'a', arguments: { x: 1 } })
   })
 })

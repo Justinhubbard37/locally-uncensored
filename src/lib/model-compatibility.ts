@@ -1,12 +1,33 @@
 /**
  * Model Compatibility for Agent Mode — now provider-aware.
  *
- * Cloud providers (OpenAI, Anthropic) always support native tool calling.
- * Ollama models need explicit compatibility checks.
+ * Cloud providers (OpenAI, Anthropic, LU Cloud) always support native tool
+ * calling. Ollama models need explicit compatibility checks.
  */
 
 import { getProviderIdFromModel } from '../api/providers'
 import type { ProviderId } from '../api/providers/types'
+
+/**
+ * Providers whose endpoints speak native OpenAI-style tool calling, so the
+ * local name heuristics below must never gate them.
+ *
+ * `lu-cloud` used to be missing here, and the name heuristic then decided per
+ * model: families that happen to be listed in AGENT_COMPATIBLE (qwen3-coder,
+ * hermes, …) resolved to 'native', everything else — Kimi K2.6, MiniMax,
+ * DeepSeek-V4 — fell through to 'hermes_xml'. The Hermes branch calls
+ * chatNonStreaming(), which posts to the LOCAL Ollama endpoint, so a cloud
+ * model that isn't installed locally answered "Chat API error: 404" and the
+ * whole Chat-tab agent run died (live repro 2026-07-27, Kimi K2.6 + Cloud).
+ * Cloud tool capability is server-driven: the picker hides tool-less models
+ * (`supports_tools` from /api/inference/v1/models) and the proxy rejects them
+ * with a clean 400, so 'native' is both correct and safe here.
+ */
+const NATIVE_TOOL_PROVIDERS: readonly string[] = ['openai', 'anthropic', 'lu-cloud']
+
+export function isNativeToolProvider(providerId: string): boolean {
+  return NATIVE_TOOL_PROVIDERS.includes(providerId)
+}
 
 const AGENT_COMPATIBLE = [
   // ── Hermes: THE uncensored agent model ──
@@ -63,7 +84,12 @@ function normalizeFamily(modelName: string): string {
   // slashes — the previous non-greedy strip left `trevorjs/...` behind and
   // the anchored dash-collapse below missed `gemma-4` entirely. Greedy fix
   // covers `hf.co/<user>/<repo>:<tag>`, `<user>/<repo>:<tag>`, and bare tags.
-  let s = modelName.toLowerCase().replace(/^.*\//, '')
+  // Drop LU's `provider::` routing prefix first. Ollama models are stored bare
+  // so this never used to matter, but every other provider prefixes, and the
+  // `:tag` strip below would otherwise cut at the FIRST colon and reduce
+  // `lu-cloud::qwen3-32b` to `lu-cloud` — every family check then silently
+  // says no.
+  let s = modelName.toLowerCase().replace(/^[a-z0-9_-]+::/, '').replace(/^.*\//, '')
   // Suffix markers — drop wherever they appear
   s = s
     .replace(/-abliterated/g, '')
@@ -122,7 +148,7 @@ export function isAgentCompatible(modelName: string | null): boolean {
   const providerId = getProviderIdFromModel(modelName)
 
   // Cloud providers always support tool calling
-  if (providerId === 'openai' || providerId === 'anthropic') return true
+  if (isNativeToolProvider(providerId)) return true
 
   const baseName = normalizeFamily(modelName)
   return AGENT_COMPATIBLE.some((f) => containsFamily(f, baseName))
@@ -144,6 +170,21 @@ const THINKING_COMPATIBLE = [
   'qwen3-coder',
   'gemma3',      // Gemma 3+ supports thinking via Ollama
   'gemma4',
+  // Families below all take Ollama's `think` param (they shipped after the
+  // list above was written and the Think toggle stayed wrongly grayed out —
+  // David 2026-07-12: "guck, dass jedes Schema von den Models gedeckt ist").
+  // A false positive is caught by the retry-without-think fallback in
+  // useChat, so listing errs on the side of enabling the toggle.
+  'gpt-oss',            // OpenAI gpt-oss 20b/120b — thinking levels
+  'magistral',          // Mistral's reasoning line
+  'deepseek-v3.1',      // hybrid think/non-think
+  'deepseek-v3.2',
+  'exaone-deep',
+  'phi4-reasoning',     // covers phi-4-reasoning(+plus) after dash-collapse
+  'phi4-mini-reasoning',
+  'glm4.5', 'glm4.6', 'glm4.7',  // GLM hybrid reasoning (NOT plain glm4:9b)
+  'kimi-k2-thinking',
+  'minimax-m2',
 ]
 
 /**
@@ -156,7 +197,7 @@ const THINKING_COMPATIBLE = [
 export function isThinkingCompatible(modelName: string | null): boolean {
   if (!modelName) return false
   const providerId = getProviderIdFromModel(modelName)
-  if (providerId === 'openai' || providerId === 'anthropic') return true
+  if (isNativeToolProvider(providerId)) return true
 
   const baseName = normalizeFamily(modelName)
   return THINKING_COMPATIBLE.some(f => containsFamily(f, baseName))
@@ -195,7 +236,7 @@ const VISION_COMPATIBLE = [
 export function isVisionCompatible(modelName: string | null): boolean {
   if (!modelName) return false
   const providerId = getProviderIdFromModel(modelName)
-  if (providerId === 'openai' || providerId === 'anthropic') return true
+  if (isNativeToolProvider(providerId)) return true
 
   const baseName = normalizeFamily(modelName)
   return VISION_COMPATIBLE.some(f => containsFamily(f, baseName))
@@ -252,7 +293,7 @@ export function getToolCallingStrategy(modelName: string): ToolCallingStrategy {
   const providerId = getProviderIdFromModel(modelName)
 
   // Cloud providers always use native tool calling
-  if (providerId === 'openai' || providerId === 'anthropic') return 'native'
+  if (isNativeToolProvider(providerId)) return 'native'
 
   // Ollama
   return isAgentCompatible(modelName) ? 'native' : 'hermes_xml'

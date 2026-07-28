@@ -89,6 +89,14 @@ const SOURCE_EXTS: &[&str] = &[
 /// targets if something imports them — we just don't read them.
 const MAX_PARSE_BYTES: u64 = 512 * 1024;
 
+/// Upper bound on how many files the walk collects. The working directory is
+/// whatever folder the user picked — pointing Code mode at a home directory
+/// instead of a repo is an easy mistake, and without a bound the walk
+/// enumerated the whole tree and then read and parsed every source file in it,
+/// for a map that returns at most 200 entries. Same lock-up class the ComfyUI
+/// detection had to bound (install.rs, 200k-file home dir).
+const MAX_WALK_FILES: usize = 20_000;
+
 // ── Import-parsing regexes ─────────────────────────────────────────
 
 static RE_TS_FROM: Lazy<Regex> = Lazy::new(|| {
@@ -119,11 +127,13 @@ fn is_ignored_dir(name: &str) -> bool {
 }
 
 /// Walks `root` and returns relative paths (POSIX-style, forward slashes)
-/// for every regular file we can plausibly want to map. Symlinks are
-/// followed (matches how an editor would view the tree). Hidden files
-/// outside `.gitignore`-style heuristics are dropped — they're noise.
-pub fn walk_repo(root: &Path) -> Vec<String> {
+/// for every regular file we can plausibly want to map, plus whether the walk
+/// stopped at `MAX_WALK_FILES`. Symlinks are NOT followed — a link pointing at
+/// a parent directory would otherwise walk forever. Hidden files outside
+/// `.gitignore`-style heuristics are dropped — they're noise.
+pub fn walk_repo(root: &Path) -> (Vec<String>, bool) {
     let mut out = Vec::new();
+    let mut truncated = false;
     let walker = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
@@ -144,8 +154,12 @@ pub fn walk_repo(root: &Path) -> Vec<String> {
                 out.push(rel);
             }
         }
+        if out.len() >= MAX_WALK_FILES {
+            truncated = true;
+            break;
+        }
     }
-    out
+    (out, truncated)
 }
 
 // ── Import resolution ──────────────────────────────────────────────
@@ -464,8 +478,8 @@ fn extract_snippet(content: &str) -> String {
 
 /// Builds the repo map for `root`. Returns top-N ranked files filtered by
 /// optional `query`. Pure on the filesystem at `root` — no global state.
-pub fn build_repo_map(root: &Path, query: Option<&str>, limit: usize) -> Vec<FileEntry> {
-    let files = walk_repo(root);
+pub fn build_repo_map(root: &Path, query: Option<&str>, limit: usize) -> (Vec<FileEntry>, bool) {
+    let (files, truncated) = walk_repo(root);
     let file_set: HashSet<String> = files.iter().cloned().collect();
 
     // Build edges. Skip non-source files for parsing, but they still
@@ -514,7 +528,7 @@ pub fn build_repo_map(root: &Path, query: Option<&str>, limit: usize) -> Vec<Fil
     });
     entries.truncate(limit);
 
-    entries
+    let out = entries
         .into_iter()
         .map(|(path, score)| {
             let snippet = fs::read_to_string(root.join(&path))
@@ -528,7 +542,8 @@ pub fn build_repo_map(root: &Path, query: Option<&str>, limit: usize) -> Vec<Fil
                 snippet,
             }
         })
-        .collect()
+        .collect();
+    (out, truncated)
 }
 
 // ── Tauri command ─────────────────────────────────────────────────
@@ -547,7 +562,7 @@ async fn repo_map_impl(args: &Value) -> CmdResult {
         )));
     }
     let limit = a.limit.unwrap_or(20).clamp(1, 200);
-    let entries = tokio::task::spawn_blocking(move || {
+    let (entries, truncated) = tokio::task::spawn_blocking(move || {
         build_repo_map(&root, a.query.as_deref(), limit)
     })
     .await
@@ -560,6 +575,17 @@ async fn repo_map_impl(args: &Value) -> CmdResult {
             "snippet": e.snippet,
         })).collect::<Vec<_>>(),
         "count": entries.len(),
+        // Say it when the walk stopped early, so a map of a home directory
+        // isn't mistaken for a complete picture of a project.
+        "truncated": truncated,
+        "note": if truncated {
+            Some(format!(
+                "Only the first {} files were scanned — this folder is far larger than a project. Point the working directory at the project root for a complete map.",
+                MAX_WALK_FILES
+            ))
+        } else {
+            None
+        },
     }))
 }
 
@@ -605,7 +631,8 @@ mod tests {
             ("target/debug/zz.rs", "// build artifact"),
             (".next/cache/x.bin", "x"),
         ]);
-        let mut files = walk_repo(dir.path());
+        let (mut files, truncated) = walk_repo(dir.path());
+        assert!(!truncated, "a six-file fixture must not hit the walk cap");
         files.sort();
         assert!(files.contains(&"src/a.ts".to_string()));
         assert!(files.contains(&"src/b.ts".to_string()));
@@ -619,6 +646,23 @@ mod tests {
                 f
             );
         }
+    }
+
+    #[test]
+    fn the_walk_stops_at_the_cap_and_says_so() {
+        // A folder that is not a project (a home directory) must not drag the
+        // whole tree into a map that returns at most 200 entries.
+        let files: Vec<(String, String)> = (0..(MAX_WALK_FILES + 50))
+            .map(|i| (format!("f{}.txt", i), String::from("x")))
+            .collect();
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let dir = fixture(&refs);
+        let (walked, truncated) = walk_repo(dir.path());
+        assert!(truncated, "cap was not reported");
+        assert_eq!(walked.len(), MAX_WALK_FILES);
     }
 
     #[test]
@@ -739,12 +783,12 @@ mod tests {
             ("src/unrelated/x.ts", "export const x = 0\n"),
         ]);
         // Global top — hub should be #1.
-        let global = build_repo_map(dir.path(), None, 5);
+        let (global, _) = build_repo_map(dir.path(), None, 5);
         assert!(!global.is_empty());
         assert_eq!(global[0].path, "src/hub.ts");
 
         // Query filter — only files matching `unrelated` survive.
-        let filtered = build_repo_map(dir.path(), Some("unrelated"), 5);
+        let (filtered, _) = build_repo_map(dir.path(), Some("unrelated"), 5);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].path, "src/unrelated/x.ts");
     }
@@ -770,7 +814,7 @@ mod tests {
             files.push((Box::leak(format!("src/f{}.ts", i).into_boxed_str()) as &str, ""));
         }
         let dir = fixture(&files);
-        let out = build_repo_map(dir.path(), None, 5);
+        let (out, _) = build_repo_map(dir.path(), None, 5);
         assert_eq!(out.len(), 5);
     }
 }

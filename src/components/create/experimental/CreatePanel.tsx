@@ -1,8 +1,9 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { Images, Play, PanelRightClose, PanelRightOpen, Trash2, Download, MonitorOff } from 'lucide-react'
+import { Images, Play, PanelRightClose, PanelRightOpen, Trash2, Download, MonitorOff, AudioLines } from 'lucide-react'
 import { downloadMediaUrl } from '../../../lib/download-media'
-import { useCreateStore } from '../../../stores/createStore'
-import { galleryItemUrl, markGalleryItemAvailable, recoverGalleryUrl } from './galleryUrl'
+import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
+import { galleryItemUrl } from './galleryUrl'
+import { useComfyMedia } from './useComfyMedia'
 import { cn } from '../ui/cn'
 
 interface Props {
@@ -96,18 +97,11 @@ export function CreatePanel({ open, onOpenChange, activeId, onSelect }: Props) {
                         g.intent === 'removebg' && 'lu-checker',
                       )}
                     >
-                      {g.type === 'video' ? (
-                        <>
-                          <video src={galleryItemUrl(g)} muted playsInline onError={() => recoverGalleryUrl(g)} onLoadedData={() => markGalleryItemAvailable(g)} className="w-full h-full object-cover" />
-                          <span className="absolute inset-0 flex items-center justify-center bg-black/20"><Play size={16} className="text-white/90" /></span>
-                        </>
-                      ) : (
-                        <img src={galleryItemUrl(g)} alt="" onError={() => recoverGalleryUrl(g)} onLoad={() => markGalleryItemAvailable(g)} className="w-full h-full object-cover" />
-                      )}
+                      <GalleryThumb g={g} />
                       {g.unavailable && (
                         <span
                           className="absolute inset-0 flex items-center justify-center bg-black/50 text-gray-500"
-                          title="Local render — the local engine isn't reachable"
+                          title="Local render, but the local engine isn't reachable"
                         >
                           <MonitorOff size={16} />
                         </span>
@@ -135,5 +129,30 @@ export function CreatePanel({ open, onOpenChange, activeId, onSelect }: Props) {
         </motion.aside>
       )}
     </AnimatePresence>
+  )
+}
+
+// One thumbnail. Its own component so it can use the useComfyMedia hook (which
+// falls back to the Rust proxy when a user-managed ComfyUI 0.19+ 403s the
+// direct /view load, #75) — hooks can't run inside the gallery .map().
+function GalleryThumb({ g }: { g: GalleryItem }) {
+  const { src, onError, onLoad } = useComfyMedia(g)
+  if (g.type === 'audio') {
+    // No visual to thumbnail — a labeled tile; the Stage viewer holds the
+    // actual <audio> player.
+    return (
+      <span className="w-full h-full flex flex-col items-center justify-center gap-1 bg-white/[0.03] text-gray-400 p-1">
+        <AudioLines size={16} />
+        <span className="t-label truncate max-w-full px-1">{g.prompt || 'Audio'}</span>
+      </span>
+    )
+  }
+  return g.type === 'video' ? (
+    <>
+      <video src={src} muted playsInline onError={onError} onLoadedData={onLoad} className="w-full h-full object-cover" />
+      <span className="absolute inset-0 flex items-center justify-center bg-black/20"><Play size={16} className="text-white/90" /></span>
+    </>
+  ) : (
+    <img src={src} alt="" onError={onError} onLoad={onLoad} className="w-full h-full object-cover" />
   )
 }

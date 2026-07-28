@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { makeInTurnCacheLookup } from '../in-turn-cache'
-import { useToolAuditStore } from '../../../stores/toolAuditStore'
+import { useToolAuditStore, AUDIT_FULL_RESULT_MAX_CHARS } from '../../../stores/toolAuditStore'
 import { stableArgsHash } from '../block-helpers'
 import type { ExecutionRequest } from '../tool-executor'
 
@@ -122,5 +122,90 @@ describe('in-turn-cache — makeInTurnCacheLookup', () => {
 
     const lookup = makeInTurnCacheLookup({ convId: 'c1', turnStartMs: 0 })
     expect(lookup(req('new', 'web_search', args), stableArgsHash(args))).toBeUndefined()
+  })
+})
+
+describe('in-turn-cache — non-idempotent tools are never served (#1)', () => {
+  beforeEach(() => useToolAuditStore.getState().clearAll())
+
+  for (const tool of ['shell_execute', 'code_execute', 'run_tests', 'file_write', 'file_edit', 'git_status', 'git_commit']) {
+    it(`never serves a cached ${tool}`, () => {
+      const s = useToolAuditStore.getState()
+      const args = { command: 'npm test' }
+      const id = s.record({ convId: 'c1', toolCallId: 'p', toolName: tool, args, startedAt: 1000 })
+      s.complete(id, { status: 'completed', completedAt: 1100, resultPreview: 'FAIL: 1 failing' })
+
+      const lookup = makeInTurnCacheLookup({ convId: 'c1', turnStartMs: 500 })
+      // Even an identical prior call must re-run, never replay a stale result.
+      expect(lookup(req('new', tool, args), stableArgsHash(args))).toBeUndefined()
+    })
+  }
+})
+
+describe('in-turn-cache — read invalidation after mutation (#1)', () => {
+  beforeEach(() => useToolAuditStore.getState().clearAll())
+
+  it('serves a cached file_read when nothing mutated after it', () => {
+    const s = useToolAuditStore.getState()
+    const args = { path: '/proj/a.ts' }
+    const id = s.record({ convId: 'c1', toolCallId: 'r1', toolName: 'file_read', args, startedAt: 1000 })
+    s.complete(id, { status: 'completed', completedAt: 1050, resultPreview: 'const a = 1' })
+
+    const lookup = makeInTurnCacheLookup({ convId: 'c1', turnStartMs: 500 })
+    expect(lookup(req('r2', 'file_read', args), stableArgsHash(args))).toBe('const a = 1')
+  })
+
+  it('invalidates a cached file_read once a file_write ran after it', () => {
+    const s = useToolAuditStore.getState()
+    const args = { path: '/proj/a.ts' }
+    const rid = s.record({ convId: 'c1', toolCallId: 'r1', toolName: 'file_read', args, startedAt: 1000 })
+    s.complete(rid, { status: 'completed', completedAt: 1050, resultPreview: 'const a = 1' })
+    // A write lands after the read — the read is now stale.
+    const wid = s.record({ convId: 'c1', toolCallId: 'w1', toolName: 'file_write', args: { path: '/proj/a.ts', content: 'const a = 2' }, startedAt: 1100 })
+    s.complete(wid, { status: 'completed', completedAt: 1150, resultPreview: 'saved' })
+
+    const lookup = makeInTurnCacheLookup({ convId: 'c1', turnStartMs: 500 })
+    expect(lookup(req('r2', 'file_read', args), stableArgsHash(args))).toBeUndefined()
+  })
+
+  it('invalidates a cached file_read after an opaque shell_execute (may touch any path)', () => {
+    const s = useToolAuditStore.getState()
+    const args = { path: '/proj/a.ts' }
+    const rid = s.record({ convId: 'c1', toolCallId: 'r1', toolName: 'file_read', args, startedAt: 1000 })
+    s.complete(rid, { status: 'completed', completedAt: 1050, resultPreview: 'old' })
+    const sid = s.record({ convId: 'c1', toolCallId: 's1', toolName: 'shell_execute', args: { command: 'npm run codegen' }, startedAt: 1100 })
+    s.complete(sid, { status: 'completed', completedAt: 1200, resultPreview: 'done' })
+
+    const lookup = makeInTurnCacheLookup({ convId: 'c1', turnStartMs: 500 })
+    expect(lookup(req('r2', 'file_read', args), stableArgsHash(args))).toBeUndefined()
+  })
+})
+
+describe('in-turn-cache — serves the FULL result, not the panel preview (#9)', () => {
+  beforeEach(() => useToolAuditStore.getState().clearAll())
+
+  it('returns the whole file, not the 500-char clipped preview', () => {
+    const s = useToolAuditStore.getState()
+    const args = { path: '/proj/big.ts' }
+    const big = 'X'.repeat(600) // longer than AUDIT_RESULT_PREVIEW_CHARS (500)
+    const id = s.record({ convId: 'c1', toolCallId: 'r1', toolName: 'file_read', args, startedAt: 1000 })
+    s.complete(id, { status: 'completed', completedAt: 1050, resultPreview: big })
+
+    const lookup = makeInTurnCacheLookup({ convId: 'c1', turnStartMs: 500 })
+    const hit = lookup(req('r2', 'file_read', args), stableArgsHash(args))
+    expect(hit).toBe(big)
+    expect(hit).toHaveLength(600)
+  })
+
+  it('misses (re-reads) when the result exceeds the retained full-result cap', () => {
+    const s = useToolAuditStore.getState()
+    const args = { path: '/proj/huge.log' }
+    const huge = 'Y'.repeat(AUDIT_FULL_RESULT_MAX_CHARS + 1)
+    const id = s.record({ convId: 'c1', toolCallId: 'r1', toolName: 'file_read', args, startedAt: 1000 })
+    s.complete(id, { status: 'completed', completedAt: 1050, resultPreview: huge })
+
+    const lookup = makeInTurnCacheLookup({ convId: 'c1', turnStartMs: 500 })
+    // Not served as a truncated slice — a miss so the executor re-reads.
+    expect(lookup(req('r2', 'file_read', args), stableArgsHash(args))).toBeUndefined()
   })
 })

@@ -33,15 +33,33 @@ import { DEFAULT_SETTINGS, BUILT_IN_PERSONAS } from '../lib/constants'
 // v12 (2.5.7): added settings.comfyGpuMode ('auto'|'cpu'|'gpu', default
 // 'auto') for the AMD ComfyUI GPU path (rhodium92). Additive — the merge
 // fills the default while preserving every existing value; NVIDIA unaffected.
-// v13 (2.5.7): added settings.cloudOnboardingSeen (one-time Cloud onboarding
-// on the first successful switch flip, default false). Additive merge.
-// v14 (2026-07-22): the macOS Cloud-only wall is lifted — the Mac app is a full
-// local+cloud app again (local mode built + tested). Existing Mac installs were
-// force-pinned to appMode 'cloud' with no real choice, so reset them to the
-// local default ONCE so they land in the now-built local mode; the visible
-// switch lets them flip back to cloud anytime. Windows/Linux appMode reflects a
-// real user choice and is never touched.
-const STORE_VERSION = 14
+// v13 (2.5.7): added settings.cloudOnboardingSeen — REMOVED in 2.6.0: the
+// one-time onboarding moved into the web checkout (#91); stale persisted
+// values are ignored by the merge.
+// v14 (2.5.8): added settings.cloudTeasersEnabled (Cloud discovery in Local
+// mode: locked Create tabs + hosted-model picker rows, default true). Additive.
+// v15 (2.5.9): added settings.codexCloudConfirmShell (default true). The cloud
+// shell-confirm was hard-wired in useCodex, so the existing confirm toggle did
+// nothing on a cloud model. Additive merge backfills the default — behaviour is
+// byte-for-byte what 2.5.8 did until the user turns the new switch off.
+// v16 (2.5.9): added settings.loopMaxPasses (default 0 = unlimited). Additive,
+// but the bump is what makes the merge RUN — without it an existing profile
+// keeps the field undefined and the Settings number box renders empty, which
+// is how this was caught on the ship exe (2026-07-25). Behaviour was already
+// correct via `?? 0`; this is so the UI shows the real value.
+// v17 (2.5.10): added settings.codexAutoApply (default false) — auto-apply
+// staged changes when the run finishes. Additive merge backfills the default;
+// stage-mode behaviour is unchanged until the user turns the new switch on.
+// v18 (2.6.0): added settings.builtinEngine (expert tuning for the bundled
+// llama-server: ctx, flash attention, KV-cache quant, threads, GPU layers,
+// mlock/mmap; defaults = the exact pre-2.6.0 argv). Additive merge backfills
+// the default object; engine behaviour is unchanged until the user edits it.
+// v19 (2.6.0): the macOS Cloud-only wall is lifted — the Mac app is a full
+// local+cloud app again. Existing Mac installs were force-pinned to appMode
+// 'cloud' with no real choice, so reset them to the local default ONCE so they
+// land in the now-built local mode; the visible switch flips back anytime.
+// Windows/Linux appMode reflects a real user choice and is never touched.
+const STORE_VERSION = 19
 
 interface SettingsState {
   settings: Settings
@@ -122,8 +140,8 @@ export const useSettingsStore = create<SettingsState>()(
             mergedSettings.preferredVideoT2VModel = ''
             mergedSettings.preferredVideoI2VModel = ''
           }
-          // v14: reset the force-pinned Mac cloud lock to the local default.
-          if (version < 14) {
+          // v19: release the Mac cloud lock (see the version log above).
+          if (version < 19) {
             const isMac = typeof navigator !== 'undefined' &&
               (/Mac|iPhone|iPad|iPod/.test(navigator.platform || '') ||
                /Mac OS X|Macintosh/.test(navigator.userAgent || ''))

@@ -29,7 +29,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::process::Command;
 
-const MLX_PORT: u16 = 47712;
+pub const MLX_PORT: u16 = 47712;
 
 fn mlx_root() -> PathBuf {
     crate::os_paths::data_dir().join("mlx")

@@ -132,7 +132,127 @@ describe('compactMessages', () => {
       { role: 'assistant', content: 'new answer' },
     ]
     const result = compactMessages(messages, 50)
-    // Should have compacted the tool call pair into a summary
+    // Oldest messages (incl. the tool call pair) are dropped, not summarized.
     expect(result.length).toBeLessThanOrEqual(messages.length)
+  })
+
+  it('keeps a recent tool result verbatim — never a char-truncated slice', () => {
+    // A file the agent read must survive compaction intact, or the model edits
+    // against content it can no longer see.
+    const bigResult = 'export const config = {\n' + '  key: "value",\n'.repeat(60) + '}'
+    const messages: OllamaChatMessage[] = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'old '.repeat(400) },
+      { role: 'assistant', content: 'old '.repeat(400) },
+      { role: 'user', content: 'read the config' },
+      { role: 'assistant', content: '', tool_calls: [{ function: { name: 'file_read', arguments: { path: 'config.ts' } } }] },
+      { role: 'tool', content: bigResult },
+      { role: 'assistant', content: 'done' },
+    ]
+    const result = compactMessages(messages, 150)
+    const toolMsg = result.find((m) => m.role === 'tool')
+    // Full content, not a 80-char summary line.
+    expect(toolMsg?.content).toBe(bigResult)
+  })
+
+  it('drops oldest messages behind a notice, not a lossy summary', () => {
+    const messages: OllamaChatMessage[] = [
+      { role: 'system', content: 'sys' },
+      ...Array.from({ length: 10 }, (_, i) => ({
+        role: (i % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant',
+        content: `msg ${i} ${'x'.repeat(200)}`,
+      })),
+      { role: 'user', content: 'latest' },
+    ]
+    const result = compactMessages(messages, 120)
+    // Real system prompt stays first.
+    expect(result[0].content).toBe('sys')
+    // A trim notice is present (not a "[Previous conversation summary]").
+    expect(result.some((m) => m.role === 'system' && m.content.includes('trimmed to fit'))).toBe(true)
+    // Newest message preserved verbatim.
+    expect(result[result.length - 1].content).toBe('latest')
+  })
+})
+
+// ── Oversized tool results (2.5.10) ────────────────────────────────
+// KEEP_RECENT keeps the newest messages even over budget — before the cap,
+// one giant file_read result rode along VERBATIM in every request (live
+// 2026-07-26: ~225k-token prompts against a 6.5k trim target).
+
+describe('compactMessages — oversized tool results', () => {
+  const giant = 'A'.repeat(3000) + 'M'.repeat(6000) + 'Z'.repeat(3000) // 12k chars
+
+  const history = (): OllamaChatMessage[] => [
+    { role: 'system', content: 'sys' },
+    { role: 'user', content: 'old '.repeat(400) },
+    { role: 'assistant', content: 'old '.repeat(400) },
+    { role: 'user', content: 'read it' },
+    { role: 'tool', content: giant },
+    { role: 'assistant', content: 'done' },
+  ]
+
+  it('caps a giant kept tool result head+tail instead of keeping it verbatim', () => {
+    const messages = history()
+    const result = compactMessages(messages, 150)
+    const toolMsg = result.find((m) => m.role === 'tool')
+    expect(toolMsg).toBeDefined()
+    expect(toolMsg!.content.length).toBeLessThan(giant.length)
+    expect(toolMsg!.content).toMatch(/truncated \d+ chars/)
+    // Head and tail survive — that is where the signal lives.
+    expect(toolMsg!.content.startsWith('AAAA')).toBe(true)
+    expect(toolMsg!.content.endsWith('ZZZZ')).toBe(true)
+    // The caller's array is never mutated.
+    expect(messages[4].content).toBe(giant)
+  })
+
+  it('never caps user or assistant text, only tool results', () => {
+    const bigUser = 'u'.repeat(9000)
+    const messages: OllamaChatMessage[] = [
+      { role: 'user', content: 'old '.repeat(400) },
+      { role: 'assistant', content: 'old '.repeat(400) },
+      { role: 'user', content: bigUser },
+      { role: 'assistant', content: 'ok' },
+      { role: 'user', content: 'next' },
+      { role: 'assistant', content: 'sure' },
+    ]
+    const result = compactMessages(messages, 150)
+    expect(result.some((m) => m.content === bigUser)).toBe(true)
+  })
+
+  it('touches nothing while the history is within budget', () => {
+    const messages = history()
+    expect(compactMessages(messages, 100000)).toEqual(messages)
+  })
+
+  it('caps Hermes-style <tool_response> results carried on user messages too', () => {
+    const messages: OllamaChatMessage[] = [
+      { role: 'user', content: 'old '.repeat(400) },
+      { role: 'assistant', content: 'old '.repeat(400) },
+      { role: 'assistant', content: 'reading' },
+      { role: 'user', content: `<tool_response>${giant}</tool_response>` },
+      { role: 'assistant', content: 'done' },
+      { role: 'user', content: 'next' },
+    ]
+    const result = compactMessages(messages, 150)
+    const carrier = result.find((m) => typeof m.content === 'string' && m.content.includes('<tool_response>'))
+    expect(carrier).toBeDefined()
+    expect(carrier!.content.length).toBeLessThan(giant.length)
+  })
+
+  it('the trim notice no longer instructs a blanket re-read', () => {
+    const messages: OllamaChatMessage[] = [
+      { role: 'system', content: 'sys' },
+      ...Array.from({ length: 12 }, (_, i) => ({
+        role: (i % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant',
+        content: `msg ${i} ${'x'.repeat(200)}`,
+      })),
+    ]
+    const result = compactMessages(messages, 120)
+    const notice = result.find((m) => m.role === 'system' && m.content.includes('trimmed to fit'))
+    expect(notice).toBeDefined()
+    // The old wording ("Re-read any file you still need with file_read.")
+    // actively FED the re-read loop.
+    expect(notice!.content).not.toContain('Re-read any file you still need')
+    expect(notice!.content).toMatch(/never repeat a call/)
   })
 })

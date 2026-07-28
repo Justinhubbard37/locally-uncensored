@@ -28,6 +28,7 @@
  * does the object<->string (de)serialisation around this string StateStorage.
  */
 import type { StateStorage } from 'zustand/middleware'
+import { log } from './logger'
 
 const DB_NAME = 'locally-uncensored-store'
 const STORE = 'kv'
@@ -54,7 +55,7 @@ const hasIDB: boolean = (() => {
 let _db: Promise<IDBDatabase> | null = null
 function getDB(): Promise<IDBDatabase> {
   if (_db) return _db
-  _db = new Promise<IDBDatabase>((resolve, reject) => {
+  const opening = new Promise<IDBDatabase>((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION)
     req.onupgradeneeded = () => {
       const db = req.result
@@ -64,7 +65,16 @@ function getDB(): Promise<IDBDatabase> {
     req.onerror = () => reject(req.error)
     req.onblocked = () => reject(new Error('indexedDB open blocked'))
   })
-  return _db
+  _db = opening
+  // A FAILED open must not stay cached. Keeping the rejected promise meant one
+  // transient failure — a second window blocking the upgrade, a momentarily
+  // busy profile dir — turned into "every read and write fails for the rest of
+  // the session", i.e. the user's chats silently stopped being saved until
+  // restart. Dropping it lets the next call open again.
+  opening.catch(() => {
+    if (_db === opening) _db = null
+  })
+  return opening
 }
 
 function idbGet(key: string): Promise<string | null> {
@@ -131,8 +141,22 @@ export const idbStorage: StateStorage = {
       try {
         await idbSet(name, value)
         lsDel(name) // drop the migrated localStorage copy → frees the 5 MB cap
-      } catch {
+      } catch (err) {
+        // Say it out loud. localStorage swallows its own quota errors, so if
+        // this fallback also fails nothing anywhere would ever mention that the
+        // user's chats are no longer being saved — they would simply be gone
+        // after the next launch.
+        log.warn('[idbStorage] IndexedDB write failed, falling back to localStorage', {
+          key: name,
+          err: String(err),
+        })
         lsSet(name, value) // idb write failed → localStorage best-effort
+        if (lsGet(name) !== value) {
+          log.error('[idbStorage] BOTH backends failed — this state is NOT being persisted', {
+            key: name,
+            bytes: value.length,
+          })
+        }
       }
     })()
   },

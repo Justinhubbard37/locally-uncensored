@@ -10,6 +10,8 @@ import {
   t2vModels,
   i2vModels,
   modelForOp,
+  opPickerModels,
+  resolveOpPick,
 } from '../cloudCatalogStore'
 import { CLOUD_MODEL_SEED } from '../../lib/render/cloud-models'
 import type { CloudCatalog } from '../../api/cloud/catalog'
@@ -46,8 +48,8 @@ beforeEach(() => {
 describe('cloudCatalogStore', () => {
   it('falls back to the static seed before any fetch', () => {
     expect(cloudModelsFor('image').length).toBeGreaterThan(0)
-    expect(defaultCloudModel('image').id).toBe('flux-schnell')
-    expect(defaultCloudModel('video').id).toBe('wan-2.2-720p')
+    expect(defaultCloudModel('image')?.id).toBe('flux-schnell')
+    expect(defaultCloudModel('video')?.id).toBe('wan-2.2-720p')
     expect(isEditCapable('flux-dev')).toBe(true)
     expect(isEditCapable('flux-schnell')).toBe(false)
     // never fetched → unknown → treat as live (don't false-block)
@@ -56,8 +58,8 @@ describe('cloudCatalogStore', () => {
 
   it('setCatalog replaces the seed with the server truth', () => {
     useCloudCatalogStore.getState().setCatalog(serverCatalog)
-    expect(defaultCloudModel('image').id).toBe('flux-9')
-    expect(defaultCloudModel('video').id).toBe('wan-9')
+    expect(defaultCloudModel('image')?.id).toBe('flux-9')
+    expect(defaultCloudModel('video')?.id).toBe('wan-9')
     expect(isEditCapable('flux-9')).toBe(true)
     expect(useCloudCatalogStore.getState().ops?.eraser).toBe(2500)
     expect(useCloudCatalogStore.getState().fetchedAt).not.toBeNull()
@@ -70,6 +72,20 @@ describe('cloudCatalogStore', () => {
     expect(editCapable).toEqual(['flux-dev'])
     const negPrompt = CLOUD_MODEL_SEED.filter((m) => m.negative_prompt).map((m) => m.id)
     expect(negPrompt).toEqual(['wan-2.2-720p', 'wan-2.2-fast', 'hunyuan-video'])
+  })
+
+  it('defaultCloudModel never explodes on an all-specialized kind (audio)', () => {
+    // Audio has no classic (ops-less) entries — in the seed AND the live v2
+    // catalog. Before the guard this was `cloudModelsFor('audio')[0].id` →
+    // TypeError, taking down the whole Create page for anyone opening Music
+    // without a previously picked image model (live-found on 2026-07-18).
+    expect(cloudModelsFor('audio')).toEqual([])
+    expect(defaultCloudModel('audio')?.kind).toBe('audio')
+    expect(defaultCloudModel('audio')?.ops?.length).toBeGreaterThan(0)
+    // a kind with no models at all resolves to undefined instead of throwing
+    useCloudCatalogStore.setState({ models: [] })
+    expect(defaultCloudModel('audio')).toBeUndefined()
+    expect(defaultCloudModel('image')).toBeUndefined()
   })
 
   it('defaultEditModel resolves the first edit-capable image model (seed and server)', () => {
@@ -144,16 +160,44 @@ describe('cloudCatalogStore', () => {
       ],
     }
 
-    it('every seed clip model does both t2v and i2v', () => {
-      const vids = CLOUD_MODEL_SEED.filter((m) => m.kind === 'video')
+    it('every classic seed clip model does both t2v and i2v', () => {
+      // Op-specialized 2.5.8 entries (lipsync/extend/motion/trainer) are not
+      // clip-generation models and are hard-false on both flags.
+      const vids = CLOUD_MODEL_SEED.filter((m) => m.kind === 'video' && !m.ops)
       expect(vids.length).toBeGreaterThan(0)
       expect(vids.every((m) => m.t2v !== false && m.i2v !== false)).toBe(true)
+      const specialized = CLOUD_MODEL_SEED.filter((m) => m.kind === 'video' && m.ops)
+      expect(specialized.length).toBeGreaterThan(0)
+      expect(specialized.every((m) => m.t2v === false && m.i2v === false)).toBe(true)
+    })
+
+    it('op-specialized seed models never reach the classic pickers', () => {
+      useCloudCatalogStore.setState({ models: CLOUD_MODEL_SEED })
+      for (const m of t2vModels()) expect(m.ops).toBeUndefined()
+      for (const m of i2vModels()) expect(m.ops).toBeUndefined()
     })
 
     it('i2vModels excludes an i2v:false model; an absent flag stays capable', () => {
       useCloudCatalogStore.getState().setCatalog(mixed)
       expect(i2vModels().map((m) => m.id)).toEqual(['dual', 'legacy'])
       expect(t2vModels().map((m) => m.id)).toEqual(['dual', 't2v-only', 'legacy'])
+    })
+
+    it('op picker offers image trainers only and resolves stale picks (take-01 regression)', () => {
+      // No surface can provide a video training set (or use a video LoRA), so
+      // the LTX video trainer stays out of the Character-Studio picker.
+      const trainers = opPickerModels('lora-train')
+      expect(trainers.map((m) => m.id)).toContain('flux-lora-trainer')
+      expect(trainers.map((m) => m.id)).not.toContain('ltx-2-video-lora-trainer')
+      expect(trainers.every((m) => m.kind === 'image')).toBe(true)
+      // cloudOpModel still held the lipsync model when Character Studio opened:
+      // the chip displayed Flux but submit flipped kind to video and trained on
+      // the LTX video trainer ("No videos found in the zip file"). Chip, meter
+      // and submit now resolve through this one rule.
+      expect(resolveOpPick('lora-train', 'p-video-avatar')).toBe('flux-lora-trainer')
+      expect(resolveOpPick('lipsync', 'p-video-avatar')).toBe('p-video-avatar')
+      useCloudCatalogStore.setState({ models: [] })
+      expect(resolveOpPick('lora-train', 'p-video-avatar')).toBe('')
     })
 
     it('modelForOp coerces an incapable pick onto the op’s first valid model', () => {

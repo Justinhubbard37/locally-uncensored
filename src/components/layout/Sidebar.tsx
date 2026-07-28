@@ -380,7 +380,7 @@ export function Sidebar() {
                   device authenticates (qrVisible flips false). */}
               {tunnelActive && tunnelUrl && (
                 <p className="text-[0.5rem] text-gray-500/70 leading-snug">
-                  First connection may take 5–10 s while DNS propagates. If you see a DNS error, wait a moment and reload.
+                  First connection may take 5 to 10 s while DNS propagates. If you see a DNS error, wait a moment and reload.
                 </p>
               )}
 
@@ -626,7 +626,7 @@ export function Sidebar() {
             </div>
             {countdown && (
               <div className={`text-[0.65rem] font-mono ${countdown === 'Expired' ? 'text-red-400' : 'text-gray-500'}`}>
-                {countdown === 'Expired' ? 'Expired — regenerating…' : `Expires in ${countdown}`}
+                {countdown === 'Expired' ? 'Expired, regenerating…' : `Expires in ${countdown}`}
               </div>
             )}
 

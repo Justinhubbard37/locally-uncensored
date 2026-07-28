@@ -48,8 +48,17 @@ function createClient(config: ProviderConfig): ProviderClient {
  * Get a provider client by ID. Uses cached instance if config hasn't changed.
  */
 export function getProvider(id: ProviderId): ProviderClient {
-  const config = useProviderStore.getState().providers[id]
-  if (!config) throw new Error(`Provider not configured: ${id}`)
+  const state = useProviderStore.getState()
+  const stored = state.providers[id]
+  if (!stored) throw new Error(`Provider not configured: ${id}`)
+
+  // The store keeps apiKey OBFUSCATED in memory (see providerStore). Handing
+  // the raw state to the client sent a garbled Bearer token on every chat /
+  // agent / Test-button request, while the model list (getEnabledProviders,
+  // which deobfuscates) worked — Groq answered "Invalid API Key", OpenRouter's
+  // public /models made Test claim "connected" and chat then 401ed
+  // (m9mx Discord 2026-07-26, four providers).
+  const config = { ...stored, apiKey: state.getProviderApiKey(id) }
 
   const key = cacheKey(config)
   let client = clientCache.get(key)

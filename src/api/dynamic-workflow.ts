@@ -50,10 +50,10 @@ export type WorkflowStrategy =
   | 'unet_mochi'      // Mochi: UNETLoader + CLIPLoader + VAELoader + EmptyMochiLatentVideo
   | 'unet_cosmos'     // Cosmos: UNETLoader + CLIPLoader(oldt5) + VAELoader + EmptyCosmosLatentVideo
   | 'svd'             // SVD: ImageOnlyCheckpointLoader + SVD_img2vid_Conditioning
-  | 'cogvideo'        // CogVideoX: Kijai wrapper nodes
   | 'framepack'       // FramePack: Kijai wrapper + image input
-  | 'pyramidflow'     // Pyramid Flow: Kijai wrapper nodes
-  | 'allegro'         // Allegro: Community wrapper nodes
+  // cogvideo / pyramidflow / allegro are gone on purpose (2026-07-24). Their
+  // builders emitted node names no wrapper registers, so those model types now
+  // resolve to 'unavailable' with an honest reason instead of a ComfyUI 400.
   | 'checkpoint'      // SDXL/SD1.5: CheckpointLoaderSimple + EmptyLatentImage
   | 'animatediff'     // AnimateDiff: CheckpointLoaderSimple + ADE_* nodes
   | 'unavailable'
@@ -169,16 +169,25 @@ export function determineStrategy(
     return { strategy: 'unavailable', reason: 'SVD requires ImageOnlyCheckpointLoader node' }
   }
 
-  // CogVideoX → Kijai wrapper nodes
+  // CogVideoX → Kijai wrapper nodes.
+  //
+  // 2026-07-24 (bob80817-dev, D#88 "it says I'm missing custom nodes, but they
+  // are there"): he was right. The gate looked for `CogVideoXSampler`, which has
+  // never existed in kijai/ComfyUI-CogVideoXWrapper — the real class is
+  // `CogVideoSampler` (verified against a real checkout; `git log -S` upstream
+  // finds the X-name in no commit ever). So a perfect install always failed the
+  // check and the user was told to go install what they already had.
+  //
+  // The gate deliberately STAYS closed rather than being pointed at the real
+  // name, because buildCogVideoWorkflow below emits the same invented names
+  // throughout (CogVideoXTextEncode / CogVideoXEmptyLatents / CogVideoXVAEDecode
+  // — none real). Opening it would only trade this clear message for an opaque
+  // ComfyUI 400. The lane needs a rebuild against the current wrapper plus a
+  // real generate E2E; until then say so honestly instead of blaming the setup.
   if (modelType === 'cogvideo') {
-    const hasCogNodes = nodes.samplers.includes('CogVideoXSampler')
-    if (hasCogNodes) {
-      return { strategy: 'cogvideo', reason: 'CogVideoX → Kijai wrapper pipeline' }
-    }
     return {
       strategy: 'unavailable',
-      reason: 'CogVideoX needs the ComfyUI-CogVideoXWrapper custom nodes. Install via ComfyUI Manager (Manager → Install Custom Nodes → search "CogVideoXWrapper") or git clone the repo into ComfyUI/custom_nodes/.',
-      installHint: { pack: 'ComfyUI-CogVideoXWrapper', url: 'https://github.com/kijai/ComfyUI-CogVideoXWrapper' },
+      reason: 'CogVideoX is not supported in this build yet. Its pipeline needs a rebuild against the current wrapper, so please pick another video model such as Wan, LTX or SVD for now.',
     }
   }
 
@@ -195,29 +204,39 @@ export function determineStrategy(
     }
   }
 
-  // Pyramid Flow → Kijai wrapper nodes
+  // Pyramid Flow → Kijai wrapper nodes.
+  //
+  // Closed for the same reason as CogVideoX above, found in the same 2026-07-24
+  // audit. The gate itself was fine (PyramidFlowSampler is real), but
+  // buildPyramidFlowWorkflow was written against a wrapper nobody checked:
+  // the loader is registered as PyramidFlowTransformerLoader, decode is
+  // PyramidFlowVAEDecode and wants a vae input we never wired, the text encoder
+  // takes clip plus positive_prompt plus negative_prompt rather than a bare
+  // `text`, and the sampler consumes prompt_embeds plus per stage step strings
+  // instead of steps and frames. So a correct install got a 400 with no clue
+  // why. Same deal as CogVideoX: reopen only with a rebuilt builder and a real
+  // generate behind it.
   if (modelType === 'pyramidflow') {
-    const hasPFNodes = nodes.samplers.includes('PyramidFlowSampler')
-    if (hasPFNodes) {
-      return { strategy: 'pyramidflow', reason: 'Pyramid Flow → Kijai wrapper pipeline' }
-    }
     return {
       strategy: 'unavailable',
-      reason: 'Pyramid Flow needs the ComfyUI-PyramidFlowWrapper custom nodes. Install via ComfyUI Manager or git clone into ComfyUI/custom_nodes/.',
-      installHint: { pack: 'ComfyUI-PyramidFlowWrapper', url: 'https://github.com/kijai/ComfyUI-PyramidFlowWrapper' },
+      reason: 'Pyramid Flow is not supported in this build yet. Its pipeline needs a rebuild against the current wrapper, so please pick another video model such as Wan, LTX or SVD for now.',
     }
   }
 
-  // Allegro → Community wrapper nodes
+  // Allegro → Community wrapper nodes.
+  //
+  // Also closed in the 2026-07-24 audit. Every other wrapper lane in this file
+  // that was never run turned out to emit invented node names, and Allegro is
+  // the one we cannot check: the wrapper it points at is a single community
+  // repo we have never had installed, its bundle was already pulled from the
+  // catalogue for being diffusers-only, and the builder follows the exact
+  // Loader/TextEncode/Sampler/Decoder shape that was wrong in both other cases.
+  // Unverifiable plus unreachable through the catalogue means it stays shut
+  // rather than shipping a third guess.
   if (modelType === 'allegro') {
-    const hasAllegroNodes = nodes.samplers.includes('AllegroSampler')
-    if (hasAllegroNodes) {
-      return { strategy: 'allegro', reason: 'Allegro → Community wrapper pipeline' }
-    }
     return {
       strategy: 'unavailable',
-      reason: 'Allegro needs the ComfyUI-Allegro community wrapper nodes (search "Allegro" in ComfyUI Manager → Install Custom Nodes).',
-      installHint: { pack: 'ComfyUI-Allegro', url: 'https://github.com/rhajou/ComfyUI-Allegro' },
+      reason: 'Allegro is not supported in this build. Please pick another video model such as Wan, LTX or SVD.',
     }
   }
 
@@ -386,13 +405,21 @@ export async function buildDynamicWorkflow(
     throw new WorkflowUnavailableError(reason, strategy, installHint)
   }
 
+  // Local Edit (mask inpaint) runs on the SDXL/SD1.5 checkpoint pipeline only.
+  // Reject other strategies explicitly instead of silently dropping the mask —
+  // the pre-2.5.7 behavior was exactly that: a masked edit fell through to
+  // plain img2img and repainted the WHOLE image.
+  if (!isVideo && gp.inputImage && gp.maskImage && strategy !== 'checkpoint') {
+    throw new WorkflowUnavailableError(
+      'Local image editing needs an SD 1.5 / SDXL checkpoint. Pick a checkpoint model for Edit. FLUX and video models are not wired for local inpaint.',
+      strategy,
+    )
+  }
+
   const seed = params.seed === -1 ? Math.floor(Math.random() * 2147483647) : params.seed
 
   // ─── Wrapper Strategies (custom node pipelines — completely different node chains) ───
 
-  if (strategy === 'cogvideo') {
-    return buildCogVideoWorkflow(params as VideoParams, seed, nodes)
-  }
   if (strategy === 'svd') {
     return buildSVDWorkflow(params as VideoParams, seed, nodes)
   }
@@ -401,12 +428,6 @@ export async function buildDynamicWorkflow(
   }
   if (strategy === 'framepack') {
     return buildFramePackWorkflow(params as VideoParams, seed, nodes)
-  }
-  if (strategy === 'pyramidflow') {
-    return buildPyramidFlowWorkflow(params as VideoParams, seed, nodes)
-  }
-  if (strategy === 'allegro') {
-    return buildAllegroWorkflow(params as VideoParams, seed, nodes)
   }
 
   // ─── Standard Strategies (UNET/Checkpoint → CLIP → Latent → KSampler → VAEDecode) ───
@@ -672,8 +693,13 @@ export async function buildDynamicWorkflow(
   }
 
   // ─── Phase 3: Latent Initialization ───
+  // Inpaint mode (local Edit): source + painted mask on the checkpoint path.
+  // Takes precedence over plain I2I — a mask means "repaint THIS area", never
+  // "repaint everything". Ported 1:1 from the web app's tested builder
+  // (create-workflows.ts): same node classes, same defaults.
+  const isInpaint = !isVideo && !!gp.inputImage && !!gp.maskImage && strategy === 'checkpoint'
   // I2I mode: LoadImage → VAEEncode instead of empty latent
-  const isI2I = !isVideo && params.inputImage && (params.denoise ?? 1.0) < 1.0
+  const isI2I = !isVideo && !isInpaint && params.inputImage && (params.denoise ?? 1.0) < 1.0
 
   const latentId = String(n++)
 
@@ -754,8 +780,12 @@ export async function buildDynamicWorkflow(
     }
   }
 
+  // The sampler consumes these refs; the I2I/inpaint overrides re-point them.
+  let latentRef: [string, number] = [latentId, 0]
+  let positiveRef: [string, number] = [posId, 0]
+  let negativeRef: [string, number] = [negId, 0]
+
   // I2I override: replace empty latent with LoadImage → VAEEncode
-  let latentSourceId = latentId
   if (isI2I) {
     const loadImageId = String(n++)
     const vaeEncodeId = String(n++)
@@ -767,8 +797,118 @@ export async function buildDynamicWorkflow(
       class_type: 'VAEEncode',
       inputs: { pixels: [loadImageId, 0], vae: [vaeSourceId, vaeOutputSlot] },
     }
-    latentSourceId = vaeEncodeId
+    latentRef = [vaeEncodeId, 0]
     // Remove the empty latent node since we're using the encoded image
+    delete workflow[latentId]
+  } else if (isInpaint) {
+    // Inpaint override: LoadImage + LoadImageMask (channel red — the mask
+    // editor exports white-where-painted on black), then:
+    //   Path B (InpaintModelConditioning, FLUX-fill/SD3-style) when the node
+    //   exists — rewrites BOTH conditionings and emits the latent on slot 2.
+    //   Path A (core VAEEncodeForInpaint) — works with any SDXL/SD1.5
+    //   checkpoint; grow_mask_by feathers the mask edge.
+    const loadImageId = String(n++)
+    const loadMaskId = String(n++)
+    workflow[loadImageId] = {
+      class_type: 'LoadImage',
+      inputs: { image: params.inputImage },
+    }
+    workflow[loadMaskId] = {
+      class_type: 'LoadImageMask',
+      inputs: { image: gp.maskImage, channel: 'red' },
+    }
+    if (allNodes['InpaintModelConditioning']) {
+      const condId = String(n++)
+      workflow[condId] = {
+        class_type: 'InpaintModelConditioning',
+        inputs: {
+          positive: positiveRef, negative: negativeRef,
+          vae: [vaeSourceId, vaeOutputSlot],
+          pixels: [loadImageId, 0], mask: [loadMaskId, 0], noise_mask: true,
+        },
+        _meta: { title: 'Inpaint Path B' },
+      }
+      positiveRef = [condId, 0]
+      negativeRef = [condId, 1]
+      latentRef = [condId, 2]
+    } else {
+      const encId = String(n++)
+      workflow[encId] = {
+        class_type: 'VAEEncodeForInpaint',
+        inputs: {
+          pixels: [loadImageId, 0], vae: [vaeSourceId, vaeOutputSlot],
+          mask: [loadMaskId, 0], grow_mask_by: gp.growMaskBy ?? 6,
+        },
+        _meta: { title: 'Inpaint Path A' },
+      }
+      latentRef = [encId, 0]
+    }
+    delete workflow[latentId]
+  }
+
+  // ─── I2V override (Animate — local lane restored, David 2026-07-17) ───
+  // A video request carrying an inputImage swaps the empty latent for the
+  // family's image-to-video conditioning node. Covers every family core
+  // ComfyUI can animate on this main path (WAN i2v, Hunyuan i2v, LTX,
+  // Cosmos); wan22/SVD/FramePack already handle the image in their dedicated
+  // builders above. Wiring is schema-driven — we only feed inputs the live
+  // node declares and map outputs by their declared types — so version drift
+  // in these nodes degrades to a ComfyUI validation error, not a bad graph.
+  const isI2V = isVideo && !!(params as GenerateParams).inputImage
+  if (isI2V && ['unet_video', 'unet_ltx', 'unet_cosmos', 'unet_mochi'].includes(strategy)) {
+    if (strategy === 'unet_mochi') {
+      throw new WorkflowUnavailableError(
+        'Mochi is text-to-video only, pick an i2v-capable model (WAN i2v, WAN 2.2 ti2v, SVD, LTX, Cosmos) to animate an image.',
+        strategy,
+      )
+    }
+    const i2vNode =
+      strategy === 'unet_ltx' ? 'LTXVImgToVideo'
+      : strategy === 'unet_cosmos' ? 'CosmosImageToVideoLatent'
+      : type === 'hunyuan' ? 'HunyuanImageToVideo'
+      : 'WanImageToVideo'
+    const meta = allNodes[i2vNode]
+    if (!meta) {
+      throw new WorkflowUnavailableError(
+        `Animating with this model family needs the ${i2vNode} node, which your ComfyUI doesn't have. Update ComfyUI, then try again.`,
+        strategy,
+      )
+    }
+    const loadId = String(n++)
+    workflow[loadId] = { class_type: 'LoadImage', inputs: { image: (params as GenerateParams).inputImage } }
+    const required = (meta.input?.required ?? {}) as Record<string, any[]>
+    const optional = (meta.input?.optional ?? {}) as Record<string, any[]>
+    const decl = { ...required, ...optional }
+    const inputs: Record<string, any> = {}
+    if (decl.positive) inputs.positive = positiveRef
+    if (decl.negative) inputs.negative = negativeRef
+    if (decl.vae) inputs.vae = [vaeSourceId, vaeOutputSlot]
+    if (decl.width) inputs.width = params.width
+    if (decl.height) inputs.height = params.height
+    if (decl.length) inputs.length = videoParams.frames
+    if (decl.batch_size) inputs.batch_size = 1
+    if (decl.start_image) inputs.start_image = [loadId, 0]
+    else if (decl.image) inputs.image = [loadId, 0]
+    else if (decl.init_image) inputs.init_image = [loadId, 0]
+    // Remaining REQUIRED widgets we don't model: take the schema default
+    // (combo → first option) — same live-schema pattern as the RMBG builder.
+    for (const [key, spec] of Object.entries(required)) {
+      if (inputs[key] !== undefined) continue
+      if (Array.isArray(spec[0])) inputs[key] = spec[0][0]
+      else if (spec[1] && typeof spec[1] === 'object' && 'default' in spec[1]) inputs[key] = spec[1].default
+    }
+    const i2vId = String(n++)
+    workflow[i2vId] = { class_type: i2vNode, inputs, _meta: { title: 'I2V conditioning' } }
+    // Outputs by declared type: 1st CONDITIONING → positive, 2nd → negative
+    // (Hunyuan emits only one — its negative stays on the text encoder),
+    // LATENT → sampler latent. A latent-only node (Cosmos) leaves both
+    // conditionings untouched.
+    const outs: string[] = (meta.output ?? []) as string[]
+    const latSlot = outs.indexOf('LATENT')
+    latentRef = [i2vId, latSlot >= 0 ? latSlot : 0]
+    const condSlots = outs.map((t, i) => (t === 'CONDITIONING' ? i : -1)).filter((i) => i >= 0)
+    if (condSlots.length >= 1) positiveRef = [i2vId, condSlots[0]]
+    if (condSlots.length >= 2) negativeRef = [i2vId, condSlots[1]]
     delete workflow[latentId]
   }
 
@@ -780,15 +920,15 @@ export async function buildDynamicWorkflow(
     class_type: 'KSampler',
     inputs: {
       model: [samplerModelId, 0],
-      positive: [posId, 0],
-      negative: [negId, 0],
-      latent_image: [latentSourceId, 0],
+      positive: positiveRef,
+      negative: negativeRef,
+      latent_image: latentRef,
       seed,
       steps: params.steps,
       cfg: params.cfgScale,
       sampler_name: params.sampler,
       scheduler: params.scheduler,
-      denoise: isI2I ? (params.denoise ?? 0.7) : 1.0,
+      denoise: isInpaint ? (params.denoise ?? 0.85) : isI2I ? (params.denoise ?? 0.7) : 1.0,
     },
   }
 
@@ -873,9 +1013,15 @@ function buildRemoveBgWorkflow(params: GenerateParams, rmbgMeta: any): Record<st
   const workflow: Record<string, any> = {}
   workflow['1'] = { class_type: 'LoadImage', inputs: { image: params.inputImage } }
 
+  // Fill BOTH required AND optional widgets from the live schema. ComfyUI-RMBG
+  // declares process_res / sensitivity / mask_blur / mask_offset as "optional"
+  // in INPUT_TYPES but its Python reads them as plain kwargs, so omitting them
+  // throws "Error in batch processing: 'process_res' (RMBG)". Defaulting every
+  // widget from object_info keeps the graph valid across RMBG versions.
   const required: Record<string, any> = rmbgMeta?.input?.required ?? {}
+  const optional: Record<string, any> = rmbgMeta?.input?.optional ?? {}
   const rmbgInputs: Record<string, any> = { image: ['1', 0] }
-  for (const [name, spec] of Object.entries(required)) {
+  for (const [name, spec] of Object.entries({ ...required, ...optional })) {
     if (name === 'image') continue
     const d = rmbgWidgetDefault(name, spec)
     if (d.set) rmbgInputs[name] = d.value
@@ -908,7 +1054,7 @@ function rmbgWidgetDefault(name: string, spec: any): { set: boolean; value?: any
   }
   if (t === 'BOOLEAN') return { set: true, value: cfg?.default ?? false }
   if (t === 'INT' || t === 'FLOAT') return { set: true, value: cfg?.default ?? 0 }
-  if (t === 'STRING') return { set: true, value: cfg?.default ?? '' }
+  if (t === 'STRING' || t === 'COLORCODE') return { set: true, value: cfg?.default ?? '' }
   return { set: false }
 }
 
@@ -934,32 +1080,12 @@ function addVideoOutput(workflow: Record<string, any>, n: number, decodeId: stri
   return n
 }
 
-function buildCogVideoWorkflow(params: VideoParams, seed: number, nodes: CategorizedNodes): Record<string, any> {
-  const workflow: Record<string, any> = {}
-  let n = 1
-
-  const modelId = String(n++)
-  const clipId = String(n++)
-  const posId = String(n++)
-  const negId = String(n++)
-  const latentId = String(n++)
-  const samplerId = String(n++)
-  const decodeId = String(n++)
-
-  workflow[modelId] = { class_type: 'CogVideoXModelLoader', inputs: { model: params.model } }
-  workflow[clipId] = { class_type: 'CogVideoXCLIPLoader', inputs: { clip_name: 't5xxl_fp16.safetensors' } }
-  workflow[posId] = { class_type: 'CogVideoXTextEncode', inputs: { text: params.prompt, clip: [clipId, 0] } }
-  workflow[negId] = { class_type: 'CogVideoXTextEncode', inputs: { text: params.negativePrompt || '', clip: [clipId, 0] } }
-  workflow[latentId] = { class_type: 'CogVideoXEmptyLatents', inputs: { width: params.width, height: params.height, frames: params.frames, batch_size: 1 } }
-  workflow[samplerId] = {
-    class_type: 'CogVideoXSampler',
-    inputs: { model: [modelId, 0], positive: [posId, 0], negative: [negId, 0], latents: [latentId, 0], seed, steps: params.steps, cfg: params.cfgScale },
-  }
-  workflow[decodeId] = { class_type: 'CogVideoXVAEDecode', inputs: { samples: [samplerId, 0], vae: [modelId, 1] } }
-
-  addVideoOutput(workflow, n, decodeId, params.fps, nodes, params.prompt)
-  return workflow
-}
+// buildCogVideoWorkflow deleted 2026-07-24 (D#88). It emitted CogVideoXCLIPLoader,
+// CogVideoXTextEncode, CogVideoXEmptyLatents, CogVideoXSampler and
+// CogVideoXVAEDecode, none of which are registered by kijai's wrapper, so it
+// only ever produced ComfyUI 400s. Kept out of the tree on purpose: leaving a
+// known-wrong graph around invites someone to just reopen the gate. Git history
+// has it if the lane is ever rebuilt, which needs a real generate to land.
 
 function buildSVDWorkflow(params: VideoParams, seed: number, nodes: CategorizedNodes): Record<string, any> {
   const workflow: Record<string, any> = {}
@@ -1051,10 +1177,27 @@ function buildWan22Workflow(params: VideoParams, seed: number, nodes: Categorize
   workflow[posId] = { class_type: 'CLIPTextEncode', inputs: { text: params.prompt, clip: [clipId, 0] } }
   workflow[negId] = { class_type: 'CLIPTextEncode', inputs: { text: params.negativePrompt || '', clip: [clipId, 0] } }
 
+  // Optional LoRA chain (D#80, game-master0): video LoRAs are model-only, so
+  // patch the UNET with LoraLoaderModelOnly (no clip side) before the sampling
+  // shift. Guarded on params.lora — a plain Wan 2.2 gen stays byte-identical.
+  let wanModelSrc = unetId
+  const wanLoras = normalizeLoraList(params.lora)
+  if (wanLoras.length > 0) {
+    const wanStrengths = normalizeLoraStrengths(params.loraStrength, wanLoras.length)
+    wanLoras.forEach((loraName, i) => {
+      const loraId = String(n++)
+      workflow[loraId] = {
+        class_type: 'LoraLoaderModelOnly',
+        inputs: { lora_name: loraName, strength_model: wanStrengths[i], model: [wanModelSrc, 0] },
+      }
+      wanModelSrc = loraId
+    })
+  }
+
   // Wan's recommended sampling shift. ModelSamplingSD3 is a core node (ships since
   // SD3), so the sampler reads from it to match the official 5B workflow's motion.
   const shiftId = String(n++)
-  workflow[shiftId] = { class_type: 'ModelSamplingSD3', inputs: { model: [unetId, 0], shift: 8.0 } }
+  workflow[shiftId] = { class_type: 'ModelSamplingSD3', inputs: { model: [wanModelSrc, 0], shift: 8.0 } }
 
   // Unified latent: a start_image is attached ONLY for an I2V request.
   const latentInputs: Record<string, any> = { vae: [vaeId, 0], width, height, length, batch_size: 1 }
@@ -1081,6 +1224,362 @@ function buildWan22Workflow(params: VideoParams, seed: number, nodes: Categorize
 
   addVideoOutput(workflow, n, decodeId, params.fps, nodes, params.prompt)
   return workflow
+}
+
+// ─── 2.5.8 specialized local lanes (music / talking character / motion) ─────
+//
+// These intents run on node families that ship with CURRENT ComfyUI cores
+// (ACE audio, Wan 2.2 S2V, Wan 2.2 Animate, Wan VACE — verified against the
+// July 2026 core). Every builder gates on live node presence and throws
+// WorkflowUnavailableError with an "Update ComfyUI" message when the install
+// predates the family — REJECT-AND-REPORT, never a broken graph.
+
+export interface LocalOpParams {
+  op: 'music' | 'lipsync' | 'motion'
+  model: string
+  prompt: string
+  negativePrompt?: string
+  seed: number
+  steps: number
+  cfgScale: number
+  sampler: string
+  scheduler: string
+  width: number
+  height: number
+  frames: number
+  fps: number
+  /** music: track length in seconds + optional lyrics. */
+  seconds?: number
+  lyrics?: string
+  /** lipsync: speech audio staged in ComfyUI's input dir + the portrait. */
+  audioFile?: string
+  refImage?: string
+  /** motion: driving video staged in ComfyUI's input dir. */
+  drivingVideo?: string
+}
+
+const UPDATE_COMFY_HINT =
+  'Update ComfyUI (Settings, AI Backends, Update ComfyUI), restart it, then generate again.'
+
+function requireNodes(allNodes: Record<string, any>, needed: string[], lane: string): void {
+  const missing = needed.filter((n) => !allNodes[n])
+  if (missing.length > 0) {
+    throw new WorkflowUnavailableError(
+      `${lane} needs ComfyUI nodes this install does not have yet (${missing.join(', ')}). ${UPDATE_COMFY_HINT}`,
+      'unavailable',
+    )
+  }
+}
+
+/** UNET loader that understands GGUF quants: .gguf files load through the
+ *  city96 GGUF pack's UnetLoaderGGUF, everything else through core UNETLoader. */
+function addUnetLoader(workflow: Record<string, any>, id: string, model: string, allNodes: Record<string, any>): void {
+  if (model.toLowerCase().endsWith('.gguf')) {
+    if (!allNodes['UnetLoaderGGUF']) {
+      throw new WorkflowUnavailableError(
+        'This model is a GGUF quant, which needs the ComfyUI-GGUF node pack. Install it from the model card, or pick the safetensors variant.',
+        'unavailable',
+        { pack: 'ComfyUI-GGUF', url: 'https://github.com/city96/ComfyUI-GGUF' },
+      )
+    }
+    workflow[id] = { class_type: 'UnetLoaderGGUF', inputs: { unet_name: model } }
+  } else {
+    workflow[id] = { class_type: 'UNETLoader', inputs: { unet_name: model, weight_dtype: 'default' } }
+  }
+}
+
+/** Sound-carrying video output: core CreateVideo muxes the audio track into
+ *  the frames, SaveVideo writes an mp4. The talking-character / motion clips
+ *  are pointless without their sound, so this path requires the core video
+ *  nodes (same family as the lanes themselves — present on any core new
+ *  enough to run them). */
+function addVideoWithAudioOutput(
+  workflow: Record<string, any>,
+  n: number,
+  decodeId: string,
+  fps: number,
+  audioSrc: [string, number] | null,
+  allNodes: Record<string, any>,
+  prompt?: string,
+): number {
+  requireNodes(allNodes, ['CreateVideo', 'SaveVideo'], 'This video output')
+  const createId = String(n++)
+  const inputs: Record<string, any> = { images: [decodeId, 0], fps }
+  if (audioSrc) inputs.audio = audioSrc
+  workflow[createId] = { class_type: 'CreateVideo', inputs }
+  const saveId = String(n++)
+  workflow[saveId] = {
+    class_type: 'SaveVideo',
+    inputs: { video: [createId, 0], filename_prefix: promptFilenamePrefix(prompt, true), format: 'auto', codec: 'auto' },
+  }
+  return n
+}
+
+/**
+ * Music (ACE-Step). All-in-one checkpoint → ACE text encode (tags + lyrics) →
+ * KSampler → VAEDecodeAudio → SaveAudioMP3. ACE-Step 1.5 checkpoints route
+ * through the 1.5 encoder/latent pair (different node ids AND different latent
+ * shape); everything else uses the v1 pair. Negative conditioning: v1 encodes
+ * the negative prompt (cheap), 1.5 zero-outs the positive instead — its
+ * encoder runs an LLM pass that would double the cost for no benefit.
+ */
+export function buildMusicWorkflow(params: LocalOpParams, seed: number, allNodes: Record<string, any>): Record<string, any> {
+  const workflow: Record<string, any> = {}
+  let n = 1
+  const isAce15 = /1[._-]?5/.test(params.model.toLowerCase().replace(/\.safetensors$/, '').replace(/^.*ace[_-]?step/, ''))
+  const encodeNode = isAce15 ? 'TextEncodeAceStepAudio1.5' : 'TextEncodeAceStepAudio'
+  const latentNode = isAce15 ? 'EmptyAceStep1.5LatentAudio' : 'EmptyAceStepLatentAudio'
+  requireNodes(allNodes, [encodeNode, latentNode, 'VAEDecodeAudio', 'SaveAudioMP3'], 'Local music')
+
+  const seconds = Math.max(5, Math.min(600, params.seconds || 120))
+  const ckptId = String(n++)
+  workflow[ckptId] = { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: params.model } }
+
+  const posId = String(n++)
+  if (isAce15) {
+    workflow[posId] = {
+      class_type: encodeNode,
+      inputs: {
+        clip: [ckptId, 1], tags: params.prompt, lyrics: params.lyrics || '',
+        seed, bpm: 120, duration: seconds, timesignature: '4', language: 'en',
+        keyscale: 'C major', generate_audio_codes: true, cfg_scale: 2.0,
+        temperature: 0.85, top_p: 0.9, top_k: 0, min_p: 0.0,
+      },
+    }
+  } else {
+    workflow[posId] = {
+      class_type: encodeNode,
+      inputs: { clip: [ckptId, 1], tags: params.prompt, lyrics: params.lyrics || '', lyrics_strength: 1.0 },
+    }
+  }
+  const negId = String(n++)
+  if (isAce15) {
+    workflow[negId] = { class_type: 'ConditioningZeroOut', inputs: { conditioning: [posId, 0] } }
+  } else {
+    workflow[negId] = {
+      class_type: encodeNode,
+      inputs: { clip: [ckptId, 1], tags: params.negativePrompt || '', lyrics: '', lyrics_strength: 1.0 },
+    }
+  }
+
+  const shiftId = String(n++)
+  workflow[shiftId] = { class_type: 'ModelSamplingSD3', inputs: { model: [ckptId, 0], shift: 5.0 } }
+  const latentId = String(n++)
+  workflow[latentId] = { class_type: latentNode, inputs: { seconds, batch_size: 1 } }
+  // ACE-Step samples on the flow-match euler/simple pairing, NOT the composer's
+  // image-model sampler (dpmpp_2m/karras etc. leaks in through the shared knobs).
+  // And the 1.5 TURBO checkpoint is distilled for ~10 steps at cfg 1.0 — the
+  // shared 'ace' default (50 steps, cfg 5) overcooks it into near-silence
+  // (measured: -43 dB mean output vs -18 dB at the turbo recipe, David's "quiet
+  // noise" bug). Pin the turbo recipe by name; other ACE checkpoints keep the
+  // composer's step/cfg but still sample on euler/simple.
+  const isTurbo = /turbo/.test(params.model.toLowerCase())
+  const musicSteps = isTurbo ? Math.min(params.steps || 10, 10) : params.steps
+  const musicCfg = isTurbo ? 1.0 : params.cfgScale
+  const samplerId = String(n++)
+  workflow[samplerId] = {
+    class_type: 'KSampler',
+    inputs: {
+      model: [shiftId, 0], positive: [posId, 0], negative: [negId, 0], latent_image: [latentId, 0],
+      seed, steps: musicSteps, cfg: musicCfg, sampler_name: 'euler', scheduler: 'simple', denoise: 1.0,
+    },
+  }
+  const decodeId = String(n++)
+  workflow[decodeId] = { class_type: 'VAEDecodeAudio', inputs: { samples: [samplerId, 0], vae: [ckptId, 2] } }
+  const saveId = String(n++)
+  workflow[saveId] = {
+    class_type: 'SaveAudioMP3',
+    inputs: { audio: [decodeId, 0], filename_prefix: promptFilenamePrefix(params.prompt, false), quality: 'V0' },
+  }
+  return workflow
+}
+
+/**
+ * Talking character (Wan 2.2 S2V, core). Portrait + speech audio → the
+ * character speaks it. wav2vec2 audio embeddings feed WanSoundImageToVideo;
+ * the finished frames are muxed WITH the speech track (CreateVideo), because
+ * a silent talking-head clip is useless. Uses the Wan 2.1 VAE + UMT5 encoder
+ * (the S2V-14B pairing from the official release).
+ */
+export function buildS2VWorkflow(params: LocalOpParams, seed: number, allNodes: Record<string, any>): Record<string, any> {
+  const workflow: Record<string, any> = {}
+  let n = 1
+  requireNodes(
+    allNodes,
+    ['WanSoundImageToVideo', 'AudioEncoderLoader', 'AudioEncoderEncode', 'LoadAudio'],
+    'Talking character',
+  )
+  if (!params.audioFile) throw new Error('Add a voice first. Record, upload or pick an audio track.')
+  if (!params.refImage) throw new Error('Add the portrait the character should speak from.')
+
+  const snap16 = (v: number, def: number) => Math.max(16, Math.round(((v && v > 0) ? v : def) / 16) * 16)
+  const width = snap16(params.width, 832)
+  const height = snap16(params.height, 480)
+  const length = snapWanLength(params.frames || 77)
+
+  const unetId = String(n++)
+  addUnetLoader(workflow, unetId, params.model, allNodes)
+  const clipId = String(n++)
+  workflow[clipId] = { class_type: 'CLIPLoader', inputs: { clip_name: 'umt5_xxl_fp8_e4m3fn_scaled.safetensors', type: 'wan', device: 'default' } }
+  const vaeId = String(n++)
+  workflow[vaeId] = { class_type: 'VAELoader', inputs: { vae_name: 'wan_2.1_vae.safetensors' } }
+  const posId = String(n++)
+  workflow[posId] = { class_type: 'CLIPTextEncode', inputs: { text: params.prompt || 'a person talking naturally, natural expression', clip: [clipId, 0] } }
+  const negId = String(n++)
+  workflow[negId] = { class_type: 'CLIPTextEncode', inputs: { text: params.negativePrompt || '', clip: [clipId, 0] } }
+
+  const audioLoadId = String(n++)
+  workflow[audioLoadId] = { class_type: 'LoadAudio', inputs: { audio: params.audioFile } }
+  const audioEncLoadId = String(n++)
+  workflow[audioEncLoadId] = { class_type: 'AudioEncoderLoader', inputs: { audio_encoder_name: 'wav2vec2_large_english_fp16.safetensors' } }
+  const audioEncId = String(n++)
+  workflow[audioEncId] = { class_type: 'AudioEncoderEncode', inputs: { audio_encoder: [audioEncLoadId, 0], audio: [audioLoadId, 0] } }
+
+  const imageId = String(n++)
+  workflow[imageId] = { class_type: 'LoadImage', inputs: { image: params.refImage } }
+  const scaleId = String(n++)
+  workflow[scaleId] = { class_type: 'ImageScale', inputs: { image: [imageId, 0], upscale_method: 'lanczos', width, height, crop: 'center' } }
+
+  const s2vId = String(n++)
+  workflow[s2vId] = {
+    class_type: 'WanSoundImageToVideo',
+    inputs: {
+      positive: [posId, 0], negative: [negId, 0], vae: [vaeId, 0],
+      width, height, length, batch_size: 1,
+      audio_encoder_output: [audioEncId, 0], ref_image: [scaleId, 0],
+    },
+  }
+
+  const shiftId = String(n++)
+  workflow[shiftId] = { class_type: 'ModelSamplingSD3', inputs: { model: [unetId, 0], shift: 8.0 } }
+  const samplerId = String(n++)
+  workflow[samplerId] = {
+    class_type: 'KSampler',
+    inputs: {
+      model: [shiftId, 0], positive: [s2vId, 0], negative: [s2vId, 1], latent_image: [s2vId, 2],
+      seed, steps: params.steps, cfg: params.cfgScale, sampler_name: params.sampler, scheduler: params.scheduler, denoise: 1.0,
+    },
+  }
+  const decodeId = String(n++)
+  workflow[decodeId] = { class_type: 'VAEDecode', inputs: { samples: [samplerId, 0], vae: [vaeId, 0] } }
+
+  addVideoWithAudioOutput(workflow, n, decodeId, params.fps || 16, [audioLoadId, 0], allNodes, params.prompt)
+  return workflow
+}
+
+/**
+ * Motion control. A character image copies the moves of a driving video.
+ * Wan 2.2 Animate models take a DWPose skeleton video (pose_video); Wan VACE
+ * models take the same skeleton as their control_video — both need the
+ * DWPreprocessor from comfyui_controlnet_aux (one-click install; its CPU
+ * onnxruntime path works on every Windows box, no GPU wheel roulette).
+ * The driving clip's own audio is carried over into the result.
+ */
+export function buildMotionWorkflow(params: LocalOpParams, seed: number, allNodes: Record<string, any>): Record<string, any> {
+  const workflow: Record<string, any> = {}
+  let n = 1
+  requireNodes(allNodes, ['LoadVideo', 'GetVideoComponents'], 'Motion control')
+  if (!allNodes['DWPreprocessor']) {
+    throw new WorkflowUnavailableError(
+      'Motion control needs the pose extractor (DWPose) from the controlnet_aux node pack. Install it from the card above, then generate again.',
+      'unavailable',
+      { pack: 'comfyui_controlnet_aux', url: 'https://github.com/Fannovel16/comfyui_controlnet_aux' },
+    )
+  }
+  if (!params.drivingVideo) throw new Error('Add the driving video whose motion the character should copy.')
+  if (!params.refImage) throw new Error('Add the character image that should perform the motion.')
+
+  const isVace = classifyModel(params.model) === 'wanvace'
+  requireNodes(allNodes, isVace ? ['WanVaceToVideo', 'TrimVideoLatent'] : ['WanAnimateToVideo', 'TrimVideoLatent'], 'Motion control')
+
+  const snap16 = (v: number, def: number) => Math.max(16, Math.round(((v && v > 0) ? v : def) / 16) * 16)
+  const width = snap16(params.width, 832)
+  const height = snap16(params.height, 480)
+  const length = snapWanLength(params.frames || 77)
+
+  const unetId = String(n++)
+  addUnetLoader(workflow, unetId, params.model, allNodes)
+  const clipId = String(n++)
+  workflow[clipId] = { class_type: 'CLIPLoader', inputs: { clip_name: 'umt5_xxl_fp8_e4m3fn_scaled.safetensors', type: 'wan', device: 'default' } }
+  const vaeId = String(n++)
+  workflow[vaeId] = { class_type: 'VAELoader', inputs: { vae_name: 'wan_2.1_vae.safetensors' } }
+  const posId = String(n++)
+  workflow[posId] = { class_type: 'CLIPTextEncode', inputs: { text: params.prompt || 'a person moving naturally, high quality', clip: [clipId, 0] } }
+  const negId = String(n++)
+  workflow[negId] = { class_type: 'CLIPTextEncode', inputs: { text: params.negativePrompt || '', clip: [clipId, 0] } }
+
+  const videoId = String(n++)
+  workflow[videoId] = { class_type: 'LoadVideo', inputs: { file: params.drivingVideo } }
+  const componentsId = String(n++)
+  workflow[componentsId] = { class_type: 'GetVideoComponents', inputs: { video: [videoId, 0] } }
+  const poseId = String(n++)
+  workflow[poseId] = {
+    class_type: 'DWPreprocessor',
+    inputs: {
+      image: [componentsId, 0], detect_hand: 'enable', detect_body: 'enable', detect_face: 'enable',
+      resolution: Math.min(width, height),
+      bbox_detector: 'yolox_l.onnx', pose_estimator: 'dw-ll_ucoco_384.onnx',
+    },
+  }
+
+  const imageId = String(n++)
+  workflow[imageId] = { class_type: 'LoadImage', inputs: { image: params.refImage } }
+  const scaleId = String(n++)
+  workflow[scaleId] = { class_type: 'ImageScale', inputs: { image: [imageId, 0], upscale_method: 'lanczos', width, height, crop: 'center' } }
+
+  const condId = String(n++)
+  if (isVace) {
+    workflow[condId] = {
+      class_type: 'WanVaceToVideo',
+      inputs: {
+        positive: [posId, 0], negative: [negId, 0], vae: [vaeId, 0],
+        width, height, length, batch_size: 1, strength: 1.0,
+        control_video: [poseId, 0], reference_image: [scaleId, 0],
+      },
+    }
+  } else {
+    workflow[condId] = {
+      class_type: 'WanAnimateToVideo',
+      inputs: {
+        positive: [posId, 0], negative: [negId, 0], vae: [vaeId, 0],
+        width, height, length, batch_size: 1,
+        reference_image: [scaleId, 0], pose_video: [poseId, 0],
+        continue_motion_max_frames: 5, video_frame_offset: 0,
+      },
+    }
+  }
+
+  const shiftId = String(n++)
+  workflow[shiftId] = { class_type: 'ModelSamplingSD3', inputs: { model: [unetId, 0], shift: 8.0 } }
+  const samplerId = String(n++)
+  workflow[samplerId] = {
+    class_type: 'KSampler',
+    inputs: {
+      model: [shiftId, 0], positive: [condId, 0], negative: [condId, 1], latent_image: [condId, 2],
+      seed, steps: params.steps, cfg: params.cfgScale, sampler_name: params.sampler, scheduler: params.scheduler, denoise: 1.0,
+    },
+  }
+  // Both conditioners prepend reference latents — trim them back out so the
+  // decoded clip starts on the motion, not on a frozen reference frame.
+  const trimId = String(n++)
+  workflow[trimId] = { class_type: 'TrimVideoLatent', inputs: { samples: [samplerId, 0], trim_amount: [condId, 3] } }
+  const decodeId = String(n++)
+  workflow[decodeId] = { class_type: 'VAEDecode', inputs: { samples: [trimId, 0], vae: [vaeId, 0] } }
+
+  addVideoWithAudioOutput(workflow, n, decodeId, params.fps || 16, [componentsId, 1], allNodes, params.prompt)
+  return workflow
+}
+
+/** Entry point for the specialized local lanes — fetches the live node
+ *  catalogue once and dispatches to the lane's builder. */
+export async function buildLocalOpWorkflow(params: LocalOpParams): Promise<Record<string, any>> {
+  const allNodes = await getAllNodeInfo()
+  const seed = params.seed === -1 ? Math.floor(Math.random() * 2147483647) : params.seed
+  switch (params.op) {
+    case 'music': return buildMusicWorkflow(params, seed, allNodes)
+    case 'lipsync': return buildS2VWorkflow(params, seed, allNodes)
+    case 'motion': return buildMotionWorkflow(params, seed, allNodes)
+  }
 }
 
 function buildFramePackWorkflow(params: VideoParams, seed: number, nodes: CategorizedNodes): Record<string, any> {
@@ -1154,46 +1653,10 @@ function buildFramePackWorkflow(params: VideoParams, seed: number, nodes: Catego
   return workflow
 }
 
-function buildPyramidFlowWorkflow(params: VideoParams, seed: number, nodes: CategorizedNodes): Record<string, any> {
-  const workflow: Record<string, any> = {}
-  let n = 1
-
-  const modelId = String(n++)
-  const vaeId = String(n++)
-  const posId = String(n++)
-  const samplerId = String(n++)
-  const decodeId = String(n++)
-
-  workflow[modelId] = { class_type: 'PyramidFlowModelLoader', inputs: { model: params.model } }
-  workflow[vaeId] = { class_type: 'PyramidFlowVAELoader', inputs: { vae: 'pyramid_flow_vae_bf16.safetensors' } }
-  workflow[posId] = { class_type: 'PyramidFlowTextEncode', inputs: { text: params.prompt } }
-  workflow[samplerId] = {
-    class_type: 'PyramidFlowSampler',
-    inputs: { model: [modelId, 0], vae: [vaeId, 0], text: [posId, 0], seed, steps: params.steps, cfg: params.cfgScale, width: params.width, height: params.height, frames: params.frames },
-  }
-  workflow[decodeId] = { class_type: 'PyramidFlowDecode', inputs: { samples: [samplerId, 0] } }
-
-  addVideoOutput(workflow, n, decodeId, params.fps, nodes, params.prompt)
-  return workflow
-}
-
-function buildAllegroWorkflow(params: VideoParams, seed: number, nodes: CategorizedNodes): Record<string, any> {
-  const workflow: Record<string, any> = {}
-  let n = 1
-
-  const modelId = String(n++)
-  const posId = String(n++)
-  const samplerId = String(n++)
-  const decodeId = String(n++)
-
-  workflow[modelId] = { class_type: 'AllegroModelLoader', inputs: { model: params.model } }
-  workflow[posId] = { class_type: 'AllegroTextEncode', inputs: { text: params.prompt } }
-  workflow[samplerId] = {
-    class_type: 'AllegroSampler',
-    inputs: { model: [modelId, 0], text: [posId, 0], seed, steps: params.steps, cfg: params.cfgScale, width: params.width, height: params.height, frames: params.frames },
-  }
-  workflow[decodeId] = { class_type: 'AllegroDecoder', inputs: { samples: [samplerId, 0] } }
-
-  addVideoOutput(workflow, n, decodeId, params.fps, nodes, params.prompt)
-  return workflow
-}
+// buildPyramidFlowWorkflow and buildAllegroWorkflow deleted 2026-07-24, same
+// audit and same reason as buildCogVideoWorkflow above. Pyramid Flow named the
+// loader PyramidFlowModelLoader (registered as PyramidFlowTransformerLoader),
+// decoded through a PyramidFlowDecode that does not exist, and fed the sampler
+// steps and frames where it wants prompt_embeds and per stage step strings.
+// Allegro followed the identical invented shape against a wrapper we have never
+// had installed. Both are recoverable from git history for a rebuild.

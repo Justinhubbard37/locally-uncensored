@@ -99,8 +99,8 @@ export async function parseOllamaError(
         kind: 'missing-blob',
         model,
         message: model
-          ? `Ollama could not load "${model}" — one of its blobs is missing on disk. Run "ollama pull ${model}" to re-fetch.`
-          : 'Ollama could not load the model — one of its blobs is missing on disk. Run "ollama pull <model>" to re-fetch.',
+          ? `Ollama could not load "${model}" , one of its blobs is missing on disk. Run "ollama pull ${model}" to re-fetch.`
+          : 'Ollama could not load the model , one of its blobs is missing on disk. Run "ollama pull <model>" to re-fetch.',
         raw,
       }
     }
@@ -147,11 +147,11 @@ export class ModelLoadError extends Error {
  */
 export function chatStyleMessage(parsed: ParsedOllamaError): string {
   if (parsed.kind === 'stale-manifest' && parsed.model) {
-    return `Ollama rejected "${parsed.model}" — its manifest is stale. Open a terminal and run: ollama pull ${parsed.model}   Then reload the model.`
+    return `Ollama rejected "${parsed.model}" , its manifest is stale. Open a terminal and run: ollama pull ${parsed.model}   Then reload the model.`
   }
   if (parsed.kind === 'missing-blob') {
     const model = parsed.model || '<model>'
-    return `Ollama could not load "${model}" — one of its on-disk blobs is missing. Open a terminal and run: ollama pull ${model}   Then reload the model.`
+    return `Ollama could not load "${model}" , one of its on-disk blobs is missing. Open a terminal and run: ollama pull ${model}   Then reload the model.`
   }
   return parsed.message
 }

@@ -260,3 +260,44 @@ describe('parseResolutionResponse', () => {
     expect(parseResolutionResponse('{"foo": "bar"}')).toEqual({ action: 'ADD' })
   })
 })
+
+// ── JSON extraction from chatty model output (2026-07-28) ────────────
+//
+// The old greedy /\{[\s\S]*\}/ spanned from the FIRST brace to the LAST one,
+// so any brace in the surrounding prose swallowed the real object and the
+// parse threw. The two callers then failed in opposite, silent ways:
+// extraction saved nothing, resolution added a duplicate instead of merging.
+describe('parsers survive prose around the JSON', () => {
+  it('extracts the object when prose before it contains braces', () => {
+    const res = parseExtractionResponse(
+      'Here is the analysis {see below}:\n{"shouldSave": true, "memories": [' +
+        '{"type": "user", "title": "Runs Arch", "content": "The user runs Arch Linux."}]}',
+    )
+    expect(res.shouldSave).toBe(true)
+    expect(res.memories[0].title).toBe('Runs Arch')
+  })
+
+  it('extracts the object when prose follows it', () => {
+    const res = parseExtractionResponse(
+      '{"shouldSave": true, "memories": [{"type": "project", "title": "LU", "content": "Ships 2.6.0 on Friday."}]}\n' +
+        'Let me know if you want {more detail}.',
+    )
+    expect(res.memories).toHaveLength(1)
+    expect(res.memories[0].type).toBe('project')
+  })
+
+  it('still resolves UPDATE when the answer is wrapped in prose', () => {
+    const decision = parseResolutionResponse(
+      'Thinking {step 1}: this is the same fact.\n' +
+        '{"action": "UPDATE", "targetId": "m1", "mergedContent": "merged text"}',
+      ['m1'],
+    )
+    expect(decision.action).toBe('UPDATE')
+    expect(decision.targetId).toBe('m1')
+  })
+
+  it('keeps returning the fallback when there is no JSON at all', () => {
+    expect(parseExtractionResponse('nothing to remember here').shouldSave).toBe(false)
+    expect(parseResolutionResponse('no idea {really}').action).toBe('ADD')
+  })
+})

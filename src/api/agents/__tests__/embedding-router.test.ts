@@ -150,9 +150,30 @@ describe('embedding-router — cosine edge cases', () => {
   it('opposite vector → -1', () => {
     expect(__internal.cosine([1, 2, 3], [-1, -2, -3])).toBeCloseTo(-1, 5)
   })
-  it('different-length vectors use the shorter length', () => {
-    const v = __internal.cosine([1, 2, 3], [1, 2])
-    expect(Number.isFinite(v)).toBe(true)
+  it('different-length vectors return 0 (incompatible embedding spaces)', () => {
+    // A mid-session embed-backend switch changes vector dimension; comparing
+    // only the overlap yields a garbage similarity, so cosine refuses.
+    expect(__internal.cosine([1, 2, 3], [1, 2])).toBe(0)
+    expect(__internal.cosine([1, 2], [1, 2, 3])).toBe(0)
+  })
+})
+
+describe('embedding-router — backend switch self-heals the cache (#14)', () => {
+  it('drops stale-dimension vectors and re-embeds in the new space', async () => {
+    clearEmbeddingCache()
+    const tools = [{ name: 'a', description: 'apple' }]
+    // First backend: 26-dim character-frequency vectors.
+    await precomputeToolEmbeddings(tools, fakeEmbed)
+    expect(__internal.CACHE.size).toBe(1)
+    // Second backend: 4-dim vectors (a different embedding model). Ranking must
+    // NOT compare across spaces — it drops the stale entry instead.
+    const smallEmbed = async (texts: string[]) => texts.map(() => [1, 0, 0, 0])
+    const ranked = await rankToolsByEmbedding('apple', tools, smallEmbed, { topN: 5 })
+    expect(ranked).toEqual([])
+    expect(__internal.CACHE.has('a')).toBe(false)
+    // Next precompute with the new backend re-embeds in the new space.
+    const added = await precomputeToolEmbeddings(tools, smallEmbed)
+    expect(added).toBe(1)
   })
 })
 

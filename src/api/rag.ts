@@ -1,7 +1,7 @@
 import { v4 as uuid } from "uuid"
 import type { DocumentMeta, TextChunk, RAGContext, VectorSearchResult } from "../types/rag"
 import { ollamaUrl, localFetch } from "./backend"
-import { isManagedBuiltinActive, embedBaseUrl, bundledEmbedStatus } from "./engine"
+import { isManagedBuiltinActive, embedBaseUrl, bundledEmbedStatus, ensureBundledEmbedAlive } from "./engine"
 
 export async function extractText(file: File): Promise<string> {
   const ext = file.name.split(".").pop()?.toLowerCase()
@@ -72,6 +72,9 @@ export async function generateEmbeddings(
   // onboarding — use it whenever it is running. Otherwise fall back to the
   // Ollama `/api/embed` path (still supported as an "Advanced" backend).
   if (isManagedBuiltinActive()) {
+    // A Create/Music render may have offloaded the embed sidecar — revive it
+    // before the request instead of failing with "cannot reach :8128".
+    await ensureBundledEmbedAlive()
     return embedViaBuiltin(texts, model)
   }
   try {
@@ -157,6 +160,15 @@ async function embedViaOllama(texts: string[], model: string): Promise<number[][
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {
+  // Vectors of different length are not comparable — that happens for real:
+  // chunks embedded with one model and a query embedded with another (switching
+  // the embedding model, or the move from Ollama embeddings to the built-in
+  // engine) have different dimensions, and a chunk whose embedding call failed
+  // can be stored empty. The old loop read past the shorter vector, multiplied
+  // by `undefined` and returned NaN — and a single NaN then poisoned the whole
+  // ranking (see hybridSearch), so retrieval silently returned the first chunks
+  // of the document instead of the relevant ones.
+  if (!a.length || a.length !== b.length) return 0
   let dot = 0,
     magA = 0,
     magB = 0
@@ -165,7 +177,8 @@ export function cosineSimilarity(a: number[], b: number[]): number {
     magA += a[i] * a[i]
     magB += b[i] * b[i]
   }
-  return dot / (Math.sqrt(magA) * Math.sqrt(magB) || 1)
+  const score = dot / (Math.sqrt(magA) * Math.sqrt(magB) || 1)
+  return Number.isFinite(score) ? score : 0
 }
 
 export function bm25Score(query: string, document: string, allDocs: string[]): number {
@@ -206,16 +219,21 @@ function hybridSearch(
     bm25Score: bm25Score(query, chunk.content, allDocTexts),
   }))
 
-  // Normalize both score sets to 0-1
-  const maxVector = Math.max(...vectorResults.map((r) => r.vectorScore), 0.001)
-  const maxBm25 = Math.max(...bm25Results.map((r) => r.bm25Score), 0.001)
+  // Normalize both score sets to 0-1. Non-finite scores are dropped from the
+  // max: Math.max with a single NaN returns NaN, which would turn EVERY
+  // normalized score into NaN and leave the sort comparing NaNs — i.e. no
+  // ranking at all.
+  const finite = (xs: number[]) => xs.filter((x) => Number.isFinite(x))
+  const maxVector = Math.max(...finite(vectorResults.map((r) => r.vectorScore)), 0.001)
+  const maxBm25 = Math.max(...finite(bm25Results.map((r) => r.bm25Score)), 0.001)
 
   // Combine with 0.7 vector + 0.3 BM25 weighting
+  const safe = (x: number) => (Number.isFinite(x) ? x : 0)
   const combined = chunks.map((chunk, i) => ({
     chunk,
     score:
-      0.7 * (vectorResults[i].vectorScore / maxVector) +
-      0.3 * (bm25Results[i].bm25Score / maxBm25),
+      0.7 * (safe(vectorResults[i].vectorScore) / maxVector) +
+      0.3 * (safe(bm25Results[i].bm25Score) / maxBm25),
   }))
 
   return combined.sort((a, b) => b.score - a.score).slice(0, topK)

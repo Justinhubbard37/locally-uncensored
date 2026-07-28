@@ -9,7 +9,7 @@
 // deriveCloudAvailable passes, the mode flips (via the one-time onboarding on
 // the first flip). Payment stays on lu-labs.ai — the app never touches Stripe.
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ExternalLink, HardDrive, RefreshCw, ArrowLeft, ArrowRight } from 'lucide-react'
 import { Modal } from '../ui/Modal'
 import { useUIStore } from '../../stores/uiStore'
@@ -18,15 +18,17 @@ import { useCloudAuthStore, deriveCloudAvailable } from '../../stores/cloudAuthS
 import { useCloudAuth } from '../../hooks/useCloudAuth'
 import { AccountPanel } from '../auth/AccountPanel'
 import { CLOUD_BASE } from '../../api/cloud/config'
-import { openExternal, isCloudOnly } from '../../api/backend'
+import { openExternal } from '../../api/backend'
 
 const PLANS = [
-  { anchor: 'hosted', name: 'Hosted' },
-  { anchor: 'pro', name: 'Pro' },
-  { anchor: 'max', name: 'Max' },
+  { anchor: 'hosted', name: 'Hosted', price: '€19' },
+  { anchor: 'pro', name: 'Pro', price: '€49' },
+  { anchor: 'max', name: 'Max', price: '€99' },
 ] as const
 
-/** Three plan buttons → pricing in the browser. */
+/** Three plan buttons → pricing in the browser. Price shown up front (monthly,
+ *  EUR — mirrors lib/pricing on lu-labs.ai); the click still leaves for the
+ *  browser to actually subscribe. */
 function PlanGrid() {
   return (
     <div className="grid grid-cols-3 gap-2">
@@ -37,8 +39,8 @@ function PlanGrid() {
           className="flex flex-col items-center gap-0.5 px-2 py-3 rounded-lg border border-[#7c3aed]/40 bg-[#7c3aed]/5 hover:bg-[#7c3aed]/15 transition-colors"
         >
           <span className="text-[0.8rem] font-semibold text-[#7c3aed] dark:text-[#a78bfa]">{p.name}</span>
-          <span className="flex items-center gap-1 text-[0.55rem] text-gray-500">
-            <ExternalLink size={8} /> lu-labs.ai
+          <span className="text-[0.62rem] font-medium text-gray-500 dark:text-gray-400">
+            {p.price}<span className="text-gray-400 dark:text-gray-500">/mo</span>
           </span>
         </button>
       ))}
@@ -46,22 +48,33 @@ function PlanGrid() {
   )
 }
 
+/** Deliberately big (David 2026-07-18): the way back to Local must be as
+ *  unmissable as the plans, in every gate state. */
 function StayLocalButton({ onLocal }: { onLocal: () => void }) {
   return (
     <button
       onClick={onLocal}
-      className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-[0.72rem] font-medium border border-gray-200 dark:border-white/10 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/5 transition-colors"
+      className="w-full flex items-center justify-center gap-2 px-3 py-3 rounded-lg text-[0.85rem] font-semibold border border-gray-200 dark:border-white/10 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/5 transition-colors"
     >
-      <HardDrive size={12} /> Stay on Local
+      <HardDrive size={15} /> Stay on Local
     </button>
   )
 }
 
-/** The purple cloud emblem that headlines every step. */
+/** The LU monogram that headlines every step (David 2026-07-13: the stock
+ *  cloud glyph is gone from this flow — the black/white mark stands on its
+ *  own, matching the one-time intro popup). */
 function CloudHero({ subtitle }: { subtitle?: string }) {
   return (
     <div className="flex flex-col items-center text-center gap-2">
-      <img src="/LU-monogram-bw.png" alt="LU" width={48} height={48} draggable={false} className="pointer-events-none select-none dark:invert-0 invert" />
+      <img
+        src="/LU-monogram-bw.png"
+        alt=""
+        width={40}
+        height={40}
+        className="dark:invert-0 invert opacity-90 select-none"
+        draggable={false}
+      />
       <h2 className="text-xl font-semibold text-gray-900 dark:text-white">LU Cloud</h2>
       {subtitle && (
         <p className="text-[0.75rem] leading-relaxed text-gray-600 dark:text-gray-400 max-w-xs">{subtitle}</p>
@@ -75,9 +88,7 @@ type Step = 'intro' | 'plans' | 'login'
 export function CloudGateModal() {
   const open = useUIStore((s) => s.cloudGateOpen)
   const setOpen = useUIStore((s) => s.setCloudGateOpen)
-  const setCloudOnboardingOpen = useUIStore((s) => s.setCloudOnboardingOpen)
   const updateSettings = useSettingsStore((s) => s.updateSettings)
-  const cloudOnboardingSeen = useSettingsStore((s) => s.settings.cloudOnboardingSeen)
   const { refresh } = useCloudAuth()
 
   const status = useCloudAuthStore((s) => s.status)
@@ -87,31 +98,31 @@ export function CloudGateModal() {
   const quota = useCloudAuthStore((s) => s.quota)
   const available = deriveCloudAvailable({ user, licenseActive, access, quota })
 
-  // macOS Cloud-only build: there is no Local to fall back to. Lead with
-  // sign-in, drop every "Stay on Local" escape, and don't let the gate be
-  // dismissed while the cloud axis is unusable (David 2026-07-11).
-  const cloudOnly = isCloudOnly()
+  // Signed-out walkthrough position. Reset to the hero every time the gate
+  // opens so a re-open never lands mid-flow.
+  const [step, setStep] = useState<Step>('intro')
+  useEffect(() => { if (open) setStep('intro') }, [open])
 
-  // Signed-out walkthrough position. Reset every time the gate opens so a
-  // re-open never lands mid-flow — straight to sign-in on the Cloud-only build.
-  const [step, setStep] = useState<Step>(cloudOnly ? 'login' : 'intro')
-  useEffect(() => { if (open) setStep(cloudOnly ? 'login' : 'intro') }, [open, cloudOnly])
-
-  // The moment the account clears every gate (fresh login, re-check after
-  // subscribing), flip the global switch and get out of the way — via the
-  // one-time cloud onboarding when this is the first successful flip.
-  const wasOpen = useRef(false)
-  useEffect(() => { wasOpen.current = open }, [open])
+  // The moment the account clears every gate — already provisioned when the
+  // gate opens, a fresh login, or a re-check after subscribing — flip the
+  // global switch and get out of the way, via the one-time cloud onboarding on
+  // the first successful flip. `open` MUST be a dependency (not the old wasOpen
+  // ref): the one-time intro popup's "Sign in or create account" can open this gate
+  // for a signed-in, fully provisioned user who's still in local mode. In that
+  // case `available` was already true before the gate opened, so an effect
+  // keyed only on `available` never re-runs — and the gate hangs forever on the
+  // terminal "Checking your account…" state. Keying on `open` fires the flip
+  // the instant the gate opens on an already-available account.
   useEffect(() => {
-    if (wasOpen.current && available) {
+    if (open && available) {
       setOpen(false)
-      if (!cloudOnboardingSeen) setCloudOnboardingOpen(true)
-      else updateSettings({ appMode: 'cloud' })
+      // 2.5.9 dropped the cloud onboarding modal, so there is nothing to hand
+      // off to — an available account just switches.
+      updateSettings({ appMode: 'cloud' })
     }
-  }, [available, cloudOnboardingSeen, setCloudOnboardingOpen, setOpen, updateSettings])
+  }, [open, available, setOpen, updateSettings])
 
   const stayLocal = () => {
-    if (cloudOnly) return
     updateSettings({ appMode: 'local' })
     setOpen(false)
   }
@@ -132,24 +143,24 @@ export function CloudGateModal() {
   const signedOut = status === 'signed-out' || !user
 
   return (
-    <Modal open={open} onClose={() => { if (!cloudOnly) setOpen(false) }} title="LU Cloud" hideHeader>
+    <Modal open={open} onClose={() => setOpen(false)} title="LU Cloud" hideHeader>
       {signedOut ? (
         step === 'intro' ? (
           <div className="space-y-5 pt-2">
-            <CloudHero subtitle="Run chat, image and video on LU's hosted GPU fleet with your lu-labs.ai account — the full cloud catalog, no downloads, no VRAM limits. Local mode stays free and never needs an account." />
+            <CloudHero subtitle="Image, video, chat, code. On LU's hosted GPUs." />
             <div className="space-y-2 max-w-xs mx-auto">
               <button onClick={() => setStep('plans')} className={primaryBtn}>
                 Get LU Cloud <ArrowRight size={13} />
               </button>
-              {!cloudOnly && <StayLocalButton onLocal={stayLocal} />}
+              <StayLocalButton onLocal={stayLocal} />
             </div>
           </div>
         ) : step === 'plans' ? (
           <div className="space-y-5 pt-2">
-            <CloudHero subtitle="Pick a plan on lu-labs.ai — payment stays in the browser." />
+            <CloudHero subtitle="Pick a plan on lu-labs.ai. Payment stays in the browser." />
             <div className="space-y-3 max-w-xs mx-auto">
               <PlanGrid />
-              {!cloudOnly && <StayLocalButton onLocal={stayLocal} />}
+              <StayLocalButton onLocal={stayLocal} />
               <div className="pt-1 flex items-center gap-2">
                 <div className="flex-1 h-px bg-gray-200 dark:bg-white/10" />
                 <span className="text-[0.6rem] text-gray-400 dark:text-gray-600">or</span>
@@ -163,9 +174,7 @@ export function CloudGateModal() {
         ) : (
           /* step === 'login' */
           <div className="space-y-4 pt-2">
-            <CloudHero subtitle={cloudOnly
-              ? "The Mac app runs on LU Cloud for now — sign in to chat and generate images and video on hosted GPUs. Local mode (on your own Mac) is coming soon."
-              : "Sign in with the account you subscribed with."} />
+            <CloudHero subtitle="Sign in with the account you subscribed with." />
             <div className="max-w-xs mx-auto">
               <AccountPanel />
               <button onClick={() => setStep('plans')} className={linkRow + ' w-full mt-3'}>
@@ -183,9 +192,9 @@ export function CloudGateModal() {
               but this account has no active plan yet. LU Cloud is part of the paid plans.
             </p>
             <PlanGrid />
-            {!cloudOnly && <StayLocalButton onLocal={stayLocal} />}
+            <StayLocalButton onLocal={stayLocal} />
             <button className={ghostBtn} onClick={() => void refresh()}>
-              <RefreshCw size={12} /> I subscribed — re-check
+              <RefreshCw size={12} /> I subscribed, check again
             </button>
           </div>
         </div>
@@ -194,13 +203,13 @@ export function CloudGateModal() {
           <CloudHero />
           <div className="space-y-3 max-w-xs mx-auto">
             <p className="text-[0.72rem] text-center text-gray-600 dark:text-gray-400">
-              LU Cloud is in a closed beta right now (Max plan only). Your plan is
-              active, but the beta hasn't opened for it yet — you'll get in the
-              moment it does, nothing to reinstall.
+              Your plan is active, but the server hasn't switched Cloud on for
+              this account yet. Hit Check again in a moment, nothing to
+              reinstall.
             </p>
-            {!cloudOnly && <StayLocalButton onLocal={stayLocal} />}
+            <StayLocalButton onLocal={stayLocal} />
             <button className={ghostBtn} onClick={() => void refresh()}>
-              <RefreshCw size={12} /> Re-check
+              <RefreshCw size={12} /> Check again
             </button>
           </div>
         </div>
@@ -212,9 +221,9 @@ export function CloudGateModal() {
               Your plan is active, but your usage couldn't be loaded just now, so
               Cloud mode can't switch on yet. Check your connection and re-check.
             </p>
-            {!cloudOnly && <StayLocalButton onLocal={stayLocal} />}
+            <StayLocalButton onLocal={stayLocal} />
             <button className={ghostBtn} onClick={() => void refresh()}>
-              <RefreshCw size={12} /> Re-check
+              <RefreshCw size={12} /> Check again
             </button>
           </div>
         </div>
@@ -223,16 +232,16 @@ export function CloudGateModal() {
           <CloudHero />
           <div className="space-y-3 max-w-xs mx-auto">
             <p className="text-[0.72rem] text-center text-gray-600 dark:text-gray-400">
-              Your plan is active, but it doesn't include a hosted-compute credit
+              Your plan is active, but it doesn't include a hosted compute credit
               budget, so there's nothing for Cloud mode to run on. Plans with
               cloud credits are on lu-labs.ai.
             </p>
             <button className={primaryBtn} onClick={() => void openExternal(`${CLOUD_BASE}/account`)}>
               <ExternalLink size={12} /> Open your account
             </button>
-            {!cloudOnly && <StayLocalButton onLocal={stayLocal} />}
+            <StayLocalButton onLocal={stayLocal} />
             <button className={ghostBtn} onClick={() => void refresh()}>
-              <RefreshCw size={12} /> Re-check
+              <RefreshCw size={12} /> Check again
             </button>
           </div>
         </div>

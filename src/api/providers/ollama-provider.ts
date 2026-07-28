@@ -19,6 +19,8 @@ import { repairToolCallArgs, extractToolCallsFromContent } from '../../lib/tool-
 interface OllamaChatChunk {
   message?: { content: string; thinking?: string; tool_calls?: { function: { name: string; arguments: Record<string, any> } }[] }
   done?: boolean
+  // Why generation ended ('stop' | 'length' | 'load' | …), final chunk only.
+  done_reason?: string
   // Server-reported timing in the final done:true chunk (Bug M v2.4.7).
   // Ollama returns nanoseconds; we convert to ms before yielding upstream.
   eval_count?: number          // tokens the model produced
@@ -96,7 +98,7 @@ export class OllamaProvider implements ProviderClient {
     if (options?.temperature !== undefined) ollamaOptions.temperature = options.temperature
     if (options?.topP !== undefined) ollamaOptions.top_p = options.topP
     if (options?.topK !== undefined) ollamaOptions.top_k = options.topK
-    if (options?.maxTokens) ollamaOptions.num_predict = options.maxTokens
+    if (options?.maxTokens && options.maxTokens > 0) ollamaOptions.num_predict = options.maxTokens
     // Bug AA v2.5.0 — forward user's context-window override. Without this
     // Ollama silently uses num_ctx=2048 (its default), which RAG payloads
     // and long-turn chats blow through immediately. Kj103x Discord
@@ -159,6 +161,7 @@ export class OllamaProvider implements ProviderClient {
         thinking: chunk.message?.thinking || undefined,
         toolCalls: toolCalls?.length ? toolCalls : undefined,
         done: chunk.done || false,
+        finishReason: chunk.done_reason || undefined,
         // Bug M v2.4.7 — pass through server-side generation metrics so the
         // benchmark can report Ollama's own measurement instead of trusting
         // client-side TTFT, which WebView2 release-mode buffers into
@@ -195,7 +198,7 @@ export class OllamaProvider implements ProviderClient {
     if (options?.temperature !== undefined) ollamaOptions.temperature = options.temperature
     if (options?.topP !== undefined) ollamaOptions.top_p = options.topP
     if (options?.topK !== undefined) ollamaOptions.top_k = options.topK
-    if (options?.maxTokens) ollamaOptions.num_predict = options.maxTokens
+    if (options?.maxTokens && options.maxTokens > 0) ollamaOptions.num_predict = options.maxTokens
     // Bug AA v2.5.0 — see chatStream() for the why.
     // num_ctx comes from the caller (hook): the user override OR the model's
     // real context length (capped for VRAM safety). 0/undefined → Ollama keeps

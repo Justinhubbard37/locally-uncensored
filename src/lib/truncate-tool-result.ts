@@ -1,5 +1,5 @@
 /**
- * Tool-output truncation for Small-Model Mode (Knob 3).
+ * Head+tail tool-output truncation.
  *
  * Long tool responses measurably hurt small models: in IBM's LongFuncEval
  * (arXiv 2505.10570) a long tool output cost Granite-3.1-8B ~30% AST accuracy,
@@ -8,8 +8,13 @@
  * file_read, a verbose build log), keep the HEAD and the TAIL — where the
  * signal usually lives — and drop the middle with a marker.
  *
- * Big-model behaviour is unchanged: callers only apply this when
- * settings.smallModelMode is on.
+ * Three callers, three budgets:
+ *  - Small-Model Mode (Knob 3): tight 1500-char default.
+ *  - Big models: a generous 60k-char cap where results enter history. Uncapped,
+ *    one giant file_read result rode along VERBATIM in every following request
+ *    via compaction's KEEP_RECENT window — live prompts of ~225k tokens per
+ *    iteration, slow turns and a drained credit wallet (Morgan, 2026-07-26).
+ *  - compactMessages: a budget-adaptive cap on tool results it keeps.
  */
 export function truncateToolResult(text: string, maxChars = 1500): string {
   if (typeof text !== 'string') return text as unknown as string
@@ -22,5 +27,5 @@ export function truncateToolResult(text: string, maxChars = 1500): string {
   const head = text.slice(0, headChars)
   const tail = tailChars > 0 ? text.slice(text.length - tailChars) : ''
   const dropped = text.length - head.length - tail.length
-  return `${head}\n\n…[truncated ${dropped} chars for small-model mode]…\n\n${tail}`
+  return `${head}\n\n…[truncated ${dropped} chars]…\n\n${tail}`
 }

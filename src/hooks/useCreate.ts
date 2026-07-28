@@ -5,16 +5,26 @@ import {
   refreshComfyModels,
   getImageModels,
   getVideoModels,
+  getAudioModels,
+  getLipsyncModels,
+  getMotionModels,
+  resolveLocalOpPick,
+  uploadMediaFile,
   getSamplers,
   getSchedulers,
   detectVideoBackend,
   cancelGeneration,
   submitWorkflow,
   getHistory,
+  isPromptQueued,
   buildTxt2ImgWorkflow,
   buildTxt2VidWorkflow,
   classifyModel,
+  isI2VModel,
+  isT2VCapable,
   extractComfyOutputFiles,
+  galleryTypeForFile,
+  MODEL_TYPE_DEFAULTS as COMFY_MODEL_DEFAULTS,
   type ClassifiedModel,
   type ComfyUIOutput,
   type VideoBackend,
@@ -25,11 +35,15 @@ import {
   LOADER_NODES, CLIP_LOADER_NODES, VAE_LOADER_NODES, SAMPLER_NODES, DECODE_NODES,
   type ComfyWSEvent,
 } from '../api/comfyui-ws'
-import { buildDynamicWorkflow, checkVideoOutputCapability } from '../api/dynamic-workflow'
+import { buildDynamicWorkflow, buildLocalOpWorkflow, checkVideoOutputCapability } from '../api/dynamic-workflow'
 import { getAllNodeInfo, clearNodeCache } from '../api/comfyui-nodes'
 import { installCustomNodes } from '../api/discover'
 import { backendCall } from '../api/backend'
 import { checkPromptSafety, SAFETY_BLOCK_MESSAGE } from '../lib/render/safety'
+import {
+  clearTrainingSet, stageTrainingImage, startCharacterTraining,
+  characterTrainingStatus, cancelCharacterTraining,
+} from '../api/trainer'
 import { useCreateStore } from '../stores/createStore'
 import { useWorkflowStore } from '../stores/workflowStore'
 import { injectParameters } from '../api/workflows'
@@ -54,6 +68,9 @@ export function useCreate() {
   const [modelLoadError, setModelLoadError] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+  // A local character-training run is a Rust child process, not a ComfyUI
+  // prompt — cancel() must reach it through its own command.
+  const trainingActive = useRef(false)
 
   // Cleanup on unmount
   useEffect(() => {
@@ -96,34 +113,48 @@ export function useCreate() {
     setModelLoadError(null)
 
     try {
-      // Apple Silicon: MLX is a first-class local image backend (hard rule —
-      // Mac local media is MLX-via-lu-bridge, never ComfyUI). Load the installed
-      // MLX catalog first (this also spins up the bundled bridge sidecar) so
-      // images work even when ComfyUI is absent — the normal Mac case.
+      // Apple Silicon: MLX is a first-class local media backend (hard rule —
+      // Mac local image/video is the in-process MLX path, never ComfyUI). Load
+      // the installed MLX catalogs FIRST so Create works on the normal Mac,
+      // which has no ComfyUI at all.
+      const mlxHost = isMlxImageHost()
       let mlxImageModels: ClassifiedModel[] = []
-      // Video has no ComfyUI counterpart on Mac (hard rule: Mac video is
-      // MLX-only, ComfyUI never even auto-starts there — see
-      // process.rs::auto_start_comfyui). The video list IS the MLX catalog.
+      // Video has no ComfyUI counterpart on Mac (ComfyUI never even auto-starts
+      // there — see process.rs::auto_start_comfyui). The video list IS the MLX
+      // catalog.
       let mlxVideoModels: ClassifiedModel[] = []
-      if (isMlxImageHost()) {
+      if (mlxHost) {
         try {
           const mlx = await mlxStatus()
           if (mlx.installed) mlxImageModels = buildMlxImageModels(await listMlxImageModels())
-        } catch { /* bridge/sidecar not up yet — treat as no MLX models */ }
+        } catch { /* MLX engine not set up yet — treat as no MLX models */ }
         try {
           mlxVideoModels = buildMlxVideoModels(await listVideoModels())
         } catch { /* mlx-video status unavailable yet — treat as no MLX video models */ }
       }
 
-      // Check connection — if ComfyUI is down, don't waste time on its queries.
+      // Check connection first — if ComfyUI is down, don't waste time on model queries.
+      // Sync the connected state on EVERY fetch: the mount-time checkConnection can
+      // race ComfyUI's autostart (exe boots faster than the engine), and nothing
+      // else ever flipped `connected` back to true — the Stage then kept showing
+      // the Download & install card while the model chip was happily populated
+      // (live-caught on the 2.5.8 extend lane E2E).
+      // NOT on Mac: there is no ComfyUI to be connected to, and pinning
+      // `connected` to false is exactly what makes the Stage cover a working
+      // MLX catalog with the ComfyUI "Download & install" card. Left at null
+      // ("not applicable"), which every ComfyUI-gated surface treats as neutral.
       const comfyOk = await checkComfyConnection()
+      if (!mlxHost) {
+        setConnected(comfyOk)
+        useCreateStore.getState().setComfyRunning(comfyOk)
+      }
       if (!comfyOk) {
         // On Apple Silicon MLX alone is a valid image/video backend — don't bail.
         if (mlxImageModels.length > 0 || mlxVideoModels.length > 0) {
           const st = useCreateStore.getState()
           setImageModels(mlxImageModels)
           st.setImageModelList(mlxImageModels)
-          if (mlxImageModels.length > 0 && !st.imageModel) {
+          if (mlxImageModels.length > 0 && !mlxImageModels.find(m => m.name === st.imageModel)) {
             st.setImageModel(mlxImageModels[0].name, mlxImageModels[0].type)
           }
           setVideoModelsList(mlxVideoModels)
@@ -135,8 +166,10 @@ export function useCreate() {
           setModelsLoaded(true)
           return
         }
+        // Honest copy: there is no "Model Manager → Mac Image/Video" surface to
+        // point at, and naming the raw install command leaks an internal path.
         setModelLoadError(
-          isMlxImageHost()
+          mlxHost
             ? 'The local image engine is not set up on this Mac yet — a one-time setup is needed before local generation works.'
             : 'ComfyUI is not running. Start it from Settings or wait for auto-start.'
         )
@@ -148,22 +181,27 @@ export function useCreate() {
       // and its internal cache hasn't updated yet.
       await refreshComfyModels()
 
-      const [comfyImgModels, comfyVidModels, samplers, schedulers, vBackend, _nodeInfo] = await Promise.all([
+      const [comfyImgModels, comfyVidModels, samplers, schedulers, vBackend, _nodeInfo, audModels, lipModels, motModels] = await Promise.all([
         getImageModels(),
         getVideoModels(),
         getSamplers(),
         getSchedulers(),
         detectVideoBackend(),
         getAllNodeInfo().catch(() => null),
+        // 2.5.8 specialized lane lists — best-effort so a probe failure never
+        // blocks the classic image/video surfaces.
+        getAudioModels().catch(() => [] as ClassifiedModel[]),
+        getLipsyncModels().catch(() => [] as ClassifiedModel[]),
+        getMotionModels().catch(() => [] as ClassifiedModel[]),
       ])
       // MLX entries go first so one is the default on a fresh Apple-Silicon box.
       const imgModels = mlxImageModels.length
         ? mergeImageModels(comfyImgModels, mlxImageModels)
         : comfyImgModels
       // Mac video is MLX-only — never surface ComfyUI video checkpoints there,
-      // even in the rare case ComfyUI happens to be reachable (e.g. a manual
-      // install the user started outside LU).
-      const vidModels = isMlxImageHost() ? mlxVideoModels : comfyVidModels
+      // even in the rare case ComfyUI happens to be reachable (a manual install
+      // the user started outside LU).
+      const vidModels = mlxHost ? mlxVideoModels : comfyVidModels
       setImageModels(imgModels)
       setVideoModelsList(vidModels)
       setSamplerList(samplers)
@@ -177,6 +215,9 @@ export function useCreate() {
       const st = useCreateStore.getState()
       st.setImageModelList(imgModels)
       st.setVideoModelList(vidModels)
+      st.setAudioModelList(audModels)
+      st.setLipsyncModelList(lipModels)
+      st.setMotionModelList(motModels)
 
       // If ComfyUI is connected but returns 0 models, do NOT set modelsLoaded — keep retrying.
       // ComfyUI may still be scanning directories (race condition on startup).
@@ -284,8 +325,8 @@ export function useCreate() {
     if (!modelLoadError) return  // No error — nothing to retry
     if (modelsLoaded) return     // modelsLoaded + error = gave up after max retries, don't loop
     const retryInterval = setInterval(async () => {
-      // No ComfyUI to poll for on Mac (hard rule: MLX-only) — retry the MLX
-      // catalog directly instead of waiting on a connection that never comes.
+      // No ComfyUI to wait for on Mac (hard rule: MLX-only) — retry the MLX
+      // catalog directly instead of gating on a connection that never comes.
       if (isMlxImageHost()) {
         fetchModels()
         return
@@ -299,15 +340,101 @@ export function useCreate() {
     return () => clearInterval(retryInterval)
   }, [modelLoadError, modelsLoaded, fetchModels])
 
+  // ── 2.5.8 A5: local character training. Not a ComfyUI render — the Rust
+  // trainer (musubi-tuner in its own venv) owns stage -> cache -> train ->
+  // convert -> loras/; this just streams its status into the normal
+  // generating UI and lands the user on the Use tab when the LoRA is in.
+  const runCharacterTraining = useCallback(async () => {
+    const state = useCreateStore.getState()
+    const { setIsGenerating, setProgress, setError } = state
+    const trigger = state.triggerWord.trim()
+    if (!trigger) {
+      setError('Pick a trigger word first, e.g. davechar. It becomes the token that summons your character.')
+      return
+    }
+    // Blobs are runtime-only — after an app restart the thumbnails would
+    // still render (object URLs die too, but names persist) with no bytes.
+    const staged = state.trainImages.filter((i) => i.blob instanceof Blob)
+    if (staged.length < 4) {
+      setError(staged.length < state.trainImages.length
+        ? 'Your photos did not survive the app restart. Re-add them, then train.'
+        : 'Add at least 4 photos of your character first (up to 30).')
+      return
+    }
+    setError(null)
+    setIsGenerating(true)
+    trainingActive.current = true
+    try {
+      const setId = trigger
+      await clearTrainingSet(setId)
+      let n = 0
+      for (const img of staged) {
+        const bytes = Array.from(new Uint8Array(await img.blob.arrayBuffer()))
+        // Musubi has no trigger flag — the token must lead every caption.
+        await stageTrainingImage(setId, img.name, bytes, `${trigger}, a photo of ${trigger}`)
+        n += 1
+        setProgress(2 + Math.round((n / staged.length) * 5), `Staging photos (${n}/${staged.length})...`)
+      }
+      setProgress(8, 'Starting the training run...')
+      await startCharacterTraining(setId, trigger, trigger, state.trainSteps)
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 3000))
+        // cancel() already reset the UI; the Rust child got its kill there.
+        if (!useCreateStore.getState().isGenerating) return
+        const s = await characterTrainingStatus().catch(() => null)
+        if (!s) continue
+        if (s.status === 'running') {
+          if (s.totalSteps > 0) {
+            setProgress(Math.min(95, 10 + Math.round((s.step / s.totalSteps) * 85)), `Training ${s.step}/${s.totalSteps}...`)
+          } else {
+            const last = s.logs[s.logs.length - 1] ?? ''
+            setProgress(10, /Step \d\/4/.test(last) ? last : 'Preparing training data...')
+          }
+        } else if (s.status === 'complete') {
+          setProgress(100, 'Character ready!')
+          // The LoRA file just landed in models/loras — drop the node cache so
+          // the Use shelf and the LoRA picker list it without a restart.
+          clearNodeCache()
+          useCreateStore.getState().bumpCharactersVersion()
+          useCreateStore.getState().setCharacterTab('use')
+          return
+        } else if (s.status === 'cancelled') {
+          return
+        } else {
+          setError(`Training failed. ${s.logs.slice(-3).join(' ')}`.slice(0, 420))
+          return
+        }
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Training could not start.')
+    } finally {
+      trainingActive.current = false
+      useCreateStore.getState().setIsGenerating(false)
+      useCreateStore.getState().setProgress(0)
+    }
+  }, [])
+
   const generateInner = useCallback(async () => {
     const state = useCreateStore.getState()
-    // AI-CSAM gate — applies before any backend is touched.
+    // AI-CSAM gate — applies before any backend is touched. On this path there
+    // is no server gate behind it: a local render goes straight to ComfyUI/MLX
+    // on the user's own machine. triggerWord is in here because local character
+    // training runs through this same function a few lines down, and the cloud
+    // gate already treats that field as prompt-bearing (useCloudCreate.ts).
+    // musicLyrics is not: music is a hosted-only op and cannot reach this path.
     {
-      const verdict = checkPromptSafety(`${state.prompt} ${state.negativePrompt}`)
+      const verdict = checkPromptSafety(`${state.prompt} ${state.negativePrompt} ${state.triggerWord}`)
       if (verdict.blocked) {
         state.setError(SAFETY_BLOCK_MESSAGE)
         return
       }
+    }
+    // Character-Studio train surface books the local trainer instead of a
+    // render; the use surface falls through to the plain image path (the
+    // selected character LoRA rides the normal selectedLoras chain).
+    if (state.cloudOp === 'character' && state.characterTab === 'train') {
+      await runCharacterTraining()
+      return
     }
     const {
       mode, prompt, negativePrompt, imageModel, videoModel,
@@ -327,12 +454,30 @@ export function useCreate() {
     const maskFilename = mask?.filename
     const isRemoveBg = mode === 'image' && removebg
 
-    // ── MLX image pipeline (Apple Silicon) — hard rule: Mac local image is
-    // MLX-via-lu-bridge, never ComfyUI. Routes on the SELECTED model being the
-    // synthetic MLX entry (a stale videoBackend must not hijack a real ComfyUI
-    // checkpoint). Generation returns a base64 PNG stored as a data URL on the
-    // gallery item, so display + download work with no ComfyUI /view route. ──
-    if (mode === 'image' && isMlxImageHost() && isMlxImageModel(imageModel) && !isRemoveBg) {
+    // ── 2.5.8 specialized local lanes. music / lipsync / motion build their
+    // own core-node graphs (buildLocalOpWorkflow); extend rides the regular
+    // I2V flow below — its source IS the extracted last frame. character
+    // trained already branched off above (Rust musubi trainer); its use
+    // surface is a plain image generate with the LoRA active. ──
+    const localOp =
+      state.cloudOp === 'music' || state.cloudOp === 'lipsync' || state.cloudOp === 'motion'
+        ? state.cloudOp
+        : null
+    const localOpList =
+      localOp === 'music' ? state.audioModelList
+      : localOp === 'lipsync' ? state.lipsyncModelList
+      : localOp === 'motion' ? state.motionModelList
+      : []
+    const localOpModel = localOp ? resolveLocalOpPick(state.localOpModel, localOpList) : ''
+
+    // ── MLX image pipeline (Apple Silicon) — hard rule: Mac local image is the
+    // in-process MLX path, never ComfyUI. Gated on the derived `image` intent
+    // (which already means: no cloudOp, no utilityOp, no removebg, text2img)
+    // AND on the SELECTED model being a synthetic MLX entry, so a real ComfyUI
+    // checkpoint from a manual install is never hijacked. Generation returns a
+    // base64 PNG stored as a data URL on the gallery item, so display +
+    // download work with no ComfyUI /view route. ──
+    if (intent === 'image' && isMlxImageHost() && isMlxImageModel(imageModel)) {
       setError(null)
       if (!prompt.trim()) { setError('Please enter a prompt.'); return }
       setIsGenerating(true)
@@ -369,14 +514,16 @@ export function useCreate() {
       return
     }
 
-    // ── MLX video pipeline (Apple Silicon) — hard rule: Mac local video is
-    // MLX-via-mlx-video, never ComfyUI. Unlike the image branch this doesn't
-    // need to check the selected model against a synthetic-name marker: on
-    // Mac the video picker IS the MLX catalog (Task 1 — ComfyUI never even
-    // auto-starts there, see process.rs::auto_start_comfyui), so every video
-    // generation routes here. Generation is a subprocess polled via
-    // video_progress every 2s (no WebSocket/node-graph like ComfyUI). ──
-    if (mode === 'video' && isMlxImageHost()) {
+    // ── MLX video pipeline (Apple Silicon) — hard rule: Mac local video is the
+    // in-process mlx-video path, never ComfyUI. Unlike the image branch this
+    // needs no model-name marker: on Mac the video picker IS the MLX catalog
+    // (fetchModels above), so every local video generation routes here. Gated
+    // on the derived `video` intent, which is text-to-video by definition —
+    // animate/extend/motion have no local lane on this host (the IntentBar
+    // shows them hidden / as cloud teasers), and their source images are staged
+    // through a ComfyUI upload that doesn't exist here. Generation is a
+    // subprocess polled via video_progress every 2s (no WebSocket/node graph). ──
+    if (intent === 'video' && isMlxImageHost()) {
       setError(null)
       if (!prompt.trim()) { setError('Please enter a prompt.'); return }
       if (!videoModel) { setError('No local video model selected — pick one from the model picker.'); return }
@@ -384,11 +531,11 @@ export function useCreate() {
       if (!catalogId) { setError(`Unknown MLX video model "${videoModel}" — re-select it from the picker.`); return }
       try {
         const status = await getVideoStatus()
-        if (!status.available) { setError('MLX video is Apple Silicon only.'); return }
+        if (!status.available) { setError('Local video generation is Apple Silicon only.'); return }
         if (!status.mlxInstalled) { setError('The local video engine is not set up on this Mac yet (a one-time setup is needed before local video works).'); return }
         if (!status.installedModels.includes(catalogId)) { setError(`The local video model "${videoModel}" isn't downloaded yet.`); return }
       } catch (e) {
-        setError(`MLX video status check failed: ${e instanceof Error ? e.message : String(e)}`)
+        setError(`Local video status check failed: ${e instanceof Error ? e.message : String(e)}`)
         return
       }
 
@@ -406,7 +553,6 @@ export function useCreate() {
           seconds: Math.max(0.5, frames / Math.max(1, fps)),
           fps,
           seed: seed === -1 ? undefined : seed,
-          initImage: effI2vImage ?? undefined,
         })
       } catch (e) {
         useCreateStore.getState().setError(`Failed to start: ${e instanceof Error ? e.message : String(e)}`)
@@ -423,9 +569,11 @@ export function useCreate() {
               reject(new Error('Cancelled'))
               return
             }
-            // Safety net: local MLX video is slow (tens of minutes), so give it
-            // a full hour — but never poll forever. On the cap, kill the
-            // mlx-video subprocess so it stops pinning the machine.
+            // Safety net (David: the machine glowed for hours). Local MLX video
+            // is slow — tens of minutes — so give it a full hour, but never
+            // poll forever. On the cap, KILL the mlx-video subprocess so it
+            // stops pinning the machine; before this it kept running after the
+            // UI had given up.
             if (Date.now() - startTime > 60 * 60 * 1000) {
               try { await cancelVideo() } catch { /* already finished/gone */ }
               reject(new Error('Generation timed out after 60 minutes'))
@@ -438,13 +586,13 @@ export function useCreate() {
               if (prog.status === 'complete') {
                 setProgress(100, 'Complete!')
                 useCreateStore.getState().setLastGenTime(`${elapsed}s`)
-                // The mp4 lives on disk only (no lu-bridge :47711/videos/<file>
-                // route anymore) — read it via the guarded `read_media_file`
-                // Rust command and hand the frontend a `blob:` URL, which the
-                // CSP's media-src allows (unlike `data:`). Reuse `dataUrl`:
-                // galleryItemUrl()/OutputView/Lightbox/download already prefer
-                // it over the ComfyUI /view path, and a blob: URL is just a
-                // string src as far as <video>/fetch are concerned.
+                // The mp4 lives on disk only (no ComfyUI /view route here) —
+                // read it via the guarded `read_media_file` Rust command and
+                // hand the frontend a `blob:` URL, which the CSP's media-src
+                // allows (unlike `data:`). Reuse `dataUrl`: galleryItemUrl() /
+                // OutputView / Lightbox / download already prefer it over the
+                // ComfyUI /view path, and a blob: URL is just a string src as
+                // far as <video>/fetch are concerned.
                 let dataUrl: string | undefined
                 try {
                   dataUrl = await readVideoAsBlobUrl(result.output)
@@ -454,8 +602,8 @@ export function useCreate() {
                 addToGallery({
                   id: uuid(), type: 'video', filename: '', subfolder: '',
                   dataUrl,
-                  // Keep the real on-disk path too, in case a future
-                  // download-to-disk path wants to reference it directly.
+                  // Keep the real on-disk path too, for a future
+                  // download-to-disk path that wants to reference it directly.
                   localPath: result.output,
                   prompt, negativePrompt, model: videoModel, modelType: 'wan',
                   seed: seed === -1 ? 0 : seed, steps, cfgScale, sampler, scheduler,
@@ -466,7 +614,7 @@ export function useCreate() {
                 return
               }
               if (prog.status === 'error') {
-                reject(new Error(prog.error || 'mlx-video failed'))
+                reject(new Error(prog.error || 'local video generation failed'))
                 return
               }
               setTimeout(tick, 2000)
@@ -488,28 +636,100 @@ export function useCreate() {
     }
 
     setError(null)
-    const activeModel = mode === 'image' ? imageModel : videoModel
+    let activeModel = localOp ? localOpModel : (mode === 'image' ? imageModel : videoModel)
+    // Chip↔run agreement (live-caught on the extend E2E): the picker DISPLAYS
+    // the first capable model when the stored pick can't run the current
+    // intent, but submit read the raw store — the run then used a model the
+    // user never saw. Apply the picker's coercion here too (same one-rule
+    // philosophy as the cloud op resolver after take-01).
+    if (!localOp && mode === 'video' && state.videoModelList.length > 0) {
+      const capable = intent === 'animate' || intent === 'extend'
+        ? state.videoModelList.filter((m) => isI2VModel(m.name))
+        : state.videoModelList.filter((m) => isT2VCapable(m.name))
+      if (capable.length > 0 && !capable.some((m) => m.name === activeModel)) {
+        activeModel = capable[0].name
+      }
+    }
     // Always re-classify from model name to avoid stale type
     const imageModelType = classifyModel(activeModel)
 
-    // Background removal is prompt-free and model-independent (RMBG node).
-    if (!isRemoveBg && !prompt.trim()) {
-      setError('Please enter a prompt.')
+    // Background removal is prompt-free and model-independent (RMBG node);
+    // lipsync/motion drive off their media inputs (the builder supplies a
+    // neutral scene prompt when the field is empty).
+    const promptOptional = isRemoveBg || localOp === 'lipsync' || localOp === 'motion'
+    if (!promptOptional && !prompt.trim()) {
+      setError(localOp === 'music' ? 'Describe the track first. Genre, mood, tempo…' : 'Please enter a prompt.')
       return
     }
     if (isRemoveBg && !effInputImage) {
       setError('Please add an image to remove its background.')
       return
     }
-    if (isI2I && !isRemoveBg && !effInputImage) {
+    if (!localOp && isI2I && !isRemoveBg && !effInputImage) {
       setError('Please add a source image first.')
       return
     }
+    // No mask-required gate on Edit. In 2.5.8 this lane was inpaint-only and
+    // the guard existed because an empty mask SILENTLY became plain img2img and
+    // repainted the whole picture. 2.5.9 renamed the lane "Edit / Image to
+    // Image" and states the rule on the canvas ("leave the mask empty to
+    // restyle the whole image, or paint an area to change just that"), so that
+    // path is now the advertised behaviour rather than a surprise — and the
+    // guard was refusing exactly what the copy above it promises. The builder
+    // already routes it correctly: no mask means isInpaint is false and the
+    // request falls into the LoadImage → VAEEncode → KSampler(denoise) i2i
+    // branch, driven by the Edit strength slider.
     if (!isRemoveBg && !activeModel) {
-      setError(mode === 'image'
-        ? 'No image model selected. Add checkpoints or FLUX models to ComfyUI.'
-        : 'No video model selected. Install Wan 2.1 or AnimateDiff models.')
+      if (localOp === 'music') {
+        setError('No music model installed. Use Download & install above to get ACE Step, then generate.')
+      } else if (localOp === 'lipsync') {
+        setError('No talking character model installed. Use Download & install above to get Wan 2.2 S2V.')
+      } else if (localOp === 'motion') {
+        setError('No motion model installed. Use Download & install above to get Wan Animate or VACE.')
+      } else {
+        setError(mode === 'image'
+          ? 'No image model selected. Add checkpoints or FLUX models to ComfyUI.'
+          : 'No video model selected. Install Wan 2.1 or AnimateDiff models.')
+      }
       return
+    }
+    // Lane input guards — reject-and-report before anything uploads.
+    if (localOp === 'lipsync') {
+      if (!source?.filename) {
+        setError('Add the portrait the character should speak from.')
+        return
+      }
+      if (!state.audioInput) {
+        setError('Add a voice first. Upload or record the speech audio.')
+        return
+      }
+    }
+    if (localOp === 'motion') {
+      if (!source?.filename) {
+        setError('Add the character image that should perform the motion.')
+        return
+      }
+      if (!state.videoInput) {
+        setError('Add the driving video whose motion the character should copy.')
+        return
+      }
+    }
+    // Animate (local I2V, restored 2026-07-17) + extend (2.5.8 — continues a
+    // clip from its extracted last frame): reject-and-report instead of
+    // feeding a start image to a t2v-only checkpoint — that either errors in
+    // ComfyUI or silently ignores the source. The ModelChip already filters
+    // the picker; this guards a stale store selection reaching submit.
+    if (intent === 'animate' || intent === 'extend') {
+      if (!effI2vImage) {
+        setError(intent === 'extend'
+          ? 'Pick the clip to extend first. Its last frame becomes the starting point.'
+          : 'Add the image you want to animate first.')
+        return
+      }
+      if (!isI2VModel(activeModel)) {
+        setError(`${activeModel} is text-to-video only. Pick an i2v-capable model (WAN i2v / WAN 2.2 ti2v / SVD / LTX) to ${intent === 'extend' ? 'extend a clip' : 'animate an image'}.`)
+        return
+      }
     }
 
     const isRunning = await checkComfyConnection()
@@ -522,23 +742,96 @@ export function useCreate() {
     setProgress(0, 'Preparing workflow...')
     abortRef.current = new AbortController()
 
+    // Make VRAM room for the render. On a single local GPU a resident chat LLM
+    // (Ollama / LM Studio / the bundled engine) squats the card, which forces
+    // ComfyUI into heavy CPU offload — or a CUDA OOM on the 14B video lanes
+    // (S2V / Animate). Free the chat backends first (they reload lazily on the
+    // next message) but keep ComfyUI's own checkpoint cached across runs
+    // (includeComfyui:false). Best-effort — never block a render on housekeeping.
+    try {
+      await Promise.all([
+        backendCall('offload_local_models', { includeComfyui: false }).catch(() => {}),
+        backendCall('lmstudio_unload_model', { model: '--all' }).catch(() => {}),
+      ])
+    } catch { /* ignore — VRAM housekeeping is best-effort */ }
+
     try {
       const baseParams = {
         prompt, negativePrompt, model: activeModel, sampler, scheduler, steps, cfgScale, width, height, seed, batchSize,
         ...(isRemoveBg && effInputImage ? { removebg: true, inputImage: effInputImage } : {}),
         ...(isI2I && !isRemoveBg && effInputImage ? { inputImage: effInputImage, denoise } : {}),
         ...(!isRemoveBg && maskFilename ? { maskImage: maskFilename, growMaskBy } : {}),
-        // Advanced image adjustments (builder ignores these for video).
-        ...(selectedLoras.length ? { loras: selectedLoras } : {}),
+        // Advanced adjustments. LoRA feeds the builder's `lora`/`loraStrength`
+        // contract (string[] + number[]); the old `loras` key was read by nobody,
+        // so LoRA selection was a silent no-op for image too (D#80). VAE/clip-skip
+        // stay image-only (the builder ignores them for video).
+        ...(selectedLoras.length
+          ? { lora: selectedLoras.map((l) => l.name), loraStrength: selectedLoras.map((l) => l.strength) }
+          : {}),
         ...(selectedVae && selectedVae !== 'auto' ? { vae: selectedVae } : {}),
         ...(clipSkip > 0 ? { clipSkip } : {}),
       }
 
-      let workflow: Record<string, any>
+      let workflow: Record<string, any> = {}
       let builderUsed: 'dynamic' | 'legacy' | 'custom' = 'dynamic'
 
+      // ── Specialized-lane graphs: stage the media inputs in ComfyUI's input
+      // dir, then build the lane's core-node workflow. No custom-workflow or
+      // legacy fallback here — REJECT-AND-REPORT via WorkflowUnavailableError
+      // is the whole point (an "Update ComfyUI" message instead of a broken
+      // graph). ──
+      if (localOp) {
+        let audioFile: string | undefined
+        let drivingVideo: string | undefined
+        let laneFrames = mode === 'video' ? frames : 0
+        if (localOp === 'lipsync' && state.audioInput) {
+          setProgress(3, 'Uploading the voice audio...')
+          audioFile = await uploadMediaFile(state.audioInput.blob, state.audioInput.name)
+          // Size the clip to the speech: a fixed 77 frames would cut a longer
+          // voice mid-sentence. Cap at ~7.5s (121 frames @16fps) so a long
+          // narration doesn't quietly queue a 10-minute render on 12 GB.
+          const audioSeconds = await new Promise<number>((resolve) => {
+            const probe = new Audio()
+            const objUrl = URL.createObjectURL(state.audioInput!.blob)
+            probe.preload = 'metadata'
+            probe.onloadedmetadata = () => { URL.revokeObjectURL(objUrl); resolve(probe.duration || 0) }
+            probe.onerror = () => { URL.revokeObjectURL(objUrl); resolve(0) }
+            probe.src = objUrl
+          })
+          if (audioSeconds > 0 && Number.isFinite(audioSeconds)) {
+            laneFrames = Math.min(121, Math.max(25, Math.round(audioSeconds * (fps || 16)) + 1))
+          }
+        }
+        if (localOp === 'motion' && state.videoInput) {
+          setProgress(3, 'Uploading the driving video...')
+          drivingVideo = await uploadMediaFile(state.videoInput.blob, state.videoInput.name)
+        }
+        setProgress(5, 'Building workflow...')
+        const laneDefaults = COMFY_MODEL_DEFAULTS[imageModelType] ?? COMFY_MODEL_DEFAULTS.unknown
+        workflow = await buildLocalOpWorkflow({
+          op: localOp,
+          model: activeModel,
+          prompt,
+          negativePrompt,
+          seed, steps, cfgScale, sampler, scheduler,
+          // The shared width/height/frames sliders follow the picked model via
+          // setLocalOpModel; fall back to the architecture defaults when a
+          // stale persisted value would be off-grid for the lane.
+          width: width || laneDefaults.width,
+          height: height || laneDefaults.height,
+          frames: laneFrames || laneDefaults.frames,
+          fps: mode === 'video' ? fps : laneDefaults.fps,
+          seconds: state.musicDuration,
+          lyrics: state.musicLyrics,
+          audioFile,
+          refImage: source?.filename || undefined,
+          drivingVideo,
+        })
+        builderUsed = 'dynamic'
+      }
+
       // Check for custom workflow assignment — but verify it's compatible with the model
-      let customWf = useWorkflowStore.getState().getWorkflowForModel(activeModel, imageModelType)
+      let customWf = localOp ? null : useWorkflowStore.getState().getWorkflowForModel(activeModel, imageModelType)
       if (customWf) {
         const wfNodes = Object.values(customWf.workflow).map((n: any) => n.class_type)
         const needsUnet = imageModelType === 'flux' || imageModelType === 'flux2' || imageModelType === 'zimage' || imageModelType === 'wan' || imageModelType === 'hunyuan'
@@ -559,7 +852,7 @@ export function useCreate() {
         setProgress(5, `Using workflow: ${customWf.name}...`)
         const params = mode === 'video' ? { ...baseParams, frames, fps, ...(effI2vImage ? { inputImage: effI2vImage } : {}) } : baseParams
         workflow = await injectParameters(customWf.workflow, customWf.parameterMap, params, imageModelType)
-      } else {
+      } else if (!localOp) {
         // Dynamic workflow builder — auto-detects nodes and builds the right pipeline
         setProgress(5, 'Building workflow...')
         try {
@@ -646,7 +939,7 @@ export function useCreate() {
                   // Re-build the workflow now that the new node is available
                   const genParams = { ...baseParams, frames, fps, ...(effI2vImage ? { inputImage: effI2vImage } : {}) }
                   workflow = await buildDynamicWorkflow(genParams, imageModelType)
-                  setProgress(10, 'VHS installed — generating MP4...')
+                  setProgress(10, 'VHS installed, generating MP4...')
                 } catch (instErr) {
                   setError(`Failed to install VHS_VideoCombine: ${instErr instanceof Error ? instErr.message : String(instErr)}. You can install it manually in ComfyUI Manager.`)
                   setIsGenerating(false)
@@ -699,17 +992,35 @@ export function useCreate() {
           store.setProgressPhase('queued')
           setProgress(10, 'Queued...')
 
-          const timeoutTimer = setTimeout(() => {
-            cleanup()
-            reject(new Error(`Generation timed out after ${Math.round(maxTime / 60000)} minutes`))
-          }, maxTime)
+          // Activity watchdog (2.5.8): the old hard wall-clock cap killed a
+          // REAL render at exactly 60 minutes while ComfyUI was still
+          // sampling (live-caught on the extend lane: 3060 + TI2V-5B, file
+          // landed on disk seconds after the app gave up). maxTime now bounds
+          // the SILENT gap — every WS event for our prompt, and a still-queued
+          // prompt on the periodic check, count as life signs.
+          let lastActivity = Date.now()
+          const timeoutTimer = setInterval(() => {
+            if (Date.now() - lastActivity > maxTime) {
+              cleanup()
+              reject(new Error(`Generation stalled: no progress from ComfyUI for ${Math.round(maxTime / 60000)} minutes`))
+            }
+          }, 15000)
 
           // Heartbeat: check ComfyUI every 10s + poll for completion (catches missed WS events)
           let completionHandled = false
+          let queueCheckCounter = 0
           const heartbeat = setInterval(async () => {
             if (completionHandled) return
             const alive = await checkComfyConnection()
             if (!alive) { cleanup(); reject(new Error('ComfyUI stopped responding during generation')); return }
+            // A prompt still in ComfyUI's queue is alive even when the socket
+            // goes quiet (long model loads emit no events) — refresh the
+            // watchdog once a minute from the queue itself.
+            queueCheckCounter += 1
+            if (queueCheckCounter >= 6) {
+              queueCheckCounter = 0
+              if (await isPromptQueued(promptId).catch(() => false)) lastActivity = Date.now()
+            }
             // Poll history to catch completion if WebSocket event was missed
             try {
               const history = await getHistory(promptId)
@@ -739,7 +1050,7 @@ export function useCreate() {
                   for (const file of files) {
                     found = true
                     addToGallery({
-                      id: uuid(), type: mode,
+                      id: uuid(), type: galleryTypeForFile(file.filename, mode),
                       filename: file.filename, subfolder: file.subfolder ?? '',
                       prompt, negativePrompt, model: activeModel,
                       modelType: mode === 'image' ? imageModelType : (videoModelsList.find(m => m.name === activeModel)?.type ?? 'wan'),
@@ -766,7 +1077,7 @@ export function useCreate() {
           let abortCheck: ReturnType<typeof setInterval> | null = null
 
           const cleanup = () => {
-            clearTimeout(timeoutTimer)
+            clearInterval(timeoutTimer)
             clearInterval(heartbeat)
             if (abortCheck) clearInterval(abortCheck)
             removeListener()
@@ -775,6 +1086,7 @@ export function useCreate() {
           const removeListener = comfyWS.on((event: ComfyWSEvent) => {
             // Only handle events for our prompt
             if ('prompt_id' in event.data && event.data.prompt_id !== promptId) return
+            lastActivity = Date.now()
 
             const elapsed = Math.round((Date.now() - startTime) / 1000)
             const st = useCreateStore.getState()
@@ -836,7 +1148,7 @@ export function useCreate() {
                     for (const file of files) {
                       found = true
                       addToGallery({
-                        id: uuid(), type: mode,
+                        id: uuid(), type: galleryTypeForFile(file.filename, mode),
                         filename: file.filename, subfolder: file.subfolder ?? '',
                         prompt, negativePrompt, model: activeModel,
                         modelType: mode === 'image' ? imageModelType : (videoModelsList.find(m => m.name === activeModel)?.type ?? 'wan'),
@@ -876,6 +1188,10 @@ export function useCreate() {
           let attempts = 0
           let comfyCheckCounter = 0
           const startTime = Date.now()
+          // Same activity watchdog as the WS branch: the deadline only fires
+          // when the prompt has also LEFT ComfyUI's queue — a slow render
+          // that is still queued extends its own window.
+          let lastActivity = Date.now()
 
           pollRef.current = setInterval(async () => {
             if (abortRef.current?.signal.aborted) {
@@ -885,10 +1201,14 @@ export function useCreate() {
             }
 
             const elapsed = Date.now() - startTime
-            if (elapsed > maxTime) {
-              if (pollRef.current) clearInterval(pollRef.current)
-              reject(new Error(`Generation timed out after ${Math.round(maxTime / 60000)} minutes`))
-              return
+            if (Date.now() - lastActivity > maxTime) {
+              if (await isPromptQueued(promptId).catch(() => false)) {
+                lastActivity = Date.now()
+              } else {
+                if (pollRef.current) clearInterval(pollRef.current)
+                reject(new Error(`Generation stalled: no progress from ComfyUI for ${Math.round(maxTime / 60000)} minutes`))
+                return
+              }
             }
 
             attempts++
@@ -933,7 +1253,7 @@ export function useCreate() {
                   for (const file of files) {
                     found = true
                     addToGallery({
-                      id: uuid(), type: mode,
+                      id: uuid(), type: galleryTypeForFile(file.filename, mode),
                       filename: file.filename, subfolder: file.subfolder ?? '',
                       prompt, negativePrompt, model: activeModel,
                       modelType: mode === 'image' ? imageModelType : (videoModelsList.find(m => m.name === activeModel)?.type ?? 'wan'),
@@ -978,7 +1298,7 @@ export function useCreate() {
       if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
       abortRef.current = null
     }
-  }, [videoBackend])
+  }, [videoBackend, runCharacterTraining])
 
   // Double-click idempotence: isGenerating only flips after the first await,
   // so a second click racing the first must be blocked SYNCHRONOUSLY — two
@@ -996,6 +1316,9 @@ export function useCreate() {
 
   const cancel = useCallback(async () => {
     abortRef.current?.abort()
+    if (trainingActive.current) {
+      try { await cancelCharacterTraining() } catch {}
+    }
     try { await cancelGeneration() } catch {}
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
     useCreateStore.getState().setIsGenerating(false)

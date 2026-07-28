@@ -114,9 +114,16 @@ export function speak(
 }
 
 /**
- * Speak text sentence by sentence for streaming-style playback.
- * Each sentence is spoken sequentially, allowing early interruption
- * via stopSpeaking() between sentences.
+ * Speak `text` via the browser SpeechSynthesis fallback.
+ *
+ * Speaks the whole text as ONE utterance. It used to split into per-sentence
+ * utterances and chain them, which hit the well-known Chromium/WebView2 bug
+ * where speak() issued right after cancel() silently no-ops — so onend for the
+ * 2nd sentence never fired and playback died after the FIRST sentence (#77c,
+ * ElBiggus: only "What do you call a fake noodle?" was read, never the punch
+ * line). One utterance removes the chaining entirely; stopSpeaking() (cancel)
+ * still interrupts instantly. A periodic resume() counters Chromium pausing the
+ * synthesizer after ~15 s on a long answer.
  */
 export async function speakStreaming(
   text: string,
@@ -127,34 +134,34 @@ export async function speakStreaming(
   if (!isSpeechSynthesisSupported()) return;
   stopSpeaking();
 
-  // Split into sentences (keeping the punctuation)
-  const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+  const synth = window.speechSynthesis;
+  const trimmed = text.trim();
+  if (!trimmed || !synth) return;
 
-  for (const sentence of sentences) {
-    const trimmed = sentence.trim();
-    if (!trimmed) continue;
+  await new Promise<void>((resolve, reject) => {
+    const utterance = new SpeechSynthesisUtterance(trimmed);
+    if (voice) utterance.voice = voice;
+    if (rate !== undefined) utterance.rate = rate;
+    if (pitch !== undefined) utterance.pitch = pitch;
 
-    // Check if speech was cancelled between sentences
-    if (!window.speechSynthesis) return;
+    const keepAlive = setInterval(() => {
+      try { synth.resume(); } catch { /* engine gone — onend/onerror will settle */ }
+    }, 10000);
+    let settled = false;
+    const cleanup = () => { if (settled) return; settled = true; clearInterval(keepAlive); };
 
-    await new Promise<void>((resolve, reject) => {
-      const utterance = new SpeechSynthesisUtterance(trimmed);
-      if (voice) utterance.voice = voice;
-      if (rate !== undefined) utterance.rate = rate;
-      if (pitch !== undefined) utterance.pitch = pitch;
+    utterance.onend = () => { cleanup(); resolve(); };
+    utterance.onerror = (event) => {
+      cleanup();
+      if (event.error === "canceled" || event.error === "interrupted") {
+        resolve();
+      } else {
+        reject(new Error(`Speech synthesis error: ${event.error}`));
+      }
+    };
 
-      utterance.onend = () => resolve();
-      utterance.onerror = (event) => {
-        if (event.error === "canceled" || event.error === "interrupted") {
-          resolve();
-        } else {
-          reject(new Error(`Speech synthesis error: ${event.error}`));
-        }
-      };
-
-      window.speechSynthesis.speak(utterance);
-    });
-  }
+    synth.speak(utterance);
+  });
 }
 
 export function stopSpeaking(): void {
@@ -234,26 +241,60 @@ export async function transcribeAudioCloud(audioBlob: Blob): Promise<string> {
 // boundaries (hard-splitting any single oversized run) so long messages read
 // aloud instead of 400ing and silently degrading to the local/browser voice.
 const TTS_MAX_CHARS = 1400;
+/** Last resort for a run with no sentence end in it: cut at `max`, but never
+ *  through a surrogate pair (a split emoji becomes two lone surrogates, which
+ *  is invalid in the JSON the cloud TTS request carries) and, where the text
+ *  has spaces, never through a word. */
+function hardSlice(s: string, max: number): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < s.length) {
+    let end = Math.min(i + max, s.length);
+    if (end < s.length) {
+      const lead = s.charCodeAt(end - 1);
+      if (lead >= 0xd800 && lead <= 0xdbff) end -= 1; // keep the pair together
+      const ws = s.lastIndexOf(" ", end - 1);
+      // Only back off to a space if it does not shrink the chunk drastically —
+      // CJK has none, and a 60% floor keeps the clip count sane.
+      if (ws > i + max * 0.6) end = ws + 1;
+    }
+    const piece = s.slice(i, end).trim();
+    if (piece) out.push(piece);
+    i = end;
+  }
+  return out;
+}
+
 export function chunkForTts(text: string, max = TTS_MAX_CHARS): string[] {
   const clean = text.trim();
   if (clean.length <= max) return clean ? [clean] : [];
-  const parts = clean.split(/(?<=[.!?。！？\n])\s+/);
+  // Split AFTER a sentence terminator. This used to require whitespace to
+  // FOLLOW it (`\s+`), which never fires for CJK — Chinese and Japanese put no
+  // space after 。！？, so a long answer stayed a single part and fell into the
+  // blind slicer below: measured, 200 Japanese sentences came out as one part
+  // and the cut landed inside a word.
+  // Parts stay VERBATIM — the separator (a space in Latin prose, nothing in
+  // CJK) rides along at the head of the next part, so concatenating restores
+  // the original exactly. Joining with a space instead would insert one into
+  // Japanese where none belongs.
+  const parts = clean.split(/(?<=[.!?。！？\n])/).filter(Boolean);
   const chunks: string[] = [];
   let cur = "";
+  const flush = () => {
+    const t = cur.trim();
+    if (t) chunks.push(t);
+    cur = "";
+  };
   for (const p of parts) {
     if (p.length > max) {
-      if (cur) { chunks.push(cur); cur = ""; }
-      for (let i = 0; i < p.length; i += max) chunks.push(p.slice(i, i + max));
+      flush();
+      for (const piece of hardSlice(p, max)) chunks.push(piece);
       continue;
     }
-    if ((cur ? cur.length + 1 + p.length : p.length) > max) {
-      if (cur) chunks.push(cur);
-      cur = p;
-    } else {
-      cur = cur ? `${cur} ${p}` : p;
-    }
+    if (cur.length + p.length > max) flush();
+    cur += p;
   }
-  if (cur) chunks.push(cur);
+  flush();
   return chunks;
 }
 
@@ -285,32 +326,45 @@ export async function synthesizeCloud(text: string, voice?: string, signal?: Abo
 
 let ttsChecked = false;
 let ttsAvailableFlag = false;
+let ttsCheckedVoice: string | undefined;
 
-export async function checkTtsAvailable(): Promise<{ available: boolean; piper?: boolean; voice?: boolean }> {
+/** Probe neural TTS. Pass the SELECTED voice — readiness is per voice: having
+ *  some other voice on disk says nothing about the one that is about to speak. */
+export async function checkTtsAvailable(voice?: string): Promise<{ available: boolean; piper?: boolean; voice?: boolean }> {
   try {
-    if (isTauri()) return await backendCall("tts_status");
+    if (isTauri()) return await backendCall("tts_status", { voice });
     return { available: false };
   } catch {
     return { available: false };
   }
 }
 
-export async function initTtsCheck(): Promise<boolean> {
-  if (ttsChecked) return ttsAvailableFlag;
+export async function initTtsCheck(voice?: string): Promise<boolean> {
+  // Cache only a POSITIVE result. A negative probe at boot is frequently a
+  // race — resolve_lu_python / the ComfyUI venv may not be ready when App.tsx
+  // fires this — and caching `false` would stick for the whole session, so
+  // every read-aloud silently fell back to the Windows SAPI voice and Piper
+  // never spoke at all (#77, ElBiggus). On a negative we leave ttsChecked
+  // false so the next caller (the lazy re-probe in useVoice, or Settings)
+  // gets a fresh probe instead of the stale miss.
+  // The cache is per voice: a positive for the voice that was selected earlier
+  // must not vouch for the one the user switched to.
+  if (ttsChecked && ttsAvailableFlag && ttsCheckedVoice === voice) return ttsAvailableFlag;
   try {
-    ttsAvailableFlag = (await checkTtsAvailable()).available;
+    ttsAvailableFlag = (await checkTtsAvailable(voice)).available;
   } catch {
     ttsAvailableFlag = false;
   }
-  ttsChecked = true;
+  ttsChecked = ttsAvailableFlag;
+  ttsCheckedVoice = voice;
   return ttsAvailableFlag;
 }
 
 // Force a fresh probe (after the in-app install, or when a Speaker button mounts
 // while neural TTS still shows unavailable).
-export async function recheckTtsAvailable(): Promise<boolean> {
+export async function recheckTtsAvailable(voice?: string): Promise<boolean> {
   ttsChecked = false;
-  return initTtsCheck();
+  return initTtsCheck(voice);
 }
 
 /** Synthesize text to a playable WAV data URL via a local Piper voice. */
@@ -432,6 +486,24 @@ function downsampleTo(input: Float32Array, inRate: number, outRate: number): Flo
   return out;
 }
 
+/** Downsample to 16 kHz when the source is higher, then encode.
+ *
+ *  The header carries the rate the samples are ACTUALLY at. It used to be
+ *  hard-coded to 16 kHz while downsampleTo returns its input untouched when the
+ *  source is already at or below the target — so a mic running below 16 kHz
+ *  produced a WAV whose header lied. A Bluetooth headset in HFP mode captures
+ *  at 8 kHz, which is the common case on Windows the moment the headset's
+ *  microphone is selected; whisper then read the take at double speed and the
+ *  transcript came back wrong or empty ("mic on but no text"). faster-whisper
+ *  resamples from whatever the header declares, so declaring it honestly is the
+ *  whole fix.
+ */
+export function pcmToWav(samples: Float32Array, inputRate: number): Blob {
+  const rate = Math.min(inputRate, STT_TARGET_RATE);
+  const ds = downsampleTo(samples, inputRate, STT_TARGET_RATE);
+  return encodeWav(floatTo16BitPCM(ds), rate);
+}
+
 function encodeWav(samples: Int16Array, sampleRate: number): Blob {
   const buffer = new ArrayBuffer(44 + samples.length * 2);
   const view = new DataView(buffer);
@@ -474,8 +546,7 @@ export function createAudioRecorder(): AudioRecorder {
     const merged = new Float32Array(total);
     let o = 0;
     for (const c of pcmChunks) { merged.set(c, o); o += c.length; }
-    const ds = downsampleTo(merged, inputRate, STT_TARGET_RATE);
-    return encodeWav(floatTo16BitPCM(ds), STT_TARGET_RATE);
+    return pcmToWav(merged, inputRate);
   };
 
   return {

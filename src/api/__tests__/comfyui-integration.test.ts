@@ -67,7 +67,10 @@ describe('Full Pipeline: Bundle → Strategy for all 14 video bundles', () => {
       const modelType = workflowToModelType[workflow]
       expect(modelType).toBeDefined()
 
-      // 4. Verify strategy is available
+      // 4. Verify strategy is available. The CogVideoX and Pyramid Flow bundles
+      // were pulled on 2026-07-24 (their builders emitted node class names no
+      // wrapper registers), so every bundle that is still listed here has to
+      // resolve to a real strategy. No carve-outs.
       const result = determineStrategy(modelType as any, true, allNodesAvailable(), defaultModels)
       expect(result.strategy).not.toBe('unavailable')
     })

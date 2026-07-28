@@ -1,5 +1,7 @@
+import { Cloud } from 'lucide-react'
 import { useCreateStore } from '../../../stores/createStore'
-import { visibleIntents } from './intents'
+import { useUIStore, type CloudTeaserTarget } from '../../../stores/uiStore'
+import { isIntentLocked, visibleIntents } from './intents'
 import { isMlxImageHost } from '../../../api/mlx-image'
 import { cn } from '../ui/cn'
 
@@ -10,46 +12,74 @@ import { cn } from '../ui/cn'
 // cross-fades via colour/shadow; neighbours slide on natural flex reflow.
 const EASE = 'ease-[cubic-bezier(0.22,1,0.36,1)]'
 
+type TeaserIntent = Extract<CloudTeaserTarget, { surface: 'intent' }>['intent']
+
 export function IntentBar() {
   const intent = useCreateStore((s) => s.intent())
   const setIntent = useCreateStore((s) => s.setIntent)
   const backend = useCreateStore((s) => s.backend)
-  // setIntent's base already clears a stale utilityOp when the mode flips back
-  // and the user picks any normal intent. Filtering (hosted-only ops + Mac's
-  // missing RMBG node) lives in visibleIntents so it stays unit-tested.
-  const intents = visibleIntents(backend, isMlxImageHost())
+  const setCloudTeaser = useUIStore((s) => s.setCloudTeaser)
+  // Every tool is always in the bar. The 2.5.8 lanes with hasLocalLane
+  // (lipsync / music / extend / motion) are REAL local tabs — plain selectable
+  // pills with NO cloud glyph (David 2026-07-19: the top row only carries a
+  // cloud badge for the genuinely hosted-only tools). Only upscale, eraser and
+  // character training (cloudOnly, no local backend) render as locked,
+  // cloud-tagged pills in local mode; a tap opens the teaser sheet / plans gate.
+  //
+  // On an MLX Mac (no ComfyUI at all) those lanes have no local implementation
+  // either, so they lock there too. Both rules live in intents.ts so they stay
+  // pure + unit tested; this component only renders the verdict.
+  const mlxHost = isMlxImageHost()
+  const intents = visibleIntents(backend, mlxHost)
 
   return (
     <div
       role="radiogroup"
       aria-label="Create mode"
       className="flex items-center justify-center gap-1 px-4 py-0.5"
-      // Sized to sit just 9% larger than the QuickControls ratio bar below
+      // Sized to sit just 9% larger than the LaneControls ratio bar below
       // (which runs at scale 0.7): 0.7 × 1.09 ≈ 0.763.
       style={{ transform: 'scale(0.763)', transformOrigin: 'center' }}
     >
       {intents.map((meta) => {
-        const selected = intent === meta.id
+        const locked = isIntentLocked(meta, backend, mlxHost)
+        const selected = !locked && intent === meta.id
         const Icon = meta.icon
         return (
           <button
             key={meta.id}
             role="radio"
             aria-checked={selected}
-            aria-label={meta.label}
-            title={meta.label}
-            onClick={() => setIntent(meta.id)}
+            aria-label={locked ? `${meta.label}, runs on LU Cloud` : meta.label}
+            title={locked ? `${meta.label}, runs on LU Cloud` : meta.label}
+            onClick={() =>
+              locked
+                ? setCloudTeaser({ surface: 'intent', intent: meta.id as TeaserIntent })
+                : setIntent(meta.id)
+            }
             className={cn(
-              'flex items-center h-9 rounded-full border lu-focus-ring transition-[background-color,border-color,box-shadow,color] duration-200',
+              'relative flex items-center h-9 rounded-full border lu-focus-ring transition-[background-color,border-color,box-shadow,color] duration-200',
               EASE,
               selected
                 ? 'bg-white/[0.11] border-white/20 shadow-sm text-white'
-                : 'border-transparent text-gray-500 hover:text-gray-200 hover:bg-white/[0.05]',
+                : locked
+                  ? 'border-transparent text-gray-600 hover:text-gray-400 hover:bg-white/[0.03]'
+                  : 'border-transparent text-gray-500 hover:text-gray-200 hover:bg-white/[0.05]',
             )}
           >
             <span className="grid place-items-center w-9 h-9 shrink-0">
               <Icon size={16} strokeWidth={selected ? 2 : 1.75} />
             </span>
+            {locked && (
+              // Brighter, theme-aware cloud tag: violet-300/80 was near
+              // invisible on light backgrounds and easy to miss on dark.
+              <Cloud
+                size={11}
+                className="absolute top-0.5 right-0.5 text-violet-500 dark:text-violet-200"
+                strokeWidth={2.4}
+                aria-hidden
+              />
+            )}
             <span
               className={cn(
                 'overflow-hidden whitespace-nowrap min-w-0 t-control transition-[max-width,opacity,padding] duration-200',

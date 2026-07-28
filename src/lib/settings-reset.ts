@@ -19,13 +19,13 @@ export const SETTINGS_TAB_RESET_KEYS: Record<SettingsTab, (keyof Settings)[]> = 
     'gpuVendor', 'gpuIndices',
     'imageGenTimeoutMinutes', 'videoGenTimeoutMinutes',
   ],
-  backends: ['apiEndpoint', 'hfDownloadPathOverride', 'exclusiveVramMode'],
+  backends: ['apiEndpoint', 'hfDownloadPathOverride', 'exclusiveVramMode', 'builtinEngine'],
   agent: [
     'personasEnabled', 'defaultWorkspace',
     'agentMaxToolCalls', 'agentMaxIterations',
     'searchProvider', 'braveApiKey', 'tavilyApiKey',
     'codexArchitectMode', 'codexArchitectModel', 'codexArchitectAllowCloud',
-    'codexRepoMapEnabled', 'codexRepoMapLimit', 'codexStageMode', 'codexReviewMode',
+    'codexRepoMapEnabled', 'codexRepoMapLimit', 'codexStageMode', 'codexAutoApply', 'codexReviewMode',
   ],
   'voice-remote': [],
 }

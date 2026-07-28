@@ -44,7 +44,7 @@ export function TaskBreakdown({ tasks }: Props) {
           <Wrench size={13} />
           Tasks
         </div>
-        <div className="text-center py-3">No tasks yet — the agent will create them as it works</div>
+        <div className="text-center py-3">No tasks yet. The agent will create them as it works</div>
       </div>
     )
   }

@@ -61,10 +61,12 @@ pub(crate) fn contain_within(root: &Path, candidate: &Path) -> Result<PathBuf, S
         #[cfg(windows)]
         {
             // Windows paths are case-insensitive; compare lowercased with a
-            // component boundary so `…/foo` can't match `…/foobar`.
-            let r = nroot.to_string_lossy().to_lowercase().replace('\\', "/");
-            let r = r.trim_end_matches('/');
-            let c = ncand.to_string_lossy().to_lowercase().replace('\\', "/");
+            // component boundary so `…/foo` can't match `…/foobar`. Both sides
+            // go through the SAME key builder (which strips any `\\?\` verbatim
+            // prefix) so an extended-length root and a plain candidate — or vice
+            // versa — still compare equal.
+            let r = win_compare_key(&nroot);
+            let c = win_compare_key(&ncand);
             c == r || c.starts_with(&format!("{}/", r))
         }
         #[cfg(not(windows))]
@@ -73,8 +75,33 @@ pub(crate) fn contain_within(root: &Path, candidate: &Path) -> Result<PathBuf, S
     if within {
         Ok(ncand)
     } else {
-        Err(format!("Path escapes the allowed workspace: {}", candidate.display()))
+        // Surface BOTH sides: the #1 support question on this error is "which
+        // folder does it think the workspace is?" — the raw root answers it.
+        Err(format!(
+            "Path escapes the allowed workspace.\n  workspace root: {}\n  requested path: {}",
+            root.display(),
+            candidate.display()
+        ))
     }
+}
+
+/// Windows containment-comparison key: lowercase, forward-slashed, `\\?\`
+/// verbatim prefix stripped, trailing slash trimmed. rfd's folder picker returns
+/// extended-length (`\\?\C:\…`, `\\?\UNC\srv\share`) paths for selections past
+/// MAX_PATH, but `workspace_root` stores the raw string — without normalizing
+/// both sides identically here, a legitimately-picked folder fails containment
+/// with "Path escapes the allowed workspace" (#79, DarkLordCmd / thecakeisnaoh).
+#[cfg(windows)]
+fn win_compare_key(p: &Path) -> String {
+    let s = p.to_string_lossy().to_lowercase().replace('\\', "/");
+    let s = if let Some(rest) = s.strip_prefix("//?/unc/") {
+        format!("//{}", rest) // verbatim UNC → plain UNC (\\srv\share)
+    } else if let Some(rest) = s.strip_prefix("//?/") {
+        rest.to_string() // verbatim disk → plain (C:\…)
+    } else {
+        s
+    };
+    s.trim_end_matches('/').to_string()
 }
 
 /// The jail root for a file op: a configured folder workspace `working_dir`
@@ -148,15 +175,68 @@ pub fn fs_read(path: String, chatId: Option<String>, workingDirectory: Option<St
         return Err(format!("File not found: {}", full.display()));
     }
 
-    // Try text first, fall back to base64 for binary
+    // Text, or a binary MARKER — never the binary payload.
+    //
+    // This used to base64-encode the whole file and ship it over IPC. Every
+    // consumer discards it: the model-facing file_read turns it into a "binary,
+    // not shown" line, and both file_edit paths refuse outright. So a 500 MB
+    // model file cost ~667 MB of base64 in Rust plus the JSON and JS copies of
+    // it, all to be thrown away — the desktop half of a guard the phone relay
+    // already had (f3542ff).
     match fs::read_to_string(&full) {
         Ok(content) => Ok(serde_json::json!({ "content": content, "encoding": "utf8" })),
         Err(_) => {
-            let bytes = fs::read(&full).map_err(|e| format!("Read error: {}", e))?;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            Ok(serde_json::json!({ "content": b64, "encoding": "base64" }))
+            let bytes = fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
+            Ok(serde_json::json!({ "encoding": "binary", "bytes": bytes }))
         }
     }
+}
+
+/// Match new content to the EXISTING file's line-ending + BOM convention so an
+/// edit produces a minimal diff instead of flipping every line. Local coding
+/// models emit `\n`; on a Windows repo whose files are CRLF, writing that raw
+/// turned every edit into a whole-file whitespace diff. For a NEW file we honor
+/// exactly what the caller sent — there is no convention to match.
+pub(crate) fn normalize_to_existing_style(existing: Option<&[u8]>, new: &str) -> Vec<u8> {
+    const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+    let existing = match existing {
+        Some(e) => e,
+        None => return new.as_bytes().to_vec(),
+    };
+    let had_bom = existing.starts_with(&BOM);
+    // The file is treated as CRLF if it contains any CRLF pair.
+    let existing_crlf = existing.windows(2).any(|w| w == b"\r\n");
+    // Normalize incoming to LF first (idempotent), then to the target style.
+    let lf = new.replace("\r\n", "\n");
+    let bodied = if existing_crlf { lf.replace('\n', "\r\n") } else { lf };
+    let mut out = Vec::with_capacity(bodied.len() + 3);
+    if had_bom && !bodied.as_bytes().starts_with(&BOM) {
+        out.extend_from_slice(&BOM);
+    }
+    out.extend_from_slice(bodied.as_bytes());
+    out
+}
+
+/// Write bytes to `target` atomically: a temp file in the SAME directory, then
+/// rename over the target. A crash or interrupt can never leave a half-written
+/// (truncated) file where the original was — std::fs::rename replaces the
+/// destination on both Unix and Windows.
+pub(crate) fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let parent = target.parent().ok_or_else(|| "No parent directory".to_string())?;
+    let base = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = parent.join(format!(".{}.tmp{}-{}", base, std::process::id(), seq));
+    fs::write(&tmp, bytes).map_err(|e| format!("Write error: {}", e))?;
+    if let Err(e) = fs::rename(&tmp, target) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("Write error (rename): {}", e));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -166,8 +246,29 @@ pub fn fs_write(path: String, content: String, chatId: Option<String>, workingDi
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Create dir: {}", e))?;
     }
-    fs::write(&full, &content).map_err(|e| format!("Write error: {}", e))?;
-    Ok(serde_json::json!({ "status": "saved", "path": full.to_string_lossy() }))
+    // Read the current bytes (if any) to preserve the file's EOL/BOM convention
+    // and to detect a no-op write.
+    let existing = fs::read(&full).ok();
+    let out_bytes = normalize_to_existing_style(existing.as_deref(), &content);
+
+    if let Some(ref old) = existing {
+        if old.as_slice() == out_bytes.as_slice() {
+            // Nothing changed — skip the write so there is no spurious mtime
+            // bump and no misleading "saved" for an identical file.
+            return Ok(serde_json::json!({
+                "status": "unchanged",
+                "path": full.to_string_lossy(),
+                "bytes": out_bytes.len(),
+            }));
+        }
+    }
+
+    write_atomic(&full, &out_bytes)?;
+    Ok(serde_json::json!({
+        "status": "saved",
+        "path": full.to_string_lossy(),
+        "bytes": out_bytes.len(),
+    }))
 }
 
 #[tauri::command]
@@ -407,7 +508,84 @@ pub async fn save_binary_file_dialog(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_workspace_root_path, resolve_path};
+    use super::{is_workspace_root_path, normalize_to_existing_style, resolve_path};
+
+    // ── #11: fs_write preserves the existing file's EOL + BOM convention ──
+    #[test]
+    fn new_file_keeps_content_verbatim() {
+        // No existing file → honor exactly what the caller sent (LF).
+        assert_eq!(normalize_to_existing_style(None, "a\nb\n"), b"a\nb\n");
+        // Even CRLF the caller explicitly sent is preserved for a new file.
+        assert_eq!(normalize_to_existing_style(None, "a\r\nb"), b"a\r\nb");
+    }
+
+    #[test]
+    fn write_atomic_replaces_and_leaves_no_debris() {
+        use super::write_atomic;
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("lu-atomic-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let target = dir.join("notes.txt");
+        fs::write(&target, b"old").unwrap();
+
+        write_atomic(&target, b"new content").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"new content");
+
+        // The temp twin must be gone — a leftover .notes.txt.tmpNNN would show
+        // up in the user's repo and in file_list.
+        let leftovers: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n != "notes.txt")
+            .collect();
+        assert!(leftovers.is_empty(), "left behind: {:?}", leftovers);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn crlf_file_gets_lf_content_converted() {
+        let existing = b"old\r\nlines\r\n";
+        assert_eq!(
+            normalize_to_existing_style(Some(existing), "new\nlines\n"),
+            b"new\r\nlines\r\n"
+        );
+    }
+
+    #[test]
+    fn lf_file_stays_lf() {
+        let existing = b"old\nlines\n";
+        assert_eq!(
+            normalize_to_existing_style(Some(existing), "new\nlines\n"),
+            b"new\nlines\n"
+        );
+    }
+
+    #[test]
+    fn crlf_conversion_is_idempotent() {
+        let existing = b"x\r\ny\r\n";
+        // Caller already sent CRLF — must not become \r\r\n.
+        assert_eq!(
+            normalize_to_existing_style(Some(existing), "a\r\nb\r\n"),
+            b"a\r\nb\r\n"
+        );
+    }
+
+    #[test]
+    fn existing_bom_is_preserved() {
+        let existing = b"\xEF\xBB\xBFhello\n";
+        let out = normalize_to_existing_style(Some(existing), "world\n");
+        assert_eq!(out, b"\xEF\xBB\xBFworld\n");
+        // Not doubled when the new content already carries the BOM.
+        let out2 = normalize_to_existing_style(Some(existing), "\u{feff}world\n");
+        assert_eq!(out2, b"\xEF\xBB\xBFworld\n");
+    }
+
+    #[test]
+    fn no_bom_stays_no_bom() {
+        let existing = b"plain\n";
+        assert_eq!(normalize_to_existing_style(Some(existing), "x\n"), b"x\n");
+    }
 
     #[test]
     fn workspace_root_paths_match() {
@@ -473,5 +651,174 @@ mod tests {
     #[test]
     fn dotdot_traversal_out_of_working_dir_is_rejected() {
         assert!(resolve_path("../../secret.txt", Some("c"), Some("D:/Projects/site")).is_err());
+    }
+
+    // ── #79: rfd's folder picker hands back extended-length (`\\?\`) roots for
+    // selections past MAX_PATH. The root then carries the verbatim prefix while
+    // the candidate is stripped of it — before the symmetric win_compare_key
+    // fix, a legitimately-picked folder failed containment. ────────────────
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_prefixed_root_allows_browsing_itself() {
+        // FileTree browse passes path == workingDirectory == the picked folder.
+        let got = resolve_path(r"\\?\D:\Projects\site", Some("c"), Some(r"\\?\D:\Projects\site"))
+            .expect("verbatim root must contain itself");
+        let s = got.to_string_lossy().to_lowercase().replace('\\', "/");
+        assert!(s.ends_with("d:/projects/site"), "got: {}", s);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn relative_path_under_verbatim_root_is_allowed() {
+        let got = resolve_path("src/main.rs", Some("c"), Some(r"\\?\D:\Projects\site"))
+            .expect("relative op under a verbatim root must resolve");
+        let s = got.to_string_lossy().to_lowercase().replace('\\', "/");
+        assert!(s.ends_with("d:/projects/site/src/main.rs"), "got: {}", s);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn absolute_op_under_verbatim_root_is_allowed() {
+        // The agent addresses files with plain absolute paths; the root is verbatim.
+        let got = resolve_path(r"D:\Projects\site\README.md", Some("c"), Some(r"\\?\D:\Projects\site"))
+            .expect("plain absolute inside a verbatim root must be allowed");
+        let s = got.to_string_lossy().to_lowercase().replace('\\', "/");
+        assert!(s.ends_with("d:/projects/site/readme.md"), "got: {}", s);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_root_still_rejects_escape() {
+        // Normalizing the prefix must not weaken the jail.
+        assert!(resolve_path(r"..\..\secret.txt", Some("c"), Some(r"\\?\D:\Projects\site")).is_err());
+        assert!(resolve_path(r"C:\Windows\System32\x.txt", Some("c"), Some(r"\\?\D:\Projects\site")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod jail_adversarial_tests {
+    use super::*;
+
+    /// The jail is the ONLY boundary between a prompt-injected model and the
+    /// user's home. These are the shapes an attacker actually sends, run
+    /// against the real function rather than reasoned about.
+    #[test]
+    fn traversal_out_of_the_workspace_is_refused() {
+        let root = Path::new("/Users/dave/project");
+        for evil in [
+            "../secrets.txt",
+            "../../.ssh/id_rsa",
+            "../../../../../../etc/passwd",
+            "sub/../../outside.txt",
+            "./../../outside.txt",
+            "/etc/passwd",
+            "/Users/dave/.ssh/id_rsa",
+            // sibling directory whose name merely STARTS with the root's name
+            "/Users/dave/project-evil/x.txt",
+            "/Users/dave/projectevil",
+        ] {
+            let cand = if Path::new(evil).is_absolute() {
+                PathBuf::from(evil)
+            } else {
+                root.join(evil)
+            };
+            assert!(
+                contain_within(root, &cand).is_err(),
+                "jail let {evil:?} through",
+            );
+        }
+    }
+
+    /// Enough `..` pops the root component itself, turning an absolute path
+    /// into a relative one. That must still not compare as "inside".
+    #[test]
+    fn popping_past_the_filesystem_root_does_not_land_inside() {
+        let root = Path::new("/Users/dave/project");
+        let cand = root.join("../../../../../../../../etc/passwd");
+        let out = contain_within(root, &cand);
+        assert!(out.is_err(), "escaped to {:?}", out);
+    }
+
+    /// The legitimate cases must keep working, or the coding agent breaks.
+    #[test]
+    fn ordinary_paths_inside_the_workspace_still_resolve() {
+        let root = Path::new("/Users/dave/project");
+        for good in ["src/main.rs", "./src/main.rs", "a/b/../c.txt", "."] {
+            assert!(
+                contain_within(root, &root.join(good)).is_ok(),
+                "jail refused a legitimate path: {good:?}",
+            );
+        }
+        // An absolute path inside the workspace is allowed on purpose (#62).
+        assert!(contain_within(root, Path::new("/Users/dave/project/src/x.rs")).is_ok());
+        // The root itself.
+        assert!(contain_within(root, root).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod binary_read_tests {
+    use super::*;
+    use std::fs;
+
+    fn ws(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("lu-fsread-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A binary must come back as a MARKER, not as a payload. Every consumer
+    /// discards the bytes, so encoding them only bought a memory spike
+    /// proportional to the file — the phone relay already refused to do it.
+    #[test]
+    fn a_binary_file_reports_its_size_and_no_content() {
+        let dir = ws("bin");
+        // Invalid UTF-8 — what read_to_string rejects.
+        fs::write(dir.join("model.gguf"), [0xff, 0xfe, 0x00, 0x01, 0x80]).unwrap();
+
+        let v = fs_read(
+            "model.gguf".into(),
+            None,
+            Some(dir.to_string_lossy().to_string()),
+        )
+        .expect("read");
+
+        assert_eq!(v["encoding"], "binary");
+        assert_eq!(v["bytes"], 5);
+        assert!(v.get("content").is_none(), "the payload must not be shipped");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_text_file_still_comes_back_verbatim() {
+        let dir = ws("txt");
+        fs::write(dir.join("a.txt"), "hallo\nwelt\n").unwrap();
+
+        let v = fs_read("a.txt".into(), None, Some(dir.to_string_lossy().to_string()))
+            .expect("read");
+
+        assert_eq!(v["encoding"], "utf8");
+        assert_eq!(v["content"], "hallo\nwelt\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The whole point: cost must not scale with the file any more.
+    #[test]
+    fn a_large_binary_is_cheap_to_read() {
+        let dir = ws("big");
+        let mut big = vec![0x80u8; 8 * 1024 * 1024]; // 8 MiB, invalid UTF-8
+        big[0] = 0xff;
+        fs::write(dir.join("big.bin"), &big).unwrap();
+
+        let started = std::time::Instant::now();
+        let v = fs_read("big.bin".into(), None, Some(dir.to_string_lossy().to_string()))
+            .expect("read");
+        let took = started.elapsed();
+
+        assert_eq!(v["bytes"], 8 * 1024 * 1024_u64);
+        assert!(v.get("content").is_none());
+        assert!(took < std::time::Duration::from_millis(200), "took {took:?}");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

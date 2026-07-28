@@ -21,6 +21,10 @@ export async function bgStart(input: {
   command: string
   cwd?: string
   shell?: string
+  /** Chat context, so the task defaults to the same workspace the foreground
+   *  shell tool uses instead of LU own process directory. */
+  chatId?: string
+  workingDirectory?: string
 }): Promise<{ id: string }> {
   if (!input.command?.trim()) throw new Error('command is required')
   // The Rust bg_tasks commands take a SINGLE `args: serde_json::Value` param
@@ -35,6 +39,8 @@ export async function bgStart(input: {
       command: input.command,
       cwd: input.cwd,
       shell: input.shell,
+      chat_id: input.chatId,
+      working_directory: input.workingDirectory,
     },
   })
 }
@@ -63,5 +69,5 @@ export function renderBgStatusOneLine(s: BgTaskStatus): string {
   const elapsed = s.finished_at
     ? `${s.finished_at - s.started_at}s`
     : `${Math.max(0, Math.floor(Date.now() / 1000) - s.started_at)}s`
-  return `[${s.id.slice(0, 8)}] ${phase} (${elapsed}) — ${s.command}`
+  return `[${s.id.slice(0, 8)}] ${phase} (${elapsed}), ${s.command}`
 }

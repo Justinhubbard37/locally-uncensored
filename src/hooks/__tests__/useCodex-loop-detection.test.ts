@@ -1,14 +1,14 @@
 /**
- * Smoke tests for the Codex loop-detector (Bug #5 hotfix, 2026-04-19).
+ * Smoke tests for the Codex loop-detector wiring.
  *
- * Small / 3B models (qwen2.5-coder:3b, llama3.2:1b) often get stuck
- * repeating the same file_write + shell_execute batch because a test
- * fails and they "fix" it by rewriting the same file. The loop detector
- * aborts with a clear message when the same batch signature appears
- * twice in a row.
+ * Bug #5 (2026-04-19) added a consecutive-batch detector; 2.5.10 replaced it
+ * with the shared AgentLoopGuard (windowed repeats, identical-read counting,
+ * narration repeats — src/lib/agent-loop-guard.ts, behaviour unit-tested in
+ * src/lib/__tests__/agent-loop-guard.test.ts) after Morgan's live 5-minute
+ * file_read loop (2026-07-26) sailed straight past the consecutive rule.
  *
- * These tests read the actual source so we catch accidental removal
- * of the detector during refactors.
+ * These tests read the actual source so we catch accidental removal of the
+ * guard WIRING during refactors; the guard's logic has its own unit tests.
  */
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'fs'
@@ -19,40 +19,36 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const src = readFileSync(join(__dirname, '../useCodex.ts'), 'utf8')
 
-describe('useCodex loop-detector (Bug #5)', () => {
-  it('declares prevBatchSig tracking variable', () => {
-    expect(src).toContain('prevBatchSig')
+describe('useCodex loop-detector (Bug #5 → AgentLoopGuard)', () => {
+  it('instantiates the shared AgentLoopGuard for the run', () => {
+    expect(src).toMatch(/new AgentLoopGuard\(\)/)
+    expect(src).toContain("from '../lib/agent-loop-guard'")
   })
 
-  it('declares sameBatchRepeats counter', () => {
-    expect(src).toContain('sameBatchRepeats')
+  it('feeds every batch as (name, stringified args) pairs', () => {
+    expect(src).toContain('loopGuard.recordBatch(')
+    expect(src).toContain('name: tc.function.name, args: JSON.stringify(tc.function.arguments)')
   })
 
-  it('computes batch signature from tool name + arguments, sorted', () => {
-    expect(src).toContain('batchSig')
-    expect(src).toContain("tc.function.name + ':' + JSON.stringify(tc.function.arguments)")
-    expect(src).toContain('.sort()')
+  it('checks the narration channel too (repeated "Let me check…" lines)', () => {
+    expect(src).toContain('loopGuard.recordNarration(turnContent)')
   })
 
-  it('halts after 2 identical repeats (total 3 matching batches)', () => {
-    // sameBatchRepeats >= 2 with prevBatchSig === batchSig means 3 batches in a row
-    expect(src).toMatch(/sameBatchRepeats\s*>=\s*2/)
+  it('halts with a user-visible message and breaks the loop', () => {
+    expect(src).toMatch(/halted: \$\{batchVerdict\.reason\}/)
+    expect(src).toMatch(/stronger model/i)
   })
 
-  it('emits a user-visible halt message mentioning model size', () => {
-    expect(src).toMatch(/same tool sequence repeated/)
-    expect(src).toMatch(/larger model/i)
+  it('injects the steer message into the model history', () => {
+    expect(src).toMatch(/batchVerdict\.action === 'steer'/)
+    expect(src).toContain("messages.push({ role: 'user', content: batchVerdict.message })")
   })
 
-  it('resets the repeat counter when the batch changes', () => {
-    expect(src).toContain('sameBatchRepeats = 0')
-  })
-
-  it('checks batch signature AFTER tool calls are collected but BEFORE executing', () => {
+  it('checks the guard AFTER tool calls are collected but BEFORE executing', () => {
     // The detector sits between "toolCalls.length === 0 break" and the
     // batch-building for-loop — so it catches the repeat before we burn
     // an execution slot and another HTTP round-trip.
-    const idxCheck = src.indexOf('batchSig = toolCalls')
+    const idxCheck = src.indexOf('loopGuard.recordBatch(')
     const idxExec = src.indexOf('budget.addToolCalls(toolCalls.length)')
     expect(idxCheck).toBeGreaterThan(0)
     expect(idxExec).toBeGreaterThan(idxCheck)

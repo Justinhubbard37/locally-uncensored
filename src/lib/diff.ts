@@ -81,11 +81,16 @@ export function computeUnifiedDiff(
     while (i < ops.length) {
       const op = ops[i]
       if (op.kind === 'equal') {
-        // Stop the hunk after `context` trailing equal lines OR if a far
-        // change is more than 2*context lines away.
+        // Close the hunk when the gap to the next change is wider than the
+        // context we'd print on both sides — the git rule. This used to compare
+        // op INDICES (`reach - i > 1`), and since equal runs are merged, the
+        // next op is always a change, so the condition was never true: two edits
+        // 200 lines apart came out as ONE hunk with 198 context lines. The panel
+        // renders 40 lines, so the second edit was invisible in the diff the
+        // user approved.
         const reach = nearestChange(ops, i)
         const headRoom = op.text.length
-        if (reach === -1 || reach - i > 1) {
+        if (reach === -1 || headRoom > context * 2) {
           const trailing = Math.min(context, headRoom)
           for (let k = 0; k < trailing; k++) {
             hunkLines.push(' ' + op.text[k])
@@ -203,15 +208,49 @@ type Op =
   | { kind: 'add'; text: string[] }
   | { kind: 'remove'; text: string[] }
 
+/**
+ * The LCS table below is O(n·m) in MEMORY, and nothing caps it upstream —
+ * measured, a 5000-line file cost 202 MB of heap and 122 ms just to render the
+ * diff of a one-line edit. So: strip the identical head and tail first (an
+ * agent editing one function in a large file leaves a tiny middle), and refuse
+ * the table outright past a hard cell budget.
+ */
+const MAX_LCS_CELLS = 4_000_000
+
 /** LCS-based line diff. Grouped into op runs for a compact unified format. */
 function diffLines(a: string[], b: string[]): Op[] {
+  let head = 0
+  while (head < a.length && head < b.length && a[head] === b[head]) head++
+  let tail = 0
+  while (
+    tail < a.length - head &&
+    tail < b.length - head &&
+    a[a.length - 1 - tail] === b[b.length - 1 - tail]
+  ) tail++
+
+  const ops: Op[] = []
+  if (head > 0) append(ops, { kind: 'equal', text: a.slice(0, head) })
+  for (const op of diffMiddle(a.slice(head, a.length - tail), b.slice(head, b.length - tail))) {
+    append(ops, op)
+  }
+  if (tail > 0) append(ops, { kind: 'equal', text: a.slice(a.length - tail) })
+  return ops
+}
+
+function diffMiddle(a: string[], b: string[]): Op[] {
   const n = a.length
   const m = b.length
-  // Classic dynamic-programming LCS table. Sufficient for chat-sized files
-  // (we cap upstream).
-  const dp: number[][] = Array.from({ length: n + 1 }, () =>
-    new Array(m + 1).fill(0),
-  )
+  if (n === 0 && m === 0) return []
+  if (n === 0) return [{ kind: 'add', text: b }]
+  if (m === 0) return [{ kind: 'remove', text: a }]
+  // Past the budget, report a whole-block replacement: still a correct diff,
+  // just not a minimal one — and it costs no table at all.
+  if (n * m > MAX_LCS_CELLS) {
+    return [{ kind: 'remove', text: a }, { kind: 'add', text: b }]
+  }
+
+  // Classic dynamic-programming LCS table, one Int32Array per row.
+  const dp: Int32Array[] = Array.from({ length: n + 1 }, () => new Int32Array(m + 1))
   for (let i = n - 1; i >= 0; i--) {
     for (let j = m - 1; j >= 0; j--) {
       if (a[i] === b[j]) {
@@ -250,7 +289,9 @@ function diffLines(a: string[], b: string[]): Op[] {
 function append(ops: Op[], op: Op): void {
   const last = ops[ops.length - 1]
   if (last && last.kind === op.kind) {
-    last.text.push(...op.text)
+    // Not `push(...op.text)` — whole-file runs reach this and spreading a
+    // six-figure array overflows the argument limit.
+    for (const t of op.text) last.text.push(t)
   } else {
     ops.push(op)
   }

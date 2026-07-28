@@ -6,6 +6,26 @@ export type CavemanMode = 'off' | 'lite' | 'full' | 'ultra'
 
 export type AppMode = 'local' | 'cloud'
 
+/** Expert tuning for the bundled llama-server. Mirrors Rust `EngineTuning`
+ *  (camelCase over IPC); values are whitelisted on the Rust side. */
+export interface BuiltinEngineTuning {
+  /** `--ctx-size`. 0 = app default (8192). */
+  ctx: number
+  /** Flash Attention: 'auto' (binary default), 'on', 'off'. */
+  flashAttn: 'auto' | 'on' | 'off'
+  /** KV-cache quantization for K/V. 'f16' = off. Quantized V needs flash attention. */
+  cacheTypeK: 'f16' | 'bf16' | 'q8_0' | 'q4_0'
+  cacheTypeV: 'f16' | 'bf16' | 'q8_0' | 'q4_0'
+  /** CPU threads for generation. <=0 = auto. */
+  threads: number
+  /** GPU layers to offload. -1 = all layers, 0 = CPU-only. */
+  gpuLayers: number
+  /** Pin the model in RAM (`--mlock`). */
+  mlock: boolean
+  /** Disable mmap (`--no-mmap`): slower load, fewer pageouts. */
+  noMmap: boolean
+}
+
 export interface Settings {
   apiEndpoint: string
   temperature: number
@@ -26,7 +46,12 @@ export interface Settings {
   /** One-time Cloud onboarding (David 2026-07-10): the FIRST successful flip
    *  to Cloud shows a short what-changes walkthrough; after that the switch
    *  flips silently. Persisted so it never re-triggers. */
-  cloudOnboardingSeen: boolean
+  /** Cloud discovery inside Local mode (2.5.8): locked Upscale/Erase tabs in
+   *  Create, hosted-model rows in the chat + Create pickers, each opening a
+   *  small "runs on LU Cloud" sheet. Teasers never block a local flow and
+   *  never show in cloud mode. Off = Local mode shows zero Cloud surfaces;
+   *  the sheet's "Hide Cloud features" link and Settings both flip this. */
+  cloudTeasersEnabled: boolean
   /** Master switch for personas. When off, new chats get no persona system
    *  prompt (raw model). Default true. Ported from the uselu web companion. */
   personasEnabled: boolean
@@ -62,6 +87,12 @@ export interface Settings {
   agentMaxToolCalls: number
   /** Hard cap on ReAct loop iterations per user turn. 0 = unlimited. */
   agentMaxIterations: number
+  /**
+   * How many passes a `/loop` may run. 0 = unlimited, which is the default:
+   * a loop the user asked to keep going should keep going until it is done or
+   * they stop it (David 2026-07-25). The stop button is the brake, not a cap.
+   */
+  loopMaxPasses: number
   /** Override for the HuggingFace GGUF download directory. Empty = auto-detect from active openai-compat provider (e.g. LM Studio models folder). */
   hfDownloadPathOverride: string
   // Generation timeouts (Bug P v2.4.7 — ake0n_official Discord 2026-05-19,
@@ -79,6 +110,12 @@ export interface Settings {
   // providers ignore this field — they manage context themselves.
   /** User-side context-window override (forwarded as Ollama's num_ctx). 0 = auto. */
   contextWindowOverride: number
+  // Built-in engine expert tuning (2.6.0 Engine-Sweep). Forwarded to the Rust
+  // EngineTuning (whitelisted there) on every engine start/swap — Onboarding,
+  // Discover, model picker and the post-offload self-heal all inherit it via
+  // the api/engine chokepoint. Defaults reproduce the pre-2.6.0 argv exactly.
+  /** Expert settings for the bundled llama-server (chat engine only). */
+  builtinEngine: BuiltinEngineTuning
   // Bug BB v2.5.0 — BobbyT Discord 2026-05-26. GPU vendor + indices to
   // forward as CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES /
   // ONEAPI_DEVICE_SELECTOR on next Ollama / ComfyUI spawn. "auto" + empty
@@ -150,6 +187,13 @@ export interface Settings {
    */
   codexStageMode: boolean
   /**
+   * Auto-apply staged changes when the run finishes. Only meaningful while
+   * codexStageMode is on: every diff is still recorded and visible, but the
+   * user is not asked to click Apply per file — "auto on everything" then
+   * really means auto (first customer feedback, Morgan 2026-07-26).
+   */
+  codexAutoApply: boolean
+  /**
    * Code-Review mode. When on, Codex runs read-only — every `file_write`
    * and `shell_execute`-style call is blocked with a friendly message and
    * the model is steered into "inline comments only" by a switched system
@@ -167,6 +211,16 @@ export interface Settings {
    * (it is path-jailed and has its own Stage mode).
    */
   codexConfirmShell: boolean
+  /**
+   * Also confirm shell/code on LU Cloud models even when `codexConfirmShell`
+   * is off. Default ON — a remote model reaching unattended local shell is a
+   * bigger blast radius than a local model the user deliberately trusts.
+   *
+   * Until 2.5.9 this was hard-wired into useCodex, so the confirm toggle above
+   * silently did nothing on a cloud model (David 2026-07-24). Same safe default,
+   * but now it is a real switch the user can see and turn off.
+   */
+  codexCloudConfirmShell: boolean
   /**
    * Shared default workspace for Codex AND Agent (Underlying refactor —
    * workspace unification). When set, both surfaces resolve relative paths

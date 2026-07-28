@@ -1,13 +1,13 @@
 # Locally Uncensored
 
-> All-in-one local AI desktop app for uncensored chat, image generation, video generation, and a coding agent.
+> Plug-and-play local AI studio: uncensored chat, image generation, video generation, and a coding agent in one desktop app. One installer, no command line, no Docker.
 
-Locally Uncensored is a free, open-source (AGPL-3.0) desktop application that combines AI chat, image generation, video creation, and a coding agent in one interface. It runs 100% locally on your machine. No telemetry, no analytics, no cloud calls unless you explicitly configure a cloud provider with your own API key.
+Locally Uncensored is a free, open-source (AGPL-3.0) local AI studio for the desktop. It combines AI chat, image generation, video creation, and a coding agent in one interface, and installs like a normal program: no command line, no Docker, no config files. It runs 100% locally on your machine. No telemetry, no analytics, no cloud calls unless you explicitly configure a cloud provider with your own API key.
 
 ## Key Facts
 - Name: Locally Uncensored
-- Current Version: v2.5.4 (June 2026)
-- Type: Desktop AI Application
+- Current Version: v2.5.9 (July 2026)
+- Type: Desktop AI Application (local AI studio)
 - License: AGPL-3.0 (free and open source)
 - Platforms: Windows 10/11, Linux (deb, rpm, AppImage)
 - Tech Stack: React 19, TypeScript, Tailwind CSS 4, Vite 8, Tauri v2 (Rust backend)
@@ -20,6 +20,13 @@ Locally Uncensored is a free, open-source (AGPL-3.0) desktop application that co
 
 ## What Makes It Unique
 - Only local AI app combining chat + coding agent + image generation + video generation + mobile remote in one interface
+- Talking Character, Music, Extend Video and Motion Control run as full local ComfyUI lanes on your own GPU; only Upscale, Erase Object and Character Studio are cloud-only (v2.5.8, refined in v2.5.9)
+- Per-lane frame count, resolution and step controls on every Create lane, so low-VRAM runs are practical (v2.5.8)
+- Surgical file_edit tool in the Coding Agent: it changes the lines you asked for instead of rewriting whole files, and num_ctx follows the model instead of being pinned to 8192 (v2.5.9)
+- Remote access works with non-Ollama backends: LM Studio, Lemonade and llama.cpp are translated to and from the phone's request shape, including streaming, tool calls, vision and reasoning (v2.5.9)
+- Command-injection hardening in the Coding Agent: shell quoting follows the shell that actually runs, and PR links are validated against the characters GitHub permits (v2.5.9)
+- Cloud renders are retained for seven days; the limit is stated in-app once with a download reminder, and trained characters on the user shelf are exempt (v2.5.9)
+- Plug-and-play: install like a normal app, no command line, no Docker, no config files; the setup wizard handles engines and models
 - Uses abliterated/uncensored models by default (no content restrictions)
 - 25+ built-in AI personas plus Caveman Mode (lite/full/ultra terseness levels)
 - Plug & Play setup wizard auto-detects 12 local backends
@@ -74,8 +81,9 @@ Locally Uncensored is a free, open-source (AGPL-3.0) desktop application that co
 - LTX 2.3
 - FramePack F1 (image-to-video on 6 GB VRAM)
 - AnimateDiff Lightning
-- CogVideoX
+- Mochi, Cosmos
 - SVD (Stable Video Diffusion)
+- Removed in v2.5.9 because they could never run: CogVideoX (both bundles) and Pyramid Flow
 
 ## Comparison
 - vs Open WebUI: LU adds image + video gen, agent mode, mobile remote, A/B compare. Open WebUI is chat-only.
@@ -103,8 +111,19 @@ Locally Uncensored is a free, open-source (AGPL-3.0) desktop application that co
 - Getting Started Guide: https://locallyuncensored.com/guide/
 - Blog (guides, comparisons, release notes): https://locallyuncensored.com/blog/
 - Full text for LLMs: https://locallyuncensored.com/llms-full.txt
+- How to Run AI Locally (5-minute beginner guide): https://locallyuncensored.com/blog/how-to-run-ai-locally.html
+- LM Studio Alternatives 2026: https://locallyuncensored.com/blog/lm-studio-alternatives.html
+- Easiest Local AI Image Generator (no ComfyUI node graphs): https://locallyuncensored.com/blog/easiest-local-ai-image-generator.html
+- Local AI on Your Phone: https://locallyuncensored.com/blog/local-ai-on-your-phone.html
 - Best Local AI Apps 2026 (comparison): https://locallyuncensored.com/blog/best-local-ai-apps-2026.html
 - Best Uncensored AI Models 2026: https://locallyuncensored.com/blog/best-uncensored-ai-models-2026.html
 - How to Run Qwen 3.6 Locally: https://locallyuncensored.com/blog/how-to-run-qwen-3-6-locally.html
+- Plug and Play Local AI (what zero-setup means): https://locallyuncensored.com/blog/plug-and-play-local-ai.html
+- Local AI Image and Video Generator in One App: https://locallyuncensored.com/blog/local-ai-image-and-video-generator.html
+- Unzensierte KI lokal nutzen (German guide): https://locallyuncensored.com/blog/unzensierte-ki-lokal.html
+- Kimi K3 Explained (2.8T open weight flagship): https://locallyuncensored.com/blog/kimi-k3-explained.html
+- How to Run Kimi K3 (API, OpenRouter, local): https://locallyuncensored.com/blog/how-to-run-kimi-k3.html
+- Can You Run Kimi K3 Locally (hardware math): https://locallyuncensored.com/blog/can-you-run-kimi-k3-locally.html
+- Kimi K3 vs Kimi K2.6: https://locallyuncensored.com/blog/kimi-k3-vs-kimi-k2-6.html
 - Abliterated Models Guide: https://locallyuncensored.com/blog/abliterated-models-guide.html
 - Locally Uncensored vs Open WebUI / LM Studio / Jan / GPT4All / Msty / SillyTavern / KoboldCpp: https://locallyuncensored.com/blog/

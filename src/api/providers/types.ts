@@ -48,6 +48,9 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   { id: 'lmstudio', name: 'LM Studio', providerId: 'openai', baseUrl: 'http://localhost:1234/v1', isLocal: true },
   { id: 'vllm', name: 'vLLM', providerId: 'openai', baseUrl: 'http://localhost:8000/v1', isLocal: true },
   { id: 'llamacpp', name: 'llama.cpp', providerId: 'openai', baseUrl: 'http://localhost:8080/v1', isLocal: true },
+  // LiteLLM proxy (GH PR #64, thanks @RheagalFire) — speaks the OpenAI protocol,
+  // so it reuses the openai client and fronts 100+ upstreams from one local port.
+  { id: 'litellm', name: 'LiteLLM', providerId: 'openai', baseUrl: 'http://localhost:4000/v1', isLocal: true },
   { id: 'koboldcpp', name: 'KoboldCpp', providerId: 'openai', baseUrl: 'http://localhost:5001/v1', isLocal: true },
   { id: 'oobabooga', name: 'text-generation-webui', providerId: 'openai', baseUrl: 'http://localhost:5000/v1', isLocal: true },
   { id: 'localai', name: 'LocalAI', providerId: 'openai', baseUrl: 'http://localhost:8080/v1', isLocal: true },
@@ -130,6 +133,12 @@ export interface ChatStreamChunk {
   thinking?: string    // Model reasoning (Ollama thinking field, <think> tags)
   toolCalls?: ToolCall[]
   done: boolean
+  // Why generation ended, on the final done:true chunk. 'stop' | 'length'
+  // (token budget exhausted — e.g. the whole budget went into reasoning) |
+  // 'disconnect' (the stream closed without any completion signal: proxy
+  // timeout, upstream cut). Lets the chat layer explain an empty reply
+  // instead of rendering silent dead air.
+  finishReason?: string
   // Server-reported generation metrics (Bug M v2.4.7 — Ollama only). Released
   // in the final done:true chunk. Authoritative tok/s = evalCount /
   // (evalDurationMs / 1000). Prefer these over client-side JS timing whenever

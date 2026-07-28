@@ -19,6 +19,7 @@
  * it from the visible answer (we don't want the raw `foo(...)` echoed as prose).
  */
 
+import { findBalancedObjects, balancedObjectAt } from './json-scan'
 import { repairJson } from './tool-call-repair'
 import { parseHermesToolCalls } from '../api/hermes-tool-calling'
 
@@ -77,25 +78,13 @@ function parseCallArgs(inner: string): Record<string, unknown> {
 /** Find bare/fenced JSON objects that name a known tool: {"name":"X","arguments":{…}}. */
 function parseJsonObjectCalls(text: string, known: Set<string>): { call: LooseToolCall; snippet: string }[] {
   const calls: { call: LooseToolCall; snippet: string }[] = []
-  // Scan every top-level-ish {...} candidate. Cheap brace-scan; repairJson
-  // tolerates trailing commas / single quotes / unquoted keys.
-  const candidates: string[] = []
-  let depth = 0
-  let start = -1
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]
-    if (c === '{') {
-      if (depth === 0) start = i
-      depth++
-    } else if (c === '}') {
-      depth--
-      if (depth === 0 && start >= 0) {
-        candidates.push(text.slice(start, i + 1))
-        start = -1
-      }
-      if (depth < 0) depth = 0
-    }
-  }
+  // Every top-level {...} candidate; repairJson tolerates trailing commas /
+  // single quotes / unquoted keys. The scan is string-aware (json-scan.ts):
+  // the old depth counter treated braces INSIDE a JSON string as structure, so
+  // a file_write whose content held a regex or a half-open block either lost
+  // its closing brace (candidate never emitted, call silently dropped) or
+  // closed one brace early (wrong arguments).
+  const candidates: string[] = findBalancedObjects(text)
   for (const cand of candidates) {
     if (!/["']?(?:name|tool|tool_name|tool_call|function)["']?\s*[:=]/.test(cand)) continue
     const parsed = repairJson(cand) as Record<string, any> | null
@@ -177,16 +166,25 @@ export function parseLooseToolCalls(text: string, known: string[]): LooseParseRe
   //    `[file_read {"path": "/package.json"}]`. Require a non-empty object so a
   //    stray `tool {}` or prose brace isn't misread as a call.
   for (const name of knownSet) {
-    const re = new RegExp(`\\[?\\s*\\b${escapeRe(name)}\\b\\s*(\\{(?:[^{}]|\\{[^{}]*\\})*\\})\\s*\\]?`, 'g')
+    // Locate the bare name, then take the BALANCED object after it. The old
+    // regex could only express one level of nesting, so `{"a":{"b":{"c":1}}}`
+    // and any content string with braces fell outside it.
+    const nameRe = new RegExp(`\\[?\\s*\\b${escapeRe(name)}\\b\\s*(?=\\{)`, 'g')
     let m: RegExpExecArray | null
-    while ((m = re.exec(text)) !== null) {
-      const parsed = repairJson(m[1]) as Record<string, any> | null
+    while ((m = nameRe.exec(text)) !== null) {
+      const obj = balancedObjectAt(text, m.index + m[0].length)
+      if (!obj) continue
+      nameRe.lastIndex = obj.end // never rescan inside the object we just took
+      const parsed = repairJson(obj.text) as Record<string, any> | null
       if (!parsed || typeof parsed !== 'object') continue
       // The brace may BE the args, or wrap them under arguments/parameters.
       const inner = parsed.arguments ?? parsed.parameters ?? parsed.args ?? parsed.params
       const args = inner && typeof inner === 'object' ? inner : parsed
       if (args && typeof args === 'object' && Object.keys(args).length > 0) {
-        push({ name, arguments: args as Record<string, unknown> }, m[0])
+        let end = obj.end
+        const closer = text.slice(end).match(/^\s*\]/)
+        if (closer) end += closer[0].length
+        push({ name, arguments: args as Record<string, unknown> }, text.slice(m.index, end))
       }
     }
   }
@@ -208,14 +206,9 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   list_files: 'file_list', search_files: 'file_search', run_shell: 'shell_execute', run_code: 'code_execute',
 }
 
-/**
- * Map a model-emitted tool name to a registered one. Tries exact, lowercase,
- * an explicit alias table, then a punctuation-insensitive equality. Returns the
- * original name unchanged when no confident match exists (so genuinely unknown
- * tools still error rather than being silently rerouted).
- */
-export function canonicalToolName(name: string, known: string[]): string {
-  if (!name) return name
+/** Exact → lowercase → alias → punctuation-insensitive. Undefined if none hit. */
+function matchKnown(name: string, known: string[]): string | undefined {
+  if (!name) return undefined
   if (known.includes(name)) return name
   const lc = name.toLowerCase()
   if (known.includes(lc)) return lc
@@ -225,6 +218,48 @@ export function canonicalToolName(name: string, known: string[]): string {
   const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '')
   const target = norm(name)
   for (const k of known) if (norm(k) === target) return k
+  return undefined
+}
+
+/**
+ * Transport noise a model (or a proxy that half-parses its format) can wrap
+ * around the bare tool name. Two shapes seen live on gpt-oss via LU Cloud,
+ * 2026-07-24:
+ *
+ *   file_edit<|channel|>commentary   harmony control token leaked into the
+ *                                    recipient field, so EVERY write tool call
+ *                                    came back "Unknown tool" and the model
+ *                                    burned a minute retrying the same name
+ *   functions.file_edit              the harmony recipient namespace, verbatim
+ *
+ * Cutting at the first character a registered name can never contain is safe:
+ * builtin names are [a-z_], so the cut can shorten a name but can never turn
+ * one tool into a different one. The namespace strip is only ever ACCEPTED by
+ * the caller when the tail matches a registered tool, which keeps MCP tools
+ * that legitimately carry dots intact.
+ */
+function toolNameCandidates(name: string): string[] {
+  const cut = name.trim().match(/^[A-Za-z0-9_.-]+/)?.[0] ?? ''
+  if (!cut) return []
+  const dot = cut.lastIndexOf('.')
+  return dot > 0 ? [cut, cut.slice(dot + 1)] : [cut]
+}
+
+/**
+ * Map a model-emitted tool name to a registered one. Tries the name as sent,
+ * then the same ladder on the name with transport noise stripped. Returns the
+ * original name unchanged when no confident match exists (so genuinely unknown
+ * tools still error rather than being silently rerouted).
+ */
+export function canonicalToolName(name: string, known: string[]): string {
+  if (!name) return name
+  const direct = matchKnown(name, known)
+  if (direct) return direct
+  for (const candidate of toolNameCandidates(name)) {
+    if (candidate === name) continue
+    const hit = matchKnown(candidate, known)
+    if (hit) return hit
+  }
   return name
 }
 
@@ -261,11 +296,33 @@ export function stripToolCallText(text: string, known: string[]): string {
       /["']?(?:arguments|parameters|params|prompt)["']?\s*[:=]/.test(inner)
     return looksLikeCall ? '' : m
   })
+  // A fence whose BODY was consumed by the strip above still leaves its
+  // container behind. Live Agent run on the ship exe (2026-07-25): the model
+  // wrote both of its calls as one ```json ARRAY next to perfectly good native
+  // tool_calls, the two objects were lifted out by range, and the bubble was
+  // left showing a "notes" block containing `[` , `,` , `]`. A fence with no
+  // letter or digit left in it carries nothing for the user, so drop it whole.
+  out = out.replace(/```[a-z_]*\s*([\s\S]*?)```/gi, (m, inner) =>
+    /[A-Za-z0-9]/.test(inner) ? m : '')
   return out
     // Strip special-token tool-call wrappers some models leave in the prose
     // (Phi-4: <|tool_call|>/<|tool|>; Mistral: [TOOL_CALLS]) so they don't show
     // in the bubble. Detection/parsing above already handled the JSON inside.
     .replace(/<\|\/?tool(?:_call)?(?:_start|_end)?\|>/gi, '')
+    // The plain Hermes spelling with no pipes. stripToolCallTags only removes
+    // MATCHED pairs, so an unclosed `<tool_call>` (a stream that ended mid-tag,
+    // a model that opened one and then answered in prose) walked all the way to
+    // the bubble — where the markdown renderer swallowed the `<t` and left the
+    // user staring at a bare `ool_call>` (live Agent run, ship exe 2026-07-25).
+    .replace(/<[|/\s]*tool_calls?[|/\s]*>/gi, '')
+    // A whole line that is nothing but a tool-call tag, INCLUDING a truncated
+    // one. Captured from the wire on the ship exe, 2026-07-25: Qwen3-32B on LU
+    // Cloud sent `</think>\n\nool_call>` as its content, next to a perfectly
+    // good native tool_calls array. The provider's own parser had already eaten
+    // the `<t`, so every pattern that starts at `<` misses the remainder and it
+    // renders as a stray `ool_call>` above the answer. We cannot stop the model
+    // doing it; we can stop showing it. Line-anchored, so prose can never match.
+    .replace(/^[ \t]*<?[|/]*t?ool_calls?[|/]*>[ \t]*$/gim, '')
     .replace(/\[\/?TOOL_CALLS?\]/gi, '')
     .replace(/```(?:json|tool_code)?\s*```/gi, '')
     .replace(/\n{3,}/g, '\n\n')

@@ -230,8 +230,8 @@ export interface ModelCapabilities {
   widthRange?: { min: number; max: number; step?: number }
   heightRange?: { min: number; max: number; step?: number }
   /**
-   * false for wrapper samplers (CogVideoX / Pyramid / Allegro / FramePack) that
-   * expose no sampler_name/scheduler enum → callers skip enum validation for them.
+   * false for wrapper samplers (FramePack) that expose no sampler_name/scheduler
+   * enum → callers skip enum validation for them.
    */
   usesKSampler: boolean
   discoveryErrors?: string[]
@@ -254,9 +254,9 @@ export function clearCapabilityCache() {
  */
 function getSamplerNodeForCaps(type: ModelType): { node: string; usesKSampler: boolean } {
   switch (type) {
-    case 'cogvideo': return { node: 'CogVideoXSampler', usesKSampler: false }
-    case 'pyramidflow': return { node: 'PyramidFlowSampler', usesKSampler: false }
-    case 'allegro': return { node: 'AllegroSampler', usesKSampler: false }
+    // cogvideo / pyramidflow / allegro dropped 2026-07-24 with their lanes: the
+    // names here were part of the same invention (CogVideoXSampler is not a real
+    // class), and those model types can no longer reach a builder anyway.
     case 'framepack': return { node: 'FramePackSampler', usesKSampler: false }
     default: return { node: 'KSampler', usesKSampler: true }
   }
@@ -330,18 +330,9 @@ export async function getModelCapabilities(model: string): Promise<ModelCapabili
       // resolveClip works in frames; derive a frame ceiling from the real duration
       // limit (× the 16-fps default) so its frame math stays bounded.
       caps.frameRange = { min: 1, max: Math.max(1, Math.round(maxSec * 16)) }
-      if (!tsl) caps.discoveryErrors!.push('framepack total_second_length absent — using 120s fallback')
+      if (!tsl) caps.discoveryErrors!.push('framepack total_second_length absent, using 120s fallback')
       break
     }
-    case 'cogvideo':
-      caps.frameRange = frameFrom('CogVideoXEmptyLatents', 'frames', 1, 49)
-      break
-    case 'pyramidflow':
-      caps.frameRange = frameFrom('PyramidFlowSampler', 'frames', 1, 16)
-      break
-    case 'allegro':
-      caps.frameRange = frameFrom('AllegroSampler', 'frames', 1, 88)
-      break
     case 'wan':
     case 'hunyuan':
     case 'ltx':

@@ -51,6 +51,14 @@ export interface ToolAuditEntry {
   errorHint?: string
   /** String preview of result, clipped to keep panel performant. */
   resultPreview?: string
+  /**
+   * Full, un-clipped result — the payload the in-turn cache serves so a second
+   * identical read in the same turn does not silently receive the 500-char
+   * `resultPreview` and mistake it for the whole file. Left undefined when the
+   * result exceeds AUDIT_FULL_RESULT_MAX_CHARS (cache misses -> re-read, which
+   * is always correct). Ephemeral, never persisted.
+   */
+  fullResult?: string
   /** Raw error string when status=failed. */
   error?: string
 }
@@ -58,8 +66,16 @@ export interface ToolAuditEntry {
 /** Max retained entries per conversation. Oldest evicted on overflow. */
 export const AUDIT_MAX_PER_CONV = 500
 
-/** Max length of result preview kept in the store. */
+/** Max length of result preview kept in the store (debug panel rendering). */
 export const AUDIT_RESULT_PREVIEW_CHARS = 500
+
+/**
+ * Max length of the FULL result retained for the in-turn cache. Bounds worst-
+ * case memory (ring buffer × this) while covering ordinary source files. A
+ * larger result is simply not retained, so a repeat read misses and re-reads
+ * the live bytes rather than serving a truncated slice.
+ */
+export const AUDIT_FULL_RESULT_MAX_CHARS = 262144
 
 interface ToolAuditState {
   /** convId → entries (newest last for cheap append; query helpers reverse). */
@@ -169,6 +185,11 @@ export const useToolAuditStore = create<ToolAuditState>((set, get) => ({
             completedAt,
             durationMs,
             resultPreview: patch.resultPreview?.slice(0, AUDIT_RESULT_PREVIEW_CHARS),
+            fullResult:
+              typeof patch.resultPreview === 'string' &&
+              patch.resultPreview.length <= AUDIT_FULL_RESULT_MAX_CHARS
+                ? patch.resultPreview
+                : undefined,
           }
         })
         next[convId] = mutated ? updated : list

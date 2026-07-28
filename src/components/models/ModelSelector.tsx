@@ -1,15 +1,74 @@
 import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { ChevronDown, Loader2, Power, PlayCircle, X } from 'lucide-react'
+import { Ban, ChevronDown, Loader2, Power, PlayCircle, Wrench, X, Cloud } from 'lucide-react'
 import { useModels } from '../../hooks/useModels'
 import { useModelStore } from '../../stores/modelStore'
 import { useProviderStore } from '../../stores/providerStore'
+import { useSettingsStore } from '../../stores/settingsStore'
+import { useUIStore } from '../../stores/uiStore'
 import { unloadAllModels, loadModel, unloadModel, listRunningModels } from '../../api/ollama'
-import { displayModelName } from '../../api/providers'
+import { displayModelName, getProviderIdFromModel } from '../../api/providers'
+import { activateBuiltinModel, isManagedBuiltinActive } from '../../api/engine'
+import { getToolCapability } from '../../api/tool-capability'
+import { canUseTools } from '../../lib/tool-support'
 import { backendCall } from '../../api/backend'
 import { listLoadedLmStudioModels, loadLmStudioModel, unloadLmStudioModel } from '../../api/lmstudio'
 import { isLmStudioProvider } from '../../lib/hf-to-provider'
 import type { AIModel } from '../../types/models'
+
+// ── Local-mode cloud discovery (2.5.8): an "LU Cloud" section at the list's
+// tail. Signed-in accounts show their real hosted chat models (the appMode
+// filter hides them from the selectable list); logged-out shows one generic
+// row. Tapping any row opens the Cloud gate (login → plan → beta) — chat rows
+// skip the teaser sheet, the gate IS the pitch here. Hidden in cloud mode
+// (models are the real list there) and when the discovery layer is off. ──
+function CloudTeaserSection({ onOpen }: { onOpen: () => void }) {
+  const appMode = useSettingsStore((s) => s.settings.appMode)
+  const teasersEnabled = useSettingsStore((s) => s.settings.cloudTeasersEnabled)
+  const setCloudGateOpen = useUIStore((s) => s.setCloudGateOpen)
+  const allModels = useModelStore((s) => s.models)
+  if (appMode === 'cloud' || !teasersEnabled) return null
+  const cloudChat = allModels.filter((m) => m.provider === 'lu-cloud' && m.type === 'text').slice(0, 5)
+  const open = () => { onOpen(); setCloudGateOpen(true) }
+  return (
+    <div className="mt-1 border-t border-white/[0.05]">
+      <div className="px-2.5 pt-2 pb-0.5 flex items-center gap-1">
+        <Cloud size={10} className="text-violet-500 dark:text-violet-200" />
+        <span className="text-[0.55rem] font-medium uppercase tracking-widest text-gray-600">
+          LU Cloud
+        </span>
+      </div>
+      {cloudChat.length > 0 ? (
+        cloudChat.map((m) => (
+          <button
+            key={m.name}
+            onClick={open}
+            className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left hover:bg-white/[0.04] transition-colors"
+            title="Runs on LU Cloud, tap to see plans"
+          >
+            <Cloud size={10} className="text-violet-500 dark:text-violet-200 shrink-0" />
+            <span className="text-[0.68rem] text-gray-400 truncate">
+              {('displayName' in m && m.displayName) || displayModelName(m.name)}
+            </span>
+            <span className="ml-auto text-[8px] text-violet-500 dark:text-violet-200">Cloud</span>
+          </button>
+        ))
+      ) : (
+        <button
+          onClick={open}
+          className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left hover:bg-white/[0.04] transition-colors"
+          title="Runs on LU Cloud, tap to see plans"
+        >
+          <Cloud size={10} className="text-violet-500 dark:text-violet-200 shrink-0" />
+          <span className="text-[0.68rem] text-gray-400">
+            Frontier chat models, no GPU needed
+          </span>
+          <span className="ml-auto text-[8px] text-violet-500 dark:text-violet-200">Cloud</span>
+        </button>
+      )}
+    </div>
+  )
+}
 
 // True when `prev` already holds exactly the names in `next`. Lets the 1.5 s
 // loaded-state poll bail out of a state update (return the SAME Set ref) when
@@ -106,28 +165,28 @@ function LmStudioServerHint({ onStarted }: { onStarted: () => void }) {
   }
 
   return (
-    <div className="relative px-2.5 py-2 border-b border-white/[0.04] bg-white/[0.03]">
+    <div className="relative px-2.5 py-2 border-b border-black/[0.06] dark:border-white/[0.04] bg-black/[0.03] dark:bg-white/[0.03]">
       <button
         onClick={(e) => { e.stopPropagation(); LM_HINT_DISMISSED_THIS_SESSION = true; setDismissed(true) }}
         aria-label="Dismiss (returns on next launch)"
         title="Dismiss (returns on next launch)"
-        className="absolute top-1 right-1 p-1 rounded text-gray-500 hover:text-gray-200 hover:bg-white/[0.08] transition-colors"
+        className="absolute top-1 right-1 p-1 rounded text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-black/[0.06] dark:hover:bg-white/[0.08] transition-colors"
       >
         <X size={10} />
       </button>
-      <p className="text-[0.6rem] text-gray-300 leading-snug mb-1.5 pr-5">
+      <p className="text-[0.6rem] text-gray-600 dark:text-gray-300 leading-snug mb-1.5 pr-5">
         LM Studio is installed ({status.model_count} model{status.model_count === 1 ? '' : 's'} on disk) but its server isn't running. Start it to pick LM Studio models here.
       </p>
       <button
         onClick={handleStart}
         disabled={starting}
-        className="w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded text-[0.62rem] bg-white/[0.06] hover:bg-white/[0.12] text-gray-200 transition-colors disabled:opacity-50"
+        className="w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded text-[0.62rem] bg-black/[0.06] dark:bg-white/[0.06] hover:bg-black/[0.1] dark:hover:bg-white/[0.12] text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-50"
       >
         {starting ? <Loader2 size={10} className="animate-spin" /> : <PlayCircle size={10} />}
         <span>{starting ? 'Starting LM Studio server…' : 'Start LM Studio Server'}</span>
       </button>
       {startError && (
-        <p className="text-[0.55rem] text-red-300/70 mt-1 leading-snug">{startError}</p>
+        <p className="text-[0.55rem] text-red-600/80 dark:text-red-300/70 mt-1 leading-snug">{startError}</p>
       )}
     </div>
   )
@@ -335,8 +394,8 @@ function LoadToggle({ loaded, busy, disabled, onClick }: {
       onClick={(e) => { e.stopPropagation(); onClick() }}
       disabled={disabled}
       title={loaded
-        ? 'Loaded in VRAM — click to unload (Off)'
-        : 'Not loaded — click to load into VRAM (On)'}
+        ? 'Loaded in VRAM. Click to unload (Off)'
+        : 'Not loaded. Click to load into VRAM (On)'}
       className={`flex items-center gap-0.5 pl-1 pr-1.5 py-0.5 rounded text-[8px] font-semibold uppercase tracking-wide transition-colors disabled:opacity-40 ${
         loaded
           ? 'text-emerald-400 bg-emerald-500/[0.12] hover:bg-emerald-500/20'
@@ -351,10 +410,24 @@ function LoadToggle({ loaded, busy, disabled, onClick }: {
 
 // ── Component ─────────────────────────────────────────────────
 
+export interface ModelSelectorProps {
+  openUpward?: boolean
+  /**
+   * Which surface is asking. 'code' is the coding agent, which cannot do
+   * anything at all without tool calls, so hosted models that have told us
+   * they do not support tools are left out of the list entirely rather than
+   * offered with a warning icon (David 2026-07-25: "Modelle ohne Tool-Support
+   * z.B. nicht im Code-Bereich anzeigen"). Local models stay listed on every
+   * surface — there the fallback XML path often still works, and when it does
+   * not the run says so.
+   */
+  surface?: 'chat' | 'code'
+}
+
 // `openUpward` flips the dropdown to open above the trigger, right-aligned —
 // used when the picker lives in the composer action bar (bottom of the screen)
 // instead of the header. Header usage keeps the default downward/centered menu.
-export function ModelSelector({ openUpward = false }: { openUpward?: boolean } = {}) {
+export function ModelSelector({ openUpward = false, surface = 'chat' }: ModelSelectorProps = {}) {
   const { models, activeModel, setActiveModel, fetchModels } = useModels()
   const isModelLoading = useModelStore((s) => s.isModelLoading)
   const [open, setOpen] = useState(false)
@@ -521,6 +594,33 @@ export function ModelSelector({ openUpward = false }: { openUpward?: boolean } =
       return
     }
 
+    // Built-in engine rows (ENG-4): swap the GGUF (await) BEFORE activating —
+    // same contract as the LM Studio path above. A failed llama-server start
+    // keeps the dropdown open and shows the real reason (Rust appends the
+    // stderr tail) instead of activating a model that can't answer. Idempotent
+    // when the model is already loaded (the Rust side compares argv + health).
+    if (isManagedBuiltinActive() && getProviderIdFromModel(model.name) === 'openai') {
+      if (selectingLms || togglingLms) return
+      setSelectError(null)
+      setSelectingLms(id)
+      try {
+        const swapped = await activateBuiltinModel(model.name)
+        if (swapped) {
+          // Raw store set — the useModels wrapper would fire a second
+          // (idempotent but pointless) activate.
+          useModelStore.getState().setActiveModel(model.name)
+        } else {
+          setActiveModel(model.name) // not a bundled GGUF — plain activate
+        }
+        setOpen(false)
+      } catch (e) {
+        setSelectError(`Couldn't start the built-in engine with "${displayModelName(model.name)}": ${e instanceof Error ? e.message : String(e)}`)
+      } finally {
+        setSelectingLms(null)
+      }
+      return
+    }
+
     // Non-LM-Studio, or an already-loaded LM Studio model: activate now.
     setActiveModel(model.name)
     setOpen(false)
@@ -561,7 +661,15 @@ export function ModelSelector({ openUpward = false }: { openUpward?: boolean } =
   // FAMILY (Qwen/Gemma/Llama/…), not by provider, because users pick
   // models by lineage first and the backend that serves them is a
   // per-row badge.
-  const textModels = models.filter(m => m.type === 'text')
+  const allTextModels = models.filter(m => m.type === 'text')
+  // Code needs tools to do literally anything. A hosted model that has told us
+  // it cannot call them is not a degraded choice there, it is a dead one, so it
+  // does not get listed. Keep the ACTIVE model visible even if it fails the
+  // check, or switching away from it becomes impossible.
+  const textModels = surface === 'code'
+    ? allTextModels.filter((m) => m.name === activeModel || canUseTools({ name: m.name, supportsTools: m.supportsTools }))
+    : allTextModels
+  const hiddenForCode = allTextModels.length - textModels.length
   const groups = groupByFamily(textModels)
   const hasOllamaModels = textModels.some(m => ('provider' in m && m.provider === 'ollama') || !('provider' in m))
 
@@ -570,7 +678,7 @@ export function ModelSelector({ openUpward = false }: { openUpward?: boolean } =
       {/* ── Trigger Button ── */}
       <button
         onClick={() => setOpen(!open)}
-        title={activeModel ? `Model: ${activeDisplayName} — click to switch` : 'Select a chat model'}
+        title={activeModel ? `Model: ${activeDisplayName}, click to switch` : 'Select a chat model'}
         aria-label="Select chat model"
         className={`
           group flex items-center gap-1.5 h-[26px] px-2 rounded-md
@@ -604,7 +712,7 @@ export function ModelSelector({ openUpward = false }: { openUpward?: boolean } =
       <AnimatePresence>
         {open && (
           <motion.div
-            className={`absolute w-72 rounded-lg overflow-hidden z-50 bg-[#363636] border border-white/[0.08] shadow-2xl shadow-black/50 ${
+            className={`absolute w-72 rounded-lg overflow-hidden z-50 bg-white dark:bg-[#363636] border border-black/10 dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/50 ${
               openUpward ? 'bottom-full mb-1.5 right-0' : 'top-full mt-1.5 left-1/2 -translate-x-1/2'
             }`}
             initial={{ opacity: 0, y: openUpward ? 6 : -6, scale: 0.98 }}
@@ -617,10 +725,18 @@ export function ModelSelector({ openUpward = false }: { openUpward?: boolean } =
                 "can't choose any models i have installed" symptom. */}
             <LmStudioServerHint onStarted={fetchModels} />
 
+            {/* Say WHY the list is shorter here than in Chat, otherwise a
+                missing favourite reads as a bug. */}
+            {hiddenForCode > 0 && (
+              <div className="px-2.5 py-1.5 border-b border-black/5 dark:border-white/[0.06] text-[0.55rem] text-gray-500">
+                {hiddenForCode} cloud {hiddenForCode === 1 ? 'model is' : 'models are'} hidden here because they cannot call tools. They are still in Chat.
+              </div>
+            )}
+
             {/* §18 — surfaced when an LM Studio auto-load (on select) failed,
                 so the user isn't left wondering why the model didn't switch. */}
             {selectError && (
-              <div className="mx-2 mt-2 px-2 py-1.5 rounded bg-red-500/10 border border-red-500/20 text-[0.6rem] text-red-300/90 leading-snug">
+              <div className="mx-2 mt-2 px-2 py-1.5 rounded bg-red-500/10 border border-red-500/20 text-[0.6rem] text-red-600/90 dark:text-red-300/90 leading-snug">
                 {selectError}
               </div>
             )}
@@ -678,8 +794,8 @@ export function ModelSelector({ openUpward = false }: { openUpward?: boolean } =
                         className={`
                           w-full flex items-center gap-2 px-2.5 py-[5px] mx-1 rounded text-left transition-colors
                           ${isActive
-                            ? 'bg-white/[0.06] text-white'
-                            : 'text-gray-400 hover:bg-white/[0.03] hover:text-gray-200'
+                            ? 'bg-black/[0.06] dark:bg-white/[0.06] text-gray-900 dark:text-white'
+                            : 'text-gray-500 dark:text-gray-400 hover:bg-black/[0.04] dark:hover:bg-white/[0.03] hover:text-gray-900 dark:hover:text-gray-200'
                           }
                           ${rowDisabled ? 'cursor-default' : 'cursor-pointer'}
                         `}
@@ -692,7 +808,7 @@ export function ModelSelector({ openUpward = false }: { openUpward?: boolean } =
 
                         {/* Model info */}
                         <div className="flex-1 min-w-0 flex items-center gap-1.5">
-                          <span className={`text-[0.7rem] truncate ${isActive ? 'text-white' : ''}`}>
+                          <span className={`text-[0.7rem] truncate ${isActive ? 'text-gray-900 dark:text-white' : ''}`}>
                             {modelDisplayName}
                           </span>
 
@@ -706,6 +822,31 @@ export function ModelSelector({ openUpward = false }: { openUpward?: boolean } =
                             <span className={`text-[8px] ${providerBadge.color}`}>
                               {providerBadge.label}
                             </span>
+                          )}
+                          {/* 2.5.8 — tool-calling capability at a glance. Ban =
+                              no function calling, so Agent/Code can't use it:
+                              either the server declared it (LU Cloud
+                              supports_tools === false — Hermes 3, Euryale,
+                              MythoMax, Llama-4-Maverick, …) or we've SEEN it
+                              reject tools at runtime (cloud 405 / ollama "does
+                              not support tools"). Wrench = tool-capable. Text
+                              models only. */}
+                          {model.type === 'text' && (
+                            (getToolCapability(model.name) === 'unsupported' || model.supportsTools === false) ? (
+                              <span
+                                className="inline-flex items-center shrink-0 text-amber-500/80"
+                                title="This model does not support tool calling, so Agent and Code mode cannot use it"
+                              >
+                                <Ban size={9} />
+                              </span>
+                            ) : model.supportsTools !== false ? (
+                              <span
+                                className="inline-flex items-center shrink-0 text-emerald-500/90"
+                                title="Supports tool calling (Agent, Code, and tools in Chat)"
+                              >
+                                <Wrench size={9} />
+                              </span>
+                            ) : null
                           )}
                           {/* §18 — inline load state while we auto-load this
                               LM Studio model on the way to selecting it. */}
@@ -752,11 +893,13 @@ export function ModelSelector({ openUpward = false }: { openUpward?: boolean } =
                   })}
                 </div>
               ))}
+
+              <CloudTeaserSection onOpen={() => setOpen(false)} />
             </div>
 
             {/* Sticky footer: Unload */}
             {hasOllamaModels && (
-              <div className="border-t border-white/[0.04] px-1 py-1">
+              <div className="border-t border-black/[0.06] dark:border-white/[0.04] px-1 py-1">
                 <button
                   onClick={async (e) => {
                     e.stopPropagation()
@@ -771,7 +914,7 @@ export function ModelSelector({ openUpward = false }: { openUpward?: boolean } =
                     finally { setUnloading(false) }
                   }}
                   disabled={unloading}
-                  className="w-full flex items-center justify-center gap-1.5 px-2 py-[5px] rounded text-[0.6rem] text-red-500/60 hover:text-red-400 hover:bg-red-500/[0.06] transition-colors disabled:opacity-40"
+                  className="w-full flex items-center justify-center gap-1.5 px-2 py-[5px] rounded text-[0.6rem] text-red-600/70 dark:text-red-500/60 hover:text-red-500 dark:hover:text-red-400 hover:bg-red-500/[0.06] transition-colors disabled:opacity-40"
                 >
                   {unloading ? <Loader2 size={10} className="animate-spin" /> : <Power size={10} />}
                   <span>{unloadDone ? 'Unloaded' : unloading ? 'Unloading...' : 'Unload all models'}</span>

@@ -99,9 +99,11 @@ describe('dynamic-workflow — determineStrategy', () => {
       expect(result.strategy).toBe('svd')
     })
 
-    it('cogvideo model -> cogvideo strategy', () => {
+    // D#88: cogvideo can never reach its strategy — the builder emits node class
+    // names that exist in no version of the wrapper, so the lane is gated off.
+    it('cogvideo model -> unavailable (lane gated until the builder is rebuilt)', () => {
       const result = determineStrategy('cogvideo', true, makeNodes(), makeModels())
-      expect(result.strategy).toBe('cogvideo')
+      expect(result.strategy).toBe('unavailable')
     })
 
     it('framepack model -> framepack strategy', () => {
@@ -109,14 +111,14 @@ describe('dynamic-workflow — determineStrategy', () => {
       expect(result.strategy).toBe('framepack')
     })
 
-    it('pyramidflow model -> pyramidflow strategy', () => {
+    it('pyramidflow model -> unavailable (builder removed, D#88 audit)', () => {
       const result = determineStrategy('pyramidflow', true, makeNodes(), makeModels())
-      expect(result.strategy).toBe('pyramidflow')
+      expect(result.strategy).toBe('unavailable')
     })
 
-    it('allegro model -> allegro strategy', () => {
+    it('allegro model -> unavailable (builder removed, D#88 audit)', () => {
       const result = determineStrategy('allegro', true, makeNodes(), makeModels())
-      expect(result.strategy).toBe('allegro')
+      expect(result.strategy).toBe('unavailable')
     })
 
     it('animatediff: sdxl + video + motion models -> animatediff', () => {
@@ -225,12 +227,14 @@ describe('dynamic-workflow — determineStrategy', () => {
   // ─── installHint (Bug #6 — Video architecture install paths) ───
 
   describe('install hints when wrapper nodes missing', () => {
-    it('cogvideo unavailable -> installHint with ComfyUI-CogVideoXWrapper', () => {
+    // D#88: cogvideo carries NO installHint any more. Offering an install button
+    // was the actual harm — the pack was already there and installing it again
+    // could never help, because the gap is on our side.
+    it('cogvideo unavailable -> no installHint, the blocker is ours not theirs', () => {
       const nodes = makeNodes({ samplers: ['KSampler'] })
       const result = determineStrategy('cogvideo', true, nodes, makeModels())
       expect(result.strategy).toBe('unavailable')
-      expect(result.installHint?.pack).toBe('ComfyUI-CogVideoXWrapper')
-      expect(result.installHint?.url).toContain('github.com')
+      expect(result.installHint).toBeUndefined()
     })
 
     it('framepack unavailable -> installHint with ComfyUI-FramePackWrapper', () => {
@@ -241,18 +245,22 @@ describe('dynamic-workflow — determineStrategy', () => {
       expect(result.installHint?.url).toContain('github.com')
     })
 
-    it('pyramidflow unavailable -> installHint with ComfyUI-PyramidFlowWrapper', () => {
+    // No install hint for the three closed lanes. An install hint says "your
+    // setup is missing something"; here the builder was the broken part, and
+    // sending people off to install a wrapper is precisely the wrong turn D#88
+    // sent bob80817-dev down.
+    it('pyramidflow unavailable -> no installHint', () => {
       const nodes = makeNodes({ samplers: ['KSampler'] })
       const result = determineStrategy('pyramidflow', true, nodes, makeModels())
       expect(result.strategy).toBe('unavailable')
-      expect(result.installHint?.pack).toBe('ComfyUI-PyramidFlowWrapper')
+      expect(result.installHint).toBeUndefined()
     })
 
-    it('allegro unavailable -> installHint with ComfyUI-Allegro', () => {
+    it('allegro unavailable -> no installHint', () => {
       const nodes = makeNodes({ samplers: ['KSampler'] })
       const result = determineStrategy('allegro', true, nodes, makeModels())
       expect(result.strategy).toBe('unavailable')
-      expect(result.installHint?.pack).toBe('ComfyUI-Allegro')
+      expect(result.installHint).toBeUndefined()
     })
 
     it('non-wrapper unavailable (flux without UNETLoader) has no installHint', () => {

@@ -637,7 +637,7 @@ export async function searchCivitai(query: string, host: string = 'civitai.com')
 
       return {
         name: item.name || `CivitAI #${item.id}`,
-        description: descParts.join(' — '),
+        description: descParts.join(', '),
         source: 'civitai' as const,
         sourceUrl: `https://${host}/models/${item.id}`,
         thumbnailUrl: thumb,

@@ -11,6 +11,7 @@
 import { getModelContext } from '../api/ollama'
 import { getProviderForModel, getProviderIdFromModel } from '../api/providers'
 import { useModelStore } from '../stores/modelStore'
+import { truncateToolResult } from './truncate-tool-result'
 import type { OllamaChatMessage } from '../types/agent-mode'
 
 // ── Token Estimation ────────────────────────────────────────────
@@ -75,14 +76,36 @@ export async function getModelMaxTokens(modelName: string): Promise<number> {
 
 // ── Message Compaction ──────────────────────────────────────────
 
-const KEEP_RECENT = 4 // Always keep the last N messages untouched
+const KEEP_RECENT = 4 // Always keep at least the last N messages untouched
+
+/**
+ * True for a message that is a tool RESULT — either the native `tool` role or
+ * a Hermes `<tool_response>` carried on a user message. Used to trim a leading
+ * orphan result whose originating tool_call fell outside the kept window.
+ */
+function isToolResultMessage(msg: OllamaChatMessage): boolean {
+  if (msg.role === 'tool') return true
+  if (msg.role === 'user' && typeof msg.content === 'string' && msg.content.includes('<tool_response>')) {
+    return true
+  }
+  return false
+}
 
 /**
  * Compact a message array to fit within a token budget.
  *
- * - If already within budget, returns messages unchanged.
- * - Otherwise, keeps the system prompt + last KEEP_RECENT messages,
- *   and summarizes everything in between.
+ * Strategy — sliding window, lossless on whatever it keeps:
+ *  - If already within budget, return messages unchanged.
+ *  - Otherwise keep the system prompt + the longest recent SUFFIX that fits,
+ *    VERBATIM, and DROP the oldest messages entirely (replaced by a one-line
+ *    notice).
+ *
+ * Why not summarize? The previous implementation char-truncated every older
+ * tool result to 80 chars. Inside a single autonomous coding turn that meant an
+ * 80-char slice of a file the agent had read was indistinguishable from the
+ * whole file — so the model edited against content it could no longer see.
+ * Dropping is honest: the model re-reads with file_read when it needs the bytes
+ * again, instead of trusting a lossy stub.
  */
 export function compactMessages(
   messages: OllamaChatMessage[],
@@ -100,99 +123,54 @@ export function compactMessages(
   // If we have fewer messages than KEEP_RECENT, can't compact further
   if (nonSystem.length <= KEEP_RECENT) return messages
 
-  // Split: old messages (to compact) + recent messages (to keep)
-  const oldMessages = nonSystem.slice(0, -KEEP_RECENT)
-  const recentMessages = nonSystem.slice(-KEEP_RECENT)
+  const systemTokens = systemMsg ? estimateMessageTokens([systemMsg]) : 0
+  const budget = Math.max(0, maxTokens - systemTokens)
 
-  // Summarize old messages
-  const summary = summarizeMessages(oldMessages)
+  // Cap oversized TOOL RESULTS before fitting the suffix. KEEP_RECENT below
+  // keeps the newest messages even when they exceed the budget — without this
+  // cap a single giant file_read result rode along VERBATIM in every request
+  // (live 2026-07-26: ~225k-token prompts against a 6.5k trim target, every
+  // iteration slow and expensive). Only tool results are capped; user and
+  // assistant text is never touched. The cap adapts to the budget (chars ≈
+  // tokens × 4), floored so tiny budgets still keep a useful head+tail.
+  const perResultCap = Math.max(4000, Math.min(32000, Math.floor(budget * 4 * 0.35)))
+  const capped = nonSystem.map((m) =>
+    isToolResultMessage(m) && typeof m.content === 'string' && m.content.length > perResultCap
+      ? { ...m, content: truncateToolResult(m.content, perResultCap) }
+      : m,
+  )
 
-  // Build compacted array
+  // Accumulate a recent suffix that fits, newest-first. Keep at least
+  // KEEP_RECENT messages even when that exceeds budget (recent context is the
+  // most valuable), otherwise stop as soon as the next message would overflow.
+  const kept: OllamaChatMessage[] = []
+  let used = 0
+  for (let i = capped.length - 1; i >= 0; i--) {
+    const t = estimateMessageTokens([capped[i]])
+    if (used + t > budget && kept.length >= KEEP_RECENT) break
+    kept.unshift(capped[i])
+    used += t
+  }
+
+  // Drop leading orphan tool results (their tool_call fell outside the window)
+  // so strict OpenAI-compatible providers don't reject a result with no call.
+  while (kept.length > 0 && isToolResultMessage(kept[0])) {
+    kept.shift()
+  }
+
+  const droppedCount = capped.length - kept.length
   const compacted: OllamaChatMessage[] = []
-
   if (systemMsg) compacted.push(systemMsg)
-
-  // Insert summary as a system-level context message
-  if (summary) {
+  if (droppedCount > 0) {
+    // Wording matters here: the old notice ("Re-read any file you still need
+    // with file_read.") actively FED a re-read loop — every iteration the
+    // model was told to read again what it had just read. Keep the honest
+    // recovery path but make it single-shot and anti-repeat.
     compacted.push({
       role: 'system',
-      content: `[Previous conversation summary]\n${summary}`,
+      content: `[${droppedCount} earlier message${droppedCount === 1 ? '' : 's'} were trimmed to fit the context window. Results you already saw still hold. If a detail is genuinely missing, re-read that specific file once; never repeat a call that already ran.]`,
     })
   }
-
-  // Keep recent messages intact
-  compacted.push(...recentMessages)
-
+  compacted.push(...kept)
   return compacted
-}
-
-// ── Message Summarization ───────────────────────────────────────
-
-/**
- * Summarize a sequence of messages into a compact string.
- * Tool call + result pairs become one-liners.
- */
-function summarizeMessages(messages: OllamaChatMessage[]): string {
-  const lines: string[] = []
-  let i = 0
-
-  while (i < messages.length) {
-    const msg = messages[i]
-
-    if (msg.role === 'user') {
-      // User message → short summary
-      const content = msg.content.trim()
-      if (content.length > 0 && !content.startsWith('<tool_response>')) {
-        lines.push(`User asked: ${truncate(content, 80)}`)
-      }
-    } else if (msg.role === 'assistant') {
-      // Check if this is a tool call (next message might be 'tool' or contains tool_response)
-      if (msg.tool_calls && msg.tool_calls.length > 0) {
-        // Native tool call
-        for (const tc of msg.tool_calls) {
-          const toolName = tc.function?.name || 'unknown'
-          const args = JSON.stringify(tc.function?.arguments || {})
-          const argsShort = truncate(args, 60)
-
-          // Look ahead for the tool result
-          const nextMsg = messages[i + 1]
-          if (nextMsg && (nextMsg.role === 'tool' || nextMsg.role === 'user')) {
-            const resultShort = truncate(nextMsg.content, 80)
-            lines.push(`Used ${toolName}(${argsShort}) → ${resultShort}`)
-            i++ // skip the result message
-          } else {
-            lines.push(`Called ${toolName}(${argsShort})`)
-          }
-        }
-      } else if (msg.content.includes('<tool_call>')) {
-        // Hermes XML tool call
-        const match = msg.content.match(/"name"\s*:\s*"([^"]+)"/)
-        const toolName = match?.[1] || 'tool'
-        const nextMsg = messages[i + 1]
-        if (nextMsg?.content?.includes('<tool_response>')) {
-          const resultShort = truncate(nextMsg.content.replace(/<\/?tool_response>/g, ''), 80)
-          lines.push(`Used ${toolName} → ${resultShort}`)
-          i++
-        } else {
-          lines.push(`Called ${toolName}`)
-        }
-      } else if (msg.content.trim().length > 0) {
-        // Regular assistant message
-        lines.push(`Assistant: ${truncate(msg.content, 100)}`)
-      }
-    } else if (msg.role === 'tool') {
-      // Standalone tool result (shouldn't happen if paired above, but just in case)
-      lines.push(`Tool result: ${truncate(msg.content, 80)}`)
-    }
-
-    i++
-  }
-
-  return lines.join('\n')
-}
-
-function truncate(text: string, maxLen: number): string {
-  const cleaned = text.replace(/\n/g, ' ').trim()
-  if (cleaned.length <= maxLen) return cleaned
-  return cleaned.slice(0, maxLen - 3) + '...'
 }

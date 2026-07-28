@@ -21,13 +21,14 @@ import { explainError as explainToolError } from './error-hints'
 // pulls DELEGATE_TASK_TOOL_DEF + buildDelegateExecutor from this file at
 // module init.
 
-/**
- * Max sub-agent nesting depth. Kept for symmetry with the original Phase
- * 13 design; the tool-registry filter (sub-agent never sees
- * `delegate_task`) already enforces non-recursion, so this is a soft
- * safety net rather than the primary guard.
- */
-export const SUB_AGENT_MAX_DEPTH = 2
+// Recursion note: a sub-agent's tool list is filtered so it never SEES
+// `delegate_task`, which is what discourages nesting in practice. It is not a
+// hard block — the runner resolves over the full registry — but the in-flight
+// concurrency cap below (SUB_AGENT_MAX_PARALLEL) plus each sub-agent's tight
+// budget bound the blast radius. (A former SUB_AGENT_MAX_DEPTH constant claimed
+// to enforce a depth limit but was never read; removed in 2.5.9. The design
+// deliberately uses one in-flight counter as the concurrency gate rather than a
+// separate nesting-depth counter, so parallel siblings are not throttled.)
 
 /**
  * Max sub-agents in flight at the same time (Bonus, 2026-05). Parallel
@@ -164,14 +165,21 @@ export async function defaultSubAgentRunner(
     })
 
     messages.push({ role: 'assistant', content: turn.content || '', tool_calls: turn.toolCalls })
-    for (const r of results) {
-      const tc = turn.toolCalls.find((t) => t.function.name === r.toolName)
+    // Map each result back to its ORIGINATING call by index. executeParallel
+    // preserves input order (results[i] <-> requests[i] <-> turn.toolCalls[i]),
+    // so zipping by index gives every tool message the correct tool_call_id —
+    // even when the turn fired the same tool twice. The previous find-by-name
+    // matched the FIRST call for both duplicates, leaving the second call's id
+    // with no result; strict OpenAI-compatible providers (lu-cloud/DeepInfra,
+    // openai, anthropic) then 400/422'd on the next turn and delegate_task
+    // aborted. The main loop already handles this the same way (useCodex.ts).
+    results.forEach((r, i) => {
       messages.push({
         role: 'tool',
         content: r.result ?? r.error ?? '(no output)',
-        tool_call_id: tc?.id,
+        tool_call_id: turn.toolCalls[i]?.id,
       })
-    }
+    })
   }
 
   return finalContent || '(sub-agent produced no final answer)'

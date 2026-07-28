@@ -68,12 +68,18 @@ export async function preflightCheck(
       nodes: ['LoadFramePackModel', 'FramePackSampler'],
       installHint: 'ComfyUI-FramePackWrapper custom nodes. Install via Discover > Video > FramePack bundle.',
     },
+    // Node class names verified 2026-07-24 against real checkouts of both
+    // wrappers. Kijai's CogVideoX pack registers CogVideoSampler, NOT
+    // CogVideoXSampler (only the LOADER carries the X), and PyramidFlow
+    // registers PyramidFlowTransformerLoader, not PyramidFlowModelLoader. The
+    // old names matched nothing, so a correct install was reported as missing
+    // (bob80817-dev, D#88).
     cogvideo: {
-      nodes: ['CogVideoXModelLoader', 'CogVideoXSampler'],
+      nodes: ['CogVideoXModelLoader', 'CogVideoSampler'],
       installHint: 'ComfyUI-CogVideoXWrapper custom nodes. Install from Model Manager.',
     },
     pyramidflow: {
-      nodes: ['PyramidFlowModelLoader', 'PyramidFlowSampler'],
+      nodes: ['PyramidFlowTransformerLoader', 'PyramidFlowSampler'],
       installHint: 'ComfyUI-PyramidFlowWrapper custom nodes. Install from Model Manager.',
     },
     allegro: {
@@ -84,7 +90,12 @@ export async function preflightCheck(
 
   const customCheck = customNodeModels[modelType]
   if (customCheck) {
-    const allNodeNames = [...nodes.loaders, ...nodes.samplers, ...nodes.conditioning, ...nodes.decoders]
+    // `CategorizedNodes` has no `conditioning` field (it is `textEncoders`), so
+    // this spread was `[...undefined]` — a TypeError that useCreate swallowed,
+    // making preflight return null for exactly the four families below. That is
+    // why nobody got the early "custom nodes missing" warning and everyone hit
+    // the failure at generate time instead.
+    const allNodeNames = [...nodes.loaders, ...nodes.samplers, ...nodes.textEncoders, ...nodes.decoders]
     const missing = customCheck.nodes.filter(n => !allNodeNames.includes(n))
     if (missing.length > 0) {
       errors.push({

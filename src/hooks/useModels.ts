@@ -10,23 +10,16 @@ import { getEnabledProviders, prefixModelName, getProviderIdFromModel } from '..
 import {
   listBundledModels, bundledToAIModels, activateBuiltinModel, isManagedBuiltinActive,
   bundledEngineStatus, bundledEmbedStatus, startBundledEmbed,
+  isEmbeddingGgufName as isEmbeddingModel,
 } from '../api/engine'
 import type { BundledModel } from '../api/engine'
 import type { PullProgress, AIModel, ModelCategory, ImageModel, VideoModel, CloudModel } from '../types/models'
 
 const VIDEO_PATTERNS = [/wan/, /svd/, /animatediff/, /animate/, /video/, /cogvideo/, /ltx/i, /framepack/, /mochi/, /cosmos/, /hunyuan/, /pyramidflow/, /allegro/]
 
-// Embedding models that should never appear in the chat model dropdown
-const EMBEDDING_PATTERNS = [/embed/, /nomic-embed/, /bge-/, /e5-/, /gte-/, /sentence-/]
-
 function isVideoModel(name: string): boolean {
   const lower = name.toLowerCase()
   return VIDEO_PATTERNS.some((p) => p.test(lower))
-}
-
-function isEmbeddingModel(name: string): boolean {
-  const lower = name.toLowerCase()
-  return EMBEDDING_PATTERNS.some((p) => p.test(lower))
 }
 
 // Boot-resume for the managed built-in engine (2.5.7): the llama-server
@@ -178,10 +171,10 @@ export function useModels() {
             .map(m => ({ ...m, provider: 'ollama' as const, providerName: 'Ollama' })))
         } catch { /* Ollama might not be running */ }
       }
+      let comfyModels: AIModel[] = []
       // Hard rule: Mac local media is MLX-only — ComfyUI never auto-starts
       // there (process.rs::auto_start_comfyui), so skip the probe outright
       // instead of a doomed connection check on every model-list refresh.
-      let comfyModels: AIModel[] = []
       const comfyOk = !isMacOS() && (await checkComfyConnection())
       if (comfyOk) {
         try {

@@ -12,7 +12,6 @@ import { useCloudAuthStore, deriveCloudAvailable } from '../stores/cloudAuthStor
 import { refreshCatalog } from '../stores/cloudCatalogStore'
 import { useProviderStore } from '../stores/providerStore'
 import { useSettingsStore } from '../stores/settingsStore'
-import { isCloudOnly } from '../api/backend'
 import type { CloudQuota } from '../lib/render/cloud-jobs'
 
 const REFRESH_MS = 5 * 60_000
@@ -52,7 +51,8 @@ async function probeAccount(): Promise<void> {
       return
     }
     const licenseActive = me.license?.status === 'active'
-    // Launch gate (Max-only closed beta): absent on older servers = allowed.
+    // Server-driven access gate (beta is fully open — servers send true for
+    // every licensed account): absent on older servers = allowed.
     const access = me.license?.access !== false
     const tier = me.license?.tier ?? null
     let quota: CloudQuota | null = null
@@ -88,11 +88,7 @@ async function probeAccount(): Promise<void> {
 
 // Never strand the app in cloud mode without a usable cloud: sign-out,
 // license loss or the beta gate flips the global switch back to Local.
-// EXCEPTION: the macOS Cloud-only build has no Local to fall back to — it stays
-// in cloud mode and the CloudGateModal drives (re-)login instead (David
-// 2026-07-11).
 function syncAppMode(): void {
-  if (isCloudOnly()) return
   const settings = useSettingsStore.getState()
   if (settings.settings.appMode === 'cloud' && !deriveCloudAvailable(useCloudAuthStore.getState())) {
     settings.updateSettings({ appMode: 'local' })

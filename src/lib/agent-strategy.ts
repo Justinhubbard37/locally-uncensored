@@ -6,7 +6,7 @@
  */
 
 import { getProviderIdFromModel, getProviderForModel } from '../api/providers'
-import { getToolCallingStrategy, type ToolCallingStrategy } from './model-compatibility'
+import { getToolCallingStrategy, isNativeToolProvider, type ToolCallingStrategy } from './model-compatibility'
 import { agentVariantExists, createAgentVariant, getAgentModelName, canFixModel } from '../api/model-template-fix'
 
 export interface ResolvedStrategy {
@@ -28,7 +28,7 @@ export async function resolveToolCallingStrategy(modelName: string): Promise<Res
   let modelToUse = modelId
   let strategy: ToolCallingStrategy
 
-  if (providerId === 'openai' || providerId === 'anthropic') {
+  if (isNativeToolProvider(providerId)) {
     strategy = 'native'
   } else {
     strategy = getToolCallingStrategy(modelId)

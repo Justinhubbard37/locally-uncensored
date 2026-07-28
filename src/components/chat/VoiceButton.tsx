@@ -78,7 +78,7 @@ export function VoiceButton({ onTranscript, onInterim, onRecordingChange, disabl
         autoStopRef.current = setTimeout(() => {
           autoStopRef.current = null
           if (!useVoiceStore.getState().isRecording) return
-          useVoiceStore.getState().setSttError("Dictation limit reached — transcribing what was recorded so far")
+          useVoiceStore.getState().setSttError("Dictation limit reached, transcribing what was recorded so far")
           void finishRecording()
         }, maxRecordingMs)
       }
@@ -96,7 +96,7 @@ export function VoiceButton({ onTranscript, onInterim, onRecordingChange, disabl
           <MicOff size={14} />
         </button>
         <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-gray-800 dark:bg-gray-700 text-white text-[0.6rem] rounded whitespace-nowrap opacity-0 group-hover/mic:opacity-100 transition-opacity pointer-events-none">
-          Speech-to-text off — enable it in Settings → Voice &amp; Remote
+          Speech-to-text off. Enable it in Settings → Voice &amp; Remote
         </div>
       </div>
     )

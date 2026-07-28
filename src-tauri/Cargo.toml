@@ -1,9 +1,16 @@
 [package]
 name = "locally-uncensored"
-version = "2.5.7"
+version = "2.5.10"
 description = "Private, local AI chat & image/video generation"
 authors = ["purpledoubled"]
 edition = "2021"
+
+[features]
+# Test-only: let LU_NO_KEYCHAIN / ~/.lu-no-keychain bypass the OS keychain during
+# unattended rebuild→open E2E loops. NEVER enabled in a shipped build (not in any
+# default), so a release binary always uses the OS vault regardless of env vars or
+# marker files. Build test artifacts with: tauri build --features insecure-test-keychain
+insecure-test-keychain = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -52,6 +59,10 @@ socket2 = "0.5"
 # Structured tracing — used for the JSON-log mode behind `LU_LOG_FORMAT=json`
 # (uselu Phase 3 parity). Default formatter is the compact text layer so
 # the existing console output stays readable for a desktop user.
+# Local time with a real UTC offset for the agent's get_current_time tool.
+# Already resolved in the lock (jsonwebtoken pulls it with `clock` +
+# iana-time-zone), so declaring it directly adds no crate to the build.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 

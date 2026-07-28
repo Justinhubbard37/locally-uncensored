@@ -65,11 +65,65 @@ pub(crate) fn host_target_triple() -> String {
     }
 }
 
+/// Expert tuning for the chat engine, settable from the app's Built-in Engine
+/// settings. `Default` reproduces the exact argv the app has always used, so
+/// an absent/partial tuning is never a behavior change. Values are whitelisted
+/// in `build_server_args` — an unknown string falls back to the default flag
+/// (settings files are user-editable; never pass them through verbatim).
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EngineTuning {
+    /// Context window (`--ctx-size`). 0 is NOT forwarded as llama-server's
+    /// "use model default" — a 128k-trained model would allocate a huge KV
+    /// cache unprompted; 0/absent means our 8192 default.
+    pub ctx: u32,
+    /// Flash Attention: "auto" (binary default, omitted), "on", "off".
+    pub flash_attn: String,
+    /// KV cache quantization for K / V: "f16" (default, omitted), "bf16",
+    /// "q8_0", "q4_0". Quantized V requires Flash Attention in llama.cpp.
+    pub cache_type_k: String,
+    pub cache_type_v: String,
+    /// CPU threads for generation. <=0 = auto (omitted).
+    pub threads: i32,
+    /// GPU layers to offload. <0 = all (999, today's behavior); >=0 explicit
+    /// (0 = CPU-only is a valid expert choice on RAM-starved boxes).
+    pub gpu_layers: i32,
+    /// Pin model in RAM (`--mlock`).
+    pub mlock: bool,
+    /// Disable mmap (`--no-mmap`): slower load, fewer pageouts.
+    pub no_mmap: bool,
+}
+
+impl Default for EngineTuning {
+    fn default() -> Self {
+        Self {
+            ctx: 8192,
+            flash_attn: "auto".into(),
+            cache_type_k: "f16".into(),
+            cache_type_v: "f16".into(),
+            threads: -1,
+            gpu_layers: -1,
+            mlock: false,
+            no_mmap: false,
+        }
+    }
+}
+
+/// KV cache types this build of llama-server accepts and we consider sane.
+const KV_CACHE_TYPES: &[&str] = &["f16", "bf16", "q8_0", "q4_0"];
+
+/// The context size actually passed to the server (`tuning.ctx`, with 0
+/// falling back to the 8192 default — see `EngineTuning::ctx`).
+pub(crate) fn effective_ctx(tuning: &EngineTuning) -> u32 {
+    if tuning.ctx == 0 { 8192 } else { tuning.ctx }
+}
+
 /// Build the `llama-server` argv for a chat engine. `-ngl 999` offloads every
 /// layer to the GPU (Metal on mac); llama-server clamps to the real layer
 /// count, so an over-large value is the idiomatic "all layers" request.
-pub(crate) fn build_server_args(model_path: &str, ctx: u32, port: u16) -> Vec<String> {
-    vec![
+/// Default tuning yields exactly the legacy argv (pinned by regression test).
+pub(crate) fn build_server_args(model_path: &str, tuning: &EngineTuning, port: u16) -> Vec<String> {
+    let mut args: Vec<String> = vec![
         "-m".into(),
         model_path.into(),
         "--host".into(),
@@ -77,10 +131,37 @@ pub(crate) fn build_server_args(model_path: &str, ctx: u32, port: u16) -> Vec<St
         "--port".into(),
         port.to_string(),
         "--ctx-size".into(),
-        ctx.to_string(),
+        effective_ctx(tuning).to_string(),
         "-ngl".into(),
-        "999".into(),
-    ]
+        if tuning.gpu_layers < 0 {
+            "999".into()
+        } else {
+            tuning.gpu_layers.to_string()
+        },
+    ];
+    if matches!(tuning.flash_attn.as_str(), "on" | "off") {
+        args.push("-fa".into());
+        args.push(tuning.flash_attn.clone());
+    }
+    if tuning.cache_type_k != "f16" && KV_CACHE_TYPES.contains(&tuning.cache_type_k.as_str()) {
+        args.push("-ctk".into());
+        args.push(tuning.cache_type_k.clone());
+    }
+    if tuning.cache_type_v != "f16" && KV_CACHE_TYPES.contains(&tuning.cache_type_v.as_str()) {
+        args.push("-ctv".into());
+        args.push(tuning.cache_type_v.clone());
+    }
+    if tuning.threads > 0 {
+        args.push("-t".into());
+        args.push(tuning.threads.to_string());
+    }
+    if tuning.mlock {
+        args.push("--mlock".into());
+    }
+    if tuning.no_mmap {
+        args.push("--no-mmap".into());
+    }
+    args
 }
 
 /// Build the `llama-server` argv for the EMBEDDINGS server (P5). `--embeddings`
@@ -221,11 +302,34 @@ fn engine_healthy(port: u16) -> bool {
         .unwrap_or(false)
 }
 
-/// Block until `/health` returns 200 or `HEALTH_TIMEOUT` elapses. Returns
-/// `Ok(())` on ready, `Err` with a hint on timeout so the UI can surface a
-/// real message instead of a silent hang.
-fn wait_for_health(port: u16) -> Result<(), String> {
-    let deadline = Instant::now() + HEALTH_TIMEOUT;
+/// The last `max` non-empty lines of a sidecar's stderr, for an error message.
+fn tail_lines(text: &str, max: usize) -> String {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let start = lines.len().saturating_sub(max);
+    lines[start..].join("\n")
+}
+
+/// Health budget scaled to the GGUF on disk: base 60s + 4s per GiB, capped
+/// at 10 minutes. A 0.5 GB model keeps the old 60s; a 40 GB one gets ~220s —
+/// big models legitimately need minutes on a cold first load, and a fixed
+/// 60s turned that into a false "did not become healthy" (ENG-4).
+fn health_timeout_for_bytes(bytes: u64) -> Duration {
+    let gb = (bytes / 1_073_741_824).min(1024) as u32;
+    (HEALTH_TIMEOUT + Duration::from_secs(4) * gb).min(Duration::from_secs(600))
+}
+
+fn health_timeout_for(model_path: &str) -> Duration {
+    std::fs::metadata(model_path)
+        .map(|m| health_timeout_for_bytes(m.len()))
+        .unwrap_or(HEALTH_TIMEOUT)
+}
+
+/// Block until `/health` returns 200 or `timeout` elapses (callers scale the
+/// budget to the model size via `health_timeout_for`). Returns `Ok(())` on
+/// ready, `Err` with a hint on timeout so the UI can surface a real message
+/// instead of a silent hang.
+fn wait_for_health(port: u16, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if engine_healthy(port) {
             return Ok(());
@@ -233,8 +337,8 @@ fn wait_for_health(port: u16) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(300));
     }
     Err(format!(
-        "Built-in engine did not become healthy on port {port} within {}s",
-        HEALTH_TIMEOUT.as_secs()
+        "Built-in engine did not become healthy on port {port} within {}s (the budget scales with model size — huge GGUFs can take minutes on a cold first load)",
+        timeout.as_secs()
     ))
 }
 
@@ -243,39 +347,91 @@ fn wait_for_health(port: u16) -> Result<(), String> {
 /// Start (or reuse) the managed chat engine for `model_path`. Idempotent: if
 /// the same model is already loaded and healthy, returns `already_running`.
 /// A different model in flight is stopped first (single-process engine).
+/// Freeze fix: loading a GGUF takes seconds to a minute, and `wait_for_health`
+/// blocks for all of it. As a plain sync `#[command]` that ran on the Tauri main
+/// thread, so the whole window sat frozen while the built-in engine started —
+/// the same class already fixed for the ComfyUI probes and the custom-node
+/// install. The blocking half runs on the blocking pool; the JS caller still
+/// awaits exactly as before.
 #[tauri::command]
-pub fn start_bundled_engine(
+pub async fn start_bundled_engine(
     app: AppHandle,
-    state: State<'_, AppState>,
     model_path: String,
-    ctx: Option<u32>,
+    tuning: Option<EngineTuning>,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
-    let ctx = ctx.unwrap_or(8192);
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        start_bundled_engine_blocking(&app, &state, model_path, tuning, port)
+    })
+    .await
+    .map_err(|e| format!("Engine start task failed to run: {e}"))?
+}
+
+fn start_bundled_engine_blocking(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    model_path: String,
+    tuning: Option<EngineTuning>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let _gate = crate::commands::process::start_gate(&crate::commands::process::ENGINE_START);
+    let tuning = tuning.unwrap_or_default();
     let port = port.unwrap_or(DEFAULT_ENGINE_PORT);
 
     if !Path::new(&model_path).exists() {
         return Err(format!("Model file not found: {model_path}"));
     }
 
-    // Already serving this exact model and healthy → no-op.
+    let desired_args = build_server_args(&model_path, &tuning, port);
+
+    // Already serving this exact argv and healthy → no-op. The argv is the
+    // idempotence key: a ctx/KV-quant/flash-attn change restarts the server,
+    // an identical request reuses the running process.
     {
         let guard = state.bundled_engine.lock().unwrap();
         if let Some(engine) = guard.as_ref() {
-            if engine.model_path == model_path && engine_healthy(engine.port) {
+            if engine.args == desired_args && engine_healthy(engine.port) {
                 return Ok(serde_json::json!({
                     "status": "already_running",
                     "port": engine.port,
                     "model_path": engine.model_path,
+                    "ctx": engine.ctx,
                 }));
             }
         }
     }
 
     // Different model (or dead) → stop the old process before spawning.
-    stop_engine_locked(&state);
+    stop_engine_locked(state);
 
-    let binary = resolve_engine_binary(&app).ok_or_else(|| {
+    // The port must actually be FREE now: our own previous child (if any) was
+    // killed AND reaped above, so anything still answering the health probe is
+    // an orphaned or foreign llama-server — left over from a crashed /
+    // hard-killed session, or user-run. Spawning against it would LOOK green:
+    // the health probe below is answered by the stranger while our child is
+    // still loading its model and only later dies on "address already in use"
+    // — so chats would silently hit an unknown model with unknown ctx, tuning
+    // would never apply, and no shutdown of ours could ever reap it. (Live
+    // repro 2026-07-28: an embed server orphaned by a hard-killed dev session
+    // made every later start look successful.)
+    if engine_healthy(port) {
+        return Err(format!(
+            "Port {port} is already serving another llama-server that this app does not manage (likely left over from a previous session or crash). Quit that process or reboot, then try again."
+        ));
+    }
+
+    // Mirror image of the Create-tab handoff: a render leaves ComfyUI's
+    // checkpoint cached in VRAM (`includeComfyui:false` keeps it warm between
+    // runs). On a single-GPU box the returning chat engine then fights that
+    // cache for memory — llama-server with `-ngl 999` loses as a CUDA OOM
+    // (RTX 5080 field report: ACE-Step → chat = crash until app restart). Ask
+    // ComfyUI to drop its cache first; best-effort no-op when it isn't running.
+    if crate::commands::process::free_comfyui_memory() {
+        println!("[Engine] asked ComfyUI to free VRAM before engine start");
+    }
+
+    let binary = resolve_engine_binary(app).ok_or_else(|| {
         format!(
             "Bundled engine binary not found ({}). Run scripts/build-llama.sh to produce the sidecar.",
             sidecar_binary_name()
@@ -284,10 +440,15 @@ pub fn start_bundled_engine(
 
     println!("[Engine] Starting built-in llama-server on port {port} — {model_path}");
     let mut cmd = Command::new(&binary);
-    cmd.args(build_server_args(&model_path, ctx, port))
+    cmd.args(&desired_args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        // llama-server writes the REASON a start fails here: a GGUF it refuses,
+        // a quant this build has no kernel for, a port already taken, too little
+        // VRAM. Sending it to /dev/null left the user with "did not become
+        // healthy", which names no cause at all. Drained on its own thread so
+        // the pipe can never fill and stall the server (see commands/shell.rs).
+        .stderr(Stdio::piped());
     // Forward the user's GPU pick (CUDA/HIP/OneAPI) exactly like start_ollama;
     // no-op in the default "auto" mode. On mac this is inert (Metal).
     if let Ok(sel) = state.gpu_selection.lock() {
@@ -296,21 +457,53 @@ pub fn start_bundled_engine(
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn bundled engine: {e}"))?;
+    let diagnostics = child.stderr.take().map(super::shell::drain);
 
     *state.bundled_engine.lock().unwrap() = Some(BundledEngine {
         child,
         model_path: model_path.clone(),
         port,
+        ctx: Some(effective_ctx(&tuning)),
+        args: desired_args,
     });
 
     // Wait for the model to load. On failure, reap the child so we don't leave
     // a zombie half-loaded server behind.
-    if let Err(e) = wait_for_health(port) {
-        stop_engine_locked(&state);
-        return Err(e);
+    if let Err(e) = wait_for_health(port, health_timeout_for(&model_path)) {
+        let why = diagnostics
+            .map(|(buf, _)| tail_lines(&super::shell::captured_text(&buf), 12))
+            .unwrap_or_default();
+        stop_engine_locked(state);
+        return Err(if why.is_empty() { e } else { format!("{e}\n\n{why}") });
+    }
+
+    // Health said OK — but was it OUR child that answered? A spawn that loses
+    // the port to an orphaned llama-server (left behind by a crashed or
+    // hard-killed session) dies on "address already in use" within
+    // milliseconds, and the probe above then hits the STRANGER: unknown model,
+    // unknown ctx, tuning that silently never applies, and a process no
+    // shutdown of ours can ever reap. Fail honestly with the child's own
+    // stderr instead of adopting it. (Live repro 2026-07-28: an embed server
+    // orphaned by a previous dev session made every later start look green.)
+    let spawn_died = {
+        let mut guard = state.bundled_engine.lock().unwrap();
+        match guard.as_mut() {
+            Some(e) => e.child.try_wait().ok().flatten().is_some(),
+            None => true,
+        }
+    };
+    if spawn_died {
+        let why = diagnostics
+            .map(|(buf, _)| tail_lines(&super::shell::captured_text(&buf), 12))
+            .unwrap_or_default();
+        stop_engine_locked(state);
+        return Err(format!(
+            "Port {port} answers health checks, but the engine this app just started exited immediately — another llama-server (likely left over from a previous session or crash) is occupying the port. Quit that process or reboot, then try again.{}",
+            if why.is_empty() { String::new() } else { format!("\n\n{why}") }
+        ));
     }
 
     println!("[Engine] Built-in engine healthy on port {port}");
@@ -318,38 +511,56 @@ pub fn start_bundled_engine(
         "status": "started",
         "port": port,
         "model_path": model_path,
+        "ctx": effective_ctx(&tuning),
     }))
 }
 
 /// Stop the managed engine, killing the child. Idempotent.
 #[tauri::command]
-pub fn stop_bundled_engine(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let was_running = stop_engine_locked(&state);
-    Ok(serde_json::json!({ "status": if was_running { "stopped" } else { "idle" } }))
+pub async fn stop_bundled_engine(app: AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // kill + wait on a server that is mid-load is not instant.
+        let state = app.state::<AppState>();
+        let was_running = stop_engine_locked(&state);
+        serde_json::json!({ "status": if was_running { "stopped" } else { "idle" } })
+    })
+    .await
+    .map_err(|e| format!("Engine stop task failed to run: {e}"))
 }
 
 /// Report whether the engine is up, which model, on which port, and a live
 /// health probe. `running` reflects the child handle; `healthy` the HTTP probe
 /// (they diverge briefly during cold load).
+/// Async because of the health probe: it is a blocking HTTP call with a 400 ms
+/// timeout, and the UI polls this. On the main thread that was a stutter on
+/// every poll and a 400 ms stall whenever the engine was starting or gone.
 #[tauri::command]
-pub fn bundled_engine_status(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
-    let guard = state.bundled_engine.lock().unwrap();
-    match guard.as_ref() {
-        Some(engine) => Ok(serde_json::json!({
-            "running": true,
-            "healthy": engine_healthy(engine.port),
-            "port": engine.port,
-            "model_path": engine.model_path,
-        })),
-        None => Ok(serde_json::json!({
-            "running": false,
-            "healthy": false,
-            "port": DEFAULT_ENGINE_PORT,
-            "model_path": null,
-        })),
-    }
+pub async fn bundled_engine_status(app: AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let probe = {
+            let guard = state.bundled_engine.lock().unwrap();
+            guard.as_ref().map(|e| (e.port, e.model_path.clone(), e.ctx))
+        };
+        match probe {
+            Some((port, model_path, ctx)) => serde_json::json!({
+                "running": true,
+                "healthy": engine_healthy(port),
+                "port": port,
+                "model_path": model_path,
+                "ctx": ctx,
+            }),
+            None => serde_json::json!({
+                "running": false,
+                "healthy": false,
+                "port": DEFAULT_ENGINE_PORT,
+                "model_path": null,
+                "ctx": null,
+            }),
+        }
+    })
+    .await
+    .map_err(|e| format!("Engine status task failed to run: {e}"))
 }
 
 /// Swap the loaded model: stop the current process and start `model_path` on
@@ -357,29 +568,43 @@ pub fn bundled_engine_status(
 /// stops a mismatched model), kept as a distinct command so the intent reads
 /// clearly at the call site and the port is preserved.
 #[tauri::command]
-pub fn swap_bundled_model(
+pub async fn swap_bundled_model(
     app: AppHandle,
-    state: State<'_, AppState>,
     model_path: String,
-    ctx: Option<u32>,
+    tuning: Option<EngineTuning>,
 ) -> Result<serde_json::Value, String> {
-    let port = state
-        .bundled_engine
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|e| e.port)
-        .unwrap_or(DEFAULT_ENGINE_PORT);
-    start_bundled_engine(app, state, model_path, ctx, Some(port))
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let port = state
+            .bundled_engine
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|e| e.port)
+            .unwrap_or(DEFAULT_ENGINE_PORT);
+        start_bundled_engine_blocking(&app, &state, model_path, tuning, Some(port))
+    })
+    .await
+    .map_err(|e| format!("Engine swap task failed to run: {e}"))?
 }
 
 /// List `*.gguf` files in the built-in models dir, marking the one currently
 /// loaded. Used by the frontend instead of `/v1/models` (which would only
 /// report the single loaded model).
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn list_bundled_models(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
+pub async fn list_bundled_models(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        list_bundled_models_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("list_bundled_models task: {e}"))?
+}
+
+fn list_bundled_models_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     let dir = builtin_models_dir()?;
     let loaded = state
         .bundled_engine
@@ -391,11 +616,16 @@ pub fn list_bundled_models(
         .into_iter()
         .map(|m| {
             let is_loaded = loaded.as_deref() == Some(m.path.as_str());
+            // Trained context limit from the GGUF header (ENG-6c) — the ONLY
+            // place it exists; /props and /v1/models don't carry it. None on
+            // any parse hiccup so a weird file can never break the listing.
+            let ctx_train = crate::commands::gguf::context_length(&m.path);
             serde_json::json!({
                 "name": m.name,
                 "path": m.path,
                 "size": m.size,
                 "loaded": is_loaded,
+                "ctx_train": ctx_train,
             })
         })
         .collect();
@@ -407,7 +637,7 @@ pub fn list_bundled_models(
 
 /// Kill the managed engine child if present. Returns whether one was running.
 /// Takes the state lock internally; callers must not already hold it.
-fn stop_engine_locked(state: &State<'_, AppState>) -> bool {
+pub(crate) fn stop_engine_locked(state: &AppState) -> bool {
     let mut guard = state.bundled_engine.lock().unwrap();
     if let Some(mut engine) = guard.take() {
         let _ = engine.child.kill();
@@ -431,12 +661,26 @@ fn stop_engine_locked(state: &State<'_, AppState>) -> bool {
 /// for the same model + healthy. A different embed model in flight is stopped
 /// first (single-process server).
 #[tauri::command]
-pub fn start_bundled_embed(
+pub async fn start_bundled_embed(
     app: AppHandle,
-    state: State<'_, AppState>,
     model_path: String,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        start_bundled_embed_blocking(&app, &state, model_path, port)
+    })
+    .await
+    .map_err(|e| format!("Embeddings start task failed to run: {e}"))?
+}
+
+fn start_bundled_embed_blocking(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    model_path: String,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let _gate = crate::commands::process::start_gate(&crate::commands::process::EMBED_START);
     let port = port.unwrap_or(DEFAULT_EMBED_PORT);
 
     if !Path::new(&model_path).exists() {
@@ -457,9 +701,18 @@ pub fn start_bundled_embed(
         }
     }
 
-    stop_embed_locked(&state);
+    stop_embed_locked(state);
 
-    let binary = resolve_engine_binary(&app).ok_or_else(|| {
+    // Same stranger-on-the-port refusal as the chat engine (see there for the
+    // full story): a health answer on a port we hold no child for is an
+    // orphan/foreign server, and spawning against it only looks like success.
+    if engine_healthy(port) {
+        return Err(format!(
+            "Port {port} is already serving another llama-server that this app does not manage (likely left over from a previous session or crash). Quit that process or reboot, then try again."
+        ));
+    }
+
+    let binary = resolve_engine_binary(app).ok_or_else(|| {
         format!(
             "Bundled engine binary not found ({}). Run scripts/build-llama.sh to produce the sidecar.",
             sidecar_binary_name()
@@ -471,26 +724,56 @@ pub fn start_bundled_embed(
     cmd.args(build_embed_args(&model_path, port))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     if let Ok(sel) = state.gpu_selection.lock() {
         crate::commands::gpu::apply_gpu_env(&mut cmd, &sel);
     }
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn embeddings server: {e}"))?;
+    let diagnostics = child.stderr.take().map(super::shell::drain);
 
     *state.bundled_embed.lock().unwrap() = Some(BundledEngine {
         child,
         model_path: model_path.clone(),
         port,
+        // No --ctx-size on the embed server; args recorded for symmetry (its
+        // idempotence check stays model_path-based, embeds have no tuning).
+        ctx: None,
+        args: build_embed_args(&model_path, port),
     });
 
-    if let Err(e) = wait_for_health(port) {
-        stop_embed_locked(&state);
-        return Err(e);
+    if let Err(e) = wait_for_health(port, health_timeout_for(&model_path)) {
+        let why = diagnostics
+            .map(|(buf, _)| tail_lines(&super::shell::captured_text(&buf), 12))
+            .unwrap_or_default();
+        stop_embed_locked(state);
+        return Err(if why.is_empty() { e } else { format!("{e}\n\n{why}") });
+    }
+
+    // Same stranger-on-the-port guard as the chat engine: a healthy probe is
+    // only proof of SOME server on the port. If our spawn already exited, the
+    // answerer is an orphan/foreign process — embeddings would come from an
+    // unknown model and our shutdown could never reap it.
+    let spawn_died = {
+        let mut guard = state.bundled_embed.lock().unwrap();
+        match guard.as_mut() {
+            Some(e) => e.child.try_wait().ok().flatten().is_some(),
+            None => true,
+        }
+    };
+    if spawn_died {
+        let why = diagnostics
+            .map(|(buf, _)| tail_lines(&super::shell::captured_text(&buf), 12))
+            .unwrap_or_default();
+        stop_embed_locked(state);
+        return Err(format!(
+            "Port {port} answers health checks, but the embeddings server this app just started exited immediately — another llama-server (likely left over from a previous session or crash) is occupying the port. Quit that process or reboot, then try again.{}",
+            if why.is_empty() { String::new() } else { format!("\n\n{why}") }
+        ));
     }
 
     println!("[Engine] Built-in embeddings server healthy on port {port}");
@@ -503,36 +786,49 @@ pub fn start_bundled_embed(
 
 /// Stop the managed embeddings server, killing the child. Idempotent.
 #[tauri::command]
-pub fn stop_bundled_embed(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let was_running = stop_embed_locked(&state);
-    Ok(serde_json::json!({ "status": if was_running { "stopped" } else { "idle" } }))
+pub async fn stop_bundled_embed(app: AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let was_running = stop_embed_locked(&state);
+        serde_json::json!({ "status": if was_running { "stopped" } else { "idle" } })
+    })
+    .await
+    .map_err(|e| format!("Embeddings stop task failed to run: {e}"))
 }
 
 /// Report whether the embeddings server is up, which model, on which port.
 #[tauri::command]
-pub fn bundled_embed_status(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
-    let guard = state.bundled_embed.lock().unwrap();
-    match guard.as_ref() {
-        Some(embed) => Ok(serde_json::json!({
-            "running": true,
-            "healthy": engine_healthy(embed.port),
-            "port": embed.port,
-            "model_path": embed.model_path,
-        })),
-        None => Ok(serde_json::json!({
-            "running": false,
-            "healthy": false,
-            "port": DEFAULT_EMBED_PORT,
-            "model_path": null,
-        })),
-    }
+pub async fn bundled_embed_status(app: AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        // Probe OUTSIDE the lock: holding it across a blocking HTTP call made
+        // every other engine command queue behind the status poll.
+        let probe = {
+            let guard = state.bundled_embed.lock().unwrap();
+            guard.as_ref().map(|e| (e.port, e.model_path.clone()))
+        };
+        match probe {
+            Some((port, model_path)) => serde_json::json!({
+                "running": true,
+                "healthy": engine_healthy(port),
+                "port": port,
+                "model_path": model_path,
+            }),
+            None => serde_json::json!({
+                "running": false,
+                "healthy": false,
+                "port": DEFAULT_EMBED_PORT,
+                "model_path": null,
+            }),
+        }
+    })
+    .await
+    .map_err(|e| format!("Embeddings status task failed to run: {e}"))
 }
 
 /// Kill the managed embeddings child if present. Returns whether one was
 /// running. Takes the state lock internally; callers must not already hold it.
-fn stop_embed_locked(state: &State<'_, AppState>) -> bool {
+pub(crate) fn stop_embed_locked(state: &AppState) -> bool {
     let mut guard = state.bundled_embed.lock().unwrap();
     if let Some(mut embed) = guard.take() {
         let _ = embed.child.kill();
@@ -549,8 +845,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn args_include_model_ctx_port_and_full_gpu_offload() {
-        let args = build_server_args("/models/qwen.gguf", 8192, 8127);
+    fn health_timeout_scales_with_model_size_and_caps() {
+        assert_eq!(health_timeout_for_bytes(0), Duration::from_secs(60));
+        // 0.5 GiB rounds down to the 60s base.
+        assert_eq!(health_timeout_for_bytes(536_870_912), Duration::from_secs(60));
+        assert_eq!(health_timeout_for_bytes(8 * 1_073_741_824), Duration::from_secs(92));
+        assert_eq!(health_timeout_for_bytes(40 * 1_073_741_824), Duration::from_secs(220));
+        // Absurd sizes hit the 10-minute cap instead of overflowing.
+        assert_eq!(health_timeout_for_bytes(u64::MAX), Duration::from_secs(600));
+    }
+
+    #[test]
+    fn default_tuning_args_match_legacy_shape() {
+        // Pin: absent/default tuning must produce EXACTLY the argv the app has
+        // shipped since 2.5.7 — expert settings are opt-in, never a drift.
+        let args = build_server_args("/models/qwen.gguf", &EngineTuning::default(), 8127);
         assert_eq!(
             args,
             vec![
@@ -561,6 +870,83 @@ mod tests {
                 "-ngl", "999",
             ]
         );
+    }
+
+    #[test]
+    fn expert_tuning_adds_all_flags_in_stable_order() {
+        let tuning = EngineTuning {
+            ctx: 16384,
+            flash_attn: "on".into(),
+            cache_type_k: "q8_0".into(),
+            cache_type_v: "q8_0".into(),
+            threads: 8,
+            gpu_layers: 20,
+            mlock: true,
+            no_mmap: true,
+        };
+        let args = build_server_args("/m.gguf", &tuning, 8127);
+        assert_eq!(
+            args,
+            vec![
+                "-m", "/m.gguf",
+                "--host", "127.0.0.1",
+                "--port", "8127",
+                "--ctx-size", "16384",
+                "-ngl", "20",
+                "-fa", "on",
+                "-ctk", "q8_0",
+                "-ctv", "q8_0",
+                "-t", "8",
+                "--mlock",
+                "--no-mmap",
+            ]
+        );
+    }
+
+    #[test]
+    fn junk_tuning_values_fall_back_to_legacy_argv() {
+        // Settings files are user-editable JSON — junk enum strings must be
+        // dropped (binary defaults), never passed through to the argv.
+        let tuning = EngineTuning {
+            ctx: 0,
+            flash_attn: "banana".into(),
+            cache_type_k: "'; rm -rf /".into(),
+            cache_type_v: "zzz".into(),
+            threads: -4,
+            gpu_layers: -1,
+            mlock: false,
+            no_mmap: false,
+        };
+        let args = build_server_args("/m.gguf", &tuning, 8127);
+        assert_eq!(
+            args,
+            vec![
+                "-m", "/m.gguf",
+                "--host", "127.0.0.1",
+                "--port", "8127",
+                "--ctx-size", "8192",
+                "-ngl", "999",
+            ]
+        );
+    }
+
+    #[test]
+    fn gpu_layers_zero_means_cpu_only_not_all() {
+        let tuning = EngineTuning { gpu_layers: 0, ..Default::default() };
+        let args = build_server_args("/m.gguf", &tuning, 8127);
+        let ngl = args.iter().position(|a| a == "-ngl").unwrap();
+        assert_eq!(args[ngl + 1], "0");
+    }
+
+    #[test]
+    fn partial_tuning_json_deserializes_with_defaults() {
+        // The frontend sends partial objects ({ctx: 16384}); serde(default)
+        // must fill the rest so a partial settings write never breaks starts.
+        let t: EngineTuning = serde_json::from_str(r#"{"ctx":16384,"cacheTypeK":"q8_0"}"#).unwrap();
+        assert_eq!(t.ctx, 16384);
+        assert_eq!(t.cache_type_k, "q8_0");
+        assert_eq!(t.flash_attn, "auto");
+        assert_eq!(t.gpu_layers, -1);
     }
 
     #[test]
@@ -626,5 +1012,25 @@ mod tests {
     fn scan_missing_dir_is_empty_not_error() {
         let dir = std::env::temp_dir().join("lu-engine-nonexistent-xyz-123");
         assert!(scan_gguf_models(&dir).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod diag_tests {
+    use super::tail_lines;
+
+    #[test]
+    fn tail_keeps_the_last_lines_and_drops_blanks() {
+        let log = "loading model\n\n  error: unknown pre-tokenizer type  \nfailed to load\n\n";
+        assert_eq!(
+            tail_lines(log, 2),
+            "error: unknown pre-tokenizer type\nfailed to load"
+        );
+    }
+
+    #[test]
+    fn tail_of_a_short_log_is_the_whole_log() {
+        assert_eq!(tail_lines("only line", 12), "only line");
+        assert_eq!(tail_lines("", 12), "");
     }
 }

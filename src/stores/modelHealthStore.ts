@@ -35,8 +35,21 @@ export const useModelHealthStore = create<ModelHealthState>()(
       lastScanTime: 0,
       scanning: false,
       dismissed: false,
+      // Only un-dismiss when the stale set actually CHANGED. The health scan
+      // runs once per launch, so clearing the flag unconditionally meant the
+      // banner returned on every start over the same untouched model and
+      // "dismiss" was decorative.
       setStaleModels: (models) =>
-        set({ staleModels: models, lastScanTime: Date.now(), dismissed: false }),
+        set((s) => {
+          const same =
+            s.staleModels.length === models.length &&
+            models.every((m) => s.staleModels.includes(m))
+          return {
+            staleModels: models,
+            lastScanTime: Date.now(),
+            dismissed: same ? s.dismissed : false,
+          }
+        }),
       markFresh: (name) =>
         set((s) => ({ staleModels: s.staleModels.filter((m) => m !== name) })),
       setScanning: (scanning) => set({ scanning }),
@@ -46,9 +59,13 @@ export const useModelHealthStore = create<ModelHealthState>()(
     }),
     {
       name: 'locally-uncensored-model-health',
-      // Only persist the scan result + timestamp. `scanning` and `dismissed`
-      // are intentionally session-only.
-      partialize: (s) => ({ staleModels: s.staleModels, lastScanTime: s.lastScanTime }),
+      // `dismissed` persists as of 2.5.9: the banner re-ran its startup scan and
+      // came back on EVERY launch while a stale model sat on disk, so closing it
+      // meant nothing. A fresh scan that finds stale models clears the flag
+      // again (setStaleModels), so a genuinely new problem still speaks up.
+      // `scanning` stays session-only — a crash mid-scan must not persist as
+      // "still scanning".
+      partialize: (s) => ({ staleModels: s.staleModels, lastScanTime: s.lastScanTime, dismissed: s.dismissed }),
     }
   )
 )

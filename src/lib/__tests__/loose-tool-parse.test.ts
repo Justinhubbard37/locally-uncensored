@@ -115,6 +115,44 @@ describe('canonicalToolName — map near-miss tool names', () => {
     expect(canonicalToolName('teleport', KN)).toBe('teleport')
   })
 
+  // Live on the ship exe, 2026-07-24: gpt-oss through LU Cloud sent the
+  // recipient as `file_edit<|channel|>commentary`. Every write tool call came
+  // back "Unknown tool" and the model spent a minute retrying the same name.
+  describe('harmony control tokens welded onto the name', () => {
+    const CODE = ['file_read', 'file_write', 'file_edit', 'shell_execute']
+
+    it('recovers the exact name that failed live', () => {
+      expect(canonicalToolName('file_edit<|channel|>commentary', CODE)).toBe('file_edit')
+    })
+
+    it('recovers other tools carrying the same marker', () => {
+      expect(canonicalToolName('file_write<|channel|>commentary', CODE)).toBe('file_write')
+      expect(canonicalToolName('shell_execute<|channel|>analysis', CODE)).toBe('shell_execute')
+    })
+
+    it('strips the harmony recipient namespace', () => {
+      expect(canonicalToolName('functions.file_edit', CODE)).toBe('file_edit')
+      expect(canonicalToolName('functions.file_edit<|channel|>commentary', CODE)).toBe('file_edit')
+    })
+
+    it('tolerates surrounding whitespace and a trailing call arrow', () => {
+      expect(canonicalToolName('  file_edit ', CODE)).toBe('file_edit')
+      expect(canonicalToolName('file_edit<|constrain|>json', CODE)).toBe('file_edit')
+    })
+
+    // The cut can only SHORTEN a name, so it can never turn one registered
+    // tool into a different one, and an unknown stem still errors.
+    it('does not invent a tool out of noise', () => {
+      expect(canonicalToolName('<|channel|>commentary', CODE)).toBe('<|channel|>commentary')
+      expect(canonicalToolName('teleport<|channel|>commentary', CODE)).toBe('teleport<|channel|>commentary')
+    })
+
+    it('keeps a dotted name intact when the full name is the registered one', () => {
+      const mcp = ['mcp.server.do_thing']
+      expect(canonicalToolName('mcp.server.do_thing', mcp)).toBe('mcp.server.do_thing')
+    })
+  })
+
   it('never maps an alias to a tool that is not registered', () => {
     expect(canonicalToolName('video_generation', ['image_generate'])).toBe('video_generation')
   })
@@ -238,5 +276,101 @@ describe('parseLooseToolCalls — nested function object + string args (OpenAI/P
     const txt = '{"tool_call": "image_generate", "arguments": {"prompt": "y"}}'
     const r = parseLooseToolCalls(txt, KN)
     expect(r.calls[0]).toEqual({ name: 'image_generate', arguments: { prompt: 'y' } })
+  })
+})
+
+describe('stripToolCallText — leftover Hermes tags', () => {
+  const KN = ['file_list', 'file_read', 'web_search']
+
+  // Live Agent run, ship exe 2026-07-25. stripToolCallTags only removes matched
+  // PAIRS, so an unclosed `<tool_call>` survived every stripper and reached the
+  // bubble, where the renderer ate the `<t` and the user saw `ool_call>`.
+  it('removes an UNCLOSED opening tag', () => {
+    expect(stripToolCallText('Let me look.\n<tool_call>', KN)).toBe('Let me look.')
+  })
+
+  it('removes a stray closing tag', () => {
+    expect(stripToolCallText('</tool_call>\nDone.', KN)).toBe('Done.')
+  })
+
+  it('still removes the piped and bracketed spellings', () => {
+    expect(stripToolCallText('<|tool_call|>x', KN)).toBe('x')
+    expect(stripToolCallText('[TOOL_CALLS]x', KN)).toBe('x')
+  })
+
+  it('leaves ordinary prose about tool calls alone', () => {
+    const prose = 'the tool call failed, try again'
+    expect(stripToolCallText(prose, KN)).toBe(prose)
+  })
+
+  // Captured from the wire, ship exe 2026-07-25. Qwen3-32B on LU Cloud put
+  // `</think>\n\nool_call>` in its content next to a valid native tool_calls
+  // array: the provider's harmony parser had already eaten the `<t`, so every
+  // pattern anchored on `<` missed the remainder and the user saw `ool_call>`.
+  it('removes a TRUNCATED tag the provider mangled before we ever saw it', () => {
+    expect(stripToolCallText('I will look at it.\nool_call>', KN)).toBe('I will look at it.')
+    expect(stripToolCallText('ool_call>', KN)).toBe('')
+    expect(stripToolCallText('ool_calls>', KN)).toBe('')
+  })
+
+  it('only strips the fragment when it is the whole line', () => {
+    // Anchored per line, so a sentence that happens to contain the characters
+    // is never touched.
+    const prose = 'the log said ool_call> which is odd'
+    expect(stripToolCallText(prose, KN)).toBe(prose)
+  })
+
+  // Captured on the ship exe 2026-07-25 (Agent, qwen2.5-coder:14b): asked for
+  // two tools in one step, the model emitted them natively AND echoed both as
+  // one ```json ARRAY. The two objects were stripped by range and the user was
+  // left with a "notes" block containing nothing but `[`, a comma and `]`.
+  it('leaves no empty husk when an echoed call ARRAY is stripped', () => {
+    const echoed = 'Running both now.\n\n```json\n[\n  {"name": "run_tests", "arguments": {}},\n  {"name": "shell_execute", "arguments": {"command": "echo hi"}}\n]\n```'
+    expect(stripToolCallText(echoed, KN)).toBe('Running both now.')
+  })
+
+  it('never drops a fence that still carries real content', () => {
+    const code = 'Here is the patch:\n\n```js\nconst a = 1\n```'
+    expect(stripToolCallText(code, KN)).toContain('const a = 1')
+  })
+})
+
+// ── Code inside the arguments (2026-07-28) ──────────────────────────
+//
+// The brace scanners counted braces inside JSON STRINGS as structure. A
+// file_write whose content holds a regex, a half-open CSS block or a stray
+// closing brace therefore either vanished (no candidate — the model believes
+// it wrote the file, nothing happened) or was cut one brace early, so the
+// arguments arrived wrong. Small local models writing code is the single most
+// common use of this loose path.
+describe('parseLooseToolCalls — braces inside the content string', () => {
+  it('keeps the call when the content holds a lone opening brace', () => {
+    const text = '{"name":"file_write","arguments":{"path":"a.js","content":"const re = /\\\\{/"}}'
+    const r = parseLooseToolCalls(text, KNOWN)
+    expect(r.calls).toHaveLength(1)
+    expect(r.calls[0].name).toBe('file_write')
+    expect(r.calls[0].arguments.path).toBe('a.js')
+  })
+
+  it('keeps the call when the content holds a lone closing brace', () => {
+    const text = '{"name":"file_write","arguments":{"path":"a.js","content":"} // end of block"}}'
+    const r = parseLooseToolCalls(text, KNOWN)
+    expect(r.calls).toHaveLength(1)
+    expect(r.calls[0].arguments.content).toBe('} // end of block')
+  })
+
+  it('keeps an unfinished CSS block intact', () => {
+    const text = '{"name":"file_write","arguments":{"path":"a.css","content":"a { color: red"}}'
+    const r = parseLooseToolCalls(text, KNOWN)
+    expect(r.calls).toHaveLength(1)
+    expect(r.calls[0].arguments.content).toBe('a { color: red')
+  })
+
+  it('handles the bare-name form with deeply nested arguments', () => {
+    const text = 'file_write {"path":"cfg.json","content":"{\\"a\\":{\\"b\\":{\\"c\\":1}}}"}'
+    const r = parseLooseToolCalls(text, KNOWN)
+    expect(r.calls).toHaveLength(1)
+    expect(r.calls[0].arguments.path).toBe('cfg.json')
+    expect(r.matched[0]).toContain('file_write')
   })
 })

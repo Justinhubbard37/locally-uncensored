@@ -62,6 +62,7 @@ describe('Small-Model Mode — Knob 1: applyMaxTools', () => {
   const tools = [
     mkTool('file_read', 'read', 'filesystem'),
     mkTool('file_write', 'write', 'filesystem'),
+    mkTool('file_edit', 'edit', 'filesystem'),
     mkTool('get_current_time', 'time', 'system'),
     mkTool('a', 'aaaa'),
     mkTool('b', 'bbbb'),
@@ -91,9 +92,9 @@ describe('Small-Model Mode — Knob 1: applyMaxTools', () => {
   })
 
   it('fills the non-always slots from rankOrder when provided', () => {
-    // 3 ALWAYS_INCLUDE + 1 free slot; rank puts 'f' first → 'f' wins, 'a' loses.
-    const out = applyMaxTools(tools, 4, ['f', 'e', 'd', 'c', 'b', 'a'])
-    expect(out.length).toBe(4)
+    // 4 ALWAYS_INCLUDE + 1 free slot; rank puts 'f' first → 'f' wins, 'a' loses.
+    const out = applyMaxTools(tools, 5, ['f', 'e', 'd', 'c', 'b', 'a'])
+    expect(out.length).toBe(5)
     expect(out.some((t) => t.name === 'f')).toBe(true)
     expect(out.some((t) => t.name === 'a')).toBe(false)
   })

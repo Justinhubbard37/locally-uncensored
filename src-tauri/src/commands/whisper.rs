@@ -23,6 +23,17 @@ pub struct WhisperServer {
     pub backend: Option<String>,
 }
 
+/// Throw away replies still sitting in the channel from an earlier, abandoned
+/// request. Returns how many were dropped (for the log — a non-zero count means
+/// a previous transcription overran its timeout).
+fn drain_stale(rx: &mpsc::Receiver<serde_json::Value>) -> usize {
+    let mut n = 0;
+    while rx.try_recv().is_ok() {
+        n += 1;
+    }
+    n
+}
+
 impl WhisperServer {
     pub fn new() -> Self {
         Self {
@@ -38,6 +49,21 @@ impl WhisperServer {
         if self.process.is_some() {
             return Ok(());
         }
+        // A start that fails halfway must leave nothing behind: `process` is set
+        // before the readiness wait, so an error after that point used to leave a
+        // dead server registered. `needs_start` then saw process.is_some(), never
+        // retried, and every later transcription answered "Whisper server not
+        // ready" until the app was restarted.
+        match self.start_inner(python_bin, script_path) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.stop();
+                Err(e)
+            }
+        }
+    }
+
+    fn start_inner(&mut self, python_bin: &str, script_path: &str) -> Result<(), String> {
 
         println!("[Whisper] Starting persistent server: {} {}", python_bin, script_path);
 
@@ -119,6 +145,24 @@ impl WhisperServer {
             return Err("Whisper server not ready".to_string());
         }
 
+        // Discard anything already queued BEFORE sending. The protocol is
+        // strictly one request, one response, and the channel carries no
+        // correlation id — so a reply that arrived after its caller gave up
+        // would be handed to the NEXT caller as if it were theirs. Concretely:
+        // a long dictation trips the 60 s timeout and reports "timed out"; the
+        // server finishes anyway and pushes that text into the channel; the
+        // user records something new and gets the PREVIOUS recording's words
+        // back — and every dictation after that stays one behind, until the
+        // server is restarted. Any stray JSON line the server logs desyncs it
+        // the same way.
+        let stale = {
+            let rx = self.response_rx.as_ref().ok_or("No response channel")?;
+            drain_stale(rx)
+        };
+        if stale > 0 {
+            println!("[Whisper] dropped {} stale response(s) before sending", stale);
+        }
+
         let stdin = self.stdin_tx.as_mut().ok_or("No stdin connection")?;
         let json_str = serde_json::to_string(cmd).map_err(|e| e.to_string())?;
 
@@ -144,6 +188,7 @@ impl WhisperServer {
         }
         if let Some(ref mut child) = self.process {
             let _ = child.kill();
+            let _ = child.wait(); // reap, or the python server lingers as a zombie
         }
         self.process = None;
         self.stdin_tx = None;
@@ -153,18 +198,105 @@ impl WhisperServer {
     }
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn whisper_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let whisper = state.whisper.lock().unwrap();
+pub async fn whisper_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        whisper_status_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("whisper_status task: {e}"))?
+}
+
+fn whisper_status_blocking(state: &AppState) -> Result<serde_json::Value, String> {
+    let (running, ready, backend) = {
+        let whisper = state.whisper.lock().unwrap();
+        (whisper.process.is_some(), whisper.ready, whisper.backend.clone())
+    };
+    // Report INSTALLED-on-disk, not merely "server process running". The whisper
+    // server lazy-starts on first mic use and is killed on quit, so keying the
+    // badge on process.is_some() made STT read as uninstalled after every
+    // relaunch — the "reinstall every launch" report (#78, ElBiggus). If the
+    // server is up it's obviously installed; otherwise probe the resolved
+    // interpreter for the faster_whisper package.
+    let available = running || whisper_package_installed(state);
     Ok(serde_json::json!({
-        "available": whisper.process.is_some(),
-        "backend": whisper.backend,
-        "loading": whisper.process.is_some() && !whisper.ready,
+        "available": available,
+        "backend": backend,
+        "loading": running && !ready,
     }))
 }
 
+/// Is `faster_whisper` importable in the interpreter install_whisper targets
+/// (resolve_lu_python: ComfyUI venv if present, else system Python)? Cheap
+/// best-effort probe so the badge reflects a prior install across relaunches
+/// without the server running. Any spawn/timeout failure → "not installed".
+fn whisper_package_installed(state: &AppState) -> bool {
+    let python = crate::commands::install::resolve_lu_python(state);
+    if python.is_empty() {
+        return false;
+    }
+    let mut cmd = Command::new(&python);
+    // Probe INSTALLABILITY with importlib.find_spec, NOT a full
+    // `import faster_whisper`. The real import pulls in ctranslate2 / onnxruntime
+    // / av and takes ~8 s warm (longer with a cold OS file cache), which on the
+    // first status check right after a cold relaunch blew past the cap below and
+    // made STT read as "not installed" until the next check — the #78 symptom,
+    // softened but not gone. find_spec answers "is the package present" in about
+    // 100 ms with no heavy import, so the badge is right on the very first probe.
+    cmd.args([
+        "-c",
+        "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('faster_whisper') else 1)",
+    ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    // find_spec returns in well under a second; the cap is kept purely so a
+    // wedged interpreter can never hang the status call.
+    for _ in 0..100 {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(_) => return false,
+        }
+    }
+    let _ = child.kill();
+    false
+}
+
 #[tauri::command]
-pub fn transcribe(app: AppHandle, audio_base64: String, content_type: String, state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn transcribe(
+    app: AppHandle,
+    audio_base64: String,
+    content_type: String,
+) -> Result<serde_json::Value, String> {
+    // On the first dictation this starts the whisper server and waits for the
+    // model — up to five minutes — and every transcription after that blocks for
+    // up to 60 s. As a sync #[command] all of that froze the Tauri main thread,
+    // so the window locked up for the whole take.
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        transcribe_blocking(&app, audio_base64, content_type, &state)
+    })
+    .await
+    .map_err(|e| format!("Transcription task failed to run: {e}"))?
+}
+
+fn transcribe_blocking(
+    app: &AppHandle,
+    audio_base64: String,
+    content_type: String,
+    state: &State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
     let audio_bytes = base64::engine::general_purpose::STANDARD
         .decode(&audio_base64)
         .map_err(|e| format!("base64 decode: {}", e))?;
@@ -199,11 +331,15 @@ pub fn transcribe(app: AppHandle, audio_base64: String, content_type: String, st
     {
         let needs_start = state.whisper.lock().map(|w| w.process.is_none()).unwrap_or(true);
         if needs_start {
-            let python_bin = state.python_bin.lock().unwrap().clone();
+            // Resolve the SAME interpreter install_whisper used (ComfyUI venv if
+            // present, else system Python). Using state.python_bin here meant a
+            // venv install was invisible at runtime → STT silently dead after
+            // relaunch on boxes with a ComfyUI venv (#78).
+            let python_bin = crate::commands::install::resolve_lu_python(state.inner());
             if python_bin.is_empty() {
                 return Err("Whisper unavailable: no Python runtime detected. Install Python in the setup step, then retry.".to_string());
             }
-            auto_start_whisper_sync(&app, &python_bin, &state.whisper);
+            auto_start_whisper_sync(app, &python_bin, &state.whisper)?;
         }
     }
 
@@ -236,8 +372,18 @@ pub fn transcribe(app: AppHandle, audio_base64: String, content_type: String, st
     }
 }
 
-/// Synchronous whisper startup (runs in background thread)
-pub fn auto_start_whisper_sync(app: &tauri::AppHandle, python_bin: &str, whisper: &Arc<Mutex<WhisperServer>>) {
+/// Synchronous whisper startup (runs in background thread).
+///
+/// Returns WHY it could not start. Every failure used to end in a `println!`,
+/// so the four distinct causes — faster-whisper missing, whisper_server.py
+/// missing, the server dying, the model never loading — all reached the user
+/// as the same "Whisper server not ready" from send_command, which says nothing
+/// about what to do next.
+pub fn auto_start_whisper_sync(
+    app: &tauri::AppHandle,
+    python_bin: &str,
+    whisper: &Arc<Mutex<WhisperServer>>,
+) -> Result<(), String> {
     // Check if faster-whisper is installed
     let mut cmd = Command::new(python_bin);
     cmd.args(["-c", "import faster_whisper"]);
@@ -251,7 +397,11 @@ pub fn auto_start_whisper_sync(app: &tauri::AppHandle, python_bin: &str, whisper
         }
         _ => {
             println!("[Whisper] faster-whisper not installed — STT disabled");
-            return;
+            return Err(
+                "Speech-to-text needs faster-whisper, which is not installed. \
+                 Install it from Settings → Voice, then try again."
+                    .to_string(),
+            );
         }
     }
 
@@ -272,10 +422,68 @@ pub fn auto_start_whisper_sync(app: &tauri::AppHandle, python_bin: &str, whisper
             let mut ws = whisper.lock().unwrap();
             if let Err(e) = ws.start(python_bin, &path_str) {
                 println!("[Whisper] Failed to start: {}", e);
+                return Err(format!("Speech-to-text could not start: {}", e));
             }
+            Ok(())
         }
         None => {
             println!("[Whisper] whisper_server.py not found");
+            Err("Speech-to-text is missing its server script (whisper_server.py). \
+                 Reinstall LU to restore it."
+                .to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod response_channel_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The exact sequence a user hits: a long dictation overruns the 60 s
+    /// timeout, the server finishes anyway and pushes its text into the shared
+    /// channel, and the NEXT dictation would read that as its own answer.
+    #[test]
+    fn a_reply_that_arrived_too_late_is_not_handed_to_the_next_caller() {
+        let (tx, rx) = mpsc::channel::<serde_json::Value>();
+
+        // Dictation A times out; its reply lands afterwards.
+        tx.send(json!({ "text": "the FIRST recording" })).unwrap();
+
+        // Dictation B starts: everything queued is by definition not ours.
+        assert_eq!(drain_stale(&rx), 1);
+
+        // Now B's own reply arrives and is the one that gets read.
+        tx.send(json!({ "text": "the SECOND recording" })).unwrap();
+        let got = rx.recv_timeout(std::time::Duration::from_millis(200)).unwrap();
+        assert_eq!(got["text"], "the SECOND recording");
+    }
+
+    /// More than one abandoned call, plus any stray JSON the server logs.
+    #[test]
+    fn several_stale_messages_are_all_dropped() {
+        let (tx, rx) = mpsc::channel::<serde_json::Value>();
+        tx.send(json!({ "text": "old one" })).unwrap();
+        tx.send(json!({ "progress": 0.5 })).unwrap();
+        tx.send(json!({ "text": "old two" })).unwrap();
+
+        assert_eq!(drain_stale(&rx), 3);
+        assert!(rx.try_recv().is_err(), "channel should be empty");
+    }
+
+    #[test]
+    fn an_empty_channel_costs_nothing_and_drops_nothing() {
+        let (_tx, rx) = mpsc::channel::<serde_json::Value>();
+        assert_eq!(drain_stale(&rx), 0);
+    }
+
+    /// Draining must not block when the sender is still alive and idle.
+    #[test]
+    fn draining_does_not_wait_for_a_live_sender() {
+        let (tx, rx) = mpsc::channel::<serde_json::Value>();
+        let started = std::time::Instant::now();
+        assert_eq!(drain_stale(&rx), 0);
+        assert!(started.elapsed() < std::time::Duration::from_millis(50));
+        drop(tx);
     }
 }

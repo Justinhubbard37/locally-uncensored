@@ -62,8 +62,20 @@ fn check_install_disk_pressure(target_dir: &Path) -> Option<String> {
     None
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn cancel_comfyui_install(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn cancel_comfyui_install(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        cancel_comfyui_install_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("cancel_comfyui_install task: {e}"))?
+}
+
+fn cancel_comfyui_install_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     state.comfyui_install_cancel.store(true, Ordering::SeqCst);
     if let Ok(mut s) = state.install_status.lock() {
         // Mark as cancelling immediately so the UI can switch to a
@@ -513,6 +525,9 @@ pub fn install_comfyui(
         );
     }
     let install_status = state.install_status.clone();
+    // Cloned into the worker so a custom install target can be persisted as
+    // the active ComfyUI path once the install completes (andy_38747).
+    let comfy_path_slot = state.comfy_path.clone();
 
     std::thread::spawn(move || {
         // Helper to update install status + logs
@@ -763,6 +778,31 @@ pub fn install_comfyui(
         }
 
         println!("[Install] ComfyUI installation complete");
+
+        // andy_38747 (Discord): the install target is user-configurable now.
+        // Persist it exactly like `set_comfyui_path` does (memory + config.json),
+        // otherwise a non-default target (e.g. D:\ComfyUI) is installed fine but
+        // never found again — `find_comfyui_path` only scans standard locations.
+        let dir_str = target_dir.to_string_lossy().to_string();
+        {
+            let mut p = comfy_path_slot.lock().unwrap();
+            *p = Some(dir_str.clone());
+        }
+        if let Some(config_dir) = dirs::config_dir() {
+            let app_config = config_dir.join("locally-uncensored");
+            let _ = std::fs::create_dir_all(&app_config);
+            let config_file = app_config.join("config.json");
+            let mut config: serde_json::Value = std::fs::read_to_string(&config_file)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+            config["comfyui_path"] = serde_json::json!(dir_str);
+            let _ = std::fs::write(
+                &config_file,
+                serde_json::to_string_pretty(&config).unwrap_or_default(),
+            );
+        }
+
         update("complete", "ComfyUI installed successfully!");
     });
 
@@ -779,6 +819,161 @@ pub fn install_comfyui_status(state: State<'_, AppState>) -> Result<serde_json::
         "download_total": install.download_total,
         "download_speed": install.download_speed,
     }))
+}
+
+/// Update an existing ComfyUI install in place: `git pull --ff-only` plus a
+/// venv-aware `pip install -r requirements.txt`. The 2.5.8 local Create lanes
+/// (music / talking character / extend / motion) need node classes that ship
+/// with current ComfyUI cores, and the UI gates on node PRESENCE — when the
+/// nodes are missing this command is the one-click "Update ComfyUI" path.
+/// Progress streams through the same `install_status` channel the installer
+/// uses, so the existing `install_comfyui_status` polling UI works unchanged.
+#[tauri::command]
+pub fn update_comfyui(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    {
+        let mut install = state.install_status.lock().unwrap();
+        if install.status == "installing" || install.status == "downloading" {
+            return Ok(serde_json::json!({"status": "already_installing"}));
+        }
+        install.status = "installing".to_string();
+        install.logs.clear();
+        install.logs.push("Updating ComfyUI...".to_string());
+    }
+
+    info!("comfyui update start");
+
+    let comfy_dir = {
+        let p = state.comfy_path.lock().unwrap().clone();
+        p.or_else(crate::commands::process::find_comfyui_path)
+            .map(PathBuf::from)
+    };
+    let fail = |state: &State<'_, AppState>, msg: &str| -> Result<serde_json::Value, String> {
+        let mut install = state.install_status.lock().unwrap();
+        install.status = "error".to_string();
+        install.logs.push(msg.to_string());
+        error!("comfyui update aborted: {}", msg);
+        Err(msg.to_string())
+    };
+    let Some(comfy_dir) = comfy_dir else {
+        return fail(&state, "ComfyUI not found. Install ComfyUI first.");
+    };
+    if !comfy_dir.join(".git").exists() {
+        // Portable / zip installs carry no git metadata — nothing to pull.
+        return fail(
+            &state,
+            "This ComfyUI was not installed from git, so it can't be updated in place. \
+             Update it with its own updater, or reinstall from Settings.",
+        );
+    }
+
+    // Prefer the install's venv Python (same preference the launcher uses);
+    // refuse without a usable interpreter — a pulled core with stale
+    // requirements is worse than no update (frontend package pins move often).
+    let python_bin = crate::python::resolve_comfyui_venv_python(&comfy_dir)
+        .unwrap_or_else(|| state.python_bin.lock().unwrap().clone());
+    if python_bin.is_empty() || !crate::python::is_real_python(&python_bin) {
+        return fail(
+            &state,
+            "No usable Python found for this ComfyUI. Install Python first, then retry the update.",
+        );
+    }
+
+    let install_status = state.install_status.clone();
+    std::thread::spawn(move || {
+        let update = |status: &str, msg: &str| {
+            if let Ok(mut s) = install_status.lock() {
+                s.status = status.to_string();
+                s.logs.push(msg.to_string());
+            }
+        };
+
+        #[cfg(target_os = "windows")]
+        {
+            let probe = windows_git_probe();
+            if probe == WindowsGitState::Missing {
+                update("error", &windows_git_install_hint(&probe).unwrap_or_default());
+                return;
+            }
+        }
+
+        update("installing", "Step 1/2: Pulling the latest ComfyUI...");
+        let mut pull = Command::new("git");
+        // --ff-only: a user-modified checkout must not silently merge; surface
+        // the divergence honestly instead.
+        pull.args(["pull", "--ff-only"])
+            .current_dir(&comfy_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(target_os = "windows")]
+        pull.creation_flags(CREATE_NO_WINDOW);
+        match pull.output() {
+            Ok(o) if o.status.success() => {
+                let out = String::from_utf8_lossy(&o.stdout);
+                let line = out.lines().last().unwrap_or("").trim().to_string();
+                update(
+                    "installing",
+                    if line.is_empty() { "Repository updated." } else { &line },
+                );
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                update(
+                    "error",
+                    &format!(
+                        "git pull failed. If you changed files inside the ComfyUI folder, \
+                         stash or revert them and retry.\n\n{}",
+                        stderr.trim(),
+                    ),
+                );
+                return;
+            }
+            Err(e) => {
+                update("error", &format!("Could not run git: {}", e));
+                return;
+            }
+        }
+
+        update(
+            "installing",
+            "Step 2/2: Updating Python dependencies (live pip output below)...",
+        );
+        let reqs = comfy_dir.join("requirements.txt");
+        if reqs.exists() {
+            let reqs_str = reqs.to_string_lossy().to_string();
+            let req_args = vec![
+                "-m", "pip", "install",
+                "--progress-bar", "off",
+                "--no-input",
+                "-r", reqs_str.as_str(),
+            ];
+            match pip_install_streaming_with_retry_cancellable(
+                &req_args,
+                &python_bin,
+                3,
+                &install_status,
+                None,
+            ) {
+                Ok(()) => update("installing", "Dependencies updated."),
+                Err(diagnosis) => {
+                    // Same stance as the installer's step 3: optional deps may
+                    // fail while ComfyUI still starts — log, don't abort.
+                    println!("[Update] Requirements warning: {}", diagnosis);
+                    update(
+                        "installing",
+                        "Some dependencies had warnings (non-critical, ComfyUI should still start).",
+                    );
+                }
+            }
+        }
+
+        println!("[Update] ComfyUI update complete");
+        update(
+            "complete",
+            "ComfyUI updated. Restart ComfyUI to load the new nodes.",
+        );
+    });
+
+    Ok(serde_json::json!({"status": "installing"}))
 }
 
 // ── Shared helper: download a file with progress tracking ────────────────────
@@ -1067,8 +1262,23 @@ fn git_download_url() -> &'static str {
 }
 
 /// Cross-platform git availability check for the Codex view's install banner.
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread,
+// so every millisecond spent here is a frozen window. Same treatment
+// `lmstudio_server_status` already got — this one was simply missed.
 #[tauri::command]
-pub fn check_git_installed() -> GitStatus {
+pub async fn check_git_installed() -> GitStatus {
+    tokio::task::spawn_blocking(check_git_installed_blocking)
+        .await
+        .unwrap_or_else(|e| GitStatus {
+            installed: false,
+            native: false,
+            version: None,
+            hint: Some(format!("git probe task failed: {e}")),
+            download_url: git_download_url().to_string(),
+        })
+}
+
+fn check_git_installed_blocking() -> GitStatus {
     let download_url = git_download_url().to_string();
     let version = git_version_string();
 
@@ -1286,8 +1496,20 @@ fn install_ollama_macos_impl<F: Fn(&str, &str)>(
     );
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn install_ollama_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn install_ollama_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        install_ollama_status_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("install_ollama_status task: {e}"))?
+}
+
+fn install_ollama_status_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     let install = state.ollama_install.lock().unwrap();
     Ok(serde_json::json!({
         "status": install.status,
@@ -1392,8 +1614,13 @@ fn lmstudio_lms_path() -> Option<PathBuf> {
     }
 
     // Last resort: PATH lookup. Catches non-standard installs (Chocolatey,
-    // user-relocated install dir, etc.).
-    if let Ok(out) = Command::new("where").arg("lms").output() {
+    // user-relocated install dir, etc.). CREATE_NO_WINDOW so this `where` probe
+    // never flashes a console window at the end user.
+    let mut where_cmd = Command::new("where");
+    where_cmd.arg("lms");
+    #[cfg(target_os = "windows")]
+    where_cmd.creation_flags(CREATE_NO_WINDOW);
+    if let Ok(out) = where_cmd.output() {
         if out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout);
             if let Some(line) = s.lines().next() {
@@ -1807,8 +2034,17 @@ pub fn install_lmstudio_status(state: State<'_, AppState>) -> Result<serde_json:
 /// Best-effort: spawn `lms server start` so we don't make the user open the
 /// LM Studio GUI just to flip the Server toggle. Idempotent — quick early-exit
 /// if the server is already responding.
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread,
+// so every millisecond spent here is a frozen window. Same treatment
+// `lmstudio_server_status` already got — this one was simply missed.
 #[tauri::command]
-pub fn start_lmstudio_server() -> Result<serde_json::Value, String> {
+pub async fn start_lmstudio_server() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(start_lmstudio_server_blocking)
+        .await
+        .map_err(|e| format!("start_lmstudio_server task: {e}"))?
+}
+
+fn start_lmstudio_server_blocking() -> Result<serde_json::Value, String> {
     if lmstudio_server_running() {
         return Ok(serde_json::json!({"status": "already_running"}));
     }
@@ -1913,9 +2149,19 @@ pub async fn lmstudio_list_loaded() -> Result<serde_json::Value, String> {
     .map_err(|e| format!("lmstudio_list_loaded task: {e}"))?
 }
 
-#[allow(non_snake_case)]
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread,
+// so every millisecond spent here is a frozen window. Same treatment
+// `lmstudio_server_status` already got — this one was simply missed.
 #[tauri::command]
-pub fn lmstudio_load_model(model: String, contextLength: Option<u32>) -> Result<serde_json::Value, String> {
+#[allow(non_snake_case)]
+pub async fn lmstudio_load_model(model: String, contextLength: Option<u32>) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || lmstudio_load_model_blocking(model, contextLength))
+        .await
+        .map_err(|e| format!("lmstudio_load_model task: {e}"))?
+}
+
+#[allow(non_snake_case)]
+fn lmstudio_load_model_blocking(model: String, contextLength: Option<u32>) -> Result<serde_json::Value, String> {
     let lms = lmstudio_lms_path()
         .ok_or_else(|| "lms CLI not found — install LM Studio first".to_string())?;
     // `lms load` blocks until the model is in memory. The caller is expected
@@ -2037,8 +2283,17 @@ pub async fn lmstudio_model_context(model: String) -> Result<serde_json::Value, 
     .map_err(|e| format!("lmstudio_model_context task: {e}"))?
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread,
+// so every millisecond spent here is a frozen window. Same treatment
+// `lmstudio_server_status` already got — this one was simply missed.
 #[tauri::command]
-pub fn lmstudio_unload_model(model: String) -> Result<serde_json::Value, String> {
+pub async fn lmstudio_unload_model(model: String) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || lmstudio_unload_model_blocking(model))
+        .await
+        .map_err(|e| format!("lmstudio_unload_model task: {e}"))?
+}
+
+fn lmstudio_unload_model_blocking(model: String) -> Result<serde_json::Value, String> {
     let lms = lmstudio_lms_path()
         .ok_or_else(|| "lms CLI not found".to_string())?;
     let mut cmd = Command::new(&lms);
@@ -2403,7 +2658,16 @@ pub fn install_whisper(
 
         update("installing", &format!("Installing faster-whisper via {} (this can take a few minutes)…", target_python));
 
-        let args = build_whisper_pip_args();
+        let mut args = build_whisper_pip_args();
+        // Arch / Debian 12+ / Fedora 38+ system Python is PEP 668 protected, so a
+        // bare `pip install` dies with externally-managed-environment. When that's
+        // the target (no ComfyUI venv absorbed it), install into the user site
+        // with the escape hatch so STT installs there too (joerack, Arch). No-op
+        // on Windows/macOS/venv Pythons (not PEP 668 protected).
+        if is_pep668_protected(&target_python) {
+            args.push("--break-system-packages");
+            args.push("--user");
+        }
         // No cancel flag — this single pip install is short relative to the
         // ComfyUI PyTorch download, so we run it to completion like install_python.
         match pip_install_streaming_with_retry_cancellable(&args, &target_python, 3, &install_state, None) {
@@ -2417,7 +2681,7 @@ pub fn install_whisper(
                 {
                     let already_running = whisper.lock().map(|w| w.ready).unwrap_or(false);
                     if !already_running {
-                        crate::commands::whisper::auto_start_whisper_sync(&app, &target_python, &whisper);
+                        let _ = crate::commands::whisper::auto_start_whisper_sync(&app, &target_python, &whisper);
                     }
                 }
                 let started = whisper.lock().map(|w| w.ready).unwrap_or(false);
@@ -2555,7 +2819,13 @@ pub fn install_tts(
             &format!("Installing piper-tts via {} (this can take a few minutes)…", target_python),
         );
 
-        let args = build_tts_pip_args();
+        let mut args = build_tts_pip_args();
+        // PEP 668 escape hatch (Arch / Debian 12+ / Fedora 38+) — see
+        // install_whisper. No-op on Windows/macOS/venv Pythons.
+        if is_pep668_protected(&target_python) {
+            args.push("--break-system-packages");
+            args.push("--user");
+        }
         match pip_install_streaming_with_retry_cancellable(&args, &target_python, 3, &install_state, None) {
             Ok(()) => {
                 update(
@@ -2653,6 +2923,33 @@ fn install_custom_node_blocking(
 ) -> Result<serde_json::Value, String> {
     let repo_url = repoUrl;
     let node_name = nodeName;
+
+    // Security review 2.5.7: this clones `repo_url` and joins `node_name` under
+    // custom_nodes/. Every in-app caller passes a hardcoded registry entry, so
+    // these are trusted today — but a single renderer foothold could call the
+    // command with a hostile value, so validate defensively. Reject anything that
+    // isn't a plain https:// URL: git's `ext::`/`file::`/`ssh` transports execute
+    // commands, and a leading `-` would be parsed as a git flag. Reject any path
+    // syntax in `node_name` (`/`, `\`, `..`, `:`, leading `-`/`.`) — an absolute
+    // or `..` component makes `custom_nodes_dir.join(node_name)` escape the dir.
+    if !repo_url.starts_with("https://")
+        || repo_url.len() > 512
+        || repo_url.contains(|c: char| c.is_whitespace() || c.is_control())
+    {
+        return Err("Refusing to install: repository URL must be a plain https:// URL.".to_string());
+    }
+    if node_name.is_empty()
+        || node_name.len() > 128
+        || node_name.contains('/')
+        || node_name.contains('\\')
+        || node_name.contains("..")
+        || node_name.contains(':')
+        || node_name.starts_with('-')
+        || node_name.starts_with('.')
+    {
+        return Err("Refusing to install: invalid custom-node name.".to_string());
+    }
+
     info!(node = %node_name, "custom node install start");
 
     let comfy_dir = match comfy_path {
@@ -2815,17 +3112,42 @@ fn install_node_requirements(
         ));
     }
     println!("[Install] Installing requirements for {} via {}", node_name, python_bin);
-    let mut pip = Command::new(&python_bin);
-    pip.args(["-m", "pip", "install", "--no-input", "-r"]).arg(&reqs)
-        .stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(target_os = "windows")]
-    pip.creation_flags(CREATE_NO_WINDOW);
-    let pip_out = pip.output()
-        .map_err(|e| format!("Failed to spawn pip for {} requirements: {}", node_name, e))?;
+    let run_pip = |extra: &[&str]| -> Result<std::process::Output, String> {
+        let mut pip = Command::new(&python_bin);
+        pip.args(["-m", "pip", "install", "--no-input"]);
+        pip.args(extra);
+        pip.arg("-r").arg(&reqs);
+        pip.stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(target_os = "windows")]
+        pip.creation_flags(CREATE_NO_WINDOW);
+        pip.output()
+            .map_err(|e| format!("Failed to spawn pip for {} requirements: {}", node_name, e))
+    };
+    let pip_out = run_pip(&[])?;
     if !pip_out.status.success() {
         let stderr = String::from_utf8_lossy(&pip_out.stderr);
         let stdout = String::from_utf8_lossy(&pip_out.stdout);
         let combined = format!("{}{}", stdout, stderr);
+        // python.org installs under Program Files have an admin-only
+        // site-packages: the first node pack whose requirements pull a NEW
+        // wheel dies with a permission error, while packs whose deps are
+        // already present sail through (why RMBG/VHS installs passed and
+        // controlnet_aux stranded the Motion install card, 2026-07-19).
+        // Retry into the per-user site — the same interpreter imports from
+        // there, no admin needed. The Windows twin of the PEP 668 --user
+        // escape above; a venv Python never hits a permission error here,
+        // and if the retry fails too we surface the original diagnosis.
+        if is_permission_denied_pip_error(&combined) {
+            println!(
+                "[Install] {} requirements hit a permission error — retrying into the user site (--user)",
+                node_name
+            );
+            if let Ok(user_out) = run_pip(&["--user"]) {
+                if user_out.status.success() {
+                    return Ok(());
+                }
+            }
+        }
         // Reuse the install_comfyui diagnose path so PEP 668 +
         // friends produce actionable messages here too.
         let diagnosis = diagnose_pip_error(&combined);
@@ -2836,6 +3158,17 @@ fn install_node_requirements(
         ));
     }
     Ok(())
+}
+
+/// True iff a failed pip run died on filesystem permissions (admin-only
+/// site-packages, e.g. python.org installs under Program Files on Windows).
+/// Those are fixable by re-running the same install with `--user`.
+fn is_permission_denied_pip_error(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    lower.contains("permission denied")
+        || lower.contains("errno 13")
+        || lower.contains("access is denied")
+        || lower.contains("winerror 5")
 }
 
 // ── tests (issue #32: PyTorch / ComfyUI install reliability) ────────────────
@@ -2994,6 +3327,32 @@ mod tests {
     fn transient_rejects_permission_error() {
         assert!(!is_transient_pip_error(
             "PermissionError: [Errno 13] Permission denied: 'C:\\\\Python\\\\Lib\\\\site-packages\\\\torch'"
+        ));
+    }
+
+    // ── permission-denied → --user retry (Motion install card, 2026-07-19) ──
+
+    #[test]
+    fn permission_predicate_matches_windows_and_unix_denials() {
+        assert!(is_permission_denied_pip_error(
+            "ERROR: Could not install packages due to an OSError: [Errno 13] Permission denied: 'C:\\\\Program Files\\\\Python311\\\\Lib\\\\site-packages\\\\onnxruntime'"
+        ));
+        assert!(is_permission_denied_pip_error(
+            "PermissionError: [WinError 5] Access is denied"
+        ));
+        assert!(is_permission_denied_pip_error("EACCES: permission denied"));
+    }
+
+    #[test]
+    fn permission_predicate_rejects_other_pip_failures() {
+        assert!(!is_permission_denied_pip_error(
+            "error: externally-managed-environment"
+        ));
+        assert!(!is_permission_denied_pip_error(
+            "ReadTimeoutError: HTTPSConnectionPool(host='pypi.org')"
+        ));
+        assert!(!is_permission_denied_pip_error(
+            "ERROR: Could not find a version that satisfies the requirement onnxruntime-gpu"
         ));
     }
 

@@ -4,6 +4,185 @@ All notable changes to Locally Uncensored are documented here.
 
 ## [Unreleased]
 
+## [2.5.9] - 2026-07-26
+
+A correctness release. Most of it is things that looked like they worked and did not.
+
+### Security
+
+- **The coding agent could be talked into running commands you never approved.** Two paths, both found in this release's security pass and both reachable without a confirmation dialog. First, the helper that wraps text before it goes into a shell escaped for Linux only, while the agent runs PowerShell on Windows, so a crafted commit message or PR title broke out of its quotes and the rest ran as commands. Second, the "continue this PR" tool accepted almost anything as an owner or repo name and pasted it straight into a shell, so a link like `github.com/a/b;<command>/pull/1` ran that command. Either one could be triggered by a poisoned file, PR comment or search result that the agent read, without you typing anything. Quoting now follows the shell that actually runs, PR links are checked against the characters GitHub itself permits, and both are pinned by tests using the exact payloads.
+
+### Fixed
+
+- **Setting up a local lane shows you what it is doing, and you can stop it.** Hitting "Download & install" on Motion Control, Music, Lipsync or Extend gave you a spinner and nothing else: no size, no percentage, no speed, nothing in the Downloads tray, and no way to cancel. The card now names the file and counts it up, the download appears in the tray like any other, and there is a Cancel that really stops the transfer.
+- **A dropped connection during a model download no longer throws the download away.** It failed with the raw text "Stream error: error decoding response body" and stopped there, even though what had already arrived was still on disk. A file that fails now retries by itself, and each retry continues from where the last one stopped instead of starting at zero.
+- **The setup card stopped asking for things you already gave it.** Motion Control kept saying "add a character image and a driving dance/pose video above" while both were loaded and the render was already running.
+- **The Downloads tray closes itself again.** It opens on its own when a download starts, then sat over the app reading "No active downloads" once the download finished or was cancelled.
+- **Auto-approve now works on cloud models.** "Confirm shell & code commands" is off by default, which is how you tell the coding agent to stop asking. On an LU Cloud model it did nothing at all: the confirm dialog was hard-wired on and the switch had no effect. Confirming on a cloud model is still the right default, so it stays the default, but it is now a switch you own: turn the main confirm off and a second option appears for cloud models specifically.
+- **A failed image no longer counts as a delivered one.** When ComfyUI returned a 400 or a 500, the image tool handed the error text back as if it were a result. LU then treated it exactly like a picture: it burned the turn's image budget so the model could not retry, wrote the error into long-term memory, and told the model "the image is now displayed to the user" right next to the error saying it was not. Models believed that line, and the rest of the conversation was built on a picture that never existed. Failures are now marked as failures everywhere, and instead of "Task completed: 1 failed" you get the actual reason and a way to retry.
+- **Read-aloud reaches the Piper voice you picked.** A cold-start probe could cache a false result for the whole session, so every read-aloud silently fell back to a Windows SAPI voice no matter which Piper voice was selected.
+- **The Edit tab says what it is.** It is now "Edit / Image to Image", with wording that makes plain image-to-image (source image, no mask) obvious instead of hiding it behind a name that sounded like touch-ups.
+- **Image generation is no longer locked to Ask on desktop, and Video generation has a permission row at all.** Both settings existed in the agent but not in the UI.
+- **The image and video tools now see GGUF models.** They read only the two ComfyUI loaders that list `.safetensors`, so a GGUF quant was invisible to them. Since several catalogue bundles ship as GGUF, you could install one from the Model Manager, watch it finish, ask for a picture and be told nothing was installed.
+- **Error messages quote model names that actually exist.** The "no video model" message sent people looking for "Wan 2.1 — 1.3B", which the Model Manager calls "Wan 2.1 · 1.3B (Lightweight)". Same for SVD.
+
+### Changed
+
+- **Three video models are gone: CogVideoX (both), Pyramid Flow.** They could never run. Their pipelines were built against ComfyUI node names that no version of the wrappers we pointed you at actually registers, so every generation came back as an error, and the install check looked for an invented node too, which is why a correct install was told to go install what it already had. Between them they offered 46 GB of downloads for that. Wan 2.1 and 2.2, LTX, SVD, FramePack, Hunyuan, Mochi and Cosmos are unaffected. Allegro is closed for the same reason. If you already downloaded a CogVideoX model, nothing is deleted from your disk, it simply is not offered any more.
+- **Cloud renders are kept for seven days.** Cloud mode now says so once, in Create, with a download reminder, so the limit is stated up front instead of surprising you later. Download what you want to keep. Trained characters on your shelf are not on that clock.
+- **Nothing says COMING SOON any more, because nothing was.** AnimateDiff v3, Mochi and Cosmos sat behind a dimmed "COMING SOON" cover while their own download buttons worked fine underneath. The badge came from a flag somebody forgot to set, not from anything being unfinished. Every model in the catalogue downloads, installs and generates.
+- **The interface lost its em-dashes.** Labels, tooltips, errors and onboarding text now read the way the rest of LU is written.
+
+### Coding agent
+
+Rebuilt in the places that were quietly costing you turns:
+
+- A surgical `file_edit` tool that changes the lines you asked for, instead of rewriting whole files.
+- Verify loops no longer serve stale shell, test and read results from the same turn.
+- Context compaction stopped truncating code you had just read to 80 characters.
+- `num_ctx` is no longer pinned to 8192, so a 32k model gets its context.
+- The tool router stopped sending "search", "current" and "latest" to the web when you meant the codebase.
+- Diffs show deletions, `.lurules` actually loads, and stage-and-approve applies in a real folder instead of failing silently.
+- Sub-agents no longer collide on tool call ids, which produced a cloud 400 whenever a turn used the same tool twice.
+- Plus: `run_tests` auto-detect, encoding flags, atomic writes, parallel git safety, the iteration cap, and the embedding cache keyed by model.
+
+### Remote
+
+- **Non-Ollama backends work over remote access.** The remote bridge forwarded everything to Ollama, so a desktop running LM Studio, Lemonade or llama.cpp answered a phone with an empty model list and a 400 on chat. The server now translates between the phone's Ollama-shaped requests and an OpenAI-compatible backend, including streaming, tool calls, vision and reasoning.
+- The remote-access guide no longer promises image generation over remote. Create stays on the desktop for now.
+
+## [2.5.8] - 2026-07-19
+
+Community fix release: works through every open GitHub issue plus the actionable Discord reports since 2.5.7. (Releases 2.5.1–2.5.7 were documented in their GitHub release notes and are not backfilled here.)
+
+### New — Model Manager rebuilt from scratch ("Model Hub")
+
+- **The Models area is a different place now.** A labeled category rail (Chat · Image · Video, plus an Installed count) replaces the cryptic icon toggles; models render as clean cards — model NAME first, one short plain-English line, size pill and capability icons with tooltips — instead of the old description-first text rows. Every function of the old manager is preserved: downloads with pause/retry/clear, bundle installs with custom nodes, CivitAI search with the `.red` mirror, HuggingFace catalog search, the Unfiltered/Mainstream split, install detection across Ollama and LM Studio, and the ComfyUI-down hints.
+- **Quant variants collapse into one card with a size picker.** Seven `Qwen 3.6 27B` rows are now one card with a "Q4_K_M · 16 GB ▾" selector; same for GLM 4.7 Flash, the 35B MoEs, Gemma 4 12B and friends. The picker recommends the best size for your GPU and marks what's already installed.
+- **The app now tells you what runs on YOUR PC.** GPU + RAM are detected up front (nvidia-smi/rocm-smi/wmic — no ComfyUI needed anymore) and every card carries an honest fit hint: green "runs on your PC", amber "tight fit", red "too big for your GPU" — plus a one-tap "Fits my PC" filter and a "Start here" strip with picks for your hardware. Nothing is ever hidden or blocked by the hint.
+- Size filters got human names (Tiny/Small/Medium/Big — same 4/10/20 GB buckets as before), the search field is always visible, and the full technical description of every model lives one ⓘ tap away.
+
+### New — Catalog refresh (May–July 2026): 27 verified additions, 2 GB to 371 GB
+
+- **Unfiltered:** DavidAU's Qwen 3.6 40B "Deckard" Heretic (the top uncensored release of mid-2026) and 27B Heretic finetune, huihui's abliterated Qwen 3.6 27B / 35B-MoE-Opus / Gemma 4 12B / Agents-A1 / Qwythos 9B (Claude-Mythos distill), the Heretic pass on Ornith 1.0 35B, TheDrummer's Rocinante XL 16B and Cydonia 24B for roleplay, and for big rigs: huihui's abliterated DeepSeek V4-Flash (600K+ downloads, single 154 GB file) and GLM 5.2 (multi-part).
+- **Mainstream:** Ornith 1.0 9B + 35B (the coding-agent hit of June, 2M+ downloads), Agents-A1 35B + 4B, LFM 2.5 8B MoE, IBM Granite 4.1 8B, MiniCPM-V 4.6 (vision in 2 GB via Ollama), Nemotron 3 Nano 4B + Omni 30B, the Qwen 3.5 9B DeepSeek-V4 distill, Mistral Medium 3.5 128B, DeepSeek V4-Flash, Hunyuan 3 295B, GLM 5.2 and Kimi K2.7-Code (1T).
+- Every direct-download entry was verified against the live HuggingFace file listing (exact repo, filename, byte size) before shipping; multi-part monsters go through the existing part-count + total-size confirmation gate. Circulating "Llama 5" and "Qwen 4" release claims were checked against the live Meta/Qwen HF orgs and are fabrications — not added.
+
+### New — Four of the Create categories now run on your own GPU, not only LU Cloud
+
+- **Talking Character, Music, Extend Video and Motion Control each grew a full local lane.** In Local mode they build a ComfyUI graph from core node families (no proprietary endpoint) and run on your card; in Cloud mode they still submit to the hosted models. Each is a normal Local tab now — only the genuinely hosted-only tools (Upscale, Erase Object, Character Studio) keep a cloud badge in Local mode. The Cloud discovery popups are a one-time onboarding: they appear once, then never again (the choice persists across updates).
+- **Music** runs ACE-Step in ComfyUI core (`TextEncodeAceStepAudio` → `EmptyAceStepLatentAudio` → `KSampler` → `VAEDecodeAudio` → `SaveAudio`), from ~4 GB. The result is a real audio tile with an inline player — audio outputs are now typed as audio (they used to inherit the tab's image/video type and refuse to play). The builder pins the sampling recipe per checkpoint: ACE-Step 1.5 turbo is a ~10-step, cfg 1 distill — running it on generic image-model settings (50 steps, cfg 5) produces near-silent noise, so the lane enforces the turbo recipe and samples every ACE checkpoint on euler/simple.
+- **Talking Character** runs Wan 2.2 S2V (`WanSoundImageToVideo` + a wav2vec2 audio encoder) from a portrait plus a voice — upload a clip or make one with the in-app TTS. The clip length follows your audio.
+- **Extend Video** continues a clip you already have: it extracts the last frame locally and feeds the regular image-to-video path, so it uses the same video models as Animate.
+- **Motion Control** drives your character from a dance/pose video: DWPose (controlnet_aux) reads the skeleton out of the driving clip and Wan VACE/Animate re-renders your character following it. The pose pack installs from the in-lane card and needs a ComfyUI restart to register — the installer performs that restart itself now. Without a GPU onnxruntime DWPose falls back to CPU pose extraction: slower, but it works.
+- **Character Studio stays on LU Cloud for now.** Local character training needs a whole trainer runtime (managed venv, base model files, a long GPU run) that 2.5.8 does not ship — rather than strand users on a half-built lane, training runs hosted and the trained character comes back to your shelf as usual.
+- **Honest about hardware:** the audience is every tier, and the copy says so. The heavy 14B video lanes (S2V, Animate) are genuinely slow on a 12 GB card even at low step counts — the new per-lane Frame/Size/Step controls (below) let you trade quality for speed. Where a lane needs a node pack the box lacks, it escalates with an actionable message rather than failing silently.
+
+### Changed — One Cloud popup at start, then quiet
+
+- App start shows a single LU Cloud popup with two choices: **"Sign in or create account"** opens the normal login/plans gate, and an equally visible **"I don't want an account"** closes it AND switches the whole Cloud discovery layer off (picker teaser rows, tap sheets) — after that tap, nothing pitches Cloud again. Settings can re-enable the discovery layer. The choice survives updates (it rides the store backup that outlives installer wipes).
+- Cloud copy no longer calls LU Cloud a closed beta — the beta is fully open. The old "Max plan (closed beta)" lines in the Create teasers and the beta wall in the gate are gone.
+
+### Fixed — Node pack installs died on Windows system Python (Motion install card stuck)
+
+- On python.org installs under `Program Files`, site-packages is admin-only: the first node pack whose requirements pull a NEW wheel (the pose extractor for Motion Control) failed with a permission error and stranded the install card — while packs whose dependencies were already present sailed through, which is why this survived earlier install testing. pip now retries the same install into the per-user site automatically (same interpreter imports from there, no admin needed). This is the Windows twin of the Linux PEP 668 `--user` escape elsewhere in this release.
+- **Starting ComfyUI twice could leave an untrackable twin owning the port.** `start_comfyui` only probed the port to decide "already running" — but a booting ComfyUI imports for 20-60 s before it binds the port, so opening a Create tab during that window spawned a second copy and overwrote the tracked process handle. The first copy then won the port bind and became a zombie LU could never stop: every install's restart killed only the tracked twin, the zombie kept serving the stale node list, and the install card span forever with no error (the exact reported chain). The start command now recognises a tracked child that is still booting and reports `starting` instead of spawning; `stop_comfyui` additionally reaps the child before returning so the port is provably free for the restart. Verified end-to-end: pose-extractor card → install → automatic restart → node registered → card cleared in 70 s.
+- If ComfyUI is running outside LU (your own terminal/script), LU cannot restart it to register a freshly installed node pack — the old process keeps serving the stale node list. Instead of polling a misleading 40 seconds, the restart now waits until LU's own engine is provably down and only then blames an external engine, with the real fix in the message: restart your ComfyUI yourself, then come back.
+
+### New — Delete image/video models from the Model Hub (cpl.sardinas7489, Discord)
+
+- Installed image and video models finally have a trash button. Before, delete existed only for Ollama chat models — a ComfyUI checkpoint that turned out too big for the PC (the report: a 27 GB video model whose render hit the 60-minute timeout) had no way back out of the app and sat on the disk forever. The delete removes the model file (plus a stale resume-partial next to it), rescans ComfyUI and refreshes the list; the path goes through the same traversal-jailed helpers as downloads and refuses anything outside the known model folders.
+
+### New — "Update ComfyUI" from inside the app
+
+- When a specialized lane needs core nodes a user-managed ComfyUI is too old to have, LU can `git pull` + reinstall requirements in place (the same streaming, cancellable, retrying installer the bundle downloads use) instead of leaving a cryptic ComfyUI rejection. Gating stays node-presence based (no brittle version-string parsing). LU-managed ComfyUI installs are always current; a user's own install gets the offer, never a forced update.
+
+### Fixed — Voice: whisper/piper state detection, venv installs, PEP 668 (#77, #78 ElBiggus; joerack Discord)
+
+- **Whisper badge no longer resets to "not installed" after every relaunch.** `whisper_status` only reported a *running* server process; after a restart the process is gone, so the UI showed red even though the install was fine. It now also probes the installed `faster_whisper` package on disk.
+- **Transcription lazy-start now uses the same Python that the installer targeted.** `transcribe` spawned `state.python_bin` (system Python) while `install_whisper` had installed into the LU-resolved interpreter — on setups where those differ, a completed install was invisible at runtime.
+- **TTS status now recognises any downloaded piper voice**, not just the default `en_US-lessac-medium`. Users who picked a different voice were silently dropped to the OS fallback voice because `tts_status` reported piper "not ready".
+- **Voice picker no longer bricks the selection when a voice download fails** — the new voice is only committed after the download succeeds.
+- **Read-aloud on WebView2 no longer stops after the first sentence.** `speakStreaming` queued one utterance per sentence; WebView2's speech synthesis regularly stalled at the chain's first hand-off. Speech now uses a single utterance plus a `resume()` keep-alive interval.
+- **Linux PEP 668 (Arch, Debian 12+, Fedora 38+): whisper/piper installs no longer die with `externally-managed-environment`.** The voice installers now detect the marker and pass `--break-system-packages --user`, matching platform reality on distros that lock the system Python. No-op on Windows/macOS/venvs.
+
+### New — Auto-read responses, off by default
+
+- Settings → Voice gains **"Auto-read new responses"** (visible once read-aloud is enabled). Completed assistant turns are spoken automatically. This intentionally returns a feature removed on 2026-06-07 — back then it fired unconditionally; now it's an explicit opt-in that defaults to OFF, and the main toggle is relabelled "Enable read-aloud" to stop implying it auto-reads.
+
+### Fixed — Agent workspace jail rejected `\\?\`-prefixed roots (#79 DarkLordCmd; thecakeisnaoh)
+
+- On Windows, a workspace whose stored root carried the `\\?\` verbatim prefix (common when a path came from a native picker or long-path handling) failed every file operation with "path escapes the workspace". The jail normalised the *candidate* path but compared it against the *raw* root — the asymmetry made the root never match itself. Both sides now go through one normaliser (case-fold, slash-fold, verbatim/UNC strip); the error message now includes both the workspace root and the requested path so future reports are diagnosable. Four new regression tests cover the `\\?\` cases.
+
+### Fixed — ComfyUI 0.19+ blocks LU's progress + media unless you pass a CORS flag (#75 cinemazverev)
+
+- ComfyUI 0.19.0 (April 2026) added an origin-check middleware that returns 403 for every cross-site request — including the desktop WebView's requests from `http://tauri.localhost` to a **user-managed** ComfyUI (LU-spawned ComfyUI always passed `--enable-cors-header`, so it was never affected). Control-plane HTTP already went through the Rust proxy and kept working; what broke was the live progress WebSocket and direct `<img>`/`<video>` gallery loads.
+- **Live progress now flows through a Rust-side WebSocket proxy** (`comfy_ws_connect`) whose client handshake carries no browser Origin, so it passes the middleware on any ComfyUI. The web build keeps the raw WebSocket.
+- **Gallery/lightbox media that fails to load direct now falls back to fetching the bytes through the Rust proxy** and displays a blob. Trade-off stated plainly: the fallback holds the whole file in memory and video loses HTTP-Range seeking — fine for short clips, noted in code.
+- **When the fallback engages, the Create tab shows a short dismissible banner with a one-click fix.** "Let me do it for you!" restarts the user-managed ComfyUI under LU's management (which always passes the CORS flag), restoring direct loads and native progress — guarded against firing mid-generation. If LU doesn't know the install's folder (or the host is remote), the banner explains the manual route instead: add `--enable-cors-header http://tauri.localhost` to the launch script. (Community threads suggested `--allow-origin` — that flag does not exist — or `--listen 0.0.0.0`, which needlessly exposes ComfyUI to the LAN.)
+
+### Fixed — Remote ComfyUI host: gallery/preview media never displayed (#82 rx422)
+
+- With Settings → ComfyUI **Host** pointed at another machine (LAN/Docker/homelab — an explicitly supported setup), generation worked but every thumbnail/preview showed "the local engine isn't reachable": the WebView's CSP intentionally pins `img-src`/`media-src` to localhost, so direct loads from a remote host are always blocked. The proxied-blob fallback above now covers this case too — media re-fetches through the Rust proxy (which knows the configured host) and displays normally, verified live against a remote host (thumbnails, fullscreen, video, and live progress via the WS proxy).
+- The CORS banner no longer appears for remote hosts — the flag hint would be wrong there (no ComfyUI flag can un-block the WebView's own CSP), the proxied path is simply the normal mode for remote setups.
+
+### Fixed — Local image-to-video (Animate) was missing from the Create tab
+
+- The redesigned Create surface had marked **Animate Image** cloud-only, silently dropping the local I2V lane the old Create tab always had (and clearing its state on every switch to local). The intent is back for the local backend, with the full submit path (source image → ComfyUI upload → workflow) reconnected.
+- **Every video family core ComfyUI can animate is wired**, schema-driven from the live `/object_info`: WAN 2.1 i2v (`WanImageToVideo`), Hunyuan i2v (`HunyuanImageToVideo`), LTX (`LTXVImgToVideo`), Cosmos (`CosmosImageToVideoLatent`) on the main builder path — WAN 2.2 TI2V, SVD and FramePack already animated via their dedicated builders. Mochi (t2v-only) and a ComfyUI missing the family's node reject with an actionable message instead of silently ignoring the source image.
+- **The model picker only offers models that can actually do the op**: Animate lists i2v-capable models (explicit `i2v`/`ti2v` tags, SVD, FramePack, LTX, Cosmos Video2World), Video lists t2v-capable ones — SVD/FramePack drop out there, dual models (WAN 2.2 TI2V, LTX) stay in both. Same gating in the chat model-picker card.
+
+### Fixed — A model without tool calling now fails with a clear message, not a raw error
+
+- Picking a model that does not support function calling and then using Agent or Code mode (or Chat with tools on) made the hosted inference endpoint answer HTTP 405, which surfaced as an opaque error or an aborted turn with no explanation (a paying user hit exactly this). LU now recognises that case across every OpenAI-compatible backend (LU Cloud / DeepInfra, LM Studio, custom endpoints) and shows a plain "this model does not support tool calling" note that says what to do: turn tools off, or switch to a tool-capable model.
+- **LU Cloud now knows up front which models can't do tools.** The `/models` list carries a per-model tool-calling flag, so Agent mode is disabled before you ever send a request on the cloud chat models that lack function calling (Hermes 3, Euryale, MythoMax, Llama 4 Maverick, and friends) — no failed turn required. Plain chatting with those models still works.
+- **Every chat model in the dropdown now shows a tools icon at a glance:** a green wrench for models that support tool calling, an amber marker for models that don't (whether the server declared it, or a run proved it). When the server returns its clean "can't run tools / can't read images" reason, LU surfaces that exact line instead of a generic error.
+
+### Fixed — Local Create now frees the chat model from VRAM before rendering
+
+- On a single local GPU, a chat model sitting in VRAM (Ollama / LM Studio / the bundled engine) left ComfyUI fighting for the card — heavy CPU offload at best, a CUDA out-of-memory on the 14B Talking Character lane at worst. A local Create run now releases the chat backends first (they reload lazily on your next message), the same offload the Cloud switch already did, so the render gets the whole GPU. ComfyUI keeps its own checkpoint cached across consecutive Create runs, so back-to-back generations don't pay a reload. (On a large card where both would have fit, this trades a quick chat-model reload for guaranteed headroom — the conservative default for the common 8-12 GB tiers.)
+
+### New — Frame count, resolution and step controls on every Create lane
+
+- **You can finally set frames, resolution and steps in the app** — before, the Video tab only had a Draft/Standard/High quality toggle, and the specialized lanes (Talking Character, Music, Extend) had no generation knobs at all, so a local video ran at the model's full frame count and step count with no way to dial it down. The composer now shows the exact knobs each lane actually consumes: **Quality (steps) + Size + Frames** on every video lane, **Quality (steps)** on the local Music lane (Length was already there), and the existing Quality + Aspect on image lanes. This makes low-VRAM runs practical — drop the steps and frames and a clip that used to be a multi-hour render finishes in minutes.
+- **Nothing on screen is a dead control.** The knobs render only where the submit path reads them: locally every lane consumes them; the regular Video/Animate lanes honour them on LU Cloud too; the specialized hosted ops run at fixed server-side settings, so those sliders stay hidden on Cloud rather than pretending to work. On Talking Character the frame count is hidden entirely and labelled "clip length follows your voice", because the lane derives it from the audio.
+- **The Size tiers are video-native.** They read the lane's actual video model (Wan S2V / Animate / the picked video model), not the last image model, so a 480p video graph offers 320p/480p/720p rather than image-centric 1024p sizes; dimensions snap to the multiple of 16 the WAN/S2V/VACE VAEs require.
+
+### New — ComfyUI install location is configurable (andy_38747, Discord)
+
+- The Settings → AI Backends → ComfyUI **Path** field now doubles as the install target: put e.g. `D:\ComfyUI` there before pressing **Install ComfyUI** and the multi-GB install (plus all image/video models, which live inside the ComfyUI folder) lands on that drive instead of filling `C:`. Empty field keeps the previous default (home folder). A completed custom-target install is persisted as the active path, so LU finds it after a restart.
+
+### Fixed — Create-tab LoRA picker was a silent no-op (game-master0, Discord #80)
+
+- The Create UI collected selected LoRAs into a `loras` param that **no code ever read** — the workflow builder expects `lora`/`loraStrength`. Selections now reach the builder, for images and video.
+- **Video LoRA support**: the LoRA stack is no longer hidden for every video model — it shows for families whose graphs support model-only LoRA loading (WAN, WAN 2.2, Hunyuan, LTX, Mochi, Cosmos). WAN 2.2's dedicated builder gains a guarded `LoraLoaderModelOnly` chain; a plain WAN 2.2 run without LoRAs produces a byte-identical graph to before.
+
+### New — Delete individual chat messages (Discord #81)
+
+- Every message's action bar gains a delete button (two-click confirm within 3 s, works for both user and assistant messages). Pairs with the existing edit/regenerate actions.
+
+### New — LiteLLM provider preset (PR #64, thanks @RheagalFire)
+
+- One-click provider preset pointing at a local LiteLLM proxy (`http://localhost:4000/v1`, OpenAI protocol) — fronts 100+ upstream providers from one endpoint.
+
+### Fixed — Errored bundle downloads can now be cleared (the_mr_pickles, Discord)
+
+- A failed bundle download left the card stuck on "Retry" with no way to dismiss the error state. A new **Clear** button resets the bundle back to installable.
+
+### Fixed — Flash-Attention parity on auto-start (#74 follow-up)
+
+- `--use-flash-attention` was only applied when ComfyUI was started manually from the UI; the boot auto-start path ignored the (positive) flash-attn probe. Both paths now behave identically. The orphaned `check_flash_attention` command (its UI nudge was removed in 2.5.7) is deleted.
+
+### Fixed — Chat model dropdown was unreadable in light mode
+
+- The model picker popover kept a hardcoded dark panel in both themes, but the light theme remaps text colours to dark — so in light mode the model names, section headers and the LM Studio hint rendered as dark text on the dark panel and were effectively invisible. The panel, its borders, the active/hover tints and the error/hint colours are now theme-aware, so the dropdown is a clean light surface in light mode and unchanged in dark. (Missed during the Model Hub redesign.)
+
+### Stability
+
+- `vitest`: **3372 tests** green. `cargo test`: **197 passed**. `cargo check`: clean (3 pre-existing dead-code warnings only). Frontend production build: clean.
+- New settings field `autoReadAloud` defaults to `false`; store migrations are additive — no breaking changes.
+- `offload_local_models` gained an optional `include_comfyui` flag (defaults true — the Cloud switch still releases everything); a local Create run passes `false` so it frees only the chat backends and keeps ComfyUI's checkpoint cached.
+
 ## [2.5.0] - 2026-05-28
 
 Minor release. 30+ changes — the headline Codex / Agent sprint (Sprint A / B / C ported from the companion repo `uselu`), eight reporter-facing fixes (B1–B3 + AA + Y + Z), two new pieces of UI (BB — GPU picker, CC — chatbot-export importer), production hardening (B4 / B5), and the autonomy-ceiling bump that turns scaffold→install→fix→verify into a single turn. Bundles all v2.4.9 contents.

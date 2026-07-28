@@ -23,10 +23,11 @@ vi.mock('../../../../api/comfyui', () => ({
 }))
 vi.mock('../../../../api/cloud/jobs', () => ({
   refreshResultUrl: vi.fn(),
+  resolveResultUrl: vi.fn(),
 }))
 
-import { fetchGalleryItemBlob } from '../galleryUrl'
-import { refreshResultUrl } from '../../../../api/cloud/jobs'
+import { fetchGalleryItemBlob, recoverGalleryUrl } from '../galleryUrl'
+import { refreshResultUrl, resolveResultUrl } from '../../../../api/cloud/jobs'
 import { useCreateStore, type GalleryItem } from '../../../../stores/createStore'
 
 const baseItem: GalleryItem = {
@@ -74,5 +75,49 @@ describe('fetchGalleryItemBlob', () => {
   it('explains the dead local ComfyUI /view URL instead of a bare TypeError', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
     await expect(fetchGalleryItemBlob(baseItem)).rejects.toThrow(/ComfyUI/)
+  })
+})
+
+// Cloud renders are deleted after seven days (the Create banner says so, and
+// services/render-worker/src/reaper.ts now does it). A tile whose render is
+// gone must settle into an honest state, not retry a dead re-sign forever.
+describe('recoverGalleryUrl — expired cloud renders', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    useCreateStore.setState({ gallery: [] })
+  })
+
+  const flush = () => new Promise((r) => setTimeout(r, 0))
+
+  it('marks the tile unavailable when the render is gone for good', async () => {
+    const item = { ...baseItem, id: 'gone-1', jobId: 'job-gone', remoteUrl: 'https://cdn/old.png' }
+    useCreateStore.setState({ gallery: [item] })
+    vi.mocked(resolveResultUrl).mockResolvedValueOnce({ kind: 'gone' })
+
+    recoverGalleryUrl(item)
+    await flush()
+    expect(useCreateStore.getState().gallery[0].unavailable).toBe(true)
+  })
+
+  it('patches in the fresh URL when the render is still there', async () => {
+    const item = { ...baseItem, id: 'ok-1', jobId: 'job-ok', remoteUrl: 'https://cdn/old.png' }
+    useCreateStore.setState({ gallery: [item] })
+    vi.mocked(resolveResultUrl).mockResolvedValueOnce({ kind: 'ok', url: 'https://cdn/new.png' })
+
+    recoverGalleryUrl(item)
+    await flush()
+    expect(useCreateStore.getState().gallery[0].remoteUrl).toBe('https://cdn/new.png')
+    expect(useCreateStore.getState().gallery[0].unavailable).toBeUndefined()
+  })
+
+  it('does NOT mark unavailable when we simply could not reach the server', async () => {
+    // An offline launch must not look like a deleted render.
+    const item = { ...baseItem, id: 'retry-1', jobId: 'job-retry', remoteUrl: 'https://cdn/old.png' }
+    useCreateStore.setState({ gallery: [item] })
+    vi.mocked(resolveResultUrl).mockResolvedValueOnce({ kind: 'retry' })
+
+    recoverGalleryUrl(item)
+    await flush()
+    expect(useCreateStore.getState().gallery[0].unavailable).toBeUndefined()
   })
 })

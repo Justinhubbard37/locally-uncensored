@@ -77,7 +77,7 @@ export function ChatbotImporter() {
 
   const handleImport = async () => {
     if (!conversationId) {
-      setError('Open or create a chat first — imports attach to whichever conversation is currently active in the chat view.')
+      setError('Open or create a chat first, imports attach to whichever conversation is currently active in the chat view.')
       return
     }
     const toImport = conversations.filter(c => selected.has(c.id))
@@ -114,7 +114,7 @@ export function ChatbotImporter() {
       <div className="flex items-start gap-2.5 p-2.5 rounded-lg border border-blue-200 dark:border-blue-500/20 bg-blue-50 dark:bg-blue-500/[0.08] text-blue-900 dark:text-blue-200">
         <Upload size={14} className="mt-0.5 shrink-0" />
         <div className="text-[0.65rem] leading-relaxed">
-          <strong>Import past conversations</strong> from ChatGPT, Claude, or Gemini exports. Each conversation lands in the active chat's RAG store — your local model can reference past turns just like any other document you upload. Stays on your machine.
+          <strong>Import past conversations</strong> from ChatGPT, Claude, or Gemini exports. Each conversation lands in the active chat's RAG store, your local model can reference past turns just like any other document you upload. Stays on your machine.
         </div>
       </div>
 
@@ -224,7 +224,7 @@ export function ChatbotImporter() {
           </div>
           {!conversationId && (
             <div className="text-[0.6rem] text-amber-300 italic">
-              Open or create a chat first — imports attach to the active conversation's RAG store.
+              Open or create a chat first, imports attach to the active conversation's RAG store.
             </div>
           )}
         </>

@@ -24,18 +24,25 @@ import {
 import { CloudJobError } from "../api/cloud/client";
 import { isTauri } from "../api/backend";
 import { log } from "../lib/logger";
+import { registerAutoSpeak } from "../lib/ttsBridge";
 
 // Honest, actionable copy for dictation failures. The cloud route's own error
 // strings (403 "your plan does not include cloud voice", 429 "monthly credit
 // budget exhausted") are already human-readable — pass those through.
 function sttErrorMessage(err: unknown): string {
   if (err instanceof CloudJobError) {
-    if (err.status === 401) return "Signed out — sign in again to use cloud dictation";
-    if (err.status === 413) return "Recording too long — try a shorter take";
-    if (err.status >= 500) return "Cloud transcription is unavailable right now — try again";
+    if (err.status === 401) return "Signed out, sign in again to use cloud dictation";
+    if (err.status === 413) return "Recording too long, try a shorter take";
+    if (err.status >= 500) return "Cloud transcription is unavailable right now, try again";
     return err.message;
   }
-  return "Transcription failed — check the microphone and try again";
+  // Local Whisper rejects with the Rust error STRING, and those are written for
+  // the user ("Speech-to-text needs faster-whisper, which is not installed…").
+  // Swallowing them behind the microphone hint sent people looking in entirely
+  // the wrong place. A real JS Error keeps the generic line — its message is
+  // for us, not for them.
+  if (typeof err === "string" && err.trim()) return err.trim();
+  return "Transcription failed, check the microphone and try again";
 }
 
 // Speak-generation counter + abort plumbing, module-scoped (NOT per hook
@@ -47,6 +54,17 @@ function sttErrorMessage(err: unknown): string {
 // Same singleton pattern as useCloudCreate's activeJobId/activeAbort.
 let speakGen = 0;
 let speakAbort: AbortController | null = null;
+
+// #77 (ElBiggus): the boot probe (App.tsx) can lose a cold-start race against
+// resolve_lu_python and leave store.ttsAvailable stuck false, so read-aloud
+// silently used the Windows SAPI voice and Piper never spoke. When we're about
+// to concede to SAPI in local Piper mode, re-probe availability a bounded
+// number of times per session (module-scoped so the whole app shares the
+// budget across every SpeakerButton). A machine that really has Piper flips
+// the store true on the first successful re-probe; a machine without it pays
+// at most MAX_LAZY_TTS_REPROBES cheap find_spec spawns for the whole session.
+let lazyTtsReprobes = 0;
+const MAX_LAZY_TTS_REPROBES = 3;
 
 function stopSpeechPlayback(): void {
   // Invalidate the running speak generation (drops queued cloud chunks and any
@@ -158,7 +176,7 @@ export function useVoice() {
 
   // Re-probe neural TTS on demand (after install) and sync the store.
   const recheckTts = useCallback(async (): Promise<boolean> => {
-    const ok = await recheckTtsAvailable();
+    const ok = await recheckTtsAvailable(store.piperVoice);
     store.setTtsAvailable(ok);
     return ok;
   }, [store]);
@@ -213,7 +231,7 @@ export function useVoice() {
         if (streamTimerRef.current) { clearInterval(streamTimerRef.current); streamTimerRef.current = null; }
         interimBusyRef.current = false;
         recorderRef.current = null;
-        store.setSttError("Microphone unavailable — check mic permissions for LU in System Settings");
+        store.setSttError("Microphone unavailable, check mic permissions for LU in System Settings");
         return false;
       }
     },
@@ -256,7 +274,7 @@ export function useVoice() {
       store.setRecording(false);
       store.setTranscribing(false);
       recorderRef.current = null;
-      store.setSttError("Recording failed — try again");
+      store.setSttError("Recording failed, try again");
       return "";
     }
   }, [store, cloudVoice]);
@@ -321,15 +339,40 @@ export function useVoice() {
             if (stopped()) return;
             log.error("External TTS failed, falling back to browser voices", { err });
           }
-        } else if (store.ttsAvailable) {
-          try {
-            const url = await synthesizeNeural(text, store.piperVoice);
+        } else {
+          // Local neural (Piper). Trust the cached availability flag, but if it
+          // is false while we're in local Piper mode, re-probe (bounded) before
+          // conceding to the browser SAPI fallback — a racy boot probe must not
+          // permanently silence Piper (#77, ElBiggus). A positive re-probe is
+          // written back to the store so later reads skip straight to Piper.
+          let piperReady = store.ttsAvailable;
+          if (!piperReady && lazyTtsReprobes < MAX_LAZY_TTS_REPROBES && store.ttsMode !== "external") {
+            lazyTtsReprobes++;
+            piperReady = await recheckTtsAvailable(store.piperVoice);
             if (stopped()) return;
-            await playNeuralAudio(url);
-            return;
-          } catch (err) {
-            if (stopped()) return;
-            log.error("Neural TTS failed, falling back to browser voices", { err });
+            if (piperReady) store.setTtsAvailable(true);
+          }
+          if (piperReady) {
+            try {
+              const url = await synthesizeNeural(text, store.piperVoice);
+              if (stopped()) return;
+              await playNeuralAudio(url);
+              store.setTtsFallbackReason(null);
+              return;
+            } catch (err) {
+              if (stopped()) return;
+              log.error("Neural TTS failed, falling back to browser voices", { err });
+              // #77 (ElBiggus): this fallback was invisible — Piper installed
+              // AND selected, yet every read-aloud spoke the system voice and
+              // nothing in the app said why. Record the reason for Settings.
+              store.setTtsFallbackReason(
+                `Piper failed to speak (${err instanceof Error ? err.message : String(err)}). Read-aloud used the system voice instead.`,
+              );
+            }
+          } else if (store.ttsMode !== "external") {
+            store.setTtsFallbackReason(
+              "Piper is installed but not responding, so read-aloud used the system voice instead.",
+            );
           }
         }
         if (!ttsSupported || stopped()) return;
@@ -356,6 +399,13 @@ export function useVoice() {
 
   const speakText = useCallback((text: string) => speakInternal(text, false), [speakInternal]);
   const speakTextStreaming = useCallback((text: string) => speakInternal(text, true), [speakInternal]);
+
+  // Publish the current streaming-speak fn so useChat/useAgentChat can auto-read
+  // finished responses (#77) without subscribing to this store. Re-runs whenever
+  // the fn is re-memoized (i.e. voice settings changed), keeping it fresh.
+  useEffect(() => {
+    registerAutoSpeak(speakTextStreaming);
+  }, [speakTextStreaming]);
 
   // Module-scoped singleton — any instance's Stop halts the global playback.
   const stopSpeaking = useCallback(() => stopSpeechPlayback(), []);

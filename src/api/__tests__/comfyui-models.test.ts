@@ -268,16 +268,22 @@ describe('determineStrategy', () => {
     expect(r.strategy).toBe('unavailable')
   })
 
-  it('cogvideo → cogvideo (with wrapper nodes)', () => {
-    const nodes = makeNodes({ samplers: ['KSampler', 'CogVideoXSampler'] })
+  // 2026-07-24 (D#88): these asserted a ComfyUI that does not exist —
+  // `CogVideoXSampler` is registered by no version of kijai's wrapper (the real
+  // class is `CogVideoSampler`), so the old "with wrapper nodes" fixture could
+  // never occur on a real install. The lane is now honestly unavailable until
+  // its builder is rebuilt against the actual node names.
+  it('cogvideo → unavailable even WITH a full wrapper install (builder still fictional)', () => {
+    const nodes = makeNodes({ samplers: ['KSampler', 'CogVideoSampler'] })
     const r = determineStrategy('cogvideo', true, nodes, emptyModels)
-    expect(r.strategy).toBe('cogvideo')
+    expect(r.strategy).toBe('unavailable')
   })
 
-  it('cogvideo → unavailable without wrapper nodes', () => {
+  it('cogvideo → unavailable without wrapper nodes, and does NOT blame the install', () => {
     const r = determineStrategy('cogvideo', true, makeNodes(), emptyModels)
     expect(r.strategy).toBe('unavailable')
-    expect(r.reason).toContain('CogVideoXWrapper')
+    expect(r.reason).toContain('not supported in this build')
+    expect(r.reason).not.toContain('Install')
   })
 
   it('framepack → framepack (with wrapper nodes)', () => {
@@ -286,16 +292,19 @@ describe('determineStrategy', () => {
     expect(r.strategy).toBe('framepack')
   })
 
-  it('pyramidflow → pyramidflow (with wrapper nodes)', () => {
+  // pyramidflow + allegro closed 2026-07-24 alongside cogvideo: their builders
+  // emitted node names no wrapper registers, so having the sampler installed
+  // never made the lane work. Wrapper nodes present must NOT reopen them.
+  it('pyramidflow → unavailable even with wrapper nodes', () => {
     const nodes = makeNodes({ samplers: ['KSampler', 'PyramidFlowSampler'] })
     const r = determineStrategy('pyramidflow', true, nodes, emptyModels)
-    expect(r.strategy).toBe('pyramidflow')
+    expect(r.strategy).toBe('unavailable')
   })
 
-  it('allegro → allegro (with wrapper nodes)', () => {
+  it('allegro → unavailable even with wrapper nodes', () => {
     const nodes = makeNodes({ samplers: ['KSampler', 'AllegroSampler'] })
     const r = determineStrategy('allegro', true, nodes, emptyModels)
-    expect(r.strategy).toBe('allegro')
+    expect(r.strategy).toBe('unavailable')
   })
 
   it('sd15 + animatediff + motion models → animatediff', () => {

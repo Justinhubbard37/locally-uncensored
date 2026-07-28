@@ -6,8 +6,10 @@ import { getModelContextCached } from '../api/ollama'
 import { getLmStudioModelContext } from '../api/lmstudio'
 import { getModelMaxTokens } from '../lib/context-compaction'
 import { effectiveContextWindow } from '../lib/context-window'
+import { isManagedBuiltinSlot } from '../api/builtin-ensure'
+import { bundledEngineStatus, bundledCtxTrain } from '../api/engine'
 
-export type CtxProvider = 'ollama' | 'lmstudio' | 'cloud' | 'unknown'
+export type CtxProvider = 'ollama' | 'lmstudio' | 'builtin' | 'cloud' | 'unknown'
 
 export interface ActiveContext {
   /** Which backend the active model runs on. */
@@ -37,6 +39,7 @@ export interface ActiveContext {
 export function useActiveContextWindow(reloadTick = 0): ActiveContext {
   const activeModel = useModelStore((s) => s.activeModel)
   const override = useSettingsStore((s) => s.settings.contextWindowOverride)
+  const builtinCtx = useSettingsStore((s) => s.settings.builtinEngine.ctx)
   const [state, setState] = useState<ActiveContext>({
     provider: 'unknown', contextWindow: 0, modelMax: 0, isTrue: false, adjustable: false,
   })
@@ -71,6 +74,40 @@ export function useActiveContextWindow(reloadTick = 0): ActiveContext {
           isTrue: true,
           adjustable: true,
         })
+        return
+      }
+
+      // ── Built-in engine (app-managed llama-server): status.ctx is the -c
+      //    the server was STARTED with — the true denominator (ENG-3). Must
+      //    come before the LM Studio probe: the bundled server is
+      //    openai-compat too and would otherwise fall through to the cloud
+      //    branch, where the counter lies. ──
+      if (providerId === 'openai' && isManagedBuiltinSlot()) {
+        const status = await bundledEngineStatus().catch(() => null)
+        if (cancelled) return
+        // Trained ceiling from the GGUF header (via the model listing) caps
+        // the dropdown presets; 0 = unknown = uncapped (pre-listing or a
+        // header without the key).
+        const modelMax = bundledCtxTrain(activeModel)
+        if (status?.running && typeof status.ctx === 'number' && status.ctx > 0) {
+          setState({
+            provider: 'builtin',
+            contextWindow: status.ctx,
+            modelMax,
+            isTrue: true,
+            adjustable: true,
+          })
+        } else {
+          // Managed but not up (offloaded / before first send): the next
+          // start uses the tuning value, so that IS the honest prediction.
+          setState({
+            provider: 'builtin',
+            contextWindow: builtinCtx > 0 ? builtinCtx : 8192,
+            modelMax,
+            isTrue: false,
+            adjustable: true,
+          })
+        }
         return
       }
 
@@ -112,7 +149,7 @@ export function useActiveContextWindow(reloadTick = 0): ActiveContext {
     })()
 
     return () => { cancelled = true }
-  }, [activeModel, override, reloadTick, reloadBump])
+  }, [activeModel, override, builtinCtx, reloadTick, reloadBump])
 
   return state
 }

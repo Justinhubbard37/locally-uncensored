@@ -30,9 +30,9 @@ function detectGPU(): { renderer: string | null; estimatedVRAM: string } {
         if (lower.includes('4090') || lower.includes('a100') || lower.includes('3090')) {
             estimatedVRAM = '24 GB+'
         } else if (lower.includes('4080') || lower.includes('3080')) {
-            estimatedVRAM = '12–16 GB'
+            estimatedVRAM = '12 to 16 GB'
         } else if (lower.includes('4070') || lower.includes('3070') || lower.includes('4060 ti')) {
-            estimatedVRAM = '8–12 GB'
+            estimatedVRAM = '8 to 12 GB'
         } else if (lower.includes('4060') || lower.includes('3060') || lower.includes('2080')) {
             estimatedVRAM = '8 GB'
         } else if (lower.includes('2070') || lower.includes('1080') || lower.includes('rx 6')) {
@@ -94,7 +94,7 @@ export function getRecommendations(tier: SystemTier): ModelRecommendation[] {
                     name: 'huihui_ai/qwen2.5-abliterated:7b',
                     label: 'Qwen 2.5 7B',
                     description: 'Lightweight & capable',
-                    reason: 'Fits your system well — needs little VRAM',
+                    reason: 'Fits your system well, needs little VRAM',
                 },
                 {
                     name: 'gemma4:e2b',
@@ -115,7 +115,7 @@ export function getRecommendations(tier: SystemTier): ModelRecommendation[] {
                     name: 'mannix/llama3.1-8b-abliterated:q5_K_M',
                     label: 'Llama 3.1 8B',
                     description: 'Fast & reliable',
-                    reason: 'Perfect for your system — recommended as a starting point',
+                    reason: 'Perfect for your system, a good starting point',
                 },
                 {
                     name: 'gemma4:e4b',
@@ -133,7 +133,7 @@ export function getRecommendations(tier: SystemTier): ModelRecommendation[] {
                     name: 'huihui_ai/deepseek-r1-abliterated:8b',
                     label: 'DeepSeek R1 8B',
                     description: 'Reasoning & thinking',
-                    reason: 'Chain-of-thought model — shows its thinking process',
+                    reason: 'Chain-of-thought model, shows its thinking process',
                 },
             ]
         case 'high':
@@ -142,7 +142,7 @@ export function getRecommendations(tier: SystemTier): ModelRecommendation[] {
                     name: 'gemma4:26b',
                     label: 'Gemma 4 26B MoE',
                     description: '26B brain, runs like 4B',
-                    reason: 'Mixture of Experts — only 3.8B active params. Vision + tools. 256K context.',
+                    reason: 'Mixture of Experts, only 3.8B active params. Vision + tools. 256K context.',
                 },
                 {
                     name: 'richardyoung/qwen3-14b-abliterated:q4_K_M',
@@ -160,7 +160,7 @@ export function getRecommendations(tier: SystemTier): ModelRecommendation[] {
                     name: 'huihui_ai/mistral-small-abliterated:24b',
                     label: 'Mistral Small 24B',
                     description: 'Very powerful',
-                    reason: 'Needs 16 GB+ VRAM — should run on your system',
+                    reason: 'Needs 16 GB+ VRAM, should run on your system',
                 },
             ]
     }

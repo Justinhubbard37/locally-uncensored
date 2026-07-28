@@ -21,8 +21,8 @@ export function SmallModelModeToggle() {
       onClick={() => updateSettings({ smallModelMode: !on })}
       title={
         on
-          ? 'Small-Model Mode: ON — lean profile for small local models (3B-8B):\n• fewer tools (embedding-ranked + capped)\n• lean system prompt\n• truncated tool outputs\n• tighter history compaction\n(num_ctx is left untouched on purpose.)\nClick to turn off.'
-          : 'Small-Model Mode — lean profile that helps small local models (3B-8B) emit valid tool calls and remember earlier steps. Click to turn on.'
+          ? 'Small-Model Mode: ON, lean profile for small local models (3B-8B):\n• fewer tools (embedding-ranked + capped)\n• lean system prompt\n• truncated tool outputs\n• tighter history compaction\n(num_ctx is left untouched on purpose.)\nClick to turn off.'
+          : 'Small-Model Mode: a lean profile that helps small local models (3B-8B) emit valid tool calls and remember earlier steps. Click to turn on.'
       }
       className={
         'flex items-center gap-1 px-1.5 py-0.5 rounded border transition-colors text-[0.55rem] ' +

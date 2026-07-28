@@ -17,22 +17,30 @@ import { retrieveContext } from '../api/rag'
 import { toolRegistry } from '../api/mcp'
 import { usePermissionStore } from '../stores/permissionStore'
 import { isThinkingCompatible, isPlainTextPlanner } from '../lib/model-compatibility'
-import { getToolCallingStrategy, type ToolCallingStrategy } from '../lib/model-compatibility'
+import { getToolCallingStrategy, isNativeToolProvider, type ToolCallingStrategy } from '../lib/model-compatibility'
 import { isMultimodalUnsupportedError, MULTIMODAL_UNSUPPORTED_MESSAGE } from '../lib/ollama-errors'
 import { log } from '../lib/logger'
 import { buildHermesToolPrompt, buildHermesToolResult, parseHermesToolCalls, stripToolCallTags, hasToolCallTags } from '../api/hermes-tool-calling'
 import { parseLooseToolCalls, stripMatchedCalls, stripToolCallText, canonicalToolName } from '../lib/loose-tool-parse'
+import { mediaCallSucceeded } from '../lib/media-result'
+import { summarizeTurn } from '../lib/turn-summary'
 import { buildVisionFeedback } from '../api/vision-feedback'
 import { compactMessages, getModelMaxTokens, estimateTokens } from '../lib/context-compaction'
-import { getModelContextCached } from '../api/ollama'
-import { effectiveContextWindow } from '../lib/context-window'
+import { resolveAgentNumCtx } from '../lib/agent-num-ctx'
 import { useMemoryStore } from '../stores/memoryStore'
+import { useVoiceStore } from '../stores/voiceStore'
+import { autoSpeak } from '../lib/ttsBridge'
 import { getProviderForModel, getProviderIdFromModel } from '../api/providers'
+import { markToolsUnsupported } from '../api/tool-capability'
 import { buildExtractionPrompt, parseExtractionResponse } from '../lib/memory-extraction'
 import { useAgentWorkflowStore } from '../stores/agentWorkflowStore'
 import { WorkflowEngine } from '../lib/workflow-engine'
 import type { AgentBlock, AgentToolCall, OllamaChatMessage } from '../types/agent-mode'
 import { selectRelevantToolsAsync } from '../lib/tool-selection'
+import { MUTATING_TOOLS } from '../lib/mutating-tools'
+import { useAgentGoalStore, renderGoalSection } from '../stores/agentGoalStore'
+import { useAgentLoopStore } from '../stores/agentLoopStore'
+import { buildLoopRecheck, loopPassSaysDone } from '../lib/agent-commands'
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
 import { budgetFromSettings } from '../api/agents/budget'
@@ -55,8 +63,15 @@ async function extractMemories(userMsg: string, assistantMsg: string, conversati
   const messages = buildExtractionPrompt(userMsg, assistantMsg, existingSummary)
 
   const { provider, modelId } = getProviderForModel(activeModel)
+  // Same num_ctx as the turn that just finished. This call runs on the SAME
+  // model right after it, and Ollama reloads whenever num_ctx changes — sending
+  // nothing here dropped the user's context back to Ollama's default and cost a
+  // second model load on every single turn (seen live 2026-07-25).
+  const numCtx = await resolveAgentNumCtx(
+    modelId, getProviderIdFromModel(activeModel), useSettingsStore.getState().settings.contextWindowOverride, activeModel,
+  )
   let fullResponse = ''
-  const stream = provider.chatStream(modelId, messages, { temperature: 0.1, maxTokens: 500 })
+  const stream = provider.chatStream(modelId, messages, { temperature: 0.1, maxTokens: 500, contextWindow: numCtx })
   for await (const chunk of stream) {
     if (chunk.content) fullResponse += chunk.content
     if (chunk.done) break
@@ -90,6 +105,11 @@ export function useAgentChat() {
   const [pendingApproval, setPendingApproval] = useState<AgentToolCall | null>(null)
 
   const abortRef = useRef<AbortController | null>(null)
+  /** True once the user pressed stop, so the /loop driver does not start
+   *  another pass on the run they just killed. */
+  const userStoppedRef = useRef(false)
+  /** The pending next /loop pass, so stop can cancel it mid-interval. */
+  const loopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const approvalQueueRef = useRef<ApprovalEntry[]>([])
   const contentRef = useRef('')
   const thinkingRef = useRef('')
@@ -172,6 +192,12 @@ export function useAgentChat() {
       curatedTools?: readonly string[]
       chatToolsMode?: boolean
       displayContent?: string
+      // A read-only slash command (/review, /plan, /diff, …). Strips the
+      // mutating tools for this turn so the command cannot do what it just
+      // told the user it would not do.
+      readOnly?: boolean
+      /** Carried by the /loop driver so a pass knows which pass it is. */
+      loop?: { pass: number; intervalMs: number; task: string; startedAt: number }
       // Chat-tools router hint (David 2026-06-20): when a bare follow-up like
       // "nochmal"/"ok generiere jetzt" continues an in-progress media task, the
       // router passes the task kind + the prior generation's exact args so a weak
@@ -244,7 +270,7 @@ export function useAgentChat() {
     let modelToUse = modelId
     let strategy: ToolCallingStrategy
 
-    if (providerId === 'openai' || providerId === 'anthropic') {
+    if (isNativeToolProvider(providerId)) {
       // Cloud providers always support native tool calling
       strategy = 'native'
     } else {
@@ -430,7 +456,8 @@ export function useAgentChat() {
     // model in plain chat only ever sees the 5 chat tools (and small models
     // aren't drowned in the full ~24-tool set).
     const curated = opts?.curatedTools
-    const toolMatchesCurated = (name: string) => !curated || curated.includes(name)
+    const toolMatchesCurated = (name: string) =>
+      (!curated || curated.includes(name)) && !(opts?.readOnly && MUTATING_TOOLS.has(name))
 
     // Build agent system prompt FIRST, then append caveman style as a modifier
     const hermesToolDefs = toolRegistry.toHermesToolDefs(permissions)
@@ -448,6 +475,9 @@ export function useAgentChat() {
         : settings.smallModelMode
           ? buildAgentSystemPromptLean(systemPrompt)
           : buildAgentSystemPrompt(systemPrompt)
+    // Standing goal (/goal) — same section Code injects, so the objective
+    // survives a switch between the two surfaces.
+    agentSystemPrompt += renderGoalSection(useAgentGoalStore.getState().getGoal(convId))
 
     // Multi-Repo (Sprint C #8): when the agent workspace has extra paths,
     // append a "Workspaces" section so the model can reference them by
@@ -616,15 +646,12 @@ export function useAgentChat() {
                 : settings.thinkingEnabled === true)
             : undefined
 
-        // num_ctx (David: "muss immer stimmen"): the override, else the model's
-        // REAL context (capped for VRAM), floored at 8192 so feeding a generated
-        // image back for vision feedback never overflows a 4096-default model.
-        let agentCtx: number = settings.contextWindowOverride || 8192
-        if (providerId === 'ollama' && !settings.contextWindowOverride) {
-          try {
-            agentCtx = Math.max(effectiveContextWindow(await getModelContextCached(modelId), 0), 8192)
-          } catch { /* keep the 8192 floor on failure */ }
-        }
+        // num_ctx (David: "muss immer stimmen"). Shared resolver so the memory
+        // extraction that runs after this turn sends the SAME value and Ollama
+        // does not reload the model at its default between the two.
+        const agentCtx: number = await resolveAgentNumCtx(
+          modelId, providerId, settings.contextWindowOverride, activeModel,
+        )
         const chatOptions = {
           // Small-Model Mode (Knob 6): gently clamp temperature for tool turns.
           // FOLKLORE, not measured — research found NO temperature finding for
@@ -937,6 +964,7 @@ export function useAgentChat() {
           let allowImg = maxImageGen - imageGenDone
           let allowVid = maxVideoGen - videoGenDone
           let blocked = false
+          let blockedNonMedia = false
           const kept: ToolCall[] = []
           for (const tc of toolCalls) {
             const name = tc.function.name
@@ -946,6 +974,7 @@ export function useAgentChat() {
               if (allowVid > 0) { allowVid--; kept.push(tc) } else { blocked = true }
             } else if (executedCallKeys.has(callKey(tc))) {
               blocked = true
+              blockedNonMedia = true
             } else {
               kept.push(tc)
             }
@@ -968,10 +997,14 @@ export function useAgentChat() {
                   id: uuid(), phase: 'reflection', content: turnContent, timestamp: Date.now(),
                 })
               }
+              // Tool-aware wording: telling a coding model "the media is
+              // already created" when its duplicate file_read got dropped
+              // reads like nonsense and derails it further.
               agentMessages.push({
                 role: 'user',
-                content:
-                  'Stop — the media you were asked for is already created and shown. Write ONLY a short, friendly closing line to the user in their own language (e.g. that their picture/clip is ready). Do not output JSON, do not repeat this note, and do not call any tool.',
+                content: blockedNonMedia
+                  ? 'Stop: you are repeating tool calls that already ran this turn — their results are shown above and have not changed. Do not call the same tool with the same arguments again. Use the results you already have and write your final answer now, without calling any tool.'
+                  : 'Stop, the media you were asked for is already created and shown. Write ONLY a short, friendly closing line to the user in their own language (e.g. that their picture/clip is ready). Do not output JSON, do not repeat this note, and do not call any tool.',
               } as ChatMessage)
               continue
             }
@@ -1069,6 +1102,24 @@ export function useAgentChat() {
         // shell/code share an 'exec' queue, image/workflow share 'comfyui',
         // pure reads fully parallel).
         if (!runningRef.current || abort.signal.aborted) break
+
+        // Same execution-time guard as Code: the catalog filter is not enough on
+        // its own, because the loose-parse fallback lifts a call the model wrote
+        // as TEXT and the executor resolves it by name without asking whether
+        // this turn was allowed to offer it. Proven live on the Code side
+        // 2026-07-25, where a read-only /plan created a file while every request
+        // carried a read-only catalog.
+        if (opts?.readOnly) {
+          const blocked = toolCalls.filter((tc) => MUTATING_TOOLS.has(tc.function?.name ?? ''))
+          if (blocked.length) {
+            toolCalls = toolCalls.filter((tc) => !MUTATING_TOOLS.has(tc.function?.name ?? ''))
+            const names = [...new Set(blocked.map((tc) => tc.function.name))].join(', ')
+            messages.push({
+              role: 'user',
+              content: `${names} is not available on this turn, it is a read-only command. Do not try to change anything. Finish with the written answer using what you have already read.`,
+            })
+          }
+        }
 
         type BatchEntry = { tc: typeof toolCalls[number]; ac: AgentToolCall; blockId: string }
         const batch: BatchEntry[] = []
@@ -1174,25 +1225,37 @@ export function useAgentChat() {
           // (so an identical repeat is skipped) and count successful media gens
           // against the per-turn cap that stops "13× the same cat".
           executedCallKeys.add(callKey(entry.tc))
-          if (result.status === 'completed' || result.status === 'cached') {
+          // D#81 (TheRealNovelist, 2026-07-21): a ComfyUI 400/500 does not reject
+          // — the media tools RETURN their error as a normal result string, so
+          // status is 'completed' and every consumer below used to treat a failed
+          // generation as a delivered one. Reclassify it once, here, and the cap,
+          // the label, the memory write and the "is now displayed" note all
+          // follow. Non-media tools are unaffected.
+          const mediaOk = mediaCallSucceeded(entry.ac.toolName, entry.ac.result)
+          if (!mediaOk) entry.ac.status = 'failed'
+          if ((result.status === 'completed' || result.status === 'cached') && mediaOk) {
             if (entry.ac.toolName === 'image_generate') imageGenDone++
             else if (entry.ac.toolName === 'video_generate') videoGenDone++
           }
           const contentLabel =
-            result.status === 'completed'
-              ? `Completed: ${entry.ac.toolName}`
-              : result.status === 'cached'
-                ? `Cached: ${entry.ac.toolName}`
-                : result.status === 'rejected'
-                  ? `Rejected: ${entry.ac.toolName}`
-                  : `Failed: ${entry.ac.toolName}`
+            !mediaOk
+              ? `Failed: ${entry.ac.toolName}`
+              : result.status === 'completed'
+                ? `Completed: ${entry.ac.toolName}`
+                : result.status === 'cached'
+                  ? `Cached: ${entry.ac.toolName}`
+                  : result.status === 'rejected'
+                    ? `Rejected: ${entry.ac.toolName}`
+                    : `Failed: ${entry.ac.toolName}`
           updateBlockById(convId!, assistantMessage.id, entry.blockId, {
             toolCall: { ...entry.ac },
             toolCalls: [{ ...entry.ac }],
             content: contentLabel,
           })
 
-          if ((result.status === 'completed' || result.status === 'cached') && entry.ac.result) {
+          // `mediaOk` guard: without it a ComfyUI error text was written into the
+          // PERSISTENT cross-conversation memory store as a 'reference' fact.
+          if ((result.status === 'completed' || result.status === 'cached') && entry.ac.result && mediaOk) {
             const argsShort = JSON.stringify(entry.ac.args).substring(0, 100)
             const resultShort = entry.ac.result.substring(0, 200)
             useMemoryStore.getState().addMemory({
@@ -1221,18 +1284,26 @@ export function useAgentChat() {
               : r.status === 'completed' || r.status === 'cached'
                 ? (r.result ?? '')
                 : r.errorHint
-                  ? `${r.error ?? 'Tool failed'} — ${r.errorHint}`
+                  ? `${r.error ?? 'Tool failed'}, ${r.errorHint}`
                   : (r.error ?? 'Tool failed')
           // Small-Model Mode (Knob 3): truncate long tool outputs (head+tail)
           // before re-injecting into history. No-op for big models. The short
           // mediaNote appended at the push sites is left intact.
-          return settings.smallModelMode ? truncateToolResult(text) : text
+          // Head+tail cap for everyone: small-model mode keeps its tight 1500
+          // chars, big models get 60k (~15k tokens) so one giant tool result
+          // can never ride along verbatim in every following request via
+          // compaction's KEEP_RECENT window (225k-token prompts, 2026-07-26).
+          return truncateToolResult(text, settings.smallModelMode ? 1500 : 60000)
         }
         // After a successful image/video gen, nudge a NATURAL closing comment so
         // the model doesn't silently loop another generation (David 2026-06-04).
         // The media-cap is the hard stop; this makes the normal path end with a
         // friendly sentence instead of a blocked-then-steered robotic one.
         const mediaNote = (name: string, r: typeof results[number]): string => {
+          // Never claim the media is on screen when the generation failed (D#81)
+          // — that injected sentence is what made the model cheerfully announce
+          // an image the user never got.
+          if (!mediaCallSucceeded(name, r.result)) return ''
           if ((r.status === 'completed' || r.status === 'cached') &&
               (name === 'image_generate' || name === 'video_generate')) {
             const kind = name === 'video_generate' ? 'video' : 'image'
@@ -1328,41 +1399,21 @@ export function useAgentChat() {
       // from the actually-completed blocks so there is always a final
       // answer at the bottom of the bubble.
       if (!contentRef.current.trim()) {
-        const blocks = blocksRef.current
-        const completedTools = blocks.filter(
-          (b) => b.phase === 'tool_call' && b.toolCall?.status === 'completed'
-        )
-        const failedTools = blocks.filter(
-          (b) => b.phase === 'tool_call' && b.toolCall?.status === 'failed'
-        )
-        const writes = completedTools.filter((b) => b.toolCall?.toolName === 'file_write').length
-        const reads = completedTools.filter((b) => b.toolCall?.toolName === 'file_read').length
-        // Media-aware closing: if a picture/clip was produced, say so warmly
-        // instead of a robotic "1 operation completed" (David 2026-06-04).
-        if (imageGenDone > 0 || videoGenDone > 0) {
-          // Only add a generic closing line when the model actually SAW the
-          // media (vision feedback was sent — image + vision-capable model).
-          // For video (never fed back) or a text-only model, contentRef stays
-          // empty: the bubble shows just the completed tool call with its inline
-          // image/video, no robotic "your video is above" (David 2026-06-16).
-          if (visionFeedbackGiven) {
-            contentRef.current = imageGenDone > 0 && videoGenDone > 0
-              ? 'Fertig — dein Bild und dein Video sind oben. / Done — your image and video are above.'
-              : videoGenDone > 0
-                ? 'Fertig — dein Video ist oben. / Done — your video is above.'
-                : 'Fertig — dein Bild ist oben. / Done — your image is above.'
-          }
-        } else {
-          const otherOk = completedTools.length - writes - reads
-          const parts: string[] = []
-          if (writes) parts.push(`${writes} file${writes === 1 ? '' : 's'} written`)
-          if (reads) parts.push(`${reads} file${reads === 1 ? '' : 's'} read`)
-          if (otherOk) parts.push(`${otherOk} operation${otherOk === 1 ? '' : 's'} completed`)
-          if (failedTools.length) parts.push(`${failedTools.length} failed`)
-          contentRef.current = parts.length
-            ? `Task completed: ${parts.join(', ')}.`
-            : "I couldn't produce a response for that. Please rephrase, or turn off Think and send again."
-        }
+        // Closing line when the model said nothing itself. Pure logic lives in
+        // summarizeTurn so the D#81 rules (a failed picture is not a completed
+        // task, and its reason gets shown) are locked by tests.
+        contentRef.current = summarizeTurn({
+          calls: blocksRef.current
+            .filter((b) => b.phase === 'tool_call' && b.toolCall)
+            .map((b) => ({
+              toolName: b.toolCall!.toolName,
+              status: b.toolCall!.status,
+              result: b.toolCall!.result,
+            })),
+          imageGenDone,
+          videoGenDone,
+          visionFeedbackGiven,
+        })
       }
 
       // Final store update
@@ -1380,10 +1431,11 @@ export function useAgentChat() {
             convId!, assistantMessage.id,
             MULTIMODAL_UNSUPPORTED_MESSAGE
           )
-        } else if (errorMsg.includes('does not support tools')) {
+        } else if ((err as { code?: string })?.code === 'tools_unsupported' || errorMsg.includes('does not support tools')) {
+          markToolsUnsupported(modelToUse)
           useChatStore.getState().updateMessageContent(
             convId!, assistantMessage.id,
-            `This model does not support tool calling.\n\nThe auto-fix could not be applied. Try pulling a standard model like:\n• qwen2.5:7b\n• llama3.1:8b\n• mistral:7b`
+            `This model does not support tool calling, so it can't run in Agent or Code mode (and Chat has tools on).\n\nTurn tools off, or switch to a model that supports tool calling:\n• local (Ollama / LM Studio): qwen2.5:7b, llama3.1:8b, mistral:7b\n• LU Cloud: pick a model shown with the tools badge`
           )
         } else if (errorMsg.includes('does not support thinking')) {
           // Graceful message for thinking errors (shouldn't reach here after retry, but just in case)
@@ -1399,7 +1451,7 @@ export function useAgentChat() {
           useChatStore.getState().updateMessageContent(
             convId!, assistantMessage.id,
             (contentRef.current ? contentRef.current + '\n\n' : '') +
-            `Lost the connection to the local model backend mid-response — it may have crashed, been closed, or was busy swapping models. LU already retried automatically.\n\nCheck that Ollama / LM Studio is running (and the model still loads), then send the message again.\n\nDetails: ${errorMsg}`
+            `Lost the connection to the local model backend mid-response, it may have crashed, been closed, or was busy swapping models. LU already retried automatically.\n\nCheck that Ollama / LM Studio is running (and the model still loads), then send the message again.\n\nDetails: ${errorMsg}`
           )
         } else {
           useChatStore.getState().updateMessageContent(
@@ -1433,21 +1485,81 @@ export function useAgentChat() {
       approvalQueueRef.current = []
       setPendingApproval(null)
 
-      // No auto-speak. Reading a response aloud is manual-only via the
-      // per-message Speaker button (David 2026-06-07: "nicht immer automatisch
-      // vorlesen"). Enabling TTS only surfaces that button; it never auto-reads.
+      // Auto-read the finished response when the user opted in (#77). Default
+      // OFF, additionally gated on ttsEnabled; getState() so this callback never
+      // subscribes to the voice store's isSpeaking churn during playback.
+      {
+        const voice = useVoiceStore.getState()
+        if (voice.ttsEnabled && voice.autoReadAloud && contentRef.current.trim()) {
+          autoSpeak(contentRef.current)
+        }
+      }
 
       // Auto-extract memories (fire-and-forget, agent mode always qualifies)
       const memSettings = useMemoryStore.getState().settings
       if (memSettings.autoExtractEnabled && contentRef.current.trim() && convId) {
         extractMemories(userContent, contentRef.current, convId).catch(() => {})
       }
+
+      // ── /loop driver ───────────────────────────────────────────────────
+      // Same driver as Code, because a loop that only worked in one of the two
+      // agent surfaces is not a feature. No pass ceiling unless the user set
+      // one: a loop someone asked to keep going keeps going until it says done
+      // or they stop it. The loop bar above the composer is what keeps that
+      // honest rather than invisible.
+      if (opts?.loop && convId && !userStoppedRef.current) {
+        const loopState = opts.loop
+        const saidDone = loopPassSaysDone(contentRef.current.trim())
+        const cap = Math.max(0, useSettingsStore.getState().settings.loopMaxPasses ?? 0)
+        const nextPass = loopState.pass + 1
+
+        if (saidDone) {
+          useAgentLoopStore.getState().clear()
+        } else if (cap > 0 && nextPass > cap) {
+          useAgentLoopStore.getState().clear()
+          useChatStore.getState().addMessage(convId, {
+            id: uuid(), role: 'assistant', timestamp: Date.now(),
+            content: `Stopped after ${cap} passes, which is the limit set in Settings. What is above is where it got to. Raise the limit or set it to unlimited to keep going.`,
+          })
+        } else {
+          const convForLoop = convId
+          useAgentLoopStore.getState().start({
+            conversationId: convForLoop, pass: nextPass, cap,
+            task: loopState.task, intervalMs: loopState.intervalMs,
+            nextAt: Date.now() + loopState.intervalMs,
+          })
+          loopTimerRef.current = setTimeout(() => {
+            loopTimerRef.current = null
+            if (runningRef.current) return
+            if (useChatStore.getState().activeConversationId !== convForLoop) {
+              useAgentLoopStore.getState().clear()
+              return
+            }
+            void sendRef.current?.(buildLoopRecheck(loopState.task, nextPass), undefined, {
+              displayContent: cap > 0 ? `pass ${nextPass} of ${cap}` : `pass ${nextPass}`,
+              loop: { ...loopState, pass: nextPass },
+            })
+          }, loopState.intervalMs)
+        }
+      }
     }
   }, [])
+
+  // Self-reference so the /loop driver can start the next pass.
+  const sendRef = useRef<typeof sendAgentMessage | null>(null)
+  sendRef.current = sendAgentMessage
 
   // ── Stop the agent ────────────────────────────────────────────
 
   const stopAgent = useCallback(() => {
+    // Stop means stop: also cancel a /loop pass waiting out its interval,
+    // otherwise the run the user just killed comes back by itself.
+    userStoppedRef.current = true
+    if (loopTimerRef.current) {
+      clearTimeout(loopTimerRef.current)
+      loopTimerRef.current = null
+    }
+    useAgentLoopStore.getState().clear()
     runningRef.current = false
     abortRef.current?.abort()
     abortRef.current = null
@@ -1500,7 +1612,7 @@ export function extractMediaPrompt(text: string): string {
 }
 
 function buildAgentSystemPrompt(basePrompt: string): string {
-  const agentInstructions = `You are an autonomous AI agent inside LU with full access to this computer. You execute tasks end-to-end by using tools — you do NOT just describe what to do.
+  const agentInstructions = `You are an autonomous AI agent inside LU with full access to this computer. You execute tasks end-to-end by using tools, you do NOT just describe what to do.
 
 Available tools:
 - Filesystem: file_read, file_write, file_list, file_search
@@ -1508,29 +1620,29 @@ Available tools:
 - System: shell_execute, code_execute, system_info, screenshot, process_list, get_current_time
 - Creative: image_generate, video_generate (text-to-video, or animate a generated image via inputImage), run_workflow
 
-AUTONOMY CONTRACT (read carefully — this is the most important rule):
-- When the user asks you to BUILD, CREATE, MAKE, or WRITE something (a file, a website, a script, a folder structure), you MUST execute it via tools — typically file_write.
-- NEVER produce a code block in your reply followed by "save this as index.html". That is a FAILURE — it means you talked instead of acted.
+AUTONOMY CONTRACT (read carefully, this is the most important rule):
+- When the user asks you to BUILD, CREATE, MAKE, or WRITE something (a file, a website, a script, a folder structure), you MUST execute it via tools, typically file_write.
+- NEVER produce a code block in your reply followed by "save this as index.html". That is a FAILURE, it means you talked instead of acted.
 - NEVER say "Now I will create X" or "Next I'll write Y" as plain prose and then stop. The model is supposed to DO the next step right now, as a tool call.
-- When the task has N steps, execute ALL N as tool calls in one session. The user does not want a tutorial — they want the result on disk.
+- When the task has N steps, execute ALL N as tool calls in one session. The user does not want a tutorial, they want the result on disk.
 - The ONLY reasons to finish without calling another tool are: (a) the task is genuinely complete, or (b) you are stuck and need user input.
 
 Workflow for build / create tasks:
 1. (Optional) file_list to scout the target directory.
 2. file_write the artefact(s) directly. For a website: write index.html, style.css, script.js as separate file_write calls.
-3. After the LAST file_write, write a 1–3 sentence final answer ("Done — wrote 3 files to <path>"). Nothing in between.
+3. After the LAST file_write, write a 1 to 3 sentence final answer ("Done — wrote 3 files to <path>"). Nothing in between.
 
-Creative tools — image_generate, video_generate:
-- When the user asks for an image / picture / drawing, CALL image_generate. You HAVE this tool — do NOT reply with prose about DALL-E, Midjourney, or "as a text model I can't". Just call it.
+Creative tools, image_generate, video_generate:
+- When the user asks for an image / picture / drawing, CALL image_generate. You HAVE this tool, do NOT reply with prose about DALL-E, Midjourney, or "as a text model I can't". Just call it.
 - After image_generate runs you will be shown the generated image; LOOK at it and briefly describe what you actually see.
 - To make a video, CALL video_generate. To animate an image you just generated, call video_generate with inputImage set to that image's filename (it is in the image_generate result).
 - Emit these as REAL tool calls through the tool channel — never write the call as plain text like image_generate(prompt="…") in your answer.
 
 Other rules:
 - You MUST use tools — NEVER answer from memory or guess file contents.
-- PATHS: use paths relative to your working directory (e.g. \`package.json\`, \`src/app.ts\`, \`.\` for the current folder). Never start a path with \`/\` or a drive letter (\`C:\\\`) — that escapes your workspace and fails. To list the current folder, use file_list with path \`.\`.
+- PATHS: use paths relative to your working directory (e.g. \`package.json\`, \`src/app.ts\`, \`.\` for the current folder). Never start a path with \`/\` or a drive letter (\`C:\\\`), that escapes your workspace and fails. To list the current folder, use file_list with path \`.\`.
 - For filesystem READ tasks: file_list first if needed, then file_read.
-- For web tasks: web_search → web_fetch on the best URL → answer based on real data. web_search returns ONLY short snippets — ALWAYS call web_fetch to read the page.
+- For web tasks: web_search → web_fetch on the best URL → answer based on real data. web_search returns ONLY short snippets, ALWAYS call web_fetch to read the page.
 - If you need to know the OS, paths, or hardware: call system_info once at the start.
 - Chain multiple tools as needed. If a tool fails, try a different approach.
 - Be concise in text. All the work happens in tool calls.
@@ -1548,14 +1660,14 @@ Other rules:
 // have a limited instruction-following budget. Keep only what a small model
 // needs to ACT — same tool names + native call format as the full prompt.
 function buildAgentSystemPromptLean(basePrompt: string): string {
-  const lean = `You are an autonomous agent in LU with tools on this computer. Do tasks by CALLING tools — do not just describe them.
+  const lean = `You are an autonomous agent in LU with tools on this computer. Do tasks by CALLING tools, do not just describe them.
 
 Tools: file_read, file_write, file_list, file_search, web_search, web_fetch, shell_execute, code_execute, system_info, get_current_time, image_generate, video_generate.
 
 Rules:
-- To build/create/write something, CALL the tool (usually file_write) — never paste a code block and say "save this".
-- PATHS: use relative paths (e.g. \`package.json\`, \`.\`). Never start with \`/\` or a drive letter — it escapes your workspace and fails.
-- Emit the tool call as your FIRST output — no "Okay, let me…" preamble. Valid JSON, one at a time. Never guess file contents — file_read first.
+- To build/create/write something, CALL the tool (usually file_write), never paste a code block and say "save this".
+- PATHS: use relative paths (e.g. \`package.json\`, \`.\`). Never start with \`/\` or a drive letter, it escapes your workspace and fails.
+- Emit the tool call as your FIRST output, no "Okay, let me…" preamble. Valid JSON, one at a time. Never guess file contents, file_read first.
 - After each tool result, if a step remains, immediately call the next tool. Do not narrate "I will now…" and then stop.
 - For images/video call image_generate / video_generate as real tool calls.
 - When everything is done, reply with one short sentence in the user's language.`
@@ -1570,13 +1682,13 @@ Rules:
  * chat into an agent. Kept short so it doesn't crowd a small model's context.
  */
 function buildChatToolsSystemPrompt(basePrompt: string): string {
-  const p = `You are a helpful chat assistant in LU, having a normal conversation. You also have a few tools for things you cannot do from memory — use one ONLY when the user's request actually needs it, otherwise just reply normally:
-- web_search — look up current/real-world facts (returns short snippets)
-- web_fetch — read a specific web page or URL (after a search, or when the user gives a link)
-- file_write — save text to a file when the user asks you to write/create/save a file
-- image_generate — create an image when the user asks for a picture/drawing/logo
-- video_generate — create a short video/animation when the user asks for one (to animate an image you just made, pass its filename as inputImage)
+  const p = `You are a helpful chat assistant in LU, having a normal conversation. You also have a few tools for things you cannot do from memory, use one ONLY when the user's request actually needs it, otherwise just reply normally:
+- web_search, look up current/real-world facts (returns short snippets)
+- web_fetch, read a specific web page or URL (after a search, or when the user gives a link)
+- file_write, save text to a file when the user asks you to write/create/save a file
+- image_generate, create an image when the user asks for a picture/drawing/logo
+- video_generate, create a short video/animation when the user asks for one (to animate an image you just made, pass its filename as inputImage)
 
-Emit tool calls through the real tool channel — never as plain text like image_generate("…"). After a tool runs, give a short, natural reply about the result. For web questions, prefer web_search then web_fetch on the best result before answering. Reply in the user's language.`
+Emit tool calls through the real tool channel, never as plain text like image_generate("…"). After a tool runs, give a short, natural reply about the result. For web questions, prefer web_search then web_fetch on the best result before answering. Reply in the user's language.`
   return basePrompt ? `${p}\n\n${basePrompt}` : p
 }

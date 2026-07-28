@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Plug, ChevronDown, Bone, User, Wrench } from 'lucide-react'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useChatStore } from '../../stores/chatStore'
+import { useToolSupport } from '../../hooks/useToolSupport'
 import type { CavemanMode } from '../../types/settings'
 
 const CAVEMAN_MODES: { value: CavemanMode; label: string; desc: string }[] = [
@@ -24,8 +25,12 @@ export function PluginsDropdown({ openUpward = false }: { openUpward?: boolean }
   // Chat-Tools (v2.5.3) — curated web/file/image/video tools in plain chat.
   // Default ON (undefined → on) so the feature works out of the box; the
   // toggle lets a user fall back to pure-text chat.
-  const chatToolsEnabled = useSettingsStore((s) => s.settings.chatToolsEnabled !== false)
+  const chatToolsEnabledSetting = useSettingsStore((s) => s.settings.chatToolsEnabled !== false)
   const updateSettings = useSettingsStore((s) => s.updateSettings)
+  // A model with no tool channel cannot run Chat Tools no matter what the
+  // switch says, so show it off and disabled rather than on and broken.
+  const { canUseTools, reason } = useToolSupport()
+  const chatToolsEnabled = chatToolsEnabledSetting && canUseTools
 
   // Per-chat persona enable/disable (mirrors mobile). Defaults to true
   // for legacy chats where the flag is absent. The toggle in the
@@ -79,18 +84,26 @@ export function PluginsDropdown({ openUpward = false }: { openUpward?: boolean }
                   <span className="text-[0.5rem] text-gray-400 truncate">web · file · image · video</span>
                 </div>
                 <button
-                  onClick={(e) => { e.stopPropagation(); updateSettings({ chatToolsEnabled: !chatToolsEnabled }) }}
-                  title={chatToolsEnabled ? 'Disable tools in plain chat' : 'Enable web/file/image/video tools in plain chat'}
+                  onClick={(e) => { e.stopPropagation(); if (canUseTools) updateSettings({ chatToolsEnabled: !chatToolsEnabledSetting }) }}
+                  disabled={!canUseTools}
+                  title={!canUseTools ? reason : chatToolsEnabled ? 'Disable tools in plain chat' : 'Enable web/file/image/video tools in plain chat'}
                   className={
                     'shrink-0 flex items-center w-7 h-3.5 rounded-full transition-colors ' +
-                    (chatToolsEnabled
-                      ? 'bg-blue-500/40 hover:bg-blue-500/55 justify-end'
-                      : 'bg-gray-300/30 dark:bg-white/10 hover:bg-gray-300/45 dark:hover:bg-white/15 justify-start')
+                    (!canUseTools
+                      ? 'bg-gray-300/20 dark:bg-white/5 cursor-default justify-start'
+                      : chatToolsEnabled
+                        ? 'bg-blue-500/40 hover:bg-blue-500/55 justify-end'
+                        : 'bg-gray-300/30 dark:bg-white/10 hover:bg-gray-300/45 dark:hover:bg-white/15 justify-start')
                   }
                 >
-                  <span className="w-3 h-3 rounded-full bg-white shadow-sm mx-px" />
+                  <span className={`w-3 h-3 rounded-full shadow-sm mx-px ${canUseTools ? 'bg-white' : 'bg-white/40'}`} />
                 </button>
               </div>
+              {!canUseTools && (
+                <div className="pb-1.5 text-[0.5rem] leading-snug text-amber-600 dark:text-amber-400/90">
+                  {reason}
+                </div>
+              )}
             </div>
 
             <div className="border-t border-gray-200 dark:border-white/[0.06] my-1" />

@@ -25,7 +25,7 @@ interface MockBlock {
   toolCall?: { toolName: string; status: string }
 }
 
-function buildFallbackAnswer(blocks: MockBlock[]): string {
+function buildFallbackAnswer(blocks: MockBlock[], readOnlyTurn = false): string {
   const completed = blocks.filter(b => b.phase === 'tool_call' && b.toolCall?.status === 'completed')
   const failed = blocks.filter(b => b.phase === 'tool_call' && b.toolCall?.status === 'failed')
   const writes = completed.filter(b => b.toolCall?.toolName === 'file_write')
@@ -45,6 +45,9 @@ function buildFallbackAnswer(blocks: MockBlock[]): string {
   }
   if (failed.length > 0) {
     return `Partially done: ${parts.join(', ')}. Some steps failed — see the errors above; the result may be incomplete.`
+  }
+  if (readOnlyTurn) {
+    return `I looked (${parts.join(', ') || 'no steps recorded'}) but the model ended without writing the answer. Send the command again, or switch to a stronger model for this one.`
   }
   return parts.length > 0 ? `Done: ${parts.join(', ')}.` : 'Done.'
 }
@@ -163,6 +166,30 @@ describe('Codex fallback final answer', () => {
 })
 
 // ── Drift detection ─────────────────────────────────────────────────────
+describe('read-only commands do not get an operations count as their answer', () => {
+  // Live /find on the ship exe, 2026-07-25: gpt-oss searched twice, wrote no
+  // text, and the user got "Done: 2 other operation(s) completed." A read-only
+  // command was asked a QUESTION — a tool tally dressed up as success is worse
+  // than admitting the answer never arrived.
+  it('says the answer is missing instead of claiming a clean finish', () => {
+    const blocks: MockBlock[] = [
+      { phase: 'tool_call', toolCall: { toolName: 'file_search', status: 'completed' } },
+      { phase: 'tool_call', toolCall: { toolName: 'file_search', status: 'completed' } },
+    ]
+    const answer = buildFallbackAnswer(blocks, true)
+    expect(answer).not.toMatch(/^Done:/)
+    expect(answer).toContain('ended without writing the answer')
+    expect(answer).toContain('2 other operation(s) completed')
+  })
+
+  it('leaves the normal build-task summary alone', () => {
+    const blocks: MockBlock[] = [
+      { phase: 'tool_call', toolCall: { toolName: 'file_write', status: 'completed' } },
+    ]
+    expect(buildFallbackAnswer(blocks, false)).toBe('Done: 1 file(s) written.')
+  })
+})
+
 describe('fallback answer drift detection', () => {
   it('useCodex.ts contains the honest fallback summary builder', () => {
     const __filename = fileURLToPath(import.meta.url)
@@ -178,5 +205,12 @@ describe('fallback answer drift detection', () => {
     expect(src).toContain('Partially done:')
     expect(src).toContain("couldn't complete the task")
     expect(src).not.toContain('Task completed:')
+    // The read-only branch must stay: a /find that produced no text has to say
+    // so rather than reporting an operations count as a clean finish.
+    expect(src).toContain('ended without writing the answer')
+    // And the nudge must ask a read-only turn for the ANSWER, not another tool
+    // call — demanding "the NEXT step as an actual tool call" is what burned the
+    // budget and produced the count in the first place.
+    expect(src).toContain('You have read enough. Write the answer now')
   })
 })

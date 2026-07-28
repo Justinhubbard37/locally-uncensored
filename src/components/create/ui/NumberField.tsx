@@ -14,6 +14,25 @@ interface Props {
   className?: string
 }
 
+/**
+ * Bring a typed value inside the declared bounds and onto the step grid.
+ *
+ * `min` / `max` / `step` on an <input type="number"> are advisory: React takes
+ * whatever was typed or pasted, so a Width declared 64..4096 step 64 reached
+ * the generator as 9999 or 3 and the job failed in the backend — in cloud mode
+ * after the request was already on its way. Applied on BLUR, never per
+ * keystroke: clamping while typing turns "1024" into 64 at the first digit.
+ */
+export function commitNumber(v: number, min?: number, max?: number, step?: number): number {
+  let out = v
+  if (typeof step === 'number' && step > 0 && typeof min === 'number') {
+    out = min + Math.round((out - min) / step) * step
+  }
+  if (typeof min === 'number') out = Math.max(min, out)
+  if (typeof max === 'number') out = Math.min(max, out)
+  return out
+}
+
 export function NumberField({ label, value, min, max, step = 1, onChange, onRandomize, mono = true, suffix, className }: Props) {
   return (
     <div className={cn('space-y-1.5', className)}>
@@ -27,6 +46,12 @@ export function NumberField({ label, value, min, max, step = 1, onChange, onRand
             max={max}
             step={step}
             onChange={(e) => { const v = parseFloat(e.target.value); if (!Number.isNaN(v)) onChange(v) }}
+            onBlur={(e) => {
+              const v = parseFloat(e.target.value)
+              if (Number.isNaN(v)) return
+              const fixed = commitNumber(v, min, max, step)
+              if (fixed !== v) onChange(fixed)
+            }}
             className={cn('bg-transparent outline-none w-full t-control text-gray-200', mono && 'lu-hud-num')}
           />
           {suffix && <span className="t-mono text-gray-600 shrink-0 pl-1">{suffix}</span>}

@@ -13,10 +13,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // Mutable flag the mock reads so each test can flip the active backend.
 let builtinActive = false
+const ensureEmbed = vi.fn()
 
 vi.mock('../engine', () => ({
   isManagedBuiltinActive: () => builtinActive,
   embedBaseUrl: () => 'http://127.0.0.1:8128/v1',
+  // Post-offload self-heal: rag awaits this before hitting :8128.
+  ensureBundledEmbedAlive: (...args: any[]) => ensureEmbed(...args),
+  bundledEmbedStatus: async () => ({ running: false, healthy: false }),
 }))
 
 const localFetch = vi.fn()
@@ -34,6 +38,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 describe('generateEmbeddings routing', () => {
   beforeEach(() => {
     localFetch.mockReset()
+    ensureEmbed.mockReset()
     builtinActive = false
   })
 
@@ -55,6 +60,9 @@ describe('generateEmbeddings routing', () => {
     expect(JSON.parse(opts.body).input).toEqual(['a', 'b'])
     // Sorted back into input order.
     expect(out).toEqual([[0.1, 0.2], [0.3, 0.4]])
+    // The post-offload self-heal MUST run before the request — a Create render
+    // stops the embed sidecar, and without this await RAG dies on a dead port.
+    expect(ensureEmbed).toHaveBeenCalledTimes(1)
   })
 
   it('falls back to Ollama /api/embed when the built-in engine is NOT active', async () => {

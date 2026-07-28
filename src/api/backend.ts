@@ -17,6 +17,7 @@ export function isTauri(): boolean {
   // Tauri v2 renamed the global from `__TAURI__` to `__TAURI_INTERNALS__`.
   // Check both so the app keeps working across both versions (and also
   // during the migration window when people might be on either).
+  if (typeof window === "undefined") return false;
   const w = window as any;
   return !!(w.__TAURI_INTERNALS__ || w.__TAURI__);
 }
@@ -132,6 +133,10 @@ export async function localFetch(
       // does NOT auto-convert camelCase here — the Rust command spec uses
       // explicit field names.
       timeout_ms: options?.timeoutMs ?? null,
+      // Forward caller headers (Authorization for keyed OpenAI-compat
+      // backends). The proxy silently dropped them before, so a LAN vLLM/
+      // TabbyAPI with an api key always got 401 through this path.
+      headers: options?.headers ?? null,
     }) as string;
 
     return new Response(text, { status: 200, headers: { "Content-Type": "application/json" } });
@@ -170,7 +175,10 @@ export async function localFetch(
     try {
       return await fetch(url, {
         method,
-        headers: options?.body ? { "Content-Type": "application/json" } : undefined,
+        headers: {
+          ...(options?.body ? { "Content-Type": "application/json" } : {}),
+          ...(options?.headers ?? {}),
+        },
         body: options?.body,
         signal,
       });
@@ -194,11 +202,14 @@ export async function localFetch(
  */
 export async function localFetchStream(
   url: string,
-  options?: { method?: string; body?: string; signal?: AbortSignal }
+  options?: { method?: string; body?: string; headers?: Record<string, string>; signal?: AbortSignal }
 ): Promise<Response> {
   const method = options?.method || "GET";
   const body = options?.body;
-  const headers = body ? { "Content-Type": "application/json" } : undefined;
+  const extraHeaders = options?.headers;
+  const headers = body || extraHeaders
+    ? { ...(body ? { "Content-Type": "application/json" } : {}), ...(extraHeaders ?? {}) }
+    : undefined;
 
   // Transport order (rikki Discord 2026-06-10, Win11 "agent error"):
   // on WebView2 the direct fetch to a loopback backend is dead on arrival —
@@ -233,7 +244,7 @@ export async function localFetchStream(
     }
   }
 
-  const proxied = await proxyStreamChunked(url, method, body, options?.signal);
+  const proxied = await proxyStreamChunked(url, method, body, extraHeaders, options?.signal);
   if (proxied) return proxied;
 
   // Proxy layer itself unavailable (invoke/Channel import died) — give the
@@ -265,7 +276,7 @@ export async function localFetchStream(
  * Returns null when the invoke/Channel layer itself is unavailable so the
  * caller can decide on a last-resort transport.
  */
-async function proxyStreamChunked(url: string, method: string, body?: string, signal?: AbortSignal): Promise<Response | null> {
+async function proxyStreamChunked(url: string, method: string, body?: string, headers?: Record<string, string>, signal?: AbortSignal): Promise<Response | null> {
   let invoke: Awaited<ReturnType<typeof getInvoke>>;
   let ChannelCtor: typeof import("@tauri-apps/api/core").Channel;
   try {
@@ -336,7 +347,7 @@ async function proxyStreamChunked(url: string, method: string, body?: string, si
       settleStreaming();
     };
 
-    void invoke("proxy_localhost_stream_chunked", { url, method, body: body || null, onChunk: channel, streamId })
+    void invoke("proxy_localhost_stream_chunked", { url, method, body: body || null, headers: headers ?? null, onChunk: channel, streamId })
       .then(() => {
         // Do NOT close here — the EOF marker does that (it may arrive after
         // this resolves; see above). Grace fallback so a lost EOF can't leak
@@ -370,6 +381,7 @@ async function proxyStreamChunked(url: string, method: string, body?: string, si
         url,
         method,
         body: body || null,
+        headers: headers ?? null,
       }) as number[];
       const uint8 = new Uint8Array(bytes);
       return new Response(uint8, { status: 200, headers: { "Content-Type": "application/x-ndjson" } });
@@ -428,6 +440,7 @@ export async function backendCall<T = any>(
     download_model_to_path: { path: "/local-api/download-model-to-path", method: "POST" },
     detect_model_path: { path: "/local-api/detect-model-path", method: "POST" },
     check_model_sizes: { path: "/local-api/check-model-sizes", method: "POST" },
+    delete_comfy_model: { path: "/local-api/delete-comfy-model", method: "POST" },
     download_progress: { path: "/local-api/download-progress" },
     pause_download: { path: "/local-api/pause-download", method: "POST" },
     cancel_download: { path: "/local-api/cancel-download", method: "POST" },
@@ -856,6 +869,37 @@ export function isPrivateOrLanHost(hostname: string): boolean {
 /** Lowercase hostname from a URL, or '' if unparseable. */
 export function hostnameOf(url: string): string {
   try { return _canonHost(new URL(url).hostname) } catch { return '' }
+}
+
+/**
+ * Hosts the webview is allowed to fetch DIRECTLY. Mirrors `connect-src` in
+ * src-tauri/tauri.conf.json — keep the two in sync. Everything else has to take
+ * the Rust proxy, because the pinned CSP kills the request inside the webview
+ * before it reaches the network. That is why a user's own cloud endpoint (a
+ * custom OpenAI-compatible provider on their domain, or a vendor LU ships no
+ * preset for) used to fail with an unexplainable network error.
+ */
+const CSP_DIRECT_HOSTS = new Set([
+  'lu-labs.ai',
+  'lrrhheztdytyfpizvuup.supabase.co',
+  'openrouter.ai',
+  'api.openai.com',
+  'api.groq.com',
+  'api.together.xyz',
+  'api.deepseek.com',
+  'api.mistral.ai',
+  'api.anthropic.com',
+  'ollama.com',
+  'huggingface.co',
+  'civitai.com',
+])
+
+export function isDirectFetchAllowed(hostname: string): boolean {
+  const h = _canonHost(hostname)
+  if (!h) return false
+  return CSP_DIRECT_HOSTS.has(h)
+    || h.endsWith('.huggingface.co')
+    || h.endsWith('.civitai.com')
 }
 
 // Hosts already registered with the proxy this session (avoid duplicate IPC).

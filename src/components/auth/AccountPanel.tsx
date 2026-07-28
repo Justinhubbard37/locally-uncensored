@@ -10,7 +10,7 @@ import { useCloudAuth } from '../../hooks/useCloudAuth'
 import { useCloudAuthStore } from '../../stores/cloudAuthStore'
 import { loginWithProvider } from '../../api/cloud/supabase'
 import { CLOUD_BASE } from '../../api/cloud/config'
-import { openExternal, isCloudOnly } from '../../api/backend'
+import { openExternal } from '../../api/backend'
 
 function Meter({ label, used, limit }: { label: string; used: number; limit: number }) {
   const pct = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0
@@ -138,9 +138,7 @@ export function AccountPanel() {
     return (
       <form onSubmit={submit} className="space-y-2">
         <p className="text-[0.7rem] text-gray-600 dark:text-gray-400">
-          {isCloudOnly()
-            ? 'Sign in with your lu-labs.ai account to continue.'
-            : "Sign in to render images, video and chat on LU's cloud GPUs. Local features never need an account."}
+          Sign in to render images, video and chat on LU's cloud GPUs. Local features never need an account.
         </p>
         <input
           type="email"
@@ -165,7 +163,18 @@ export function AccountPanel() {
             disabled={busy || !email || !password}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded text-[0.7rem] font-medium bg-gray-900 text-white dark:bg-white dark:text-gray-900 disabled:opacity-40 hover:opacity-90 transition-opacity"
           >
-            {busy ? <Loader2 size={11} className="animate-spin" /> : <img src="/LU-monogram-bw.png" alt="" width={12} height={12} draggable={false} className="pointer-events-none select-none invert-0 dark:invert" />}
+            {busy ? <Loader2 size={11} className="animate-spin" /> : (
+              /* Monogram, not the stock cloud glyph. The button is dark on light
+                 and light on dark, so the invert flips the other way here. */
+              <img
+                src="/LU-monogram-bw.png"
+                alt=""
+                width={12}
+                height={12}
+                draggable={false}
+                className="shrink-0 select-none invert-0 dark:invert"
+              />
+            )}
             {mode === 'signin' ? 'Sign in' : 'Create account'}
           </button>
           <button
@@ -205,7 +214,7 @@ export function AccountPanel() {
 
       {licenseActive && quota ? (
         <div className="space-y-2">
-          {/* One shared compute-credit wallet — chat, images, video and voice
+          {/* One shared compute-credit wallet, chat, images, video and voice
               all draw from the same monthly budget. */}
           <Meter
             label="Cloud credits (this month)"

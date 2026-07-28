@@ -16,7 +16,8 @@ export const DEFAULT_SETTINGS: Settings = {
   onboardingDone: false,
   // Global Local/Cloud switch (2.5.7) — local is and stays the default.
   appMode: 'local',
-  cloudOnboardingSeen: false,
+  // Cloud teasers in Local mode (2.5.8) — on by default, one-click off.
+  cloudTeasersEnabled: true,
   personasEnabled: true,
   thinkingEnabled: true,
   // Small-Model Mode (v2.5.0) — lean profile for 3B-8B local models.
@@ -38,6 +39,8 @@ export const DEFAULT_SETTINGS: Settings = {
   // surfaces in finite wall-clock.
   agentMaxToolCalls: 400,
   agentMaxIterations: 200,
+  // Unlimited by design — see the note on the type.
+  loopMaxPasses: 0,
   hfDownloadPathOverride: '',
   // Generation timeouts (Bug P v2.4.7)
   imageGenTimeoutMinutes: 20,
@@ -45,6 +48,16 @@ export const DEFAULT_SETTINGS: Settings = {
   // Bug AA v2.5.0 — Ollama num_ctx override. 0 = use Ollama default (2048
   // on most builds). Users with RAG / long chats can bump this up.
   contextWindowOverride: 0,
+  builtinEngine: {
+    ctx: 8192,
+    flashAttn: 'auto',
+    cacheTypeK: 'f16',
+    cacheTypeV: 'f16',
+    threads: -1,
+    gpuLayers: -1,
+    mlock: false,
+    noMmap: false,
+  },
   // Bug BB v2.5.0 — GPU picker. "auto" + empty indices = no env-var,
   // runtime picks default. User sets these via Settings → Hardware.
   gpuVendor: 'auto',
@@ -65,10 +78,15 @@ export const DEFAULT_SETTINGS: Settings = {
   codexRepoMapEnabled: false,
   codexRepoMapLimit: 20,
   codexStageMode: false,
+  codexAutoApply: false,
   codexReviewMode: false,
   // H2 security gate. OFF by default = the autonomous coding agent keeps
   // running shell/code unattended; ON pauses each exec for a confirm.
   codexConfirmShell: false,
+  // Cloud arm of the same gate. ON = a cloud model always confirms shell/code
+  // even with the toggle above off. Keeps the 2.5.7 security-review default,
+  // but as a switch the user owns instead of a hidden override.
+  codexCloudConfirmShell: true,
   defaultWorkspace: null,
   // v8: user-uploaded profile picture (base64 data URL, ≤256px). '' = default icon.
   userAvatarDataUrl: '',
@@ -305,5 +323,5 @@ export const ONBOARDING_MODELS: OnboardingModel[] = [
   // in the Model Manager → Discover tab (curated list + HuggingFace
   // search). Onboarding is "give the user a working chat in 30 seconds";
   // anything heavier comes after they've made it past the wizard.
-  { name: 'qwen2.5-0.5b', label: 'Qwen 2.5 0.5B (Starter)', description: 'Tiny instant-chat model — 400 MB, runs on anything. Great to verify your setup; pick bigger models from the Discover tab once you\'re in.', size: '0.4 GB', vram: '1 GB', vramGB: 1, recommended: true, agent: false, downloadUrl: HF_OB('bartowski/Qwen2.5-0.5B-Instruct-GGUF', 'Qwen2.5-0.5B-Instruct-Q4_K_M.gguf'), filename: 'Qwen2.5-0.5B-Instruct-Q4_K_M.gguf', sizeGB: 0.4 },
+  { name: 'qwen2.5-0.5b', label: 'Qwen 2.5 0.5B (Starter)', description: 'Tiny instant-chat model, 400 MB, runs on anything. Great to verify your setup; pick bigger models from the Discover tab once you\'re in.', size: '0.4 GB', vram: '1 GB', vramGB: 1, recommended: true, agent: false, downloadUrl: HF_OB('bartowski/Qwen2.5-0.5B-Instruct-GGUF', 'Qwen2.5-0.5B-Instruct-Q4_K_M.gguf'), filename: 'Qwen2.5-0.5B-Instruct-Q4_K_M.gguf', sizeGB: 0.4 },
 ]

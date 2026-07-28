@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { UploadCloud, ImagePlus, Scissors, Wand2, Sparkles, X, Loader2, Download, AlertTriangle } from 'lucide-react'
+import { UploadCloud, ImagePlus, Scissors, Wand2, Sparkles, X, Loader2, Download, AlertTriangle, Image as ImageIcon, Film } from 'lucide-react'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
 import { useCreateExp } from './CreateContext'
 import { INTENT_MAP } from './intents'
@@ -10,13 +10,15 @@ import { Button } from '../ui/Button'
 import { cn } from '../ui/cn'
 import { loadImageRef } from './loadImage'
 import { galleryItemUrl, fetchGalleryItemBlob, recoverGalleryUrl } from './galleryUrl'
+import { InstallCancelled } from '../../../lib/bundle-install'
 
 interface Props {
   displayed?: GalleryItem
   onOpenMaskEditor: () => void
   /** Adopt a finished result as the edit source, THEN open the mask editor —
-   *  a t2i run leaves `source` empty, and the editor always reads `source`. */
-  /** Absent on the local backend — inpainting/edit is a cloud-only op. */
+   *  a t2i run leaves `source` empty, and the editor always reads `source`.
+   *  Absent where the Edit intent has no working local lane (the MLX Mac),
+   *  so the button only shows where inpainting actually runs. */
   onEditResult?: (item: GalleryItem) => void
   onFullscreen: (item: GalleryItem) => void
 }
@@ -30,22 +32,52 @@ export function Stage({ displayed, onOpenMaskEditor, onEditResult, onFullscreen 
   const setPrompt = useCreateStore((s) => s.setPrompt)
   const caps = useCreateStore((s) => s.caps)
   const backend = useCreateStore((s) => s.backend)
+  const imageModelList = useCreateStore((s) => s.imageModelList)
+  const videoModelList = useCreateStore((s) => s.videoModelList)
+  const audioModelList = useCreateStore((s) => s.audioModelList)
+  const lipsyncModelList = useCreateStore((s) => s.lipsyncModelList)
+  const motionModelList = useCreateStore((s) => s.motionModelList)
+  const { connected, modelsLoaded } = useCreateExp()
   // On the cloud backend the utility ops (background removal, …) run on
   // WaveSpeed's hosted endpoints — there's no local ComfyUI node to install,
   // so the capability is always ready. Only the local backend gates on the
   // node probe (which never runs without a local ComfyUI and would strand
   // cloud users on a dead "Open Model Manager" card).
   const capReady = !meta.capability || backend === 'cloud' || !!caps[meta.capability]
+  // Local model files missing for this intent (fresh PC): gate the stage on a
+  // one-click starter-bundle card. connected === false also gates — the same
+  // button installs ComfyUI itself first. connected === null (still probing)
+  // gates nothing, so the card never flashes during startup.
+  const listForKind: Record<NonNullable<typeof meta.requiresModels>, unknown[]> = {
+    image: imageModelList,
+    video: videoModelList,
+    audio: audioModelList,
+    lipsync: lipsyncModelList,
+    motion: motionModelList,
+  }
+  const modelsMissing = backend === 'local' && !!meta.requiresModels && (
+    connected === false ||
+    (connected === true && modelsLoaded && listForKind[meta.requiresModels].length === 0)
+  )
 
   // A result counts for the current source only if it was generated after the
   // source was loaded — otherwise an older gallery item would hijack the stage.
   const freshResult = displayed && displayed.createdAt >= sourceSetAt
 
+  const characterTab = useCreateStore((s) => s.characterTab)
+  const characterTrain = intent === 'character' && characterTab === 'train'
+
   let body: React.ReactNode
   if (isGenerating) {
     body = <GeneratingView />
+  } else if (modelsMissing) {
+    body = <ModelInstallCard kind={meta.requiresModels!} />
   } else if (meta.capability && !capReady) {
     body = <CapabilityCard cap={meta.capability} />
+  } else if (characterTrain) {
+    // Character-Studio training board: the image SET lives here (4-30 photos);
+    // trigger word + train button sit in the composer below.
+    body = <TrainSetBoard />
   } else if (meta.needsSource && !source) {
     body = <InputSlot />
   } else if (meta.needsSource && source && !freshResult) {
@@ -79,19 +111,28 @@ export function Stage({ displayed, onOpenMaskEditor, onEditResult, onFullscreen 
   }
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-      <AnimatePresence mode="wait">
-        <motion.div
-          key={intent + (isGenerating ? ':gen' : '')}
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.12 }}
-          className="flex-1 min-h-0 flex flex-col"
-        >
-          {body}
-        </motion.div>
-      </AnimatePresence>
+    // The viewer canvas: ONE fixed, centred frame that is identical on every tab
+    // (Image / Edit / Cutout / Video) — same height and width — so switching
+    // modes no longer resizes or shifts the stage. It shares the Gallery bubble's
+    // surface + radius so the two read as a matched pair, and it sits in the same
+    // row as the Gallery (see CreateExperimental) so both are always equal height.
+    // Whatever the mode renders (empty state, dropzone, result, install card) is
+    // centred inside this frame.
+    <div className="flex-1 min-w-0 min-h-0 flex overflow-hidden p-2">
+      <div className="flex-1 min-w-0 rounded-xl bg-gray-50 dark:bg-[#1e1e1e] ring-1 ring-black/[0.04] dark:ring-white/[0.05] flex flex-col overflow-hidden relative">
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={intent + (isGenerating ? ':gen' : '')}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.12 }}
+            className="flex-1 min-h-0 flex flex-col"
+          >
+            {body}
+          </motion.div>
+        </AnimatePresence>
+      </div>
     </div>
   )
 }
@@ -100,6 +141,7 @@ function teachTitle(intent: string): string {
   switch (intent) {
     case 'image': return 'What do you want to create?'
     case 'video': return 'Describe a scene to animate'
+    case 'edit': return 'Edit or restyle your image'
     default: return 'Get started'
   }
 }
@@ -140,7 +182,7 @@ function InputSlot() {
     // containers (HEIC/AVIF/GIF) pass: loadImageRef re-encodes them to PNG,
     // and throws honestly when the WebView can't decode them.
     if (!file.type.startsWith('image/')) {
-      setError('That file type is not supported — use PNG, JPG or WebP.')
+      setError('That file type is not supported. Use PNG, JPG or WebP.')
       return
     }
     setLoading(true)
@@ -155,44 +197,56 @@ function InputSlot() {
   }
 
   return (
-    <div className="flex-1 flex flex-col items-center justify-center p-6">
-      <div
-        onClick={() => inputRef.current?.click()}
-        onDragOver={(e) => { e.preventDefault(); setDrag(true) }}
-        onDragLeave={() => setDrag(false)}
-        onDrop={(e) => { e.preventDefault(); setDrag(false); const f = e.dataTransfer.files[0]; if (f) handleFile(f) }}
-        className={cn(
-          'w-full max-w-sm aspect-[5/4] min-h-[220px] max-h-[44vh] rounded-[var(--radius-panel)] border-2 border-dashed flex flex-col items-center justify-center gap-3 cursor-pointer transition-colors',
-          drag ? 'border-blue-400 bg-blue-500/10' : 'border-white/10 bg-white/[0.02] hover:border-white/20',
-        )}
-      >
-        {loading ? <Loader2 className="animate-spin text-gray-400" size={28} /> : (
-          meta.id === 'removebg' ? <Scissors className="text-gray-500" size={28} strokeWidth={1.5} /> : <UploadCloud className="text-gray-500" size={28} strokeWidth={1.5} />
-        )}
-        <div className="text-center">
-          <div className="t-title text-gray-300">{meta.id === 'removebg' ? 'Drop an image to cut out' : meta.id === 'animate' ? 'Drop an image to animate' : 'Drop an image to edit'}</div>
-          <div className="t-body text-gray-600">or click to browse · PNG, JPG, WebP</div>
-        </div>
-        <input ref={inputRef} type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f) }} />
-      </div>
-      {galleryImages.length > 0 && (
-        <div className="mt-4 w-full max-w-sm">
-          <div className="t-label text-gray-600 mb-2 text-center">or pick from your gallery</div>
-          <div className="flex justify-center gap-1.5 overflow-x-auto pb-1">
-            {galleryImages.map((g) => (
-              <button
-                key={g.id}
-                onClick={() => { if (!loading) void adoptFromGallery(g) }}
-                className="shrink-0 w-12 h-12 rounded-md overflow-hidden border border-white/10 hover:border-white/30 transition-colors"
-                title="Use this image as the source"
-                aria-label="Use this gallery image as the source"
-              >
-                <img src={galleryItemUrl(g)} alt="" className="w-full h-full object-cover" onError={() => recoverGalleryUrl(g)} />
-              </button>
-            ))}
+    // Scroll-safe centering: `m-auto` centres the column when there's room and
+    // collapses to a scroll when the dropzone + gallery strip exceed a short
+    // window (e.g. a 1366×768 laptop) — previously the parent's overflow-hidden
+    // clipped the "or pick from your gallery" strip.
+    <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin flex flex-col">
+      <div className="m-auto w-full max-w-sm flex flex-col items-center p-6">
+        <div
+          onClick={() => inputRef.current?.click()}
+          onDragOver={(e) => { e.preventDefault(); setDrag(true) }}
+          onDragLeave={() => setDrag(false)}
+          onDrop={(e) => { e.preventDefault(); setDrag(false); const f = e.dataTransfer.files[0]; if (f) handleFile(f) }}
+          className={cn(
+            // max-h trimmed 44vh→36vh so the "or pick from your gallery" strip
+            // below stays visible without scrolling at typical window heights
+            // (the 44vh drop target scaled with the window and always shoved the
+            // strip just past the fold). Still scrolls gracefully on tiny windows.
+            'w-full aspect-[5/4] min-h-[200px] max-h-[36vh] rounded-[var(--radius-panel)] border-2 border-dashed flex flex-col items-center justify-center gap-3 cursor-pointer transition-colors',
+            drag ? 'border-blue-400 bg-blue-500/10' : 'border-white/10 bg-white/[0.02] hover:border-white/20',
+          )}
+        >
+          {loading ? <Loader2 className="animate-spin text-lu-accent" size={30} /> : (
+            meta.id === 'removebg'
+              ? <Scissors className="text-lu-accent drop-shadow-[0_0_7px_var(--color-lu-accent-ring)]" size={30} strokeWidth={1.5} />
+              : <UploadCloud className="text-lu-accent drop-shadow-[0_0_7px_var(--color-lu-accent-ring)]" size={30} strokeWidth={1.5} />
+          )}
+          <div className="text-center">
+            <div className="t-title text-gray-300">{meta.id === 'removebg' ? 'Drop an image to cut out' : meta.id === 'animate' ? 'Drop an image to animate' : 'Drop an image to edit'}</div>
+            <div className="t-body text-gray-600">or click to browse · PNG, JPG, WebP</div>
           </div>
+          <input ref={inputRef} type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f) }} />
         </div>
-      )}
+        {galleryImages.length > 0 && (
+          <div className="mt-4 w-full">
+            <div className="t-label text-gray-600 mb-2 text-center">or pick from your gallery</div>
+            <div className="flex justify-center gap-1.5 overflow-x-auto pb-1">
+              {galleryImages.map((g) => (
+                <button
+                  key={g.id}
+                  onClick={() => { if (!loading) void adoptFromGallery(g) }}
+                  className="shrink-0 w-12 h-12 rounded-md overflow-hidden border border-white/10 hover:border-white/30 transition-colors"
+                  title="Use this image as the source"
+                  aria-label="Use this gallery image as the source"
+                >
+                  <img src={galleryItemUrl(g)} alt="" className="w-full h-full object-cover" onError={() => recoverGalleryUrl(g)} />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -211,33 +265,35 @@ function SourcePreview({ onOpenMaskEditor }: { onOpenMaskEditor: () => void }) {
   if (!source) return null
 
   return (
-    <div className="flex-1 flex flex-col items-center justify-center p-6">
-      <div className="relative">
-        <img src={source.url} alt="source" className={cn('max-h-[52vh] max-w-full object-contain rounded-[var(--radius-panel)] border border-white/[0.06]', intent === 'removebg' && 'lu-checker')} />
-        {mask && (
-          <div className="absolute top-2 left-2 t-label text-gray-300 bg-black/50 px-2 py-1 rounded-md">mask painted</div>
-        )}
-        <button
-          onClick={() => { setSource(null); setMask(null) }}
-          className="absolute top-2 right-2 w-7 h-7 flex items-center justify-center rounded-lg bg-black/50 text-gray-300 hover:text-white"
-          title="Remove image"
-        >
-          <X size={14} />
-        </button>
+    <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin flex flex-col">
+      <div className="m-auto flex flex-col items-center p-6">
+        <div className="relative">
+          <img src={source.url} alt="source" className={cn('max-h-[52vh] max-w-full object-contain rounded-[var(--radius-panel)] border border-white/[0.06]', intent === 'removebg' && 'lu-checker')} />
+          {mask && (
+            <div className="absolute top-2 left-2 t-label text-gray-300 bg-black/50 px-2 py-1 rounded-md">mask painted</div>
+          )}
+          <button
+            onClick={() => { setSource(null); setMask(null) }}
+            className="absolute top-2 right-2 w-7 h-7 flex items-center justify-center rounded-lg bg-black/50 text-gray-300 hover:text-white"
+            title="Remove image"
+          >
+            <X size={14} />
+          </button>
+        </div>
+        <div className="flex items-center gap-2 mt-4">
+          {meta.allowsMask && (
+            <Button variant="secondary" icon={Wand2} onClick={onOpenMaskEditor}>{mask ? 'Edit mask' : 'Paint mask'}</Button>
+          )}
+          <ChangeImageButton onChange={(r) => setSource(r)} />
+        </div>
+        <p className="t-body text-gray-600 mt-3 text-center max-w-sm">
+          {meta.id === 'removebg' ? 'Hit Create to cut out the subject and export a transparent PNG.'
+            : meta.id === 'upscale' ? 'Hit Create to upscale the image.'
+            : meta.id === 'eraser' ? 'Paint a mask over the object to remove, then hit Create.'
+            : meta.allowsMask ? 'Leave the mask empty to restyle the whole image, or paint an area to change just that. Write your prompt below, then Create.'
+            : 'Describe the motion below, then Create.'}
+        </p>
       </div>
-      <div className="flex items-center gap-2 mt-4">
-        {meta.allowsMask && (
-          <Button variant="secondary" icon={Wand2} onClick={onOpenMaskEditor}>{mask ? 'Edit mask' : 'Paint mask'}</Button>
-        )}
-        <ChangeImageButton onChange={(r) => setSource(r)} />
-      </div>
-      <p className="t-body text-gray-600 mt-3 text-center max-w-sm">
-        {meta.id === 'removebg' ? 'Hit Create to cut out the subject and export a transparent PNG.'
-          : meta.id === 'upscale' ? 'Hit Create to upscale the image.'
-          : meta.id === 'eraser' ? 'Paint a mask over the object to remove, then hit Create.'
-          : meta.allowsMask ? 'Paint a mask over what should change, write the edit prompt below, then Create.'
-          : 'Describe the motion below, then Create.'}
-      </p>
     </div>
   )
 }
@@ -250,7 +306,7 @@ function ChangeImageButton({ onChange }: { onChange: (r: Awaited<ReturnType<type
   // fine and then 415ed at submit (and a decode failure rejected unhandled).
   const handleFile = async (file: File) => {
     if (!file.type.startsWith('image/')) {
-      setError('That file type is not supported — use PNG, JPG or WebP.')
+      setError('That file type is not supported. Use PNG, JPG or WebP.')
       return
     }
     setError(null)
@@ -268,53 +324,270 @@ function ChangeImageButton({ onChange }: { onChange: (r: Awaited<ReturnType<type
   )
 }
 
+// ── Shared install-card chrome: spinner + streamed status + dismissible error ──
+// The Cancel button is not optional chrome. David 2026-07-25 clicked Download &
+// install on Motion Control, got a spinner, and had no way to stop or even see
+// a 10.5 GB transfer. Cancel here aborts the install loop and kills the running
+// download in Rust; the partial file stays, so a later run resumes.
+function InstallCardBody({ run, installing, status, err, onDismiss, onCancel }: {
+  run: () => void; installing: boolean; status: string; err: string | null
+  onDismiss: () => void; onCancel: () => void
+}) {
+  return (
+    <div className="flex flex-col items-center gap-2.5 pt-1">
+      {installing ? (
+        <div className="flex flex-col items-center gap-1.5">
+          <div className="t-control text-gray-400 flex items-center gap-2">
+            <Loader2 size={14} className="animate-spin shrink-0" />
+            <span>{status || 'Installing…'}</span>
+          </div>
+          <button
+            onClick={onCancel}
+            title="Stops the setup. A download in flight is dropped, finished files stay."
+            className="t-control text-gray-500 hover:text-gray-300 underline underline-offset-2 transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <Button variant="primary" icon={Download} onClick={run}>Download &amp; install</Button>
+      )}
+      {err && (
+        <div className="relative t-control text-gray-300 bg-white/[0.03] rounded-[var(--radius-control)] px-2.5 py-2 pr-7 max-w-sm text-left">
+          <div className="flex items-start gap-2">
+            <AlertTriangle size={13} className="text-gray-400 shrink-0 mt-px" />
+            <span className="min-w-0 break-words">{err}</span>
+          </div>
+          <button onClick={onDismiss} className="absolute top-1.5 right-1.5 text-gray-500 hover:text-gray-300 transition-colors" title="Dismiss" aria-label="Dismiss">
+            <X size={12} />
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Capability missing → one-click install right here ──
-function CapabilityCard({ cap }: { cap: 'rmbg' }) {
+const CAP_COPY = {
+  rmbg: {
+    icon: Scissors,
+    title: 'Background removal needs a one-time download',
+    description: 'The AI cutout runs fully locally (ComfyUI-RMBG). This installs the node now. The ~300 MB cutout model downloads automatically on your first cutout.',
+  },
+  'inpaint-nodes': {
+    icon: Wand2,
+    title: 'Image editing needs ComfyUI up and running',
+    description: 'Local Edit repaints the masked area with ComfyUI’s built-in inpaint nodes. This starts ComfyUI (installing it first if needed) and verifies the nodes.',
+  },
+  dwpose: {
+    icon: Film,
+    title: 'Motion control needs the pose extractor',
+    description: 'DWPose reads the skeleton out of your driving video so the character can copy it. This installs the controlnet aux node pack; the pose models download automatically on your first run.',
+  },
+} as const
+
+/** While an install runs, the card must not keep saying "needs a one-time
+ *  download" with a bare spinner under it, which is what made David ask whether
+ *  anything was happening at all. Title and description both switch. */
+const BUSY_DESCRIPTION = {
+  capability: 'This installs a small node pack and restarts ComfyUI. Cancel any time.',
+  // Cancel really does throw the partial file away (cancel_download deletes the
+  // .download temp), so the copy says that rather than the friendlier thing.
+  // A connection that DROPS is the opposite case: that partial survives and the
+  // next try resumes from it, which is what the retry line promises.
+  bundle: 'Follow it in the Downloads tray up top. You can cancel any time, which stops the download and drops what it had so far.',
+} as const
+
+function CapabilityCard({ cap }: { cap: 'rmbg' | 'inpaint-nodes' | 'dwpose' }) {
   const { installCapability } = useCreateExp()
   const [installing, setInstalling] = useState(false)
   const [status, setStatus] = useState('')
   const [err, setErr] = useState<string | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
+  const copy = CAP_COPY[cap]
 
   const run = async () => {
+    const ac = new AbortController()
+    abortRef.current = ac
     setInstalling(true); setErr(null); setStatus('Starting…')
     try {
-      // On success caps.rmbg flips true and Stage swaps this card for the input slot.
-      await installCapability(cap, setStatus)
+      // On success the capability flips true and Stage swaps this card for the input slot.
+      await installCapability(cap, setStatus, ac.signal)
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e))
+      // A cancel is a decision, not a failure: say so plainly and add the one
+      // thing that is not obvious, that the node install itself finishes in the
+      // background because there is nothing to roll back.
+      setErr(e instanceof InstallCancelled
+        ? 'Cancelled. Any node install already running finishes on its own in the background.'
+        : e instanceof Error ? e.message : String(e))
     } finally {
       setInstalling(false)
+      abortRef.current = null
     }
   }
 
   return (
     <EmptyState
-      icon={Scissors}
+      icon={copy.icon}
       tone="accent"
-      title="Background removal needs a one-time download"
-      description="The AI cutout runs fully locally (ComfyUI-RMBG). This installs the node now — the ~300 MB cutout model downloads automatically on your first cutout."
+      title={installing ? 'Setting this up for you' : copy.title}
+      description={installing ? BUSY_DESCRIPTION.capability : copy.description}
     >
-      <div className="flex flex-col items-center gap-2.5 pt-1">
-        {installing ? (
-          <div className="t-control text-gray-400 flex items-center gap-2">
-            <Loader2 size={14} className="animate-spin shrink-0" />
-            <span>{status || 'Installing…'}</span>
-          </div>
-        ) : (
-          <Button variant="primary" icon={Download} onClick={run}>Download &amp; install</Button>
-        )}
-        {err && (
-          <div className="relative t-control text-gray-300 bg-white/[0.03] rounded-[var(--radius-control)] px-2.5 py-2 pr-7 max-w-sm text-left">
-            <div className="flex items-start gap-2">
-              <AlertTriangle size={13} className="text-gray-400 shrink-0 mt-px" />
-              <span className="min-w-0 break-words">{err}</span>
-            </div>
-            <button onClick={() => setErr(null)} className="absolute top-1.5 right-1.5 text-gray-500 hover:text-gray-300 transition-colors" title="Dismiss" aria-label="Dismiss">
-              <X size={12} />
-            </button>
-          </div>
-        )}
-      </div>
+      <InstallCardBody
+        run={run} installing={installing} status={status} err={err}
+        onDismiss={() => setErr(null)}
+        onCancel={() => abortRef.current?.abort()}
+      />
     </EmptyState>
+  )
+}
+
+// ── Local model files missing → one-click starter bundle (fresh-PC path) ──
+const BUNDLE_COPY = {
+  image: {
+    icon: ImageIcon,
+    title: 'Local image generation needs a one-time download',
+    description: 'This sets up everything for a fully local run: ComfyUI itself if it’s missing, plus the Juggernaut XL starter checkpoint (~6.5 GB). That same model also powers the local Edit tab.',
+  },
+  video: {
+    icon: Film,
+    title: 'Local video generation needs a one-time download',
+    description: 'This sets up everything for a fully local run: ComfyUI itself if it’s missing, plus the Wan 2.1 starter model files (~9.2 GB, 480p, light on VRAM).',
+  },
+  audio: {
+    icon: ImageIcon,
+    title: 'Local music needs a one-time download',
+    description: 'This sets up everything for fully local music: ComfyUI itself if it’s missing, plus the ACE Step 1.5 music model (~9.3 GB, runs from 6 GB VRAM). Local music is never filtered.',
+  },
+  lipsync: {
+    icon: Film,
+    title: 'Local talking characters need a one-time download',
+    description: 'This sets up the Wan 2.2 S2V model plus its audio encoder (~20 GB total). Comfortable on 12 GB VRAM; smaller cards offload and render slower.',
+  },
+  motion: {
+    icon: Film,
+    title: 'Local motion control needs a one-time download',
+    description: 'This sets up the Wan VACE motion model plus its support files (~10.5 GB, runs from 8 GB VRAM). The bigger Wan Animate variant is in the Model Manager.',
+  },
+} as const
+
+function ModelInstallCard({ kind }: { kind: 'image' | 'video' | 'audio' | 'lipsync' | 'motion' }) {
+  const { installModelBundle } = useCreateExp()
+  const [installing, setInstalling] = useState(false)
+  const [status, setStatus] = useState('')
+  const [err, setErr] = useState<string | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
+  const copy = BUNDLE_COPY[kind]
+
+  const run = async () => {
+    const ac = new AbortController()
+    abortRef.current = ac
+    setInstalling(true); setErr(null); setStatus('Starting…')
+    try {
+      // On success the model lists refill and Stage swaps this card away.
+      await installModelBundle(kind, setStatus, ac.signal)
+    } catch (e) {
+      setErr(e instanceof InstallCancelled
+        ? 'Cancelled. Files that finished are kept, the one in flight was dropped.'
+        : e instanceof Error ? e.message : String(e))
+    } finally {
+      setInstalling(false)
+      abortRef.current = null
+    }
+  }
+
+  return (
+    <EmptyState
+      icon={copy.icon}
+      tone="accent"
+      title={installing ? 'Setting this up for you' : copy.title}
+      description={installing ? BUSY_DESCRIPTION.bundle : copy.description}
+    >
+      <InstallCardBody
+        run={run} installing={installing} status={status} err={err}
+        onDismiss={() => setErr(null)}
+        onCancel={() => abortRef.current?.abort()}
+      />
+    </EmptyState>
+  )
+}
+
+// ── Character-Studio training board (2.5.8): the 4-30 photo set. Trigger word
+// and the Create (train) button live in the composer; this is the visual home
+// of the image set with add/remove + drag&drop. ──
+function TrainSetBoard() {
+  const trainImages = useCreateStore((s) => s.trainImages)
+  const addTrainImages = useCreateStore((s) => s.addTrainImages)
+  const removeTrainImage = useCreateStore((s) => s.removeTrainImage)
+  const backend = useCreateStore((s) => s.backend)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const addFiles = (files: FileList | File[]) => {
+    const imgs = Array.from(files)
+      .filter((f) => f.type.startsWith('image/'))
+      .map((f) => ({ name: f.name, url: URL.createObjectURL(f), blob: f as Blob }))
+    if (imgs.length > 0) addTrainImages(imgs)
+  }
+
+  return (
+    <div
+      className="flex-1 min-h-0 flex flex-col p-4 gap-3"
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => { e.preventDefault(); addFiles(e.dataTransfer.files) }}
+    >
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = '' }}
+      />
+      {trainImages.length === 0 ? (
+        <button
+          onClick={() => inputRef.current?.click()}
+          className="flex-1 rounded-xl border-2 border-dashed border-white/10 hover:border-white/25 transition-colors flex flex-col items-center justify-center gap-2 text-gray-500 hover:text-gray-300"
+        >
+          <UploadCloud size={28} />
+          <div className="t-body">Drop 4 to 30 photos of your character here</div>
+          <div className="t-label text-gray-600">
+            One person or character, varied angles and lighting works best
+          </div>
+        </button>
+      ) : (
+        <>
+          <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin">
+            <div className="grid grid-cols-4 sm:grid-cols-6 gap-2">
+              {trainImages.map((img) => (
+                <div key={img.name} className="relative group aspect-square rounded-lg overflow-hidden bg-white/[0.03] border border-white/[0.06]">
+                  <img src={img.url} alt="" className="w-full h-full object-cover" />
+                  <button
+                    onClick={() => removeTrainImage(img.name)}
+                    className="absolute top-1 right-1 p-1 rounded-md bg-black/60 text-gray-300 opacity-0 group-hover:opacity-100 hover:text-white transition-opacity"
+                    title="Remove"
+                    aria-label="Remove"
+                  >
+                    <X size={11} />
+                  </button>
+                </div>
+              ))}
+              <button
+                onClick={() => inputRef.current?.click()}
+                className="aspect-square rounded-lg border-2 border-dashed border-white/10 hover:border-white/25 flex items-center justify-center text-gray-500 hover:text-gray-300 transition-colors"
+                title="Add photos"
+                aria-label="Add photos"
+              >
+                <ImagePlus size={18} />
+              </button>
+            </div>
+          </div>
+          <div className="t-label text-gray-500 text-center shrink-0">
+            {trainImages.length}/30 photos. {backend === 'cloud'
+              ? 'Training runs in the cloud and lands the character on your shelf.'
+              : 'Training runs on your GPU and lands the character in your local LoRAs.'}
+          </div>
+        </>
+      )}
+    </div>
   )
 }

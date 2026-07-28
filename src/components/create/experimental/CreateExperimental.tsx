@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { AlertTriangle, X } from 'lucide-react'
+import { AlertTriangle, Cloud, X } from 'lucide-react'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
+import { useCloudNoticeStore, CLOUD_RETENTION_DAYS, shouldShowRetentionNotice } from '../../../stores/cloudNoticeStore'
 import { CreateExpProvider, useCreateExp } from './CreateContext'
 import { IntentBar } from './IntentBar'
 import { Stage } from './Stage'
@@ -11,7 +12,8 @@ import { Lightbox } from './Lightbox'
 import { AdvancedDrawer } from './AdvancedDrawer'
 import { MaskEditor } from './MaskEditor'
 import { VhsInstallModal } from './VhsInstallModal'
-import { INTENT_MAP } from './intents'
+import { INTENT_MAP, isIntentAvailable } from './intents'
+import { isMlxImageHost } from '../../../api/mlx-image'
 import { fetchGalleryItemBlob } from './galleryUrl'
 import { loadImageRef } from './loadImage'
 
@@ -29,6 +31,11 @@ function CreateExperimentalInner() {
   const error = useCreateStore((s) => s.error)
   const setError = useCreateStore((s) => s.setError)
   const backend = useCreateStore((s) => s.backend)
+  const comfyCorsBlocked = useCreateStore((s) => s.comfyCorsBlocked)
+  const setComfyCorsBlocked = useCreateStore((s) => s.setComfyCorsBlocked)
+  const isGenerating = useCreateStore((s) => s.isGenerating)
+  const retentionNoticeSeen = useCloudNoticeStore((s) => s.retentionNoticeSeen)
+  const setRetentionNoticeSeen = useCloudNoticeStore((s) => s.setRetentionNoticeSeen)
   const { modelLoadError, connected, comfyOnCpu } = useCreateExp()
 
   const [shownId, setShownId] = useState<string | null>(null)
@@ -36,6 +43,27 @@ function CreateExperimentalInner() {
   const [maskOpen, setMaskOpen] = useState(false)
   const [lightbox, setLightbox] = useState<GalleryItem | null>(null)
   const [panelOpen, setPanelOpen] = useState(false)
+
+  // One-click CORS fix (David 2026-07-17): restart the user-managed ComfyUI
+  // under LU's management so it carries --enable-cors-header. On success the
+  // banner clears; if LU can't do it (unknown path / remote host) the backend
+  // error explains the manual route and stays visible in the banner.
+  const [corsFixing, setCorsFixing] = useState(false)
+  const [corsFixError, setCorsFixError] = useState<string | null>(null)
+  const fixCorsForMe = useCallback(async () => {
+    setCorsFixing(true)
+    setCorsFixError(null)
+    try {
+      const { backendCall } = await import('../../../api/backend')
+      await backendCall('fix_comfyui_cors')
+      // ComfyUI is relaunching with the flag — direct loads work from here on.
+      useCreateStore.getState().setComfyCorsBlocked(false)
+    } catch (err) {
+      setCorsFixError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setCorsFixing(false)
+    }
+  }, [])
 
   // David 2026-07-11: the Stage starts EMPTY and never auto-surfaces a persisted
   // gallery item — not on mount, not on a mode/intent switch. It fills only on an
@@ -56,6 +84,13 @@ function CreateExperimentalInner() {
 
   const displayed = shownId ? gallery.find((g) => g.id === shownId) : undefined
   const banner = error ?? modelLoadError
+
+  // "Edit with mask" on a finished image force-sets the 'edit' intent. On the
+  // MLX Mac that lane does not exist (no ComfyUI inpaint nodes, and MLX
+  // generate DROPS the source + mask — it silently produced an unrelated fresh
+  // text-to-image instead of an edit). Hide the action where the lane can't
+  // run, using the same rule the IntentBar renders from.
+  const editAvailable = isIntentAvailable('edit', backend, isMlxImageHost())
 
   // Pull a finished result back in as the working source (ImageRef). Needed
   // because a text-to-image run leaves `source` empty — without this, "Edit
@@ -91,7 +126,7 @@ function CreateExperimentalInner() {
   }, [intent])
 
   return (
-    <div className="h-full w-full flex flex-col bg-[#141414] text-gray-200 overflow-hidden">
+    <div className="relative h-full w-full flex flex-col bg-white dark:bg-[#141414] text-gray-200 overflow-hidden">
       <IntentBar />
 
       <AnimatePresence>
@@ -123,30 +158,85 @@ function CreateExperimentalInner() {
         <div className="flex items-center gap-2 px-4 py-2 bg-yellow-500/5 border-b border-yellow-500/10 text-yellow-300 text-xs shrink-0">
           <AlertTriangle size={12} className="shrink-0" />
           <span>
-            ComfyUI is running on the CPU (no usable GPU detected) — generation will be extremely slow and may time out.
+            ComfyUI is running on the CPU (no usable GPU detected). Generation will be extremely slow and may time out.
             AMD GPU? Point LU at a ROCm/ZLUDA ComfyUI and set Settings → Hardware → ComfyUI GPU to force GPU.
           </span>
         </div>
       )}
 
-      {/* Stage+Composer on the left, the Gallery bubble as a right rail —
-          matched 1:1 with the web companion (the old bottom strip is gone). */}
-      <div className="flex-1 min-h-0 flex overflow-hidden">
-        <div className="flex-1 min-w-0 relative flex flex-col">
-          <Stage
-            displayed={displayed}
-            onOpenMaskEditor={() => setMaskOpen(true)}
-            onEditResult={backend === 'cloud' ? (it) => { void editResultWithMask(it) } : undefined}
-            onFullscreen={(it) => setLightbox(it)}
-          />
-          <Composer onOpenAdvanced={() => setAdvancedOpen(true)} />
-
-          <AdvancedDrawer open={advancedOpen} onClose={() => setAdvancedOpen(false)} />
-          <MaskEditor open={maskOpen} onClose={() => setMaskOpen(false)} />
+      {/* Cross-origin block (#75, cinemazverev): a user-managed ComfyUI 0.19+
+          answers the WebView's media/WS requests with a Sec-Fetch 403, so results
+          couldn't be viewed. LU proxies the bytes so they still display, but the
+          live progress bar + native video seeking degrade. David 2026-07-17: keep
+          the message short and offer a one-click fix — LU restarts ComfyUI under
+          its own management, which always passes the CORS flag. Local only,
+          dismissible; the long manual-flag hint only appears if the fix fails. */}
+      {backend === 'local' && comfyCorsBlocked && (
+        <div className="flex items-start gap-2 px-4 py-2 bg-yellow-500/5 border-b border-yellow-500/10 text-yellow-300 text-xs shrink-0">
+          <AlertTriangle size={12} className="shrink-0 mt-0.5" />
+          <span className="flex-1 min-w-0">
+            {corsFixError
+              ? corsFixError
+              : corsFixing
+                ? 'Restarting ComfyUI with the fix… this takes a moment.'
+                : 'Your ComfyUI blocks direct loads (v0.19+), so previews use a slower fallback.'}
+          </span>
+          {!corsFixing && (
+            <button
+              onClick={() => { void fixCorsForMe() }}
+              disabled={isGenerating}
+              title={isGenerating ? 'Waiting for the current generation to finish' : 'LU restarts ComfyUI with the CORS flag for you'}
+              className="shrink-0 px-2 py-0.5 rounded bg-yellow-500/15 hover:bg-yellow-500/25 text-yellow-200 transition-colors whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Let me do it for you!
+            </button>
+          )}
+          <button onClick={() => { setComfyCorsBlocked(false); setCorsFixError(null) }} className="shrink-0 text-yellow-300/70 hover:text-yellow-100" title="Dismiss">
+            <X size={14} />
+          </button>
         </div>
+      )}
 
+      {/* Cloud gallery retention (David 2026-07-24). Cloud renders live on our
+          servers, not on this machine, so the gallery is not permanent storage.
+          Cloud mode only. One time ever: no close X and no auto-hide, the only
+          way out is the explicit "Do not show again", and it stays dismissed
+          across updates (persisted in lu_cloud_notice). */}
+      {shouldShowRetentionNotice(backend, retentionNoticeSeen) && (
+        <div className="flex items-start gap-2 px-4 py-2 bg-purple-500/5 border-b border-purple-500/10 text-purple-200 text-xs shrink-0">
+          <Cloud size={12} className="shrink-0 mt-0.5" />
+          <span className="flex-1 min-w-0">
+            Cloud results are stored for {CLOUD_RETENTION_DAYS} days and then deleted.
+            Download anything you want to keep from the gallery.
+          </span>
+          <button
+            onClick={() => setRetentionNoticeSeen(true)}
+            className="shrink-0 px-2 py-0.5 rounded bg-purple-500/15 hover:bg-purple-500/25 text-purple-100 transition-colors whitespace-nowrap"
+          >
+            Do not show again
+          </button>
+        </div>
+      )}
+
+      {/* The viewer (Stage) and the Gallery bubble share ONE row, so they're
+          always the exact same height; the prompt window spans the full width
+          beneath them. (Previously the Gallery ran full-height alongside both the
+          viewer AND the composer, so it was taller than the viewer.) */}
+      <div className="flex-1 min-h-0 flex overflow-hidden">
+        <Stage
+          displayed={displayed}
+          onOpenMaskEditor={() => setMaskOpen(true)}
+          onEditResult={editAvailable ? (it) => { void editResultWithMask(it) } : undefined}
+          onFullscreen={(it) => setLightbox(it)}
+        />
         <CreatePanel open={panelOpen} onOpenChange={setPanelOpen} activeId={shownId} onSelect={openGalleryItem} />
       </div>
+
+      {/* Prompt window — full width, beneath the viewer + gallery. */}
+      <Composer onOpenAdvanced={() => setAdvancedOpen(true)} />
+
+      <AdvancedDrawer open={advancedOpen} onClose={() => setAdvancedOpen(false)} />
+      <MaskEditor open={maskOpen} onClose={() => setMaskOpen(false)} />
 
       <Lightbox item={lightbox} onClose={() => setLightbox(null)} />
       <VhsInstallModal />

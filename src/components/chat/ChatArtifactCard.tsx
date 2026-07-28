@@ -90,7 +90,7 @@ export function ChatArtifactCard({ artifact }: { artifact: ChatArtifact }) {
       {/* Scrollable preview */}
       <pre className="px-2.5 py-1.5 text-[0.65rem] leading-snug text-gray-700 dark:text-gray-300 font-mono overflow-auto max-h-64 scrollbar-thin whitespace-pre">
         {preview}
-        {hiddenLines > 0 ? `\n\n… ${hiddenLines} more line${hiddenLines === 1 ? '' : 's'} — download for the full file` : ''}
+        {hiddenLines > 0 ? `\n\n… ${hiddenLines} more line${hiddenLines === 1 ? '' : 's'}. Download for the full file` : ''}
       </pre>
     </div>
   )

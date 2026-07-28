@@ -16,15 +16,16 @@ import type {
 import { ProviderError } from './types'
 import { parseSSEStream } from '../sse'
 import { repairJson } from '../../lib/tool-call-repair'
-import { localFetch, localFetchStream, isPrivateOrLanHost, hostnameOf, ensureProxyAllowsHost } from '../backend'
+import { signalCreditsExhausted } from '../../lib/credits-exhausted'
+import { localFetch, localFetchStream, isPrivateOrLanHost, isDirectFetchAllowed, hostnameOf, ensureProxyAllowsHost } from '../backend'
+import { ensureBuiltinEngineAlive } from '../builtin-ensure'
 
-// Local/LAN vs cloud routing now lives in the `useLocalProxy` getter (below)
-// plus the shared host helpers in backend.ts (isPrivateOrLanHost/hostnameOf).
-// A local OR LAN OpenAI-compat backend (LM Studio/vLLM bound to 0.0.0.0,
-// reached over the network) is hit through the Rust proxy to bypass CORS + the
-// webview CSP; cloud endpoints use a direct fetch. Fixes GH #49 (LAN endpoint
-// "Test" failed because a 192.168.x.x host fell back to a CSP/CORS-blocked
-// direct fetch).
+// Transport routing lives in the `useLocalProxy` getter (below) plus the shared
+// host helpers in backend.ts. A direct webview fetch only works for hosts the
+// pinned CSP lists; everything else — LAN backends (also CORS-blocked, GH #49)
+// and any cloud endpoint LU ships no preset for — goes through the Rust proxy.
+// `isLanBackend` stays separate: it decides local-only BEHAVIOUR (context
+// probing), which must not follow the transport decision.
 
 // ── OpenAI API Types ───────────────────────────────────────────
 
@@ -73,6 +74,12 @@ interface OpenAIModelEntry {
   name?: string
   context_length?: number
   input_modalities?: string[]
+  // LU Cloud /models declares per-model tool-calling support. Some cloud chat
+  // models (Hermes 3, Euryale, MythoMax, Llama-4-Maverick, …) can't do function
+  // calling; the server marks them false so Agent/Code mode can gate them up
+  // front instead of eating a mid-run 400. Absent on backends that don't send
+  // it → the mapping falls back to `true` (optimistic, corrected at runtime).
+  supports_tools?: boolean
   think?: 'toggle' | 'always' | 'never'
 }
 
@@ -133,6 +140,41 @@ function guessContextFromName(model: string): number {
   return 8192
 }
 
+// Real context windows from the provider's /models catalogue (LU Cloud sends
+// context_length per model). The name heuristic underestimates new cloud
+// models badly (Qwen3.6-35B-A3B → 32k guess vs 262k real), which shrinks the
+// applyMaxTokens headroom toward the 256 floor on long chats and truncates
+// answers. Module-level and keyed by endpoint — NOT an instance field: the
+// lu-cloud provider builds a FRESH OpenAIProvider delegate on every call (its
+// bearer token rotates), so an instance map is always empty exactly where it
+// matters. listModels fills it through one delegate; chatStream's
+// applyMaxTokens and getContextLength read it through another.
+const catalogContext = new Map<string, number>()
+
+/**
+ * Which accumulator slot a tool-call delta without an `index` belongs to. The
+ * field is required by the OpenAI spec but several compatible servers omit it.
+ * A delta carrying a fresh id opens the next slot; anything else continues the
+ * call currently being filled.
+ */
+function keyForUnindexedDelta(
+  accum: Map<number, { id: string; name: string; args: string }>,
+  id?: string,
+): number {
+  if (id) {
+    for (const [key, call] of accum) {
+      if (call.id === id) return key
+    }
+    return accum.size
+  }
+  return Math.max(0, accum.size - 1)
+}
+
+/** Test-only: reset the endpoint catalogue between test cases. */
+export function __clearContextCatalogForTests(): void {
+  catalogContext.clear()
+}
+
 // ── Provider Implementation ────────────────────────────────────
 
 export class OpenAIProvider implements ProviderClient {
@@ -140,20 +182,35 @@ export class OpenAIProvider implements ProviderClient {
 
   constructor(private config: ProviderConfig) {}
 
+  private catalogKey(model: string): string {
+    return `${this.baseUrl}|${model}`
+  }
+
   private get baseUrl(): string {
     return this.config.baseUrl.replace(/\/+$/, '')
   }
 
   /**
-   * Whether requests must go through the Rust proxy instead of a direct webview
-   * fetch. True for any local/LAN endpoint — declared by the preset
+   * A backend on this machine or the LAN — declared by the preset
    * (`config.isLocal`) OR detected from the host (localhost, RFC1918, CGNAT,
-   * IPv6 ULA/link-local, .local, bare machine name). Cloud endpoints (public
-   * hostnames, isLocal=false) use a direct fetch. Fixes GH #49 where a LAN LM
-   * Studio (e.g. 192.168.1.50) used a direct fetch and was CSP/CORS-blocked.
+   * IPv6 ULA/link-local, .local, bare machine name). Drives behaviour that only
+   * makes sense locally: per-model context probing and the LM Studio enhanced
+   * API. Cloud endpoints must not do those (N+1 requests → rate limits).
+   */
+  private get isLanBackend(): boolean {
+    return this.config.isLocal === true || isPrivateOrLanHost(hostnameOf(this.baseUrl))
+  }
+
+  /**
+   * Whether requests must go through the Rust proxy instead of a direct webview
+   * fetch. Two reasons: a LAN endpoint has no CORS headers for the
+   * tauri.localhost origin (GH #49), and a public host outside the pinned CSP
+   * allow-list gets killed inside the webview before it hits the network — that
+   * is every custom OpenAI-compatible provider a user configures themselves
+   * (their own domain, or a vendor LU ships no preset for).
    */
   private get useLocalProxy(): boolean {
-    return this.config.isLocal === true || isPrivateOrLanHost(hostnameOf(this.baseUrl))
+    return this.isLanBackend || !isDirectFetchAllowed(hostnameOf(this.baseUrl))
   }
 
   private get headers(): Record<string, string> {
@@ -222,9 +279,18 @@ export class OpenAIProvider implements ProviderClient {
     // it — we handle that with a retry below.
     if (options?.thinking === true) body.reasoning_effort = 'high'
     else if (options?.thinking === false) body.reasoning_effort = 'minimal'
-    // Ask LM Studio / local openai-compat servers for REAL token usage in a
-    // final stream chunk (choices:[] + usage:{...}). Dropped on 400 below.
-    if (this.useLocalProxy) body.stream_options = { include_usage: true }
+    // Ask the server for REAL token usage in a final stream chunk
+    // (choices:[] + usage:{...}). OpenAI, DeepInfra (LU Cloud), Groq, vLLM and
+    // LM Studio all honor stream_options; an endpoint that rejects unknown
+    // params 400/422s and the retry below drops it. Real usage is what keeps
+    // the TokenCounter honest — a char/4 estimate can't see the system prompt.
+    body.stream_options = { include_usage: true }
+
+    // Managed built-in engine: Create/Music renders stop the llama-server
+    // child to free VRAM ("reloads lazily on the next message") — this is that
+    // lazy reload. Restart-before-send instead of letting the fetch hit a dead
+    // 127.0.0.1:8127 and look like a crashed backend.
+    if (this.config.managed === true) await ensureBuiltinEngineAlive(model)
 
     if (this.useLocalProxy) await ensureProxyAllowsHost(this.baseUrl)
     const fetcher = this.useLocalProxy ? localFetchStream : fetch
@@ -257,12 +323,14 @@ export class OpenAIProvider implements ProviderClient {
     const toolCallAccum: Map<number, { id: string; name: string; args: string }> = new Map()
     let promptTokens = 0
     let completionTokens = 0
-    const doneChunk = (): ChatStreamChunk => {
+    let finishReason: string | undefined
+    const doneChunk = (fallbackReason: string): ChatStreamChunk => {
       const toolCalls = this.flushToolCalls(toolCallAccum)
       return {
         content: '',
         toolCalls: toolCalls.length ? toolCalls : undefined,
         done: true,
+        finishReason: finishReason ?? fallbackReason,
         promptEvalCount: promptTokens || undefined,
         evalCount: completionTokens || undefined,
       }
@@ -270,7 +338,7 @@ export class OpenAIProvider implements ProviderClient {
 
     for await (const event of parseSSEStream(res)) {
       if (event.data === '[DONE]') {
-        yield doneChunk()
+        yield doneChunk('stop')
         return
       }
 
@@ -305,6 +373,13 @@ export class OpenAIProvider implements ProviderClient {
       const choice = chunk.choices?.[0]
       if (!choice) continue
 
+      // Capture WHY the model stopped ('stop', 'length', 'content_filter').
+      // 'length' with zero content is the reasoning-loop failure mode: the
+      // whole token budget went into thinking and no answer was ever written
+      // (David, cloud Qwen3.6, 2026-07-12) — the chat layer needs the reason
+      // to explain the empty bubble.
+      if (choice.finish_reason) finishReason = choice.finish_reason
+
       const content = choice.delta?.content || ''
 
       // Yield native reasoning as `thinking` so the panel fills live —
@@ -318,11 +393,21 @@ export class OpenAIProvider implements ProviderClient {
       // Accumulate streamed tool calls
       if (choice.delta?.tool_calls) {
         for (const tc of choice.delta.tool_calls) {
-          const existing = toolCallAccum.get(tc.index)
+          const key = tc.index ?? keyForUnindexedDelta(toolCallAccum, tc.id)
+          const existing = toolCallAccum.get(key)
           if (existing) {
+            // id and name do NOT always arrive in the first delta — several
+            // OpenAI-compat servers send the id one chunk later, or open with a
+            // bare index. Ignoring them left a call with an empty name (dispatch
+            // fails on "") or an empty tool_call_id, which 422s the follow-up
+            // turn — the exact break the server-side normalizer had to heal.
+            // Set-if-empty, not append: servers that repeat the full name in
+            // every delta are far more common than ones that stream it in parts.
+            if (tc.id && !existing.id) existing.id = tc.id
+            if (tc.function?.name && !existing.name) existing.name = tc.function.name
             if (tc.function?.arguments) existing.args += tc.function.arguments
           } else {
-            toolCallAccum.set(tc.index, {
+            toolCallAccum.set(key, {
               id: tc.id || '',
               name: tc.function?.name || '',
               args: tc.function?.arguments || '',
@@ -342,8 +427,13 @@ export class OpenAIProvider implements ProviderClient {
       // chunk, which now carries the captured usage.
     }
 
-    // Stream ended without an explicit [DONE] sentinel.
-    yield doneChunk()
+    // Stream ended without an explicit [DONE] sentinel. If the server also
+    // never sent a finish_reason, the connection was cut mid-generation
+    // (proxy idle-timeout, upstream drop) — a clean FIN ends parseSSEStream
+    // without any error, which used to masquerade as a normal completion and
+    // leave the user a silent empty bubble. Tag it 'disconnect' so the chat
+    // layer can say so.
+    yield doneChunk('disconnect')
   }
 
   async chatWithTools(
@@ -370,6 +460,10 @@ export class OpenAIProvider implements ProviderClient {
     if (options?.thinking === true) body.reasoning_effort = 'high'
     else if (options?.thinking === false) body.reasoning_effort = 'minimal'
 
+    // Same self-heal as chatStream: agent/tool turns after a Create render
+    // must revive the offloaded built-in engine before hitting its port.
+    if (this.config.managed === true) await ensureBuiltinEngineAlive(model)
+
     if (this.useLocalProxy) await ensureProxyAllowsHost(this.baseUrl)
     const fetcher = this.useLocalProxy ? localFetch : fetch
     let res = await fetcher(`${this.baseUrl}/chat/completions`, {
@@ -391,7 +485,7 @@ export class OpenAIProvider implements ProviderClient {
     }
 
     if (!res.ok) {
-      throw await this.parseError(res)
+      throw await this.parseError(res, tools.length > 0)
     }
 
     const data: OpenAIResponse = await res.json()
@@ -434,7 +528,7 @@ export class OpenAIProvider implements ProviderClient {
     // Context-Limit vom Server. Sonst zeigen wir 8K obwohl das Modell 32K+
     // kann. Probes laufen parallel; bei Cloud-Providers (OpenAI/OpenRouter)
     // wuerde N+1 zu Rate-Limits fuehren, deshalb nur KNOWN_CONTEXT/Heuristik.
-    if (this.useLocalProxy) {
+    if (this.isLanBackend) {
       return Promise.all(models.map(async m => ({
         id: m.id,
         name: m.id,
@@ -444,20 +538,32 @@ export class OpenAIProvider implements ProviderClient {
           KNOWN_CONTEXT[m.id] ??
           (await this.probeContextFromServer(m.id)) ??
           guessContextFromName(m.id),
-        supportsTools: true,
+        supportsTools: m.supports_tools ?? true,
       })))
     }
 
-    return models.map(m => ({
-      id: m.id,
-      name: m.name ?? m.id,
-      provider: 'openai' as const,
-      providerName: this.config.name,
-      contextLength: m.context_length ?? KNOWN_CONTEXT[m.id] ?? guessContextFromName(m.id),
-      supportsTools: true,
-      supportsVision: m.input_modalities?.includes('image') || undefined,
-      thinkMode: m.think,
-    }))
+    return models.map(m => {
+      // Remember the server-declared window for applyMaxTokens (see
+      // catalogContext). Server value beats every heuristic — it reflects
+      // what THIS deployment actually serves.
+      if (m.context_length && m.context_length > 0) {
+        catalogContext.set(this.catalogKey(m.id), m.context_length)
+      }
+      return {
+        id: m.id,
+        name: m.name ?? m.id,
+        provider: 'openai' as const,
+        providerName: this.config.name,
+        contextLength: m.context_length ?? KNOWN_CONTEXT[m.id] ?? guessContextFromName(m.id),
+        // Server-authoritative tool capability. `false` for the cloud chat
+        // models that can't do function calling → the whole chain (Agent
+        // toggle, dropdown icon, Code mode) gates them without a failed run.
+        // Fallback `true` keeps older deployments (no field) optimistic.
+        supportsTools: m.supports_tools ?? true,
+        supportsVision: m.input_modalities?.includes('image') || undefined,
+        thinkMode: m.think,
+      }
+    })
   }
 
   async checkConnection(): Promise<boolean> {
@@ -489,7 +595,7 @@ export class OpenAIProvider implements ProviderClient {
    * Returnt `null` wenn nichts gefunden, damit Callers cascaden koennen.
    */
   private async probeContextFromServer(model: string): Promise<number | null> {
-    if (!this.useLocalProxy) return null
+    if (!this.isLanBackend) return null
 
     // 1. LM Studio Enhanced API: /api/v0/models/<id>
     //    Base-URL ist typischerweise http://localhost:1234/v1 — wir tauschen
@@ -531,10 +637,14 @@ export class OpenAIProvider implements ProviderClient {
 
   async getContextLength(model: string): Promise<number> {
     // Cascade:
-    //   1. KNOWN_CONTEXT lookup (kein Network, instant)
-    //   2. probeContextFromServer (LM Studio enhanced + generic /v1/models/<id>)
-    //   3. Heuristik aus dem Modell-Namen
-    //   4. Konservativer 8192er-Fallback (in guessContextFromName)
+    //   1. Server-declared context_length from the /models catalogue (LU
+    //      Cloud) — authoritative for the deployment, beats every heuristic
+    //   2. KNOWN_CONTEXT lookup (kein Network, instant)
+    //   3. probeContextFromServer (LM Studio enhanced + generic /v1/models/<id>)
+    //   4. Heuristik aus dem Modell-Namen
+    //   5. Konservativer 8192er-Fallback (in guessContextFromName)
+    const catalog = catalogContext.get(this.catalogKey(model))
+    if (catalog && catalog > 0) return catalog
     if (KNOWN_CONTEXT[model]) return KNOWN_CONTEXT[model]
     const probed = await this.probeContextFromServer(model)
     if (probed) return probed
@@ -580,9 +690,11 @@ export class OpenAIProvider implements ProviderClient {
     if (accum.size === 0) return []
 
     const calls: ToolCall[] = []
-    for (const [, tc] of accum) {
+    for (const [index, tc] of accum) {
       calls.push({
-        id: tc.id,
+        // A server that never sent an id would otherwise put an empty
+        // tool_call_id in the follow-up message and 422 the next turn.
+        id: tc.id || `call_${index}`,
         function: {
           name: tc.name,
           arguments: this.safeParseArgs(tc.args),
@@ -604,14 +716,21 @@ export class OpenAIProvider implements ProviderClient {
 
   // ── Error parsing ────────────────────────────────────────────
 
-  private async parseError(res: Response): Promise<ProviderError> {
+  private async parseError(res: Response, toolsSent = false): Promise<ProviderError> {
     let message = `${this.config.name}: Request failed`
     let code: string = 'network'
     let hasServerMessage = false
+    // LU Cloud proxy tags impossible requests with a structured top-level code
+    // (sibling of `error`): "model_no_tools" (tools sent to a model without
+    // function calling) / "model_no_vision" (image sent to a text-only model).
+    // Mapped to our kinds after the status switch so the honest `error` line
+    // surfaces and Agent/Code can remember the model.
+    let serverCode: string | undefined
 
     try {
-      const data = await res.json() as { error?: unknown; message?: string }
+      const data = await res.json() as { error?: unknown; message?: string; code?: string }
       const err = data.error
+      if (typeof data.code === 'string' && data.code.trim()) serverCode = data.code
       // OpenAI & most servers: { error: { message, code } }. But LM Studio and
       // llama.cpp commonly send a BARE string ({ error: "..." }) or a top-level
       // { message: "..." }. The old object-only read missed both → the real
@@ -648,6 +767,30 @@ export class OpenAIProvider implements ProviderClient {
       code = 'not_found'
     }
 
+    // A tool-augmented request rejected for the tools themselves. DeepInfra /
+    // LU Cloud answer 405 for a model without function calling; some servers
+    // 400/404/422 with a tool/function message. Tag it 'tools_unsupported' so
+    // the chat layer shows a clean "this model can't do tool calling" note (and
+    // remembers the model) instead of a raw status error. Guarded on toolsSent
+    // so a plain 405 on a tool-less request is never mislabelled.
+    if (toolsSent && (res.status === 405 || ((res.status === 400 || res.status === 404 || res.status === 422) && /\btools?\b|function[_ ]?call/i.test(message)))) {
+      code = 'tools_unsupported'
+      if (!hasServerMessage) message = `${this.config.name}: this model does not support tools (function calling).`
+    }
+
+    // Server-authoritative capability rejection (LU Cloud proxy, HTTP 400).
+    // Wins over the heuristic above: it names the exact reason and ships an
+    // honest, user-facing `error` line (already captured as `message`).
+    if (serverCode === 'model_no_tools') code = 'tools_unsupported'
+    else if (serverCode === 'model_no_vision') code = 'vision_unsupported'
+    else if (serverCode === 'credits_exhausted') {
+      // Out of credits, top-up wallet empty (HTTP 429). Raise the global
+      // signal so the "Load up your credits" dialog opens on top of the
+      // honest error line already carried in `message`.
+      code = 'credits_exhausted'
+      signalCreditsExhausted()
+    }
+
     // LM Studio: model load fails when there's no inference runtime for the
     // model's format installed. The raw API error reads "No LM Runtime found
     // for model format 'gguf'" which doesn't tell a noob what to do —
@@ -664,7 +807,7 @@ export class OpenAIProvider implements ProviderClient {
         "Open LM Studio → click the 🔍 Discover icon in the left sidebar → " +
         "switch to the \"Runtimes\" tab → download \"llama.cpp (CPU)\" " +
         "(plus a GPU runtime if you have one).\n\n" +
-        "Once the runtime is downloaded, come back here and resend your message — " +
+        "Once the runtime is downloaded, come back here and resend your message, " +
         "no need to restart LU."
     }
 

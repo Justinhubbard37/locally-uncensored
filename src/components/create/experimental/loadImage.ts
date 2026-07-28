@@ -28,7 +28,7 @@ function decodeImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image()
     img.onload = () => resolve(img)
-    img.onerror = () => reject(new Error('the image could not be decoded — use PNG, JPG or WebP'))
+    img.onerror = () => reject(new Error('the image could not be decoded, use PNG, JPG or WebP'))
     img.src = url
   })
 }
