@@ -164,7 +164,15 @@ export const useDownloadStore = create<DownloadStoreState>()((set, get) => ({
         return
       }
     }
-    // Clear the error state first
+    // Clear the error state — on BOTH sides. The errored entry also lives in
+    // the Rust download map, and download_model short-circuits with "exists"
+    // when the file is already on disk, never touching that map. So a retry
+    // that hits the short-circuit left the old error row in place and the next
+    // refresh() resurrected the card the user had just retried, making the
+    // model look permanently broken. Same reason dismiss() clears it there.
+    if (get().downloads[id]?.status === 'error') {
+      await cancelDownload(id).catch(() => { /* best effort — a restart clears it */ })
+    }
     set(s => {
       const updated = { ...s.downloads }
       delete updated[id]
