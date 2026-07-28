@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Character LoRA Training, Locally: Free &amp; Uncensored (2026)</title>
+<meta name="description" content="Train a character LoRA on your own GPU: 15–30 images, a free open-source trainer, 8–12 GB VRAM. Honest settings, captioning, and no content filters.">
+<meta name="keywords" content="character lora training, train a character lora locally, uncensored lora training, character lora how many images, lora training 8gb vram, kohya_ss vs ai-toolkit, sdxl character lora settings">
+<meta property="og:title" content="Character LoRA Training, Locally: Free &amp; Uncensored (2026)">
+<meta property="og:description" content="Train a LoRA of your own character on your own GPU: dataset size, captioning, kohya_ss vs ai-toolkit, the settings that matter, and why local training has no content filter.">
+<meta property="og:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<meta property="og:url" content="https://locallyuncensored.com/blog/character-lora-training-local.html">
+<meta property="og:type" content="article">
+<meta property="article:published_time" content="2026-07-28">
+<meta property="article:author" content="PurpleDoubleD">
+<meta property="article:tag" content="LoRA Training">
+<meta property="article:tag" content="Character LoRA">
+<meta property="article:tag" content="Image Generation">
+<meta property="article:tag" content="Tutorial">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Character LoRA Training, Locally: Free &amp; Uncensored (2026)">
+<meta name="twitter:description" content="15–30 images, a free trainer, 8–12 GB VRAM. The honest local walkthrough for training a consistent character LoRA on your own GPU.">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<link rel="canonical" href="https://locallyuncensored.com/blog/character-lora-training-local.html">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="../favicon.png">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"Article","headline":"Character LoRA Training, Locally: Free and Uncensored","description":"How to train a character LoRA on your own GPU with a free open-source trainer: how many images you need, how captioning actually works, kohya_ss vs ostris/ai-toolkit, conservative starting settings for rank, learning rate and steps, and how to test the result with weight and checkpoint sweeps.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-07-28","dateModified":"2026-07-28","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/character-lora-training-local.html"},"keywords":"character lora training, train a character lora locally, uncensored lora training, character lora how many images, lora training 8gb vram"}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://locallyuncensored.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://locallyuncensored.com/blog/"},{"@type":"ListItem","position":3,"name":"Character LoRA Training, Locally","item":"https://locallyuncensored.com/blog/character-lora-training-local.html"}]}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"HowTo","name":"How to train a character LoRA locally","description":"Train a LoRA of one specific character on your own GPU with a free open-source trainer, then test it with weight and checkpoint sweeps. No cloud service, no content filter, no upload.","totalTime":"PT3H","tool":[{"@type":"HowToTool","name":"NVIDIA GPU with 8–12 GB VRAM (16 GB+ recommended for FLUX training)"},{"@type":"HowToTool","name":"15–30 varied images of your character"},{"@type":"HowToTool","name":"kohya_ss or ostris/ai-toolkit (free, open source)"}],"step":[{"@type":"HowToStep","position":1,"name":"Collect 15–30 varied images","text":"Gather 15–30 images of one character: different angles, framings, expressions, lighting and backgrounds, with the identity itself constant. One subject per image, no other faces, no heavy filters or watermarks."},{"@type":"HowToStep","position":2,"name":"Caption with a unique trigger word","text":"Put a text caption next to each image. Start every caption with a made-up trigger word the base model has no prior for, then describe the things you want to stay promptable (pose, outfit, background, lighting). Traits you never describe get absorbed into the trigger word."},{"@type":"HowToStep","position":3,"name":"Install a free local trainer","text":"Set up kohya_ss (GUI, the long-standing SD 1.5/SDXL standard) or ostris/ai-toolkit (config-driven, the usual pick for FLUX). Both are free, open source, and run entirely on your own machine."},{"@type":"HowToStep","position":4,"name":"Configure conservative starting settings","text":"For a character LoRA, sane starting points are network rank 16 (range 8–32), alpha equal to rank or half of it, learning rate around 1e-4 with an AdamW-class optimizer, 1,500–3,000 total steps, batch size 1–2, resolution 1024 for SDXL or FLUX. Treat these as starting corridors, not a recipe."},{"@type":"HowToStep","position":5,"name":"Train on your own GPU","text":"Run the training. On a 12 GB class card an SDXL character LoRA in this range typically takes roughly one to three hours. Enable gradient checkpointing, an 8-bit optimizer and cached latents on smaller cards. Save intermediate checkpoints every epoch."},{"@type":"HowToStep","position":6,"name":"Test with weight and checkpoint sweeps","text":"Generate a grid with a fixed seed and prompt at LoRA weights 0.6, 0.8 and 1.0, then repeat across saved checkpoints. Pick the earliest checkpoint with stable likeness. If training poses or backgrounds leak into every image, the LoRA is overtrained: use an earlier checkpoint or reduce steps."},{"@type":"HowToStep","position":7,"name":"Load the LoRA in your image app","text":"Copy the finished .safetensors into the models/loras folder of your ComfyUI install. In Locally Uncensored the LoRA picker sits in the Create tab's advanced controls, and multiple LoRAs can be stacked with individual weight controls."}]}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"How many images do I need for a character LoRA?","acceptedAnswer":{"@type":"Answer","text":"15–30 varied images is the sweet spot for a single character. As few as 10 can work if they cover different angles, framings, expressions and lighting. Going far past 50 rarely improves likeness and mostly teaches the model the repetition in your dataset. Variety per image beats raw count."}},{"@type":"Question","name":"Can I train a LoRA with 8 GB VRAM?","acceptedAnswer":{"@type":"Answer","text":"Yes, with the right base model. SD 1.5 trains comfortably on 8 GB. SDXL is possible on 8 GB with every memory saver enabled — batch size 1, gradient checkpointing, an 8-bit optimizer, cached latents — and dropping to 768px buckets if you still hit out-of-memory errors. FLUX LoRA training is not realistic on 8 GB; plan on 16 GB or more, or train on SDXL instead."}},{"@type":"Question","name":"Is local LoRA training uncensored?","acceptedAnswer":{"@type":"Answer","text":"Yes, in a precise sense: an open-source trainer running on your own GPU has no content filter, no upload step and no terms of service, so no service reviews or rejects your dataset, and nothing leaves your machine. That freedom stops at other people's rights — training an identity LoRA of a real person without their consent is out, and non-consensual intimate imagery of real people is illegal in a growing list of jurisdictions."}},{"@type":"Question","name":"How long does it take to train a character LoRA?","acceptedAnswer":{"@type":"Answer","text":"On a mid-range card (12 GB class), an SDXL character LoRA at 1,500–3,000 steps typically lands in the one-to-three-hour range. Smaller cards and heavier memory-saving settings run slower, FLUX training runs noticeably longer, and the first run always includes extra time for setting up the trainer itself."}},{"@type":"Question","name":"Should I train a character LoRA on SDXL or FLUX?","acceptedAnswer":{"@type":"Answer","text":"SDXL is the pragmatic default: it trains on 8–12 GB VRAM with memory savers, has the largest LoRA ecosystem, and is forgiving of imperfect datasets. FLUX gives stronger prompt following and detail but realistically wants 16–24 GB for training, runs slower, and the FLUX.1 dev weights carry a non-commercial license worth checking if you sell outputs. Train on the family you actually generate with."}}]}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/lu.css">
+<script defer src="/assets/lu.js"></script>
+  <script data-goatcounter="https://lu-uncensored.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+<nav class="lu-nav">
+  <a class="lu-nav-brand" href="/" aria-label="Locally Uncensored">
+    <span class="lu-mono" data-mono="nav" data-size="40" aria-hidden="true"></span>
+    <span class="lu-nav-word">Locally <span class="accent">Uncensored</span></span>
+  </a>
+  <div class="lu-nav-links" id="lu-nav-links">
+    <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/blog/">Blog</a>
+    <a class="lu-nav-link" href="/guide/">Guide</a>
+    <a class="lu-nav-link" href="/remote-access/">Remote</a>
+  </div>
+  <div class="lu-nav-right">
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">908&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">300+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <span class="lu-nav-sep"></span>
+    <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
+    <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</nav>
+<article class="lu-doc">
+<h1>Character LoRA Training, Locally: Free and Uncensored</h1>
+<div class="meta">Published July 28, 2026 &middot; PurpleDoubleD &middot; 11 min read</div>
+
+<p>To train a character LoRA locally you need three things: a GPU with 8&ndash;12 GB of VRAM, 15&ndash;30 varied images of your character, and a free open-source trainer such as kohya_ss or ostris/ai-toolkit. A first usable LoRA takes roughly one to three hours on a mid-range card and costs nothing.</p>
+
+<p>That is the whole answer; the rest of this guide is the detail. What a character LoRA actually is, how to build a dataset that teaches identity instead of memorizing photos, which of the two standard free trainers to pick, the handful of settings that genuinely matter, and how to test the result instead of hoping. Everything happens on your own machine &mdash; no upload, no queue, and no terms of service between you and your own character.</p>
+
+<h2>What Is a Character LoRA?</h2>
+
+<p>A LoRA (Low-Rank Adaptation) is a small trainable add-on for an image model. Instead of retraining the billions of weights in a base model like SDXL or FLUX, LoRA training adjusts a compact set of extra weights &mdash; a file of tens to a couple hundred megabytes &mdash; that loads on top of the unchanged base model at generation time. A <strong>character LoRA</strong> is a LoRA trained on one specific character: the same face, hair, build and signature features across a small set of images, tied to a trigger word you choose. Prompt the trigger word, and the model draws your character.</p>
+
+<p>The problem it solves is consistency. A base model invents a new face every generation; no amount of prompt engineering makes "the same woman as last time" reliable. A character LoRA pins identity in place while leaving everything else promptable &mdash; pose, outfit, lighting, scene, art style. One hard constraint to know before training: a LoRA only works with the model family it was trained for. An SDXL character LoRA loads into SDXL-family checkpoints (including finetunes like Juggernaut XL), a FLUX LoRA into FLUX. Train on the family you actually generate with.</p>
+
+<h2>The Dataset: 15&ndash;30 Images That Teach Identity</h2>
+
+<h3>How Many, and What Kind</h3>
+
+<p><strong>15&ndash;30 images is the sweet spot</strong> for a single character. Ten can work if they are genuinely varied; going far past fifty rarely improves likeness and mostly teaches the model the repetition in your dataset. What matters more than count is variety with the identity held constant:</p>
+
+<ul>
+<li><strong>Angles</strong> &mdash; front, three-quarter, profile; not thirty selfies from the same arm</li>
+<li><strong>Framing</strong> &mdash; a mix of close-ups, half-body and full-body shots</li>
+<li><strong>Expressions and lighting</strong> &mdash; neutral, smiling, serious; daylight, indoor, dramatic</li>
+<li><strong>Backgrounds and outfits</strong> &mdash; different in every image, unless an outfit is part of the character's identity</li>
+<li><strong>One subject per image</strong> &mdash; no second faces, no watermarks, no heavy filters, nothing you would not want baked into the LoRA</li>
+</ul>
+
+<p>Resolution does not need to be uniform &mdash; trainers resize and bucket images automatically &mdash; but aim for source material around 1024&nbsp;px on the long side for SDXL and FLUX. For an original character that only exists as generations, you can bootstrap the dataset from your own renders: generate with a fixed description and seed variations, keep the 20 most consistent results, and accept that the source model's look gets baked in along with the character.</p>
+
+<h3>Captioning, Honestly</h3>
+
+<p>A caption is a plain text file sitting next to each image, and captioning is where most first LoRAs go wrong, so here is the actual rule: <strong>whatever you describe in the caption stays promptable; whatever you leave undescribed gets absorbed into the trigger word.</strong> Start every caption with a made-up trigger token the base model has no prior for (an invented name, not a common word), then describe the changeable things &mdash; pose, outfit, background, lighting. Do <em>not</em> describe the fixed identity traits you want locked to the trigger, like face shape or eye color. Describing them tells the trainer they are variables, which is the opposite of what you want.</p>
+
+<p>Two honest simplifications save hours. First, many character LoRAs train fine with minimal captions &mdash; sometimes just the trigger word &mdash; and that is a legitimate strategy, not a hack. Second, auto-captioning gets you 90% of the way: kohya_ss ships BLIP-style caption and WD14 tag generators, and correcting their obvious mistakes beats hand-writing thirty poetic descriptions. Consistency across captions matters more than eloquence in any single one.</p>
+
+<h2>Choosing a Local Trainer: kohya_ss vs ai-toolkit</h2>
+
+<p>Two free, open-source trainers cover almost all local character training in 2026, and both run entirely on your own machine:</p>
+
+<table>
+<tr><th></th><th>kohya_ss</th><th>ostris/ai-toolkit</th></tr>
+<tr><td>Interface</td><td>GUI with every option exposed</td><td>Config file with sane defaults; newer releases add a browser UI</td></tr>
+<tr><td>Strongest at</td><td>SD 1.5 and SDXL, huge preset and tutorial base</td><td>FLUX training first-class, SDXL supported</td></tr>
+<tr><td>First impression</td><td>A wall of settings; most guides reference its parameter names</td><td>Fewer knobs, quicker to a first run</td></tr>
+<tr><td>Cost and license</td><td>Free, open source</td><td>Free, open source</td></tr>
+</table>
+
+<p>The fair summary: for an SDXL character LoRA the two produce equivalent results, so pick by interface taste &mdash; kohya_ss if you want a GUI and the ability to follow ten years of accumulated tutorials knob-for-knob, ai-toolkit if you want a config file, good defaults, and the smoothest road to FLUX training. Neither is one-click software: both want a working Python environment and a CUDA-capable GPU, and the first install is the least plug-and-play step in this entire guide. Budget an evening for setup and treat everything after that as the easy part.</p>
+
+<h2>The Settings That Actually Matter</h2>
+
+<p>Trainers expose dozens of parameters; a character LoRA cares about five. These are <strong>starting points, not gospel</strong> &mdash; every dataset drifts a little differently:</p>
+
+<table>
+<tr><th>Setting</th><th>Starting point</th><th>What it does</th></tr>
+<tr><td>Network rank (dim)</td><td>16 (useful range 8&ndash;32)</td><td>Capacity of the LoRA. Higher = bigger file, more detail retention, more overfitting risk</td></tr>
+<tr><td>Network alpha</td><td>Equal to rank, or half of it</td><td>Scales the LoRA's effective strength during training; keep it simple</td></tr>
+<tr><td>Learning rate</td><td>~1e-4 (AdamW-class optimizer)</td><td>How aggressively weights update. Halve it if outputs look fried or oversharpened</td></tr>
+<tr><td>Total steps</td><td>1,500&ndash;3,000</td><td>Overall training length for a 15&ndash;30 image set. Save checkpoints along the way</td></tr>
+<tr><td>Batch size / memory</td><td>1&ndash;2, gradient checkpointing on, 8-bit optimizer, cached latents</td><td>The standard low-VRAM toolkit that makes 8&ndash;12 GB cards workable</td></tr>
+</table>
+
+<p>If the trainer you picked trains the text encoder as well (common for SDXL setups), keep its learning rate lower than the main one &mdash; half to a tenth &mdash; or leave text-encoder training off entirely for a first run. FLUX LoRAs typically train the transformer only. Resolution: 1024 for SDXL and FLUX, dropping to 768 buckets if an 8 GB card hits out-of-memory errors.</p>
+
+<h3>Base Model: SDXL or FLUX?</h3>
+
+<p><strong>SDXL is the pragmatic default for character training.</strong> It trains on 8&ndash;12 GB VRAM with the memory savers above, has the largest ecosystem of compatible checkpoints and style LoRAs, and forgives imperfect datasets. <strong>FLUX</strong> delivers stronger prompt adherence and detail, but training it realistically wants 16&ndash;24 GB of VRAM (some quantized setups squeeze under that, slowly), and the FLUX.1 dev weights carry a non-commercial license worth reading if you plan to sell outputs. If your card is in the 8&ndash;12 GB class, train SDXL and enjoy it; the result loads into every SDXL-family checkpoint you already use.</p>
+
+<p>Expect an SDXL character run at these settings to occupy a 12 GB class card for roughly one to three hours. Training holds the whole GPU while it runs &mdash; if you normally keep a chat model resident on the same card, the sequential-loading logic from our guide to <a href="run-llm-and-stable-diffusion-together.html">running an LLM and Stable Diffusion on one GPU</a> applies doubly here: unload everything else first.</p>
+
+<h2>Test, Then Iterate</h2>
+
+<p>A trained LoRA is a hypothesis until you sweep it. Three tests tell you everything:</p>
+
+<ul>
+<li><strong>Weight sweep.</strong> Fix the seed and prompt, generate at LoRA weight 0.6, 0.8 and 1.0. Too weak and the likeness drifts back toward the base model's generic faces; overtrained and the training data leaks &mdash; the same pose and background creeping into every image, plastic skin, cranked contrast.</li>
+<li><strong>Checkpoint sweep.</strong> Run the same grid across the checkpoints you saved during training. The best LoRA is very often not the final one; pick the earliest checkpoint with stable likeness, because it is the least overfit.</li>
+<li><strong>Flexibility test.</strong> Prompt things that are deliberately not in the dataset: a new outfit, a night scene, a different art style. A good character LoRA follows; one that can only reproduce its training images needs fewer steps, a lower rank, or more dataset variety.</li>
+</ul>
+
+<p>When a first LoRA is 80% right, the fix is almost always the dataset, not the settings. Overtrained results want fewer steps or an earlier checkpoint; a likeness that never locks in wants more varied images; a stubborn background that haunts every render wants that background out of the training set. One evening of iteration on a dataset beats a week of hyperparameter mysticism.</p>
+
+<h2>Is Local LoRA Training Uncensored?</h2>
+
+<p>Yes, and in a precise, unexciting sense: an open-source trainer running on your own GPU has <strong>no content filter, no upload step, and no terms of service</strong>. Nothing leaves your machine, so no service reviews your dataset, no policy decides whether your character is acceptable, and no rule change six months from now retroactively applies to you. Hosted training services have to enforce upload rules; a local trainer has nothing to enforce. For adult or NSFW original characters this is the practical difference between possible and not-worth-the-risk &mdash; and even for entirely safe-for-work characters it means your designs, your drafts and your reference images stay your own. The same local-first logic drives the chat side of this site, where <a href="abliterated-models-guide.html">abliterated models</a> remove refusal behaviour from open-weight LLMs you run yourself.</p>
+
+<p>One honest boundary belongs in this section: uncensored tooling is not a license to train identity LoRAs of real people who never agreed to it. Non-consensual intimate imagery of real people is illegal in a growing list of jurisdictions and indefensible everywhere. Your own character, your own face, or a person who actually said yes &mdash; that is the line this guide assumes, and local training does not move it.</p>
+
+<h2>Using Your LoRA in Locally Uncensored</h2>
+
+<p>This blog belongs to <a href="https://locallyuncensored.com/">Locally Uncensored</a>, the free, open-source all-in-one local AI studio, so here is the honest hand-off: <strong>the app does not train LoRAs</strong> &mdash; training stays in kohya_ss or ai-toolkit &mdash; but it is a comfortable place to use the result. The app drives ComfyUI as its image engine (our <a href="comfyui-beginners-guide.html">ComfyUI beginners guide</a> explains that arrangement), so your finished <code>.safetensors</code> goes where ComfyUI looks for LoRAs: the <code>models/loras</code> folder of your ComfyUI install.</p>
+
+<p>From there, the LoRA picker sits with the Create tab's advanced controls &mdash; alongside VAE override and CLIP-skip &mdash; out of the way until you ask for it. LoRA stacking is supported with individual weight controls, so your character LoRA can run next to a style LoRA at different strengths, and the built-in CivitAI marketplace downloads any checkpoint, LoRA, embedding or VAE into the correct ComfyUI subdirectory automatically &mdash; handy for grabbing style LoRAs to stack with the character you just trained. Type the trigger word, set the weight, generate: same GPU that trained it, no node graph required.</p>
+
+<h2>FAQ</h2>
+
+<h3>How many images do I need for a character LoRA?</h3>
+<p>15&ndash;30 varied images is the sweet spot. As few as 10 can work if they cover different angles, framings, expressions and lighting. Far past 50 rarely helps and mostly teaches the model your dataset's repetition. Variety per image beats raw count.</p>
+
+<h3>Can I train a LoRA with 8 GB VRAM?</h3>
+<p>Yes, with the right base model. SD 1.5 trains comfortably on 8 GB. SDXL fits with every memory saver on &mdash; batch size 1, gradient checkpointing, 8-bit optimizer, cached latents &mdash; and 768px buckets if you still hit out-of-memory errors. FLUX training is not realistic on 8 GB; plan on 16 GB+, or train SDXL instead.</p>
+
+<h3>Is local LoRA training uncensored?</h3>
+<p>Yes: no content filter, no upload, no terms of service &mdash; your dataset never leaves your machine and no service reviews it. The boundary is other people's rights: no identity LoRAs of real people without their consent.</p>
+
+<h3>How long does it take to train a character LoRA?</h3>
+<p>Roughly one to three hours for an SDXL character LoRA at 1,500&ndash;3,000 steps on a 12 GB class card. Smaller cards and heavier memory savers run slower, FLUX runs noticeably longer, and your first session includes the one-time cost of setting up the trainer.</p>
+
+<h3>Should I train on SDXL or FLUX?</h3>
+<p>SDXL, unless you have 16&ndash;24 GB of VRAM and specifically want FLUX's prompt adherence. SDXL trains on 8&ndash;12 GB, has the biggest checkpoint and LoRA ecosystem, and is forgiving. Note the FLUX.1 dev non-commercial license if you sell outputs, and always train on the model family you generate with.</p>
+
+<h2>Next Steps</h2>
+
+<ul>
+<li><a href="comfyui-beginners-guide.html">ComfyUI beginners guide</a> &mdash; the engine your LoRA runs on, without the node graphs</li>
+<li><a href="run-llm-and-stable-diffusion-together.html">Run an LLM and Stable Diffusion on one GPU</a> &mdash; the VRAM logic for sharing a card between chat and images</li>
+<li><a href="abliterated-models-guide.html">Abliterated models guide</a> &mdash; the uncensored chat-side counterpart to local image freedom</li>
+</ul>
+
+<div class="cta">
+<h2>Use Your LoRA in One Local Studio</h2>
+<p>Chat, image, video and a coding agent in one app &mdash; free, open source, AGPL-3.0. Load your trained character LoRA, stack a style on top, and generate on your own GPU.</p>
+<a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest" class="btn">Download Locally Uncensored</a>
+</div>
+</article>
+<footer>
+  <div class="footer-row footer-meta"><span>&copy; 2026 &middot; Locally Uncensored &middot; AGPL-3.0</span></div>
+  <div class="footer-row footer-links">
+    <a href="https://locallyuncensored.com/blog/">Blog</a>
+    <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
+    <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions">Discussions</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
+    <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
+    <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+  </div>
+</footer>
+</body>
+</html>
