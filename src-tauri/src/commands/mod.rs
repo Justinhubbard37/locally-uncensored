@@ -5,6 +5,7 @@ pub mod comfy_ws;
 pub mod download;
 pub mod engine;
 pub mod filesystem;
+pub mod gguf;
 pub mod gpu;
 pub mod health;
 pub mod install;

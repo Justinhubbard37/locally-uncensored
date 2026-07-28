@@ -35,6 +35,10 @@ export interface BundledModel {
   size: number
   /** Whether this model is the one currently loaded by the engine. */
   loaded: boolean
+  /** Context length the model was TRAINED with, read from the GGUF header
+   * (ENG-6c). null/absent when the header doesn't carry it — presets then
+   * stay uncapped, exactly the pre-2.6.0 behavior. */
+  ctx_train?: number | null
 }
 
 export interface EngineStatus {
@@ -59,6 +63,16 @@ export function embedBaseUrl(): string {
 // activate a model by its picker id (which is what the model store carries)
 // without threading the path through AIModel, which has no path field.
 const pathByName = new Map<string, string>()
+// name → trained context limit (GGUF header). Feeds the Context dropdown's
+// preset cap via useActiveContextWindow.modelMax.
+const ctxTrainByName = new Map<string, number>()
+
+/** Trained context limit of a bundled model by picker id (`openai::<name>`
+ * or bare), or 0 when unknown / listing not fetched yet (= uncapped). */
+export function bundledCtxTrain(nameOrPrefixed: string): number {
+  const name = nameOrPrefixed.includes('::') ? nameOrPrefixed.split('::')[1] : nameOrPrefixed
+  return ctxTrainByName.get(name) ?? 0
+}
 
 /**
  * True when the active OpenAI-compat backend is the app-managed built-in engine
@@ -150,7 +164,11 @@ export async function listBundledModels(): Promise<BundledModel[]> {
   const res = await backendCall<{ dir: string; models: BundledModel[] }>('list_bundled_models')
   const models = res?.models ?? []
   pathByName.clear()
-  for (const m of models) pathByName.set(m.name, m.path)
+  ctxTrainByName.clear()
+  for (const m of models) {
+    pathByName.set(m.name, m.path)
+    if (typeof m.ctx_train === 'number' && m.ctx_train > 0) ctxTrainByName.set(m.name, m.ctx_train)
+  }
   return models
 }
 

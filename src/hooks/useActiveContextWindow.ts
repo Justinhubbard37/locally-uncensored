@@ -7,7 +7,7 @@ import { getLmStudioModelContext } from '../api/lmstudio'
 import { getModelMaxTokens } from '../lib/context-compaction'
 import { effectiveContextWindow } from '../lib/context-window'
 import { isManagedBuiltinSlot } from '../api/builtin-ensure'
-import { bundledEngineStatus } from '../api/engine'
+import { bundledEngineStatus, bundledCtxTrain } from '../api/engine'
 
 export type CtxProvider = 'ollama' | 'lmstudio' | 'builtin' | 'cloud' | 'unknown'
 
@@ -85,11 +85,15 @@ export function useActiveContextWindow(reloadTick = 0): ActiveContext {
       if (providerId === 'openai' && isManagedBuiltinSlot()) {
         const status = await bundledEngineStatus().catch(() => null)
         if (cancelled) return
+        // Trained ceiling from the GGUF header (via the model listing) caps
+        // the dropdown presets; 0 = unknown = uncapped (pre-listing or a
+        // header without the key).
+        const modelMax = bundledCtxTrain(activeModel)
         if (status?.running && typeof status.ctx === 'number' && status.ctx > 0) {
           setState({
             provider: 'builtin',
             contextWindow: status.ctx,
-            modelMax: 0, // GGUF training ceiling not surfaced here — leave presets uncapped
+            modelMax,
             isTrue: true,
             adjustable: true,
           })
@@ -99,7 +103,7 @@ export function useActiveContextWindow(reloadTick = 0): ActiveContext {
           setState({
             provider: 'builtin',
             contextWindow: builtinCtx > 0 ? builtinCtx : 8192,
-            modelMax: 0,
+            modelMax,
             isTrue: false,
             adjustable: true,
           })

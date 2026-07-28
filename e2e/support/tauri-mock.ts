@@ -115,7 +115,9 @@ export function tauriMockInit(opts: TauriMockOptions) {
       case 'list_bundled_models':
         return Promise.resolve({
           dir: MODELS_DIR,
-          models: [{ name: opts.modelName, path: modelPath, size: 400 * 1024 * 1024, loaded: true }],
+          // ctx_train mirrors the GGUF-header read (ENG-6c) — 32k, like the
+          // real Qwen2.5 starter — so specs can assert the preset cap.
+          models: [{ name: opts.modelName, path: modelPath, size: 400 * 1024 * 1024, loaded: true, ctx_train: 32768 }],
         })
 
       // ── built-in EMBEDDINGS server lifecycle (P5) ─────────────────

@@ -56,7 +56,12 @@ test('context dropdown relaunches the built-in engine and the counter follows', 
   await expect(page.getByText(/\/8\.2k/)).toBeVisible()
 
   // Pick 16K → apply() persists tuning.ctx and swaps the running engine.
+  // The preset list is capped at the model's TRAINED ceiling (32k from the
+  // GGUF header via the listing) — no 64K/128K options for a 32k model.
   await trigger.click()
+  await expect(page.getByRole('button', { name: /^32K$/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^64K$/ })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /^128K$/ })).toHaveCount(0)
   await page.getByRole('button', { name: /^16K$/ }).click()
 
   await expect(page.getByRole('button', { name: /ctx 16K/ })).toBeVisible({ timeout: 10_000 })

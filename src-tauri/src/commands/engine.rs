@@ -616,11 +616,16 @@ fn list_bundled_models_blocking(state: &AppState) -> Result<serde_json::Value, S
         .into_iter()
         .map(|m| {
             let is_loaded = loaded.as_deref() == Some(m.path.as_str());
+            // Trained context limit from the GGUF header (ENG-6c) — the ONLY
+            // place it exists; /props and /v1/models don't carry it. None on
+            // any parse hiccup so a weird file can never break the listing.
+            let ctx_train = crate::commands::gguf::context_length(&m.path);
             serde_json::json!({
                 "name": m.name,
                 "path": m.path,
                 "size": m.size,
                 "loaded": is_loaded,
+                "ctx_train": ctx_train,
             })
         })
         .collect();
