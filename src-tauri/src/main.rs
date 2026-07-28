@@ -214,12 +214,6 @@ fn main() {
             commands::search::install_searxng,
             commands::search::searxng_status,
             // Claude Code
-            commands::claude_code::detect_claude_code,
-            commands::claude_code::install_claude_code,
-            commands::claude_code::install_claude_code_status,
-            commands::claude_code::start_claude_code,
-            commands::claude_code::stop_claude_code,
-            commands::claude_code::send_claude_code_input,
             // Remote Access
             commands::remote::start_remote_server,
             commands::remote::stop_remote_server,

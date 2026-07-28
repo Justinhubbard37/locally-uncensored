@@ -219,9 +219,6 @@ pub struct AppState {
     /// finishes installing — without that, the user would have to restart
     /// LU to pick up the freshly installed Python.
     pub python_bin: Arc<Mutex<String>>,
-    // Claude Code
-    pub claude_code_process: Mutex<Option<Child>>,
-    pub claude_code_install: Arc<Mutex<InstallState>>,
     // Remote Access
     pub remote: Mutex<RemoteServer>,
     /// Per-chat workspace overrides — when present, agent file ops with
@@ -317,8 +314,6 @@ impl AppState {
             searxng_available: AtomicBool::new(false),
             python_bin: Arc::new(Mutex::new(python_bin)),
             // Claude Code
-            claude_code_process: Mutex::new(None),
-            claude_code_install: Arc::new(Mutex::new(InstallState::default())),
             // Remote Access
             remote: Mutex::new(RemoteServer::new()),
             chat_workspace_overrides: Arc::new(Mutex::new(HashMap::new())),
@@ -419,28 +414,6 @@ impl AppState {
             }
         }
 
-        if let Ok(mut proc) = self.claude_code_process.lock() {
-            // take(), not a borrow: leaving the pid in the slot let the Drop
-            // pass below fire a second taskkill at it.
-            if let Some(child) = proc.take() {
-                let pid = child.id();
-                #[cfg(windows)]
-                {
-                    let _ = std::process::Command::new("taskkill")
-                        .args(["/pid", &pid.to_string(), "/T", "/F"])
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .output();
-                    drop(child);
-                }
-                #[cfg(not(windows))]
-                {
-                    let mut child = child;
-                    let _ = child.kill();
-                    let _ = pid;
-                }
-                println!("[ClaudeCode] Stopped (explicit shutdown)");
-            }
-        }
 
         // Character-LoRA training. The PID sits in AppState like every other
         // long-running child, but shutdown skipped it — so quitting during a
