@@ -57,6 +57,28 @@ fn sanitize_component(s: &str) -> String {
     cleaned.trim_matches('_').chars().take(48).collect()
 }
 
+/// Pick a file stem that doesn't clobber an existing photo in `dir`.
+///
+/// Sanitising kills the difference between real filenames — "foto (1).png" and
+/// "foto [1].png" both become `foto__1_` — and the caption sidecar is keyed on
+/// the stem alone. Writing blindly therefore replaced an earlier photo AND its
+/// caption while the UI reported both as staged, so a set the user filled with
+/// 20 pictures could silently train on 17. Re-staging the SAME bytes keeps the
+/// same stem (an idempotent re-upload should not duplicate).
+fn free_stem(dir: &Path, base: &str, ext: &str, bytes: &[u8]) -> String {
+    let mut stem = base.to_string();
+    for n in 2..=999u32 {
+        let img = dir.join(format!("{stem}.{ext}"));
+        let cap = dir.join(format!("{stem}.txt"));
+        let same_photo = fs::read(&img).map(|b| b == bytes).unwrap_or(false);
+        if same_photo || (!img.exists() && !cap.exists()) {
+            return stem;
+        }
+        stem = format!("{base}_{n}");
+    }
+    stem
+}
+
 fn config_json_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("locally-uncensored").join("config.json"))
 }
@@ -414,7 +436,8 @@ pub fn stage_training_image(
     }
     let img_dir = trainer_root(&app).join("train").join(&set).join("img");
     fs::create_dir_all(&img_dir).map_err(|e| format!("could not create the set dir: {e}"))?;
-    let stem = if name.is_empty() { format!("photo_{}", fileBytes.len() % 100000) } else { name };
+    let base = if name.is_empty() { format!("photo_{}", fileBytes.len() % 100000) } else { name };
+    let stem = free_stem(&img_dir, &base, &ext, &fileBytes);
     fs::write(img_dir.join(format!("{stem}.{ext}")), &fileBytes)
         .map_err(|e| format!("could not write the photo: {e}"))?;
     // Caption sidecar: trigger word comes first — musubi has no trigger
@@ -684,6 +707,34 @@ pub fn cancel_character_training(state: State<'_, AppState>) -> Result<(), Strin
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_second_photo_never_overwrites_the_first() {
+        use super::free_stem;
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("lu-trainer-stem-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // "foto (1).png" and "foto [1].png" both sanitise to the same stem.
+        let first = free_stem(&dir, "foto__1_", "png", b"AAAA");
+        assert_eq!(first, "foto__1_");
+        fs::write(dir.join(format!("{first}.png")), b"AAAA").unwrap();
+        fs::write(dir.join(format!("{first}.txt")), "caption one").unwrap();
+
+        let second = free_stem(&dir, "foto__1_", "png", b"BBBB");
+        assert_ne!(second, first, "a different photo must not reuse the stem");
+
+        // The caption sidecar collides too, even with a different extension.
+        let third = free_stem(&dir, "foto__1_", "jpg", b"CCCC");
+        assert_ne!(third, first);
+
+        // Re-staging the SAME bytes keeps the stem — no duplicate on re-upload.
+        let again = free_stem(&dir, "foto__1_", "png", b"AAAA");
+        assert_eq!(again, first);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]
