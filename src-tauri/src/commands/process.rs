@@ -407,13 +407,6 @@ pub fn find_comfyui_path() -> Option<String> {
         }
     }
 
-    // 2b. Deep scan user home directory (finds ComfyUI in non-standard paths like Desktop/bs/IMage Gen/ComfyUI)
-    let home2 = dirs::home_dir().unwrap_or_default();
-    if let Some(found) = scan_for_comfyui(&home2, 7) {
-        println!("[ComfyUI] Found via deep home scan: {}", found.display());
-        return Some(found.to_string_lossy().to_string());
-    }
-
     let home = dirs::home_dir().unwrap_or_default();
 
     // 3. Check common fixed locations (including Stability Matrix, portable installs)
@@ -446,6 +439,18 @@ pub fn find_comfyui_path() -> Option<String> {
         if p.join("main.py").exists() {
             return Some(p.to_string_lossy().to_string());
         }
+    }
+
+    // 3b. Deep scan of the user home (finds ComfyUI in non-standard paths like
+    // Desktop/bs/IMage Gen/ComfyUI). Runs AFTER config + fixed locations: as a
+    // FIRST candidate its directory-walk order could pick a stale second copy
+    // over the standard install — LU then downloads/checks models in a folder
+    // the running ComfyUI never scans ("installed but not recognized",
+    // pnwpdr4519 Discord 2026-07-27). Same lesson as d9146e3 ("deep home scan
+    // last").
+    if let Some(found) = scan_for_comfyui(&home, 7) {
+        println!("[ComfyUI] Found via deep home scan: {}", found.display());
+        return Some(found.to_string_lossy().to_string());
     }
 
     // 4. Recursive scan of Desktop, Documents, Downloads, and drive roots

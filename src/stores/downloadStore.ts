@@ -18,6 +18,7 @@ interface DownloadStoreState {
   setMeta: (filename: string, url: string, subfolder: string, destDir?: string) => void
   setBundleGroup: (bundleName: string, filenames: string[]) => void
   markComplete: (filename: string) => void
+  markInvisible: (filename: string) => void
   pause: (id: string) => Promise<void>
   cancel: (id: string) => Promise<void>
   resume: (id: string) => Promise<void>
@@ -29,6 +30,12 @@ interface DownloadStoreState {
 if (typeof window !== 'undefined') {
   window.addEventListener('comfyui-download-exists', ((e: CustomEvent<{ filename: string }>) => {
     useDownloadStore.getState().markComplete(e.detail.filename)
+  }) as EventListener)
+  // File exists on disk but the RUNNING ComfyUI does not list it — LU and
+  // ComfyUI are looking at different model folders. Shown as an error row so
+  // the user gets an explanation instead of a silent "already installed".
+  window.addEventListener('comfyui-model-invisible', ((e: CustomEvent<{ filename: string }>) => {
+    useDownloadStore.getState().markInvisible(e.detail.filename)
   }) as EventListener)
 }
 
@@ -101,6 +108,18 @@ export const useDownloadStore = create<DownloadStoreState>()((set, get) => ({
       downloads: {
         ...s.downloads,
         [filename]: { progress: 1, total: 1, speed: 0, filename, status: 'complete' },
+      },
+    }))
+  },
+
+  markInvisible: (filename: string) => {
+    set(s => ({
+      downloads: {
+        ...s.downloads,
+        [filename]: {
+          progress: 0, total: 0, speed: 0, filename, status: 'error',
+          error: 'File is already on disk, but your running ComfyUI does not list it — LU and ComfyUI are using different model folders. Point LU at the right ComfyUI install (Settings → AI Backends) or restart ComfyUI from LU, then try again.',
+        },
       },
     }))
   },

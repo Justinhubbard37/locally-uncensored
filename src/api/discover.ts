@@ -129,49 +129,82 @@ export async function checkBundlesInstalled(bundles: ModelBundle[]): Promise<Rec
     for (const b of bundles) result[b.name] = false
   }
 
+  // ComfyUI's own model lists — fetched once, used twice: to CONFIRM the
+  // size-check hits (a file the RUNNING ComfyUI cannot see must not count as
+  // installed) and as the fuzzy variant fallback further down.
+  // Issue #51 (adhney): ComfyUI lists partially-downloaded files too, so the
+  // fuzzy fallback would mark an incomplete download as INSTALLED. Drop any
+  // file check_model_sizes confirms is partial before matching.
+  let comfyLists: Record<string, string[]> | null = null
+  try {
+    const [rawCheckpoints, rawDiffModels, rawVaes, rawClips] = await Promise.all([
+      getCheckpoints(), getDiffusionModels(), getVAEModels(), getCLIPModels(),
+    ])
+    const [checkpoints, diffModels, vaes, clips] = await Promise.all([
+      filterPartialFiles(rawCheckpoints).then(s => Array.from(s)),
+      filterPartialFiles(rawDiffModels).then(s => Array.from(s)),
+      filterPartialFiles(rawVaes).then(s => Array.from(s)),
+      filterPartialFiles(rawClips).then(s => Array.from(s)),
+    ])
+    comfyLists = { checkpoints, diffusion_models: diffModels, vae: vaes, text_encoders: clips }
+  } catch {
+    comfyLists = null // ComfyUI not reachable · size-check verdicts stand
+  }
+
+  // pnwpdr4519 (Discord 2026-07-27): the size check looks at the directory LU
+  // resolves, but the RUNNING ComfyUI may scan a different install (second
+  // copy, moved install). "Installed" from the disk check alone then locks the
+  // user out: the Create picker (fed by ComfyUI's enums) shows nothing AND
+  // re-downloading is refused. When ComfyUI is reachable, a bundle only counts
+  // as installed if ComfyUI can actually see at least one of its listed files.
+  if (comfyLists) {
+    const visible = new Set<string>()
+    for (const arr of Object.values(comfyLists)) for (const n of arr) visible.add(normalizeModelBase(n))
+    for (const bundle of bundles) {
+      if (!result[bundle.name]) continue
+      const enumFiles = bundle.files.filter(f => f.filename && f.subfolder && ENUM_SUBFOLDERS.has(f.subfolder))
+      if (enumFiles.length === 0) continue
+      if (!enumFiles.some(f => visible.has(normalizeModelBase(f.filename!)))) {
+        result[bundle.name] = false
+        log.warn(`[discover] ${bundle.name}: files on disk but invisible to the running ComfyUI · not counting as installed`)
+      }
+    }
+  }
+
   // Fallback: for bundles not detected by exact filename, check ComfyUI's model lists
   // This catches variant files (e.g. fp8 version of a model with different filename)
   // STRICT: only exact base-name match · no substring matching (caused false positives
   // where z_image_turbo matched z_image_base, or gemma-4-31b matched gemma-4-e4b)
   const undetected = bundles.filter(b => !result[b.name])
-  if (undetected.length > 0) {
-    try {
-      const [rawCheckpoints, rawDiffModels, rawVaes, rawClips] = await Promise.all([
-        getCheckpoints(), getDiffusionModels(), getVAEModels(), getCLIPModels(),
-      ])
-      // Issue #51 (adhney): ComfyUI lists partially-downloaded files too, so the
-      // fuzzy fallback below would mark an incomplete download as INSTALLED. Drop
-      // any file check_model_sizes confirms is partial before matching.
-      const [checkpoints, diffModels, vaes, clips] = await Promise.all([
-        filterPartialFiles(rawCheckpoints).then(s => Array.from(s)),
-        filterPartialFiles(rawDiffModels).then(s => Array.from(s)),
-        filterPartialFiles(rawVaes).then(s => Array.from(s)),
-        filterPartialFiles(rawClips).then(s => Array.from(s)),
-      ])
-      const modelsBySubfolder: Record<string, string[]> = {
-        checkpoints, diffusion_models: diffModels, vae: vaes, text_encoders: clips,
-      }
-      for (const bundle of undetected) {
-        const allFound = bundle.files.every(f => {
-          if (!f.filename || !f.subfolder) return true
-          const models = modelsBySubfolder[f.subfolder] || []
-          // Strip extension and common quant suffixes for fuzzy matching
-          const base = f.filename.replace(/\.[^.]+$/, '').toLowerCase()
-            .replace(/[-_](fp4|fp8|fp16|bf16|e4m3fn|scaled|fp8_e4m3fn_scaled)$/g, '')
-          return models.some(m => {
-            const mBase = m.replace(/\.[^.]+$/, '').toLowerCase()
-              .replace(/[-_](fp4|fp8|fp16|bf16|e4m3fn|scaled|fp8_e4m3fn_scaled)$/g, '')
-            return mBase === base
-          })
-        })
-        if (allFound) result[bundle.name] = true
-      }
-    } catch {
-      // ComfyUI not reachable · keep exact-match results
+  if (undetected.length > 0 && comfyLists) {
+    const modelsBySubfolder = comfyLists
+    for (const bundle of undetected) {
+      const allFound = bundle.files.every(f => {
+        if (!f.filename || !f.subfolder) return true
+        const models = modelsBySubfolder[f.subfolder] || []
+        const base = normalizeModelBase(f.filename)
+        return models.some(m => normalizeModelBase(m) === base)
+      })
+      if (allFound) result[bundle.name] = true
     }
   }
 
   return result
+}
+
+/** Subfolders whose contents ComfyUI enumerates via object_info — the only
+ *  ones the visibility check can reason about (loras/upscale etc. stay on the
+ *  pure size check). */
+const ENUM_SUBFOLDERS = new Set(['checkpoints', 'diffusion_models', 'vae', 'text_encoders'])
+
+/** Base identity of a model file: basename only (ComfyUI enums can carry
+ *  nested-subdir prefixes), lowercase, extension and common quant suffixes
+ *  stripped. Shared by the installed-detection visibility check and the fuzzy
+ *  variant fallback so both agree on what "the same model" means. */
+export function normalizeModelBase(name: string): string {
+  const base = name.split(/[\\/]/).pop() ?? name
+  return base.replace(/\.[^.]+$/, '').toLowerCase()
+    .replace(/[-_](fp4|fp8|fp16|bf16|e4m3fn|scaled|fp8_e4m3fn_scaled)$/g, '')
 }
 
 /** #72: the backend used to resolve a failed `git pull` as
@@ -222,12 +255,36 @@ export async function installBundleComplete(bundle: ModelBundle): Promise<void> 
     }
   } catch { /* can't check · download everything */ }
 
+  // Lazily fetched ComfyUI visibility set: "already installed" is only true
+  // when the RUNNING ComfyUI lists the file. A file that exists on disk but is
+  // invisible to ComfyUI means LU and ComfyUI look at different model folders
+  // (pnwpdr4519 Discord 2026-07-27) — silently skipping it as installed left
+  // the user with no picker entry AND no way to re-download.
+  let visibleBases: Set<string> | null | undefined
+  const comfyCanSee = async (filename: string): Promise<boolean | null> => {
+    if (visibleBases === undefined) {
+      try {
+        const lists = await Promise.all([getCheckpoints(), getDiffusionModels(), getVAEModels(), getCLIPModels()])
+        visibleBases = new Set(lists.flat().map(normalizeModelBase))
+      } catch {
+        visibleBases = null // ComfyUI unreachable · cannot judge visibility
+      }
+    }
+    return visibleBases ? visibleBases.has(normalizeModelBase(filename)) : null
+  }
+
   // Step 1: Start downloads only for files NOT already installed
   for (const file of bundle.files) {
     if (!file.downloadUrl || !file.filename || !file.subfolder) continue
     if (installedFiles.has(file.filename)) {
-      log.info(`[discover] Skipping ${file.filename} · already installed`)
-      window.dispatchEvent(new CustomEvent('comfyui-download-exists', { detail: { filename: file.filename } }))
+      const visible = ENUM_SUBFOLDERS.has(file.subfolder) ? await comfyCanSee(file.filename) : null
+      if (visible === false) {
+        log.warn(`[discover] ${file.filename} exists on disk but the running ComfyUI does not list it`)
+        window.dispatchEvent(new CustomEvent('comfyui-model-invisible', { detail: { filename: file.filename } }))
+      } else {
+        log.info(`[discover] Skipping ${file.filename} · already installed`)
+        window.dispatchEvent(new CustomEvent('comfyui-download-exists', { detail: { filename: file.filename } }))
+      }
       continue
     }
     try {
