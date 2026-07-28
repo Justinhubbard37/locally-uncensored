@@ -354,7 +354,9 @@ impl AppState {
     /// when Tauri's destructor chain skips us.
     pub fn shutdown_subprocesses(&self) {
         if let Ok(mut proc) = self.ollama_process.lock() {
-            if let Some(ref mut child) = *proc {
+            // take(), not a borrow: leaving the pid in the slot let the Drop
+            // pass below fire a second taskkill at it.
+            if let Some(child) = proc.take() {
                 let pid = child.id();
                 #[cfg(windows)]
                 {
@@ -362,9 +364,11 @@ impl AppState {
                         .args(["/pid", &pid.to_string(), "/T", "/F"])
                         .creation_flags(CREATE_NO_WINDOW)
                         .output();
+                    drop(child);
                 }
                 #[cfg(not(windows))]
                 {
+                    let mut child = child;
                     let _ = child.kill();
                     let _ = pid;
                 }
@@ -393,7 +397,9 @@ impl AppState {
         }
 
         if let Ok(mut proc) = self.comfy_process.lock() {
-            if let Some(ref mut child) = *proc {
+            // take(), not a borrow: leaving the pid in the slot let the Drop
+            // pass below fire a second taskkill at it.
+            if let Some(child) = proc.take() {
                 let pid = child.id();
                 #[cfg(windows)]
                 {
@@ -401,9 +407,11 @@ impl AppState {
                         .args(["/pid", &pid.to_string(), "/T", "/F"])
                         .creation_flags(CREATE_NO_WINDOW)
                         .output();
+                    drop(child);
                 }
                 #[cfg(not(windows))]
                 {
+                    let mut child = child;
                     let _ = child.kill();
                     let _ = pid;
                 }
@@ -412,7 +420,9 @@ impl AppState {
         }
 
         if let Ok(mut proc) = self.claude_code_process.lock() {
-            if let Some(ref mut child) = *proc {
+            // take(), not a borrow: leaving the pid in the slot let the Drop
+            // pass below fire a second taskkill at it.
+            if let Some(child) = proc.take() {
                 let pid = child.id();
                 #[cfg(windows)]
                 {
@@ -420,9 +430,11 @@ impl AppState {
                         .args(["/pid", &pid.to_string(), "/T", "/F"])
                         .creation_flags(CREATE_NO_WINDOW)
                         .output();
+                    drop(child);
                 }
                 #[cfg(not(windows))]
                 {
+                    let mut child = child;
                     let _ = child.kill();
                     let _ = pid;
                 }
@@ -455,7 +467,10 @@ impl Drop for AppState {
         // calls `shutdown_subprocesses` itself (see `commands::system::exit_app`
         // and the tray "quit" handler in `main.rs`). This Drop covers the
         // remaining "Tauri-managed shutdown DID happen to run our Drop" case
-        // — idempotent re-kill on already-dead PIDs is a harmless taskkill.
+        // — and every branch now take()s its slot, so a second pass has
+        // nothing left to kill. It used to leave the pids in place and call
+        // the re-kill harmless; `taskkill /T /F` on a pid Windows has since
+        // recycled is not harmless, it takes out a stranger's process tree.
         self.shutdown_subprocesses();
     }
 }
