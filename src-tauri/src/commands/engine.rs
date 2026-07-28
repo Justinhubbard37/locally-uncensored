@@ -278,6 +278,7 @@ fn start_bundled_engine_blocking(
     ctx: Option<u32>,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
+    let _gate = crate::commands::process::start_gate(&crate::commands::process::ENGINE_START);
     let ctx = ctx.unwrap_or(8192);
     let port = port.unwrap_or(DEFAULT_ENGINE_PORT);
 
@@ -515,6 +516,7 @@ fn start_bundled_embed_blocking(
     model_path: String,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
+    let _gate = crate::commands::process::start_gate(&crate::commands::process::EMBED_START);
     let port = port.unwrap_or(DEFAULT_EMBED_PORT);
 
     if !Path::new(&model_path).exists() {

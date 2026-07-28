@@ -841,7 +841,32 @@ pub async fn start_ollama(app: tauri::AppHandle) -> Result<serde_json::Value, St
     .map_err(|e| format!("start_ollama task: {e}"))?
 }
 
+/// Serialise a "check that nothing runs, then spawn it" path.
+///
+/// These used to be serialised BY ACCIDENT: a synchronous `#[tauri::command]`
+/// runs on the Tauri main thread, so two invocations could never overlap. Now
+/// that the bodies run on the blocking pool, two triggers close together (a
+/// mount effect alongside a click, a double click, onboarding's retry loop) can
+/// BOTH pass the "nothing is running" check — the window between that check and
+/// storing the child is long, it contains a filesystem search — and both spawn a
+/// server. Only the second child gets stored, so the first is an orphan holding
+/// VRAM that no stop_* will ever kill. That orphan is exactly the zombie
+/// `start_comfyui` warns about a few lines below.
+///
+/// The second caller waits instead of being turned away, so once it proceeds the
+/// normal "already running" check answers it — no new status value, no change
+/// for the frontend.
+pub(crate) fn start_gate(lock: &'static Mutex<()>) -> std::sync::MutexGuard<'static, ()> {
+    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub(crate) static COMFY_START: Mutex<()> = Mutex::new(());
+pub(crate) static OLLAMA_START: Mutex<()> = Mutex::new(());
+pub(crate) static ENGINE_START: Mutex<()> = Mutex::new(());
+pub(crate) static EMBED_START: Mutex<()> = Mutex::new(());
+
 fn start_ollama_blocking(state: &AppState) -> Result<serde_json::Value, String> {
+    let _gate = start_gate(&OLLAMA_START);
     // Check if already running
     {
         let mut cmd = Command::new("tasklist");
@@ -1057,6 +1082,7 @@ pub async fn start_comfyui(app: tauri::AppHandle) -> Result<serde_json::Value, S
 }
 
 fn start_comfyui_blocking(state: &AppState) -> Result<serde_json::Value, String> {
+    let _gate = start_gate(&COMFY_START);
     // If user pointed LU at a remote ComfyUI, we have no local process to spawn.
     // Just report status — the remote side is responsible for running ComfyUI.
     {
@@ -2117,4 +2143,49 @@ pub(crate) fn free_comfyui_memory() -> bool {
         .send()
         .map(|r| r.status().is_success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod start_gate_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_GATE: Mutex<()> = Mutex::new(());
+
+    /// The window that matters: two threads both pass a "nothing is running"
+    /// check and both spawn. With the gate, the second one cannot enter until
+    /// the first has finished storing its child.
+    #[test]
+    fn two_concurrent_starts_never_overlap() {
+        static INSIDE: AtomicUsize = AtomicUsize::new(0);
+        static MAX_SEEN: AtomicUsize = AtomicUsize::new(0);
+
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let _gate = start_gate(&TEST_GATE);
+                    let now = INSIDE.fetch_add(1, Ordering::AcqRel) + 1;
+                    MAX_SEEN.fetch_max(now, Ordering::AcqRel);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    INSIDE.fetch_sub(1, Ordering::AcqRel);
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(MAX_SEEN.load(Ordering::Acquire), 1, "two starts ran at once");
+    }
+
+    /// A panic inside a start must not wedge every later start.
+    #[test]
+    fn a_poisoned_gate_still_opens() {
+        static POISON_ME: Mutex<()> = Mutex::new(());
+        let _ = std::thread::spawn(|| {
+            let _gate = start_gate(&POISON_ME);
+            panic!("start blew up");
+        })
+        .join();
+        let _gate = start_gate(&POISON_ME); // would panic on a plain .unwrap()
+    }
 }
