@@ -55,13 +55,28 @@ mod chunked {
         }
     }
 
-    /// Chunk count recorded in the head entry; 0 when absent or plain.
-    fn stored_chunks(account: &str) -> Result<usize, String> {
-        match entry(account)?.get_password() {
-            Ok(head) => Ok(parse_marker(&head).unwrap_or(0)),
-            Err(keyring::Error::NoEntry) => Ok(0),
-            Err(e) => Err(e.to_string()),
+    /// Upper bound for the chunk sweep. 64 × MAX_UNITS is far beyond any
+    /// credential this app stores; it only stops a runaway loop.
+    const MAX_CHUNKS: usize = 64;
+
+    /// Delete chunk entries from `from` upward until one is missing.
+    ///
+    /// Sweeps the entries THEMSELVES instead of trusting the head's recorded
+    /// count. A chunked write that failed before the marker landed leaves
+    /// fragments the head never points at, and a count-driven cleanup could
+    /// not see them — so they survived every later delete. Secret material
+    /// outliving the deletion the user asked for is the one outcome this
+    /// module must not have.
+    fn sweep_chunks_from(account: &str, from: usize) -> Result<(), String> {
+        for i in from..MAX_CHUNKS {
+            let acct = chunk_account(account, i);
+            match entry(&acct)?.get_password() {
+                Ok(_) => delete_entry(&acct)?,
+                Err(keyring::Error::NoEntry) => break,
+                Err(e) => return Err(e.to_string()),
+            }
         }
+        Ok(())
     }
 
     pub(super) fn parse_marker(head: &str) -> Option<usize> {
@@ -90,14 +105,10 @@ mod chunked {
     }
 
     pub fn set(account: &str, value: &str) -> Result<(), String> {
-        // Best-effort read of the previous layout so a shrinking value leaves
-        // no orphaned chunk entries behind.
-        let old = stored_chunks(account).unwrap_or(0);
         if value.encode_utf16().count() <= MAX_UNITS {
             entry(account)?.set_password(value).map_err(|e| e.to_string())?;
-            for i in 0..old {
-                let _ = delete_entry(&chunk_account(account, i));
-            }
+            // Drop every chunk: this value lives in the head alone now.
+            let _ = sweep_chunks_from(account, 0);
             return Ok(());
         }
         // Chunks first, marker last — a torn write keeps the old head (and
@@ -111,9 +122,8 @@ mod chunked {
         entry(account)?
             .set_password(&format!("{MARKER}{}", parts.len()))
             .map_err(|e| e.to_string())?;
-        for i in parts.len()..old {
-            let _ = delete_entry(&chunk_account(account, i));
-        }
+        // Anything past the new tail is left over from a longer previous value.
+        let _ = sweep_chunks_from(account, parts.len());
         Ok(())
     }
 
@@ -139,12 +149,8 @@ mod chunked {
     }
 
     pub fn delete(account: &str) -> Result<(), String> {
-        let count = stored_chunks(account)?;
         delete_entry(account)?;
-        for i in 0..count {
-            delete_entry(&chunk_account(account, i))?;
-        }
-        Ok(())
+        sweep_chunks_from(account, 0)
     }
 }
 
