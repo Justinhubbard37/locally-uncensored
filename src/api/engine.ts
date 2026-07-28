@@ -176,7 +176,13 @@ export function bundledToAIModels(models: BundledModel[]): CloudModel[] {
  */
 export async function activateBuiltinModel(nameOrPrefixed: string, tuning?: BuiltinEngineTuning): Promise<boolean> {
   const name = nameOrPrefixed.includes('::') ? nameOrPrefixed.split('::')[1] : nameOrPrefixed
-  const path = pathByName.get(name)
+  let path = pathByName.get(name)
+  if (!path) {
+    // Callers outside the picker (Models page via the store chokepoint) can
+    // run before any listBundledModels() populated the map — refresh once.
+    await listBundledModels().catch(() => undefined)
+    path = pathByName.get(name)
+  }
   if (!path) return false
   await swapBundledModel(path, tuning)
   return true

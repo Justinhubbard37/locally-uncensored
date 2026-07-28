@@ -142,12 +142,17 @@ describe('activateBuiltinModel', () => {
     expect(await activateBuiltinModel('qwen')).toBe(true)
   })
 
-  it('no-ops when the path is unknown', async () => {
+  it('refreshes the listing once for an unknown name, then no-ops without a swap', async () => {
     vi.mocked(backendCall).mockResolvedValue({ dir: '/m', models: [] } as never)
     await listBundledModels()
     vi.mocked(backendCall).mockClear()
     const ok = await activateBuiltinModel('openai::ghost')
     expect(ok).toBe(false)
-    expect(backendCall).not.toHaveBeenCalled()
+    // A caller may run before any listing populated the map (Models-page →
+    // store chokepoint), so ONE refresh is expected — but never a swap for a
+    // name that stays unknown.
+    expect(backendCall).toHaveBeenCalledTimes(1)
+    expect(backendCall).toHaveBeenCalledWith('list_bundled_models')
+    expect(backendCall).not.toHaveBeenCalledWith('swap_bundled_model', expect.anything())
   })
 })
