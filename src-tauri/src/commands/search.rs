@@ -226,7 +226,13 @@ async fn try_wikipedia(query: &str, count: usize) -> Result<Vec<SearchResult>, S
         urlencoding::encode(query), count
     );
 
-    let resp = reqwest::get(&url)
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .get(&url)
+        .send()
         .await
         .map_err(|e| format!("Wikipedia: {}", e))?;
 
