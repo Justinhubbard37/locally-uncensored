@@ -1637,7 +1637,7 @@ function UpdateSection() {
 
         {/* Manual check */}
         <button
-          onClick={() => { useUpdateStore.setState({ lastChecked: null }); checkForUpdate() }}
+          onClick={() => { void checkForUpdate(true) }}
           disabled={isChecking}
           className="text-[0.6rem] text-gray-500 hover:text-gray-300 transition-colors disabled:opacity-40"
         >
