@@ -114,6 +114,7 @@ Locally Uncensored is a free, open-source (AGPL-3.0) local AI studio for the des
 - How to Run AI Locally (5-minute beginner guide): https://locallyuncensored.com/blog/how-to-run-ai-locally.html
 - LM Studio Alternatives 2026: https://locallyuncensored.com/blog/lm-studio-alternatives.html
 - Easiest Local AI Image Generator (no ComfyUI node graphs): https://locallyuncensored.com/blog/easiest-local-ai-image-generator.html
+- Run an LLM and Stable Diffusion Together on One GPU (VRAM math + pairings): https://locallyuncensored.com/blog/run-llm-and-stable-diffusion-together.html
 - Local AI on Your Phone: https://locallyuncensored.com/blog/local-ai-on-your-phone.html
 - Best Local AI Apps 2026 (comparison): https://locallyuncensored.com/blog/best-local-ai-apps-2026.html
 - Best Uncensored AI Models 2026: https://locallyuncensored.com/blog/best-uncensored-ai-models-2026.html
