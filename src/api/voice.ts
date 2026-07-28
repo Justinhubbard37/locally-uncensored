@@ -486,6 +486,24 @@ function downsampleTo(input: Float32Array, inRate: number, outRate: number): Flo
   return out;
 }
 
+/** Downsample to 16 kHz when the source is higher, then encode.
+ *
+ *  The header carries the rate the samples are ACTUALLY at. It used to be
+ *  hard-coded to 16 kHz while downsampleTo returns its input untouched when the
+ *  source is already at or below the target — so a mic running below 16 kHz
+ *  produced a WAV whose header lied. A Bluetooth headset in HFP mode captures
+ *  at 8 kHz, which is the common case on Windows the moment the headset's
+ *  microphone is selected; whisper then read the take at double speed and the
+ *  transcript came back wrong or empty ("mic on but no text"). faster-whisper
+ *  resamples from whatever the header declares, so declaring it honestly is the
+ *  whole fix.
+ */
+export function pcmToWav(samples: Float32Array, inputRate: number): Blob {
+  const rate = Math.min(inputRate, STT_TARGET_RATE);
+  const ds = downsampleTo(samples, inputRate, STT_TARGET_RATE);
+  return encodeWav(floatTo16BitPCM(ds), rate);
+}
+
 function encodeWav(samples: Int16Array, sampleRate: number): Blob {
   const buffer = new ArrayBuffer(44 + samples.length * 2);
   const view = new DataView(buffer);
@@ -528,8 +546,7 @@ export function createAudioRecorder(): AudioRecorder {
     const merged = new Float32Array(total);
     let o = 0;
     for (const c of pcmChunks) { merged.set(c, o); o += c.length; }
-    const ds = downsampleTo(merged, inputRate, STT_TARGET_RATE);
-    return encodeWav(floatTo16BitPCM(ds), STT_TARGET_RATE);
+    return pcmToWav(merged, inputRate);
   };
 
   return {
