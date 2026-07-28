@@ -465,6 +465,14 @@ pub fn install_comfyui(
     install_path: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
+    // Never on macOS: local media there is MLX. Refusing before we touch the
+    // install slot means a stray call cannot even leave the status machine in
+    // "installing" — see start_comfyui for why the guard lives in Rust and not
+    // only in the UI that hides these buttons.
+    if !crate::commands::process::comfy_supported_here() {
+        return Err(crate::commands::process::MACOS_COMFY_REFUSAL.to_string());
+    }
+
     let mut install = state.install_status.lock().unwrap();
     if install.status == "installing" {
         return Ok(serde_json::json!({"status": "already_installing"}));

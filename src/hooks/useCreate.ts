@@ -66,6 +66,12 @@ export function useCreate() {
   const [videoBackend, setVideoBackend] = useState<VideoBackend>('none')
   const [modelsLoaded, setModelsLoaded] = useState(false)
   const [modelLoadError, setModelLoadError] = useState<string | null>(null)
+  // macOS only: which local media lanes have no MLX model installed yet.
+  // `null` means "not probed" — Windows/Linux leave it there, and so does the
+  // Mac until the first fetch answers, so no setup card can flash at startup.
+  // `connected` cannot carry this: it tracks ComfyUI, which is not the local
+  // media backend on a Mac.
+  const [mlxMissing, setMlxMissing] = useState<{ image: boolean; video: boolean } | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   // A local character-training run is a Rust child process, not a ComfyUI
@@ -90,6 +96,14 @@ export function useCreate() {
 
   const runPreflight = useCallback(async () => {
     const state = useCreateStore.getState()
+    // Preflight validates a model against ComfyUI's installed node graph. On a
+    // Mac that question has no meaning — and asking it reaches out to port 8188,
+    // where a ComfyUI the user runs for something else would answer about nodes
+    // that have nothing to do with the MLX model being checked.
+    if (isMlxImageHost()) {
+      state.setPreflightStatus(null, [], [])
+      return
+    }
     const activeModel = state.mode === 'image' ? state.imageModel : state.videoModel
     if (!activeModel) {
       state.setPreflightStatus(null, [], [])
@@ -131,6 +145,7 @@ export function useCreate() {
         try {
           mlxVideoModels = buildMlxVideoModels(await listVideoModels())
         } catch { /* mlx-video status unavailable yet — treat as no MLX video models */ }
+        setMlxMissing({ image: mlxImageModels.length === 0, video: mlxVideoModels.length === 0 })
       }
 
       // Check connection first — if ComfyUI is down, don't waste time on model queries.
@@ -1356,6 +1371,7 @@ export function useCreate() {
     videoBackend,
     modelsLoaded,
     modelLoadError,
+    mlxMissing,
     checkConnection,
     fetchModels,
     runPreflight,

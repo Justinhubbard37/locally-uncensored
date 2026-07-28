@@ -11,6 +11,7 @@ import { cn } from '../ui/cn'
 import { loadImageRef } from './loadImage'
 import { galleryItemUrl, fetchGalleryItemBlob, recoverGalleryUrl } from './galleryUrl'
 import { InstallCancelled } from '../../../lib/bundle-install'
+import { isMlxImageHost } from '../../../api/mlx-image'
 
 interface Props {
   displayed?: GalleryItem
@@ -37,7 +38,7 @@ export function Stage({ displayed, onOpenMaskEditor, onEditResult, onFullscreen 
   const audioModelList = useCreateStore((s) => s.audioModelList)
   const lipsyncModelList = useCreateStore((s) => s.lipsyncModelList)
   const motionModelList = useCreateStore((s) => s.motionModelList)
-  const { connected, modelsLoaded } = useCreateExp()
+  const { connected, modelsLoaded, mlxMissing } = useCreateExp()
   // On the cloud backend the utility ops (background removal, …) run on
   // WaveSpeed's hosted endpoints — there's no local ComfyUI node to install,
   // so the capability is always ready. Only the local backend gates on the
@@ -55,10 +56,19 @@ export function Stage({ displayed, onOpenMaskEditor, onEditResult, onFullscreen 
     lipsync: lipsyncModelList,
     motion: motionModelList,
   }
-  const modelsMissing = backend === 'local' && !!meta.requiresModels && (
+  // macOS answers this from MLX, not from ComfyUI: `connected` is deliberately
+  // pinned to null there (there is nothing to connect to), so the rule below
+  // would never fire and a Mac with no model installed got an empty stage and
+  // no way to fix it — the setup lived in Settings, where nothing pointed.
+  const macMissing =
+    backend === 'local' && !!mlxMissing &&
+    (meta.requiresModels === 'image' ? mlxMissing.image
+      : meta.requiresModels === 'video' ? mlxMissing.video
+        : false)
+  const modelsMissing = macMissing || (mlxMissing === null && backend === 'local' && !!meta.requiresModels && (
     connected === false ||
     (connected === true && modelsLoaded && listForKind[meta.requiresModels].length === 0)
-  )
+  ))
 
   // A result counts for the current source only if it was generated after the
   // source was loaded — otherwise an older gallery item would hijack the stage.
@@ -329,9 +339,13 @@ function ChangeImageButton({ onChange }: { onChange: (r: Awaited<ReturnType<type
 // install on Motion Control, got a spinner, and had no way to stop or even see
 // a 10.5 GB transfer. Cancel here aborts the install loop and kills the running
 // download in Rust; the partial file stays, so a later run resumes.
-function InstallCardBody({ run, installing, status, err, onDismiss, onCancel }: {
+function InstallCardBody({ run, installing, status, err, onDismiss, onCancel, cancelTitle }: {
   run: () => void; installing: boolean; status: string; err: string | null
   onDismiss: () => void; onCancel: () => void
+  /** What Cancel actually does here. The MLX installer on macOS runs in Rust
+   *  and outlives this view, so its Cancel stops watching, not downloading —
+   *  claiming otherwise would be a lie the next screen exposes. */
+  cancelTitle?: string
 }) {
   return (
     <div className="flex flex-col items-center gap-2.5 pt-1">
@@ -343,7 +357,7 @@ function InstallCardBody({ run, installing, status, err, onDismiss, onCancel }: 
           </div>
           <button
             onClick={onCancel}
-            title="Stops the setup. A download in flight is dropped, finished files stay."
+            title={cancelTitle ?? 'Stops the setup. A download in flight is dropped, finished files stay.'}
             className="t-control text-gray-500 hover:text-gray-300 underline underline-offset-2 transition-colors"
           >
             Cancel
@@ -396,6 +410,9 @@ const BUSY_DESCRIPTION = {
   // A connection that DROPS is the opposite case: that partial survives and the
   // next try resumes from it, which is what the retry line promises.
   bundle: 'Follow it in the Downloads tray up top. You can cancel any time, which stops the download and drops what it had so far.',
+  // The MLX installer runs inside Rust and keeps going without this view, so
+  // this line must not promise the Downloads tray or a real cancel.
+  macBundle: 'This runs in the background and survives leaving this tab. Settings → AI Backends → Local Media shows the same progress.',
 } as const
 
 function CapabilityCard({ cap }: { cap: 'rmbg' | 'inpaint-nodes' | 'dwpose' }) {
@@ -442,6 +459,22 @@ function CapabilityCard({ cap }: { cap: 'rmbg' | 'inpaint-nodes' | 'dwpose' }) {
   )
 }
 
+// macOS runs local media on Apple MLX, so the Mac card must not promise a
+// ComfyUI download or quote VRAM figures — unified memory is the constraint
+// there, and the sizes are the MLX catalog's, not ComfyUI's.
+const MAC_BUNDLE_COPY = {
+  image: {
+    icon: ImageIcon,
+    title: 'Local image generation needs a one-time setup',
+    description: 'This sets up Apple MLX on this Mac and downloads the smallest image model to start with. More models — including unfiltered ones — are in Settings → AI Backends → Local Media.',
+  },
+  video: {
+    icon: Film,
+    title: 'Local video generation needs a one-time setup',
+    description: 'This sets up Apple MLX video on this Mac and downloads the smallest video model. Video renders take minutes per clip, not seconds.',
+  },
+} as const
+
 // ── Local model files missing → one-click starter bundle (fresh-PC path) ──
 const BUNDLE_COPY = {
   image: {
@@ -477,7 +510,8 @@ function ModelInstallCard({ kind }: { kind: 'image' | 'video' | 'audio' | 'lipsy
   const [status, setStatus] = useState('')
   const [err, setErr] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
-  const copy = BUNDLE_COPY[kind]
+  const mac = isMlxImageHost()
+  const copy = (mac && (kind === 'image' || kind === 'video')) ? MAC_BUNDLE_COPY[kind] : BUNDLE_COPY[kind]
 
   const run = async () => {
     const ac = new AbortController()
@@ -501,12 +535,13 @@ function ModelInstallCard({ kind }: { kind: 'image' | 'video' | 'audio' | 'lipsy
       icon={copy.icon}
       tone="accent"
       title={installing ? 'Setting this up for you' : copy.title}
-      description={installing ? BUSY_DESCRIPTION.bundle : copy.description}
+      description={installing ? (mac ? BUSY_DESCRIPTION.macBundle : BUSY_DESCRIPTION.bundle) : copy.description}
     >
       <InstallCardBody
         run={run} installing={installing} status={status} err={err}
         onDismiss={() => setErr(null)}
         onCancel={() => abortRef.current?.abort()}
+        cancelTitle={mac ? 'Stops showing progress here. The download itself keeps running — pick it up in Settings → AI Backends → Local Media.' : undefined}
       />
     </EmptyState>
   )

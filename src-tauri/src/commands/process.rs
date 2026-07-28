@@ -11,6 +11,19 @@ use std::os::windows::process::CommandExt;
 
 use crate::state::AppState;
 
+/// What every ComfyUI entry point answers on macOS. Local media there is Apple
+/// MLX and nothing else, so the honest answer names the surface that does work
+/// instead of failing with a bare error.
+pub const MACOS_COMFY_REFUSAL: &str =
+    "ComfyUI is not used on macOS. Local image and video run on Apple MLX — set it up in Settings → AI Backends → Local Media (Apple MLX).";
+
+/// One definition of "may this machine run a local ComfyUI at all". Every entry
+/// point asks this rather than testing the target itself, so the rule has a
+/// single place to be read, tested, and changed.
+pub fn comfy_supported_here() -> bool {
+    !cfg!(target_os = "macos")
+}
+
 /// Windows: hide console windows for spawned processes
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -1104,6 +1117,17 @@ fn start_comfyui_blocking(state: &AppState) -> Result<serde_json::Value, String>
         }
     }
 
+    // macOS is MLX-only for local media — a hard product rule, not a preference.
+    // The frontend hides every ComfyUI surface there, but the frontend is not
+    // the only caller: the remote/mobile control surface reaches these commands
+    // directly, and any future caller would too. Refusing here is what actually
+    // makes the rule true. The remote-host branch above still answers, so a Mac
+    // pointed at someone else's ComfyUI keeps working — only spawning a local
+    // one is refused.
+    if !comfy_supported_here() {
+        return Err(MACOS_COMFY_REFUSAL.to_string());
+    }
+
     let port = *state.comfy_port.lock().unwrap();
 
     if is_comfyui_running_on_port(port) {
@@ -1938,6 +1962,22 @@ mod tests {
     }
 
     // ── Bug J: needs_cpu_fallback platform short-circuit ─────────────────
+
+    #[test]
+    fn comfy_is_refused_on_macos_and_allowed_elsewhere() {
+        // "Mac local media is MLX, never ComfyUI" is a product rule, and the
+        // UI-side hiding of the buttons is not where a rule is kept — the
+        // remote/mobile control surface calls these commands directly.
+        if cfg!(target_os = "macos") {
+            assert!(!comfy_supported_here(), "macOS must refuse a local ComfyUI");
+            // The refusal has to say where the working surface is; a bare
+            // "unsupported" leaves the user with nothing to do next.
+            assert!(MACOS_COMFY_REFUSAL.contains("MLX"));
+            assert!(MACOS_COMFY_REFUSAL.contains("Settings"));
+        } else {
+            assert!(comfy_supported_here(), "Windows/Linux keep ComfyUI");
+        }
+    }
 
     #[test]
     fn needs_cpu_fallback_is_false_on_macos() {

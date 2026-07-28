@@ -247,6 +247,7 @@ export function tauriMockInit(opts: TauriMockOptions) {
         return Promise.resolve(mlxImageCatalog.map((m) => ({ ...m, installed: mlx.images.has(m.id) })))
       case 'install_mlx_diffusion':
         slot.imageEngine = 0
+        record('__E2E_MLX_CALLS__', { cmd })
         return Promise.resolve({ ok: true, status: 'installing' })
       case 'install_mlx_diffusion_status': {
         const s = installStatus('imageEngine')
@@ -301,6 +302,7 @@ export function tauriMockInit(opts: TauriMockOptions) {
         return Promise.resolve(mlxVideoCatalog.map((m) => ({ ...m, installed: mlx.videos.has(m.id) })))
       case 'video_install_mlx':
         slot.videoEngine = 0
+        record('__E2E_MLX_CALLS__', { cmd })
         return Promise.resolve({ ok: true, status: 'installing' })
       case 'video_install_mlx_status': {
         const s = installStatus('videoEngine')
@@ -310,8 +312,10 @@ export function tauriMockInit(opts: TauriMockOptions) {
       case 'video_install_model':
         slot.video = 0
         pendingVideoId = m?.id ?? null
-        record('__E2E_MLX_CALLS__', { cmd, id: args?.id })
-        return Promise.resolve({ ok: true, status: 'installing', id: args?.id })
+        // The payload is nested under `args` (invokeMedia) — reading args.id
+        // here recorded undefined and let an id assertion pass on nothing.
+        record('__E2E_MLX_CALLS__', { cmd, id: m?.id })
+        return Promise.resolve({ ok: true, status: 'installing', id: m?.id })
       case 'video_install_model_status': {
         const s = installStatus('video')
         if (s.status === 'complete' && pendingVideoId) {

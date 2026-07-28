@@ -138,6 +138,42 @@ test('fresh mac: the Local Media panel installs the engine and a model', async (
   expect(calls.some((c) => c.cmd === 'mlx_image_install_model' && c.id === 'sd-turbo')).toBe(true)
 })
 
+test('fresh mac: Create itself offers the setup, and it is the MLX one', async ({ page }) => {
+  // The gap MAC-3 left open: the installer existed in Settings, but Create —
+  // where the user actually is when they hit the wall — showed an empty stage
+  // and a "one-time setup is needed" line with nothing to press. The card the
+  // other platforms get was gated on ComfyUI being *down*, and on a Mac that
+  // question is never asked, so it could not fire.
+  const fresh: TauriMockOptions = {
+    ...MAC_OPTS,
+    mlx: { engineInstalled: false, videoEngineInstalled: false, installedImages: [], installedVideos: [] },
+  }
+  await bootLocalCreate(page, fresh)
+
+  const card = page.getByText(/Local image generation needs a one-time setup/i)
+  await expect(card).toBeVisible({ timeout: 20_000 })
+  // Mac copy, not the ComfyUI bundle copy — no ComfyUI download is promised.
+  await expect(page.getByText(/Apple MLX/i).first()).toBeVisible()
+  await expect(page.getByText(/ComfyUI/i)).toHaveCount(0)
+
+  await page.getByRole('button', { name: /Download & install/i }).click()
+
+  // Engine first, then the SMALLEST model in the catalog — the setup path
+  // must not pull the 4.4 GB one when a 2.6 GB one would do.
+  await expect
+    .poll(async () => (await mlxCalls(page)).map((c: any) => c.cmd), { timeout: 30_000 })
+    .toContain('mlx_image_install_model')
+  const calls = (await mlxCalls(page)) as any[]
+  expect(calls.some((c) => c.cmd === 'install_mlx_diffusion')).toBe(true)
+  expect(calls.find((c) => c.cmd === 'mlx_image_install_model').id).toBe('sd-turbo')
+
+  // The hard rule: nothing in this flow reaches for ComfyUI.
+  const comfy = await page.evaluate(
+    () => (window as unknown as { __E2E_COMFY_CALLS__?: unknown[] }).__E2E_COMFY_CALLS__ ?? [],
+  )
+  expect(comfy).toHaveLength(0)
+})
+
 test('windows local is unchanged: ComfyUI lanes still offered', async ({ page }) => {
   // Guard against fixing the Mac by breaking everyone else.
   await bootLocalCreate(page, { ...MAC_OPTS, platform: 'windows' })

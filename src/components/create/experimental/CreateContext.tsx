@@ -7,6 +7,7 @@ import { getLoraModels, getVAEModels, checkComfyConnection, refreshComfyModels }
 import { getAllNodeInfo, clearNodeCache } from '../../../api/comfyui-nodes'
 import { installCustomNodes, getImageBundles, getVideoBundles, getAudioBundles, getLipsyncBundles, getMotionBundles, startModelDownload, getDownloadProgress } from '../../../api/discover'
 import { backendCall, isMacOS } from '../../../api/backend'
+import { installMlxStack } from '../../../api/mlx-install'
 import { useDownloadStore } from '../../../stores/downloadStore'
 import { downloadBundleFiles, waitOrAbort } from '../../../lib/bundle-install'
 import { ensureLocalFilename } from './loadImage'
@@ -64,6 +65,9 @@ interface CreateExpValue {
   connected: boolean | null
   modelsLoaded: boolean
   modelLoadError: string | null
+  /** macOS: which local lanes still have no MLX model. `null` off-Mac and until
+   *  the first probe answers, so the setup card never flashes during startup. */
+  mlxMissing: { image: boolean; video: boolean } | null
   /** True while the ComfyUI that LU launched runs with --cpu (shd_scorpion,
    *  RX 7900 XTX): surfaces the honest slow-mode warning instead of a silent
    *  20-minute timeout. */
@@ -99,7 +103,7 @@ export function useCreateExp(): CreateExpValue {
 export function CreateExpProvider({ children }: { children: ReactNode }) {
   const {
     generate, cancel, samplerList, schedulerList,
-    connected, modelsLoaded, modelLoadError, checkConnection, fetchModels,
+    connected, modelsLoaded, modelLoadError, mlxMissing, checkConnection, fetchModels,
   } = useCreate()
   const { cloudAvailable, quota, refreshQuota } = useCloudSession()
   const cloud = useCloudCreate({ onQuotaChange: refreshQuota })
@@ -292,6 +296,20 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
   // a restart. Bundles that need a custom node pack (GGUF loader, pose
   // extractor) install + register it first — one click really means one click.
   const installModelBundle = useCallback(async (kind: 'image' | 'video' | 'audio' | 'lipsync' | 'motion', onProgress?: (msg: string) => void, signal?: AbortSignal) => {
+    // macOS takes the MLX path — engine plus the smallest model of that kind.
+    // Everything below this line is the ComfyUI bundle flow, which would start
+    // by installing ComfyUI itself; on a Mac that is the one thing that must
+    // never happen (Rust refuses it too — see process.rs::comfy_supported_here).
+    // Only image and video exist locally there; the other lanes are cloud
+    // teasers on a Mac and never render this card.
+    if (isMacOS()) {
+      if (kind !== 'image' && kind !== 'video') {
+        throw new Error('This one runs in LU Cloud on a Mac — local generation covers images and video.')
+      }
+      await installMlxStack(kind, onProgress, signal)
+      await fetchModels()
+      return
+    }
     await ensureComfyRunning(onProgress, signal)
     const bundle = (
       kind === 'image' ? getImageBundles()
@@ -358,7 +376,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
     enhanceVideo: cloud.enhanceVideo,
     makeVoice: cloud.makeVoice,
     samplerList, schedulerList, loraList, vaeList,
-    connected, modelsLoaded, modelLoadError, comfyOnCpu, installCapability, installModelBundle,
+    connected, modelsLoaded, modelLoadError, mlxMissing, comfyOnCpu, installCapability, installModelBundle,
     cloudAvailable, quota, refreshQuota,
   }
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
