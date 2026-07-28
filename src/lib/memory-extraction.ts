@@ -11,6 +11,7 @@
  * - reference: Pointers to external resources, tools, URLs
  */
 
+import { extractJsonObject } from './json-scan'
 import type { MemoryType } from '../types/agent-mode'
 
 export interface ExtractedMemory {
@@ -75,45 +76,6 @@ Analyze this exchange. What (if anything) should be remembered?`
  * Parse the LLM's extraction response. Handles models that wrap JSON in
  * markdown code blocks or add preamble text.
  */
-/**
- * First balanced JSON object in `text` that actually parses.
- *
- * The old `/\{[\s\S]*\}/` was greedy: it spanned from the FIRST brace to the
- * LAST one, so a single brace in the model's prose ("Here is the analysis
- * {see below}: {...}") swallowed the real object and JSON.parse threw. Small
- * local models wrap their JSON in prose constantly, and the two callers fail
- * in opposite, silent ways — extraction saves nothing, resolution adds a
- * duplicate instead of merging. Walking the braces (string- and escape-aware)
- * finds the real object regardless of what surrounds it.
- */
-function extractJsonObject(text: string): any | null {
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] !== '{') continue
-    let depth = 0
-    let inString = false
-    let escaped = false
-    for (let j = i; j < text.length; j++) {
-      const ch = text[j]
-      if (escaped) { escaped = false; continue }
-      if (ch === '\\') { escaped = inString; continue }
-      if (ch === '"') { inString = !inString; continue }
-      if (inString) continue
-      if (ch === '{') depth++
-      else if (ch === '}') {
-        depth--
-        if (depth === 0) {
-          try {
-            return JSON.parse(text.slice(i, j + 1))
-          } catch {
-            break // not the object we want — try the next opening brace
-          }
-        }
-      }
-    }
-  }
-  return null
-}
-
 export function parseExtractionResponse(response: string): ExtractionResult {
   const fallback: ExtractionResult = { shouldSave: false, memories: [] }
 

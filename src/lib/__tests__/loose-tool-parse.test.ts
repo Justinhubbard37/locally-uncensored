@@ -334,3 +334,43 @@ describe('stripToolCallText — leftover Hermes tags', () => {
     expect(stripToolCallText(code, KN)).toContain('const a = 1')
   })
 })
+
+// ── Code inside the arguments (2026-07-28) ──────────────────────────
+//
+// The brace scanners counted braces inside JSON STRINGS as structure. A
+// file_write whose content holds a regex, a half-open CSS block or a stray
+// closing brace therefore either vanished (no candidate — the model believes
+// it wrote the file, nothing happened) or was cut one brace early, so the
+// arguments arrived wrong. Small local models writing code is the single most
+// common use of this loose path.
+describe('parseLooseToolCalls — braces inside the content string', () => {
+  it('keeps the call when the content holds a lone opening brace', () => {
+    const text = '{"name":"file_write","arguments":{"path":"a.js","content":"const re = /\\\\{/"}}'
+    const r = parseLooseToolCalls(text, KNOWN)
+    expect(r.calls).toHaveLength(1)
+    expect(r.calls[0].name).toBe('file_write')
+    expect(r.calls[0].arguments.path).toBe('a.js')
+  })
+
+  it('keeps the call when the content holds a lone closing brace', () => {
+    const text = '{"name":"file_write","arguments":{"path":"a.js","content":"} // end of block"}}'
+    const r = parseLooseToolCalls(text, KNOWN)
+    expect(r.calls).toHaveLength(1)
+    expect(r.calls[0].arguments.content).toBe('} // end of block')
+  })
+
+  it('keeps an unfinished CSS block intact', () => {
+    const text = '{"name":"file_write","arguments":{"path":"a.css","content":"a { color: red"}}'
+    const r = parseLooseToolCalls(text, KNOWN)
+    expect(r.calls).toHaveLength(1)
+    expect(r.calls[0].arguments.content).toBe('a { color: red')
+  })
+
+  it('handles the bare-name form with deeply nested arguments', () => {
+    const text = 'file_write {"path":"cfg.json","content":"{\\"a\\":{\\"b\\":{\\"c\\":1}}}"}'
+    const r = parseLooseToolCalls(text, KNOWN)
+    expect(r.calls).toHaveLength(1)
+    expect(r.calls[0].arguments.path).toBe('cfg.json')
+    expect(r.matched[0]).toContain('file_write')
+  })
+})
