@@ -46,7 +46,6 @@ export interface Settings {
   /** One-time Cloud onboarding (David 2026-07-10): the FIRST successful flip
    *  to Cloud shows a short what-changes walkthrough; after that the switch
    *  flips silently. Persisted so it never re-triggers. */
-  cloudOnboardingSeen: boolean
   /** Cloud discovery inside Local mode (2.5.8): locked Upscale/Erase tabs in
    *  Create, hosted-model rows in the chat + Create pickers, each opening a
    *  small "runs on LU Cloud" sheet. Teasers never block a local flow and

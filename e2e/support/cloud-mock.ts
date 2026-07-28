@@ -189,17 +189,14 @@ export async function routeCloud(page: Page, scenario: CloudScenario): Promise<v
  * Pre-seed the persisted settings so the app boots straight into chat (no
  * onboarding walk) in LOCAL mode. The settingsStore merge() backfills every
  * missing field from defaults, so the minimal shape is enough.
- * cloudOnboardingSeen defaults to true here so the specs exercising the
- * silent flip stay silent — the first-flip onboarding has its own spec.
  */
-export async function seedOnboardingDone(page: Page, opts?: { cloudOnboardingSeen?: boolean }): Promise<void> {
-  const cloudOnboardingSeen = opts?.cloudOnboardingSeen !== false
-  await page.addInitScript((seen) => {
+export async function seedOnboardingDone(page: Page): Promise<void> {
+  await page.addInitScript(() => {
     window.localStorage.setItem(
       'chat-settings',
-      JSON.stringify({ state: { settings: { onboardingDone: true, appMode: 'local', cloudOnboardingSeen: seen }, _version: 10 }, version: 10 }),
+      JSON.stringify({ state: { settings: { onboardingDone: true, appMode: 'local' }, _version: 10 }, version: 10 }),
     )
-  }, cloudOnboardingSeen)
+  })
 }
 
 /** The purple Cloud light-switch in the header (right cluster). */

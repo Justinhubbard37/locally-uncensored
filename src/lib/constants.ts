@@ -16,7 +16,6 @@ export const DEFAULT_SETTINGS: Settings = {
   onboardingDone: false,
   // Global Local/Cloud switch (2.5.7) — local is and stays the default.
   appMode: 'local',
-  cloudOnboardingSeen: false,
   // Cloud teasers in Local mode (2.5.8) — on by default, one-click off.
   cloudTeasersEnabled: true,
   personasEnabled: true,

@@ -20,9 +20,6 @@ interface UIState {
   /** CloudGateModal (login → plan → beta gate) — opened by the header's
    *  Cloud switch when the cloud side isn't usable yet. */
   cloudGateOpen: boolean
-  /** One-time Cloud onboarding — opened on the first successful flip to
-   *  Cloud (subscription present, cloudOnboardingSeen still false). */
-  cloudOnboardingOpen: boolean
   /** CloudTeaserModal — null = closed. */
   cloudTeaser: CloudTeaserTarget | null
   /** CloudExampleModal — the example video popup a teaser sheet's "See plans"
@@ -33,7 +30,6 @@ interface UIState {
   toggleSidebar: () => void
   setSidebarOpen: (open: boolean) => void
   setCloudGateOpen: (open: boolean) => void
-  setCloudOnboardingOpen: (open: boolean) => void
   setCloudTeaser: (target: CloudTeaserTarget | null) => void
   setCloudExampleVideo: (target: Extract<CloudTeaserTarget, { surface: 'intent' }> | null) => void
 }
@@ -42,7 +38,6 @@ export const useUIStore = create<UIState>()((set) => ({
   currentView: 'chat',
   sidebarOpen: true,
   cloudGateOpen: false,
-  cloudOnboardingOpen: false,
   cloudTeaser: null,
   cloudExampleVideo: null,
 
@@ -53,7 +48,6 @@ export const useUIStore = create<UIState>()((set) => ({
   toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
   setCloudGateOpen: (open) => set({ cloudGateOpen: open }),
-  setCloudOnboardingOpen: (open) => set({ cloudOnboardingOpen: open }),
   setCloudTeaser: (target) => set({ cloudTeaser: target }),
   setCloudExampleVideo: (target) => set({ cloudExampleVideo: target }),
 }))
