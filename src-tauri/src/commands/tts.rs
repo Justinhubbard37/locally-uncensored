@@ -147,7 +147,7 @@ fn installed_voice_ids(app: &tauri::AppHandle) -> Vec<String> {
 /// the frontend awaits it with a spinner (no separate progress channel; a voice
 /// is ~63 MB). Idempotent: re-downloading an existing voice just no-ops fast.
 #[tauri::command]
-pub fn download_voice(
+pub async fn download_voice(
     voice: String,
     state: State<'_, AppState>,
     app: tauri::AppHandle,
@@ -155,10 +155,24 @@ pub fn download_voice(
     if !is_valid_voice(&voice) {
         return Err(format!("invalid voice id: {}", voice));
     }
+    // Resolve the interpreter while we still hold the State borrow, then hand
+    // owned values to the blocking pool: the download itself is tens of MB over
+    // the network and used to run on the Tauri MAIN thread, so the window was
+    // frozen for the whole transfer.
     let python = crate::commands::install::resolve_lu_python(state.inner());
     if python.is_empty() || !crate::python::is_real_python(&python) {
         return Err("no_python: install Python first.".to_string());
     }
+    tokio::task::spawn_blocking(move || download_voice_blocking(voice, python, app))
+        .await
+        .map_err(|e| format!("download_voice task: {e}"))?
+}
+
+fn download_voice_blocking(
+    voice: String,
+    python: String,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
     let dir = piper_voices_dir(&app)?;
     let _ = std::fs::create_dir_all(&dir);
 
