@@ -414,7 +414,23 @@ pub fn file_write(
     if let Some(parent) = full_path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Create dir: {}", e))?;
     }
-    fs::write(&full_path, &content).map_err(|e| format!("Write error: {}", e))?;
+    // Same treatment the desktop path (fs_write) already gets: keep the file's
+    // EOL/BOM convention, skip an identical write, and swap the new bytes in
+    // atomically. A plain fs::write here could leave a user's source file
+    // truncated if the app died mid-write, and it rewrote a CRLF repo as LF —
+    // which shows up as "every line changed" in git.
+    let existing = fs::read(&full_path).ok();
+    let out_bytes = crate::commands::filesystem::normalize_to_existing_style(
+        existing.as_deref(),
+        &content,
+    );
+    if existing.as_deref() == Some(out_bytes.as_slice()) {
+        return Ok(serde_json::json!({
+            "status": "unchanged",
+            "path": full_path.to_string_lossy(),
+        }));
+    }
+    crate::commands::filesystem::write_atomic(&full_path, &out_bytes)?;
     Ok(serde_json::json!({"status": "saved", "path": full_path.to_string_lossy()}))
 }
 

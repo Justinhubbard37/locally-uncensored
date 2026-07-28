@@ -191,7 +191,7 @@ pub fn fs_read(path: String, chatId: Option<String>, workingDirectory: Option<St
 /// models emit `\n`; on a Windows repo whose files are CRLF, writing that raw
 /// turned every edit into a whole-file whitespace diff. For a NEW file we honor
 /// exactly what the caller sent — there is no convention to match.
-fn normalize_to_existing_style(existing: Option<&[u8]>, new: &str) -> Vec<u8> {
+pub(crate) fn normalize_to_existing_style(existing: Option<&[u8]>, new: &str) -> Vec<u8> {
     const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
     let existing = match existing {
         Some(e) => e,
@@ -215,7 +215,7 @@ fn normalize_to_existing_style(existing: Option<&[u8]>, new: &str) -> Vec<u8> {
 /// rename over the target. A crash or interrupt can never leave a half-written
 /// (truncated) file where the original was — std::fs::rename replaces the
 /// destination on both Unix and Windows.
-fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let parent = target.parent().ok_or_else(|| "No parent directory".to_string())?;
@@ -511,6 +511,30 @@ mod tests {
         assert_eq!(normalize_to_existing_style(None, "a\nb\n"), b"a\nb\n");
         // Even CRLF the caller explicitly sent is preserved for a new file.
         assert_eq!(normalize_to_existing_style(None, "a\r\nb"), b"a\r\nb");
+    }
+
+    #[test]
+    fn write_atomic_replaces_and_leaves_no_debris() {
+        use super::write_atomic;
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("lu-atomic-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let target = dir.join("notes.txt");
+        fs::write(&target, b"old").unwrap();
+
+        write_atomic(&target, b"new content").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"new content");
+
+        // The temp twin must be gone — a leftover .notes.txt.tmpNNN would show
+        // up in the user's repo and in file_list.
+        let leftovers: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n != "notes.txt")
+            .collect();
+        assert!(leftovers.is_empty(), "left behind: {:?}", leftovers);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
