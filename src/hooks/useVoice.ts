@@ -351,11 +351,22 @@ export function useVoice() {
               const url = await synthesizeNeural(text, store.piperVoice);
               if (stopped()) return;
               await playNeuralAudio(url);
+              store.setTtsFallbackReason(null);
               return;
             } catch (err) {
               if (stopped()) return;
               log.error("Neural TTS failed, falling back to browser voices", { err });
+              // #77 (ElBiggus): this fallback was invisible — Piper installed
+              // AND selected, yet every read-aloud spoke the system voice and
+              // nothing in the app said why. Record the reason for Settings.
+              store.setTtsFallbackReason(
+                `Piper failed to speak (${err instanceof Error ? err.message : String(err)}). Read-aloud used the system voice instead.`,
+              );
             }
+          } else if (store.ttsMode !== "external") {
+            store.setTtsFallbackReason(
+              "Piper is installed but not responding, so read-aloud used the system voice instead.",
+            );
           }
         }
         if (!ttsSupported || stopped()) return;

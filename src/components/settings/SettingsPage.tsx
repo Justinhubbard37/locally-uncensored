@@ -1462,6 +1462,13 @@ export function SettingsPage() {
             {ttsInstallError && (
               <p className="text-[0.55rem] text-red-400/90 leading-snug">{ttsInstallError}</p>
             )}
+            {/* #77: read-aloud silently fell back to the system voice while this
+                row showed a healthy green check — surface the recorded reason. */}
+            {voiceSettings.ttsMode === 'piper' && voiceSettings.ttsFallbackReason && (
+              <p className="text-[0.55rem] text-amber-400/90 leading-snug">
+                {voiceSettings.ttsFallbackReason} If an antivirus quarantined Piper, whitelist it or reinstall the voice below.
+              </p>
+            )}
             {!ttsLoading && ttsStatus && !ttsStatus.available && !ttsInstalling && !ttsInstallError && (
               <p className="text-[0.55rem] text-gray-500 leading-snug">
                 Required for read-aloud. Installs Piper + a neural voice locally (~63 MB).
@@ -1779,7 +1786,7 @@ function TroubleshootSection() {
                   ? (report.host.vram_free_gb != null
                       ? `${report.host.vram_free_gb} / ${report.host.vram_total_gb} GB free`
                       : `${report.host.vram_total_gb} GB`)
-                  : ','}
+                  : 'not detected'}
               </span>
             </div>
           </div>

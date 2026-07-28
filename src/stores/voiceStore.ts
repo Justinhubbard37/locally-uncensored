@@ -15,6 +15,10 @@ interface VoiceState {
   // Whether local neural TTS (Piper) is installed + a voice model is present.
   // Same transient/probe model as sttAvailable.
   ttsAvailable: boolean;
+  /** #77 (ElBiggus): why the last read-aloud fell back to the system voice
+   *  although Piper is installed + selected. Transient, shown in Settings —
+   *  the silent fallback made this class of failure undiagnosable. */
+  ttsFallbackReason: string | null;
   /** Last dictation/transcription failure (human-readable, e.g. the cloud
    *  route's 429 "monthly credit budget exhausted") — shown by VoiceButton
    *  instead of silently dropping the take. Transient. */
@@ -50,6 +54,7 @@ interface VoiceState {
   setTranscript: (transcript: string) => void;
   setSttAvailable: (available: boolean) => void;
   setTtsAvailable: (available: boolean) => void;
+  setTtsFallbackReason: (reason: string | null) => void;
   setSttError: (error: string | null) => void;
   setPiperVoice: (voice: string) => void;
   updateVoiceSettings: (
@@ -83,6 +88,7 @@ export const useVoiceStore = create<VoiceState>()(
       transcript: "",
       sttAvailable: false,
       ttsAvailable: false,
+      ttsFallbackReason: null,
       sttError: null,
 
       // Persisted settings — voice OFF by default (David 2026-06-07:
@@ -109,6 +115,7 @@ export const useVoiceStore = create<VoiceState>()(
       setTranscript: (transcript) => set({ transcript }),
       setSttAvailable: (available) => set({ sttAvailable: available }),
       setTtsAvailable: (available) => set({ ttsAvailable: available }),
+      setTtsFallbackReason: (reason) => set({ ttsFallbackReason: reason }),
       setSttError: (error) => set({ sttError: error }),
       setPiperVoice: (voice) => set({ piperVoice: voice }),
 
