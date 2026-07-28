@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ChevronDown, Check, Loader2 } from 'lucide-react'
+import { ChevronDown, Check, Loader2, AlertTriangle } from 'lucide-react'
 import { useModelStore } from '../../stores/modelStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { getProviderIdFromModel, displayModelName } from '../../api/providers'
@@ -32,6 +32,11 @@ export function ContextDropdown() {
   const updateSettings = useSettingsStore((s) => s.updateSettings)
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
+  // Reload failure, surfaced instead of swallowed: the engine's start error
+  // (out of memory for the new ctx, port held by a stranger) is actionable,
+  // and a silent catch here would bury exactly the honest message the Rust
+  // side now produces. Cleared on the next attempt or by clicking it away.
+  const [applyError, setApplyError] = useState<string | null>(null)
   const [tick, setTick] = useState(0)
   const ctx = useActiveContextWindow(tick)
   const builtinCtx = useSettingsStore((s) => s.settings.builtinEngine.ctx)
@@ -55,12 +60,15 @@ export function ContextDropdown() {
       const tuning = useSettingsStore.getState().settings.builtinEngine
       if (value === tuning.ctx) return
       setBusy(true)
+      setApplyError(null)
       updateSettings({ builtinEngine: { ...tuning, ctx: value } })
       try {
         const status = await bundledEngineStatus()
         if (status?.running && status.model_path) await swapBundledModel(status.model_path)
-      } catch {
-        /* non-fatal — the next engine start uses the new value */
+      } catch (e) {
+        // The setting is saved (the next start uses it) — but the immediate
+        // relaunch failed and the engine is now stopped; say so.
+        setApplyError(e instanceof Error ? e.message : String(e))
       } finally {
         setBusy(false)
         setTick((t) => t + 1)
@@ -70,6 +78,7 @@ export function ContextDropdown() {
     }
     if (value === override) return
     setBusy(true)
+    setApplyError(null)
     updateSettings({ contextWindowOverride: value }) // 0 = Auto
     try {
       const providerId = getProviderIdFromModel(activeModel)
@@ -82,8 +91,9 @@ export function ContextDropdown() {
         // value 0 (Auto) -> reload without -c so LM Studio picks its default.
         await loadLmStudioModel(displayModelName(activeModel), value > 0 ? value : undefined)
       }
-    } catch {
-      /* non-fatal — the counter will simply keep its prior value */
+    } catch (e) {
+      // Reload failed — the counter keeps its prior value; tell the user why.
+      setApplyError(e instanceof Error ? e.message : String(e))
     } finally {
       setBusy(false)
       setTick((t) => t + 1) // re-read the model's real loaded context
@@ -108,9 +118,24 @@ export function ContextDropdown() {
         className="flex items-center gap-1 px-1.5 py-0.5 rounded border border-gray-200 dark:border-white/[0.06] hover:border-gray-400 dark:hover:border-white/15 text-gray-500 transition-colors text-[0.55rem] font-mono tabular-nums disabled:opacity-60"
       >
         {busy ? <Loader2 size={9} className="animate-spin" /> : null}
+        {applyError && !busy ? <AlertTriangle size={9} className="text-red-400" /> : null}
         <span>ctx {fmt(ctx.contextWindow)}</span>
         <ChevronDown size={8} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
+      {applyError && !open && (
+        <div
+          onClick={() => setApplyError(null)}
+          title="Click to dismiss"
+          className="absolute right-0 top-full mt-1 z-50 w-64 p-2 rounded-md border border-red-500/25 bg-white dark:bg-[#1a1a1a] shadow-xl cursor-pointer"
+        >
+          <div className="flex items-start gap-1.5 text-red-500 dark:text-red-300">
+            <AlertTriangle size={10} className="mt-0.5 shrink-0" />
+            <span className="text-[0.55rem] leading-snug break-words">
+              Couldn&apos;t reload with the new context — {applyError}
+            </span>
+          </div>
+        </div>
+      )}
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
