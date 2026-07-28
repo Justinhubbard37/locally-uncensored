@@ -93,7 +93,7 @@ export class AnthropicProvider implements ProviderClient {
     const body: Record<string, any> = {
       model,
       messages: anthropicMessages,
-      max_tokens: options?.maxTokens || 4096,
+      max_tokens: options?.maxTokens && options.maxTokens > 0 ? options.maxTokens : 4096,
       stream: true,
     }
 
@@ -226,7 +226,7 @@ export class AnthropicProvider implements ProviderClient {
     const body: Record<string, any> = {
       model,
       messages: anthropicMessages,
-      max_tokens: options?.maxTokens || 4096,
+      max_tokens: options?.maxTokens && options.maxTokens > 0 ? options.maxTokens : 4096,
     }
 
     if (system) body.system = system

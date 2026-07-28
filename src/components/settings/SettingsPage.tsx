@@ -1121,7 +1121,7 @@ export function SettingsPage() {
               <input
                 type="number"
                 value={settings.maxTokens}
-                onChange={(e) => updateSettings({ maxTokens: parseInt(e.target.value) || 0 })}
+                onChange={(e) => updateSettings({ maxTokens: Math.max(0, parseInt(e.target.value) || 0) })}
                 min={0}
                 placeholder="0"
                 className="w-20 px-1.5 py-0.5 rounded bg-transparent border border-white/8 text-[0.65rem] text-right text-gray-300 font-mono focus:outline-none focus:border-white/20"
