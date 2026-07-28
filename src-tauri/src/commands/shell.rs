@@ -1,5 +1,7 @@
 use std::io::Read;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -26,6 +28,79 @@ fn workspace_cwd(chat_id: Option<&str>) -> PathBuf {
         .unwrap_or_default()
         .join("agent-workspace")
         .join(slug)
+}
+
+/// How much of a command's output travels back to the model. Anything past this
+/// is still read off the pipe — it has to be, or the child blocks — but dropped.
+const MAX_CAPTURE: usize = 256 * 1024;
+
+#[derive(Default)]
+struct Captured {
+    kept: Vec<u8>,
+    total: usize,
+}
+
+/// Drain a child pipe on its own thread. The pipe MUST be read while the process
+/// runs: an OS pipe buffer is only tens of kilobytes, and a child that fills it
+/// blocks on write forever. Reading only after `try_wait()` reports an exit
+/// therefore deadlocks on any command with real output — it hit the full timeout
+/// and returned nothing at all.
+fn drain(mut pipe: impl Read + Send + 'static) -> (Arc<Mutex<Captured>>, Arc<AtomicBool>) {
+    let buf = Arc::new(Mutex::new(Captured::default()));
+    let done = Arc::new(AtomicBool::new(false));
+    let sink = Arc::clone(&buf);
+    let flag = Arc::clone(&done);
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if let Ok(mut c) = sink.lock() {
+                        c.total += n;
+                        let room = MAX_CAPTURE.saturating_sub(c.kept.len());
+                        if room > 0 {
+                            c.kept.extend_from_slice(&chunk[..n.min(room)]);
+                        }
+                    }
+                }
+            }
+        }
+        flag.store(true, Ordering::Release);
+    });
+    (buf, done)
+}
+
+/// Decode captured bytes leniently. Build tools on a non-UTF-8 Windows codepage
+/// emit bytes `read_to_string` rejects outright — that used to throw the whole
+/// output away and hand the model an empty string next to a successful exit code.
+fn captured_text(buf: &Arc<Mutex<Captured>>) -> String {
+    let c = match buf.lock() {
+        Ok(c) => c,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let mut text = String::from_utf8_lossy(&c.kept).into_owned();
+    if c.total > c.kept.len() {
+        text.push_str(&format!(
+            "\n[output truncated: {} of {} bytes shown]",
+            c.kept.len(),
+            c.total
+        ));
+    }
+    text
+}
+
+/// Give the reader threads a moment to hit EOF after the child is gone. Never
+/// joins them: a grandchild can keep the pipe open (a spawned dev server), and
+/// joining would hang the command instead of returning what we already have.
+fn settle(a: &Arc<AtomicBool>, b: &Arc<AtomicBool>, max: std::time::Duration) {
+    let deadline = std::time::Instant::now() + max;
+    while std::time::Instant::now() < deadline {
+        if a.load(Ordering::Acquire) && b.load(Ordering::Acquire) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
 }
 
 #[tauri::command]
@@ -112,23 +187,26 @@ fn shell_execute_sync(
 
     let mut child = cmd.spawn().map_err(|e| format!("Spawn shell: {}", e))?;
 
+    // Start draining both pipes immediately — see `drain`.
+    let (out_buf, out_done) = match child.stdout.take() {
+        Some(p) => drain(p),
+        None => (Arc::new(Mutex::new(Captured::default())), Arc::new(AtomicBool::new(true))),
+    };
+    let (err_buf, err_done) = match child.stderr.take() {
+        Some(p) => drain(p),
+        None => (Arc::new(Mutex::new(Captured::default())), Arc::new(AtomicBool::new(true))),
+    };
+
     let start = std::time::Instant::now();
     let timeout_dur = std::time::Duration::from_millis(timeout_ms);
 
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stdout_str = String::new();
-                let mut stderr_str = String::new();
-                if let Some(mut stdout) = child.stdout.take() {
-                    let _ = stdout.read_to_string(&mut stdout_str);
-                }
-                if let Some(mut stderr) = child.stderr.take() {
-                    let _ = stderr.read_to_string(&mut stderr_str);
-                }
+                settle(&out_done, &err_done, std::time::Duration::from_millis(500));
                 return Ok(serde_json::json!({
-                    "stdout": stdout_str,
-                    "stderr": stderr_str,
+                    "stdout": captured_text(&out_buf),
+                    "stderr": captured_text(&err_buf),
                     "exitCode": status.code().unwrap_or(-1),
                     "timedOut": false,
                 }));
@@ -136,9 +214,17 @@ fn shell_execute_sync(
             Ok(None) => {
                 if start.elapsed() > timeout_dur {
                     let _ = child.kill();
+                    settle(&out_done, &err_done, std::time::Duration::from_millis(200));
+                    // Hand back whatever the command managed to print. A build
+                    // that dies on the timeout still tells the model where it got.
+                    let mut stderr_str = captured_text(&err_buf);
+                    if !stderr_str.is_empty() {
+                        stderr_str.push('\n');
+                    }
+                    stderr_str.push_str(&format!("Execution timed out after {}ms", timeout_ms));
                     return Ok(serde_json::json!({
-                        "stdout": "",
-                        "stderr": format!("Execution timed out after {}ms", timeout_ms),
+                        "stdout": captured_text(&out_buf),
+                        "stderr": stderr_str,
                         "exitCode": -1,
                         "timedOut": true,
                     }));
@@ -147,5 +233,39 @@ fn shell_execute_sync(
             }
             Err(e) => return Err(format!("Wait error: {}", e)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn capture(bytes: Vec<u8>) -> String {
+        let (buf, done) = drain(Cursor::new(bytes));
+        settle(&done, &done, std::time::Duration::from_secs(2));
+        captured_text(&buf)
+    }
+
+    #[test]
+    fn output_survives_bytes_that_are_not_utf8() {
+        // "Grüße" in CP1252 — what a Windows build tool prints. read_to_string
+        // used to reject this and leave the model with an empty result.
+        let text = capture(vec![b'G', b'r', 0xfc, 0xdf, b'e']);
+        assert!(text.starts_with("Gr"), "lost the output: {:?}", text);
+        assert!(text.ends_with('e'), "lost the tail: {:?}", text);
+    }
+
+    #[test]
+    fn oversized_output_is_capped_and_says_so() {
+        let text = capture(vec![b'x'; MAX_CAPTURE + 5_000]);
+        assert!(text.contains("output truncated"), "no truncation note: {:?}", &text[..64]);
+        assert!(text.len() < MAX_CAPTURE + 200);
+    }
+
+    #[test]
+    fn small_output_comes_back_whole_and_unannotated() {
+        let text = capture(b"hello\n".to_vec());
+        assert_eq!(text, "hello\n");
     }
 }
