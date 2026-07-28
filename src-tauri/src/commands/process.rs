@@ -1462,6 +1462,28 @@ pub fn set_comfyui_path(path: String, state: State<'_, AppState>) -> Result<serd
     Ok(serde_json::json!({"status": "saved", "path": path}))
 }
 
+/// Split a trailing `:port` off a host the user typed. The neighbouring Ollama
+/// field accepts `host:port`, so people type it here too — and it broke
+/// everything downstream without saying so: the proxy allow-list compares
+/// against the PARSED host (no port) and refused the request, while the progress
+/// socket built `ws://host:port:port`. The user then read "host not allowed,
+/// configure it in Settings" about the field they had just filled in.
+/// IPv6 literals (more than one colon) are left alone.
+fn split_host_port(input: &str) -> (String, Option<u16>) {
+    if input.matches(':').count() == 1 {
+        if let Some((h, p)) = input.rsplit_once(':') {
+            if !h.is_empty() && !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) {
+                if let Ok(port) = p.parse::<u16>() {
+                    if port > 0 {
+                        return (h.to_string(), Some(port));
+                    }
+                }
+            }
+        }
+    }
+    (input.to_string(), None)
+}
+
 #[tauri::command]
 pub fn set_comfyui_host(host: String, state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let trimmed = host.trim();
@@ -1472,11 +1494,15 @@ pub fn set_comfyui_host(host: String, state: State<'_, AppState>) -> Result<serd
     if trimmed.contains('/') || trimmed.contains(' ') || trimmed.contains('?') {
         return Err("Host must be a plain hostname or IP, no slashes/spaces".to_string());
     }
-    let final_host = trimmed.to_string();
+    let (final_host, typed_port) = split_host_port(trimmed);
 
     {
         let mut h = state.comfy_host.lock().unwrap();
         *h = final_host.clone();
+    }
+    if let Some(port) = typed_port {
+        let mut p = state.comfy_port.lock().unwrap();
+        *p = port;
     }
 
     // Persist to config file
@@ -1495,6 +1521,9 @@ pub fn set_comfyui_host(host: String, state: State<'_, AppState>) -> Result<serd
         };
 
         config["comfyui_host"] = serde_json::json!(final_host);
+        if let Some(port) = typed_port {
+            config["comfyui_port"] = serde_json::json!(port);
+        }
         let _ = fs::write(&config_file, serde_json::to_string_pretty(&config).unwrap());
     }
 
@@ -1795,6 +1824,25 @@ pub fn auto_start_comfyui(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_host_typed_with_its_port_keeps_both() {
+        assert_eq!(split_host_port("192.168.1.50:8188"), ("192.168.1.50".into(), Some(8188)));
+        assert_eq!(split_host_port("comfy.local:7860"), ("comfy.local".into(), Some(7860)));
+    }
+
+    #[test]
+    fn a_plain_host_is_left_alone() {
+        assert_eq!(split_host_port("192.168.1.50"), ("192.168.1.50".into(), None));
+        assert_eq!(split_host_port("localhost"), ("localhost".into(), None));
+        // Not a port: no digits, empty, or out of range.
+        assert_eq!(split_host_port("host:abc"), ("host:abc".into(), None));
+        assert_eq!(split_host_port("host:"), ("host:".into(), None));
+        assert_eq!(split_host_port("host:0"), ("host:0".into(), None));
+        assert_eq!(split_host_port("host:99999"), ("host:99999".into(), None));
+        // IPv6 literals must survive untouched.
+        assert_eq!(split_host_port("fd00::1"), ("fd00::1".into(), None));
+    }
 
     // ── Bug J: needs_cpu_fallback platform short-circuit ─────────────────
 
