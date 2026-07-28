@@ -447,3 +447,80 @@ impl Drop for AppState {
         self.shutdown_subprocesses();
     }
 }
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    /// A live child that outlives the test unless something kills it.
+    fn sleeper() -> std::process::Child {
+        std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleeper")
+    }
+
+    /// A killed-but-unreaped child is a ZOMBIE — `ps -p` still lists it, so the
+    /// process STATE has to be read. Z means the kill landed and only the exit
+    /// status is still pending; at quit the parent dies and init reaps it.
+    fn alive(pid: u32) -> bool {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "state=", "-p", &pid.to_string()])
+            .output();
+        match out {
+            Ok(o) => {
+                let st = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                !st.is_empty() && !st.starts_with('Z')
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// The quit path is normally only reachable through the Tauri exit (tray
+    /// Quit / exit_app), which cannot be triggered from a test or from a shell.
+    /// It is a plain method though, so it CAN be exercised with real children —
+    /// which is the only runtime proof available for it on this machine.
+    #[test]
+    #[cfg_attr(target_os = "windows", ignore = "uses sleep/ps")]
+    fn shutdown_kills_the_tracked_children_and_empties_the_slots() {
+        let state = AppState::new();
+
+        let ollama = sleeper();
+        let comfy = sleeper();
+        let ollama_pid = ollama.id();
+        let comfy_pid = comfy.id();
+        *state.ollama_process.lock().unwrap() = Some(ollama);
+        *state.comfy_process.lock().unwrap() = Some(comfy);
+
+        // The trainer is tracked as a bare pid, which is exactly why the
+        // shutdown used to skip it (d038209).
+        let trainer = sleeper();
+        let trainer_pid = trainer.id();
+        std::mem::forget(trainer); // only the pid is tracked, as in the real flow
+        *state.trainer_process.lock().unwrap() = Some(trainer_pid);
+
+        state.shutdown_subprocesses();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+
+        assert!(!alive(ollama_pid), "ollama child survived the shutdown");
+        assert!(!alive(comfy_pid), "comfyui child survived the shutdown");
+        assert!(!alive(trainer_pid), "TRAINER survived the shutdown (d038209)");
+
+        // Slots emptied, so the Drop pass has nothing left to fire at — a pid
+        // Windows may have recycled by then (3f3427c).
+        assert!(state.ollama_process.lock().unwrap().is_none());
+        assert!(state.comfy_process.lock().unwrap().is_none());
+        assert!(state.trainer_process.lock().unwrap().is_none());
+    }
+
+    /// Quitting with nothing running must not panic or block.
+    #[test]
+    fn shutdown_on_an_idle_state_is_a_no_op() {
+        let state = AppState::new();
+        state.shutdown_subprocesses();
+        state.shutdown_subprocesses();
+    }
+}
