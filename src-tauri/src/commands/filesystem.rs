@@ -688,3 +688,64 @@ mod tests {
         assert!(resolve_path(r"C:\Windows\System32\x.txt", Some("c"), Some(r"\\?\D:\Projects\site")).is_err());
     }
 }
+
+#[cfg(test)]
+mod jail_adversarial_tests {
+    use super::*;
+
+    /// The jail is the ONLY boundary between a prompt-injected model and the
+    /// user's home. These are the shapes an attacker actually sends, run
+    /// against the real function rather than reasoned about.
+    #[test]
+    fn traversal_out_of_the_workspace_is_refused() {
+        let root = Path::new("/Users/dave/project");
+        for evil in [
+            "../secrets.txt",
+            "../../.ssh/id_rsa",
+            "../../../../../../etc/passwd",
+            "sub/../../outside.txt",
+            "./../../outside.txt",
+            "/etc/passwd",
+            "/Users/dave/.ssh/id_rsa",
+            // sibling directory whose name merely STARTS with the root's name
+            "/Users/dave/project-evil/x.txt",
+            "/Users/dave/projectevil",
+        ] {
+            let cand = if Path::new(evil).is_absolute() {
+                PathBuf::from(evil)
+            } else {
+                root.join(evil)
+            };
+            assert!(
+                contain_within(root, &cand).is_err(),
+                "jail let {evil:?} through",
+            );
+        }
+    }
+
+    /// Enough `..` pops the root component itself, turning an absolute path
+    /// into a relative one. That must still not compare as "inside".
+    #[test]
+    fn popping_past_the_filesystem_root_does_not_land_inside() {
+        let root = Path::new("/Users/dave/project");
+        let cand = root.join("../../../../../../../../etc/passwd");
+        let out = contain_within(root, &cand);
+        assert!(out.is_err(), "escaped to {:?}", out);
+    }
+
+    /// The legitimate cases must keep working, or the coding agent breaks.
+    #[test]
+    fn ordinary_paths_inside_the_workspace_still_resolve() {
+        let root = Path::new("/Users/dave/project");
+        for good in ["src/main.rs", "./src/main.rs", "a/b/../c.txt", "."] {
+            assert!(
+                contain_within(root, &root.join(good)).is_ok(),
+                "jail refused a legitimate path: {good:?}",
+            );
+        }
+        // An absolute path inside the workspace is allowed on purpose (#62).
+        assert!(contain_within(root, Path::new("/Users/dave/project/src/x.rs")).is_ok());
+        // The root itself.
+        assert!(contain_within(root, root).is_ok());
+    }
+}
