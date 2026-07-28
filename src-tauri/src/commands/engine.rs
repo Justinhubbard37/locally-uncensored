@@ -309,11 +309,27 @@ fn tail_lines(text: &str, max: usize) -> String {
     lines[start..].join("\n")
 }
 
-/// Block until `/health` returns 200 or `HEALTH_TIMEOUT` elapses. Returns
-/// `Ok(())` on ready, `Err` with a hint on timeout so the UI can surface a
-/// real message instead of a silent hang.
-fn wait_for_health(port: u16) -> Result<(), String> {
-    let deadline = Instant::now() + HEALTH_TIMEOUT;
+/// Health budget scaled to the GGUF on disk: base 60s + 4s per GiB, capped
+/// at 10 minutes. A 0.5 GB model keeps the old 60s; a 40 GB one gets ~220s —
+/// big models legitimately need minutes on a cold first load, and a fixed
+/// 60s turned that into a false "did not become healthy" (ENG-4).
+fn health_timeout_for_bytes(bytes: u64) -> Duration {
+    let gb = (bytes / 1_073_741_824).min(1024) as u32;
+    (HEALTH_TIMEOUT + Duration::from_secs(4) * gb).min(Duration::from_secs(600))
+}
+
+fn health_timeout_for(model_path: &str) -> Duration {
+    std::fs::metadata(model_path)
+        .map(|m| health_timeout_for_bytes(m.len()))
+        .unwrap_or(HEALTH_TIMEOUT)
+}
+
+/// Block until `/health` returns 200 or `timeout` elapses (callers scale the
+/// budget to the model size via `health_timeout_for`). Returns `Ok(())` on
+/// ready, `Err` with a hint on timeout so the UI can surface a real message
+/// instead of a silent hang.
+fn wait_for_health(port: u16, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if engine_healthy(port) {
             return Ok(());
@@ -321,8 +337,8 @@ fn wait_for_health(port: u16) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(300));
     }
     Err(format!(
-        "Built-in engine did not become healthy on port {port} within {}s",
-        HEALTH_TIMEOUT.as_secs()
+        "Built-in engine did not become healthy on port {port} within {}s (the budget scales with model size — huge GGUFs can take minutes on a cold first load)",
+        timeout.as_secs()
     ))
 }
 
@@ -440,7 +456,7 @@ fn start_bundled_engine_blocking(
 
     // Wait for the model to load. On failure, reap the child so we don't leave
     // a zombie half-loaded server behind.
-    if let Err(e) = wait_for_health(port) {
+    if let Err(e) = wait_for_health(port, health_timeout_for(&model_path)) {
         let why = diagnostics
             .map(|(buf, _)| tail_lines(&super::shell::captured_text(&buf), 12))
             .unwrap_or_default();
@@ -674,7 +690,7 @@ fn start_bundled_embed_blocking(
         args: build_embed_args(&model_path, port),
     });
 
-    if let Err(e) = wait_for_health(port) {
+    if let Err(e) = wait_for_health(port, health_timeout_for(&model_path)) {
         let why = diagnostics
             .map(|(buf, _)| tail_lines(&super::shell::captured_text(&buf), 12))
             .unwrap_or_default();
@@ -749,6 +765,17 @@ pub(crate) fn stop_embed_locked(state: &AppState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_timeout_scales_with_model_size_and_caps() {
+        assert_eq!(health_timeout_for_bytes(0), Duration::from_secs(60));
+        // 0.5 GiB rounds down to the 60s base.
+        assert_eq!(health_timeout_for_bytes(536_870_912), Duration::from_secs(60));
+        assert_eq!(health_timeout_for_bytes(8 * 1_073_741_824), Duration::from_secs(92));
+        assert_eq!(health_timeout_for_bytes(40 * 1_073_741_824), Duration::from_secs(220));
+        // Absurd sizes hit the 10-minute cap instead of overflowing.
+        assert_eq!(health_timeout_for_bytes(u64::MAX), Duration::from_secs(600));
+    }
 
     #[test]
     fn default_tuning_args_match_legacy_shape() {

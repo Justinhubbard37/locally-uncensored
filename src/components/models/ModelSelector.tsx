@@ -7,7 +7,8 @@ import { useProviderStore } from '../../stores/providerStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useUIStore } from '../../stores/uiStore'
 import { unloadAllModels, loadModel, unloadModel, listRunningModels } from '../../api/ollama'
-import { displayModelName } from '../../api/providers'
+import { displayModelName, getProviderIdFromModel } from '../../api/providers'
+import { activateBuiltinModel, isManagedBuiltinActive } from '../../api/engine'
 import { getToolCapability } from '../../api/tool-capability'
 import { canUseTools } from '../../lib/tool-support'
 import { backendCall } from '../../api/backend'
@@ -587,6 +588,33 @@ export function ModelSelector({ openUpward = false, surface = 'chat' }: ModelSel
         setOpen(false)
       } catch {
         setSelectError(`Couldn't load "${displayModelName(model.name)}" into LM Studio. Is the LM Studio server running?`)
+      } finally {
+        setSelectingLms(null)
+      }
+      return
+    }
+
+    // Built-in engine rows (ENG-4): swap the GGUF (await) BEFORE activating —
+    // same contract as the LM Studio path above. A failed llama-server start
+    // keeps the dropdown open and shows the real reason (Rust appends the
+    // stderr tail) instead of activating a model that can't answer. Idempotent
+    // when the model is already loaded (the Rust side compares argv + health).
+    if (isManagedBuiltinActive() && getProviderIdFromModel(model.name) === 'openai') {
+      if (selectingLms || togglingLms) return
+      setSelectError(null)
+      setSelectingLms(id)
+      try {
+        const swapped = await activateBuiltinModel(model.name)
+        if (swapped) {
+          // Raw store set — the useModels wrapper would fire a second
+          // (idempotent but pointless) activate.
+          useModelStore.getState().setActiveModel(model.name)
+        } else {
+          setActiveModel(model.name) // not a bundled GGUF — plain activate
+        }
+        setOpen(false)
+      } catch (e) {
+        setSelectError(`Couldn't start the built-in engine with "${displayModelName(model.name)}": ${e instanceof Error ? e.message : String(e)}`)
       } finally {
         setSelectingLms(null)
       }
