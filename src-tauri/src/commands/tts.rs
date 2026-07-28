@@ -165,11 +165,29 @@ pub fn download_voice(
 /// play. `voice` is an optional Piper voice id (defaults to PIPER_VOICE). Runs
 /// the Piper CLI one-shot.
 #[tauri::command]
-pub fn synthesize(
+pub async fn synthesize(
     text: String,
     voice: Option<String>,
-    state: State<'_, AppState>,
     app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    // Piper is a cold-started Python process: importing onnxruntime and loading
+    // the voice takes seconds, and read-aloud calls this once per chunk. As a
+    // sync #[command] every one of those seconds was spent on the Tauri main
+    // thread with the window frozen — the same class fixed for the engine and
+    // the agent tools.
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        synthesize_blocking(text, voice, &state, &app)
+    })
+    .await
+    .map_err(|e| format!("Speech task failed to run: {e}"))?
+}
+
+fn synthesize_blocking(
+    text: String,
+    voice: Option<String>,
+    state: &State<'_, AppState>,
+    app: &tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let text = text.trim().to_string();
     if text.is_empty() {
@@ -186,7 +204,7 @@ pub fn synthesize(
         return Err("no_python: install Python first.".to_string());
     }
 
-    let (onnx, config) = piper_voice_paths(&app, &voice)?;
+    let (onnx, config) = piper_voice_paths(app, &voice)?;
     if !onnx.exists() || !config.exists() {
         return Err(format!(
             "no_voice: the '{}' voice isn't downloaded — pick/install it in Settings → Voice & Remote.",
@@ -218,9 +236,14 @@ pub fn synthesize(
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     let mut child = cmd.spawn().map_err(|e| format!("Failed to start piper: {}", e))?;
+    // Feed stdin from its own thread. Writing the whole text inline and only
+    // then draining piper's pipes deadlocks once the text outgrows the pipe
+    // buffer: piper blocks writing its log while we block writing the text.
+    // The thread ends by dropping stdin, which is what tells piper to start.
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(text.as_bytes());
-        // dropped at end of block → stdin closed so piper proceeds
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(text.as_bytes());
+        });
     }
     let output = child
         .wait_with_output()
