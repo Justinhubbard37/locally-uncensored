@@ -233,7 +233,29 @@ fn whisper_package_installed(state: &AppState) -> bool {
 }
 
 #[tauri::command]
-pub fn transcribe(app: AppHandle, audio_base64: String, content_type: String, state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn transcribe(
+    app: AppHandle,
+    audio_base64: String,
+    content_type: String,
+) -> Result<serde_json::Value, String> {
+    // On the first dictation this starts the whisper server and waits for the
+    // model — up to five minutes — and every transcription after that blocks for
+    // up to 60 s. As a sync #[command] all of that froze the Tauri main thread,
+    // so the window locked up for the whole take.
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        transcribe_blocking(&app, audio_base64, content_type, &state)
+    })
+    .await
+    .map_err(|e| format!("Transcription task failed to run: {e}"))?
+}
+
+fn transcribe_blocking(
+    app: &AppHandle,
+    audio_base64: String,
+    content_type: String,
+    state: &State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
     let audio_bytes = base64::engine::general_purpose::STANDARD
         .decode(&audio_base64)
         .map_err(|e| format!("base64 decode: {}", e))?;
@@ -276,7 +298,7 @@ pub fn transcribe(app: AppHandle, audio_base64: String, content_type: String, st
             if python_bin.is_empty() {
                 return Err("Whisper unavailable: no Python runtime detected. Install Python in the setup step, then retry.".to_string());
             }
-            auto_start_whisper_sync(&app, &python_bin, &state.whisper)?;
+            auto_start_whisper_sync(app, &python_bin, &state.whisper)?;
         }
     }
 

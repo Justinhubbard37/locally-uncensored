@@ -620,7 +620,7 @@ async fn handle_agent_tool(
             let code = body.args.get("code").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let timeout = body.args.get("timeout").and_then(|v| v.as_u64());
             if code.is_empty() { Err("code_execute needs a non-empty `code` argument.".into()) }
-            else { crate::commands::agent::execute_code(code, timeout, chat_id.clone(), None, app_state) }
+            else { crate::commands::agent::execute_code_blocking(code, timeout, chat_id.clone(), None, &app_state) }
         }
         "web_search" => {
             let query = body.args.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();

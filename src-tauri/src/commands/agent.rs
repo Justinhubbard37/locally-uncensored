@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::state::AppState;
 
@@ -266,13 +266,33 @@ mod path_tests {
     }
 }
 
+/// Runs on the blocking pool: the poll loop below waits for the Python process
+/// for up to `timeout_ms`, and a sync #[command] would spend all of that on the
+/// Tauri main thread with the window frozen (same class as install.rs and the
+/// built-in engine). The shell tool next door already did it this way.
 #[tauri::command]
-pub fn execute_code(
+pub async fn execute_code(
+    app: AppHandle,
     code: String,
     timeout: Option<u64>,
     #[allow(non_snake_case)] chatId: Option<String>,
     #[allow(non_snake_case)] workingDirectory: Option<String>,
-    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        execute_code_blocking(code, timeout, chatId, workingDirectory, &state)
+    })
+    .await
+    .map_err(|e| format!("Code execution task failed to run: {e}"))?
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn execute_code_blocking(
+    code: String,
+    timeout: Option<u64>,
+    chatId: Option<String>,
+    workingDirectory: Option<String>,
+    state: &State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let timeout_ms = timeout.unwrap_or(30000);
 
