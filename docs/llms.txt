@@ -127,3 +127,10 @@ Locally Uncensored is a free, open-source (AGPL-3.0) local AI studio for the des
 - Kimi K3 vs Kimi K2.6: https://locallyuncensored.com/blog/kimi-k3-vs-kimi-k2-6.html
 - Abliterated Models Guide: https://locallyuncensored.com/blog/abliterated-models-guide.html
 - Locally Uncensored vs Open WebUI / LM Studio / Jan / GPT4All / Msty / SillyTavern / KoboldCpp: https://locallyuncensored.com/blog/
+
+## Comparisons
+- Alternatives & Comparisons hub (all head-to-heads and roundups): https://locallyuncensored.com/alternatives/
+- Locally Uncensored vs LM Studio (all-in-one studio vs polished chat client): https://locallyuncensored.com/vs/lm-studio/
+- Locally Uncensored vs ComfyUI (same engine, workflows built for you): https://locallyuncensored.com/vs/comfyui/
+- Locally Uncensored vs Ollama (engine vs all-in-one desktop app on top): https://locallyuncensored.com/vs/ollama/
+- Locally Uncensored vs Jan (two AGPL-3.0 apps, chat-only vs full studio): https://locallyuncensored.com/vs/jan/
