@@ -874,7 +874,9 @@ async function runShell(command: string, cwd: string | undefined, timeout = 6000
 
 async function executeShellExecuteBg(args: Record<string, any>): Promise<string> {
   const { bgStart } = await import('../agents/bg-tasks')
-  const { id } = await bgStart({ command: args.command, cwd: args.cwd })
+  // Thread the chat context through, or the task starts in LU's own directory
+  // instead of the workspace the foreground shell tool uses.
+  const { id } = await bgStart({ command: args.command, cwd: args.cwd, ...chatCtx() })
   return `Task started: ${id}. Use shell_task_status to poll, shell_task_kill to cancel.`
 }
 

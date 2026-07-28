@@ -128,6 +128,12 @@ struct StartArgs {
     cwd: Option<String>,
     #[serde(default)]
     shell: Option<String>,
+    // Same chat context the flat `shell_execute` path carries, so a background
+    // task defaults to the SAME folder its foreground twin would use.
+    #[serde(default)]
+    chat_id: Option<String>,
+    #[serde(default)]
+    working_directory: Option<String>,
 }
 
 // ── Internal impls (verbatim from uselu, sans &AppState) ──────────────
@@ -141,7 +147,22 @@ async fn shell_task_start_impl(args: &Value) -> CmdResult {
     if a.command.trim().is_empty() {
         return Err(bad_request("command is empty"));
     }
-    if let Some(cwd) = &a.cwd {
+    // Without an explicit cwd the child used to inherit LU's OWN process
+    // directory — the install folder on Windows. The tool exists for
+    // `pnpm install` / `cargo build`, so a task the model started "in the
+    // project" ran somewhere else entirely. Fall back to the workspace the
+    // foreground shell tool resolves.
+    let cwd = match a.cwd.clone() {
+        Some(c) => Some(c),
+        None => crate::commands::filesystem::workspace_root(
+            a.chat_id.as_deref(),
+            a.working_directory.as_deref(),
+        )
+        .to_str()
+        .map(|s| s.to_string())
+        .filter(|s| std::path::Path::new(s).is_dir()),
+    };
+    if let Some(cwd) = &cwd {
         let p = std::path::Path::new(cwd);
         if !p.is_dir() {
             return Err(bad_request(format!("cwd does not exist: {}", cwd)));
@@ -167,7 +188,7 @@ async fn shell_task_start_impl(args: &Value) -> CmdResult {
 
     let mut cmd = TokioCommand::new(&program);
     cmd.args(&args_vec);
-    if let Some(cwd) = &a.cwd {
+    if let Some(cwd) = &cwd {
         cmd.current_dir(cwd);
     }
     cmd.stdout(std::process::Stdio::piped())
@@ -200,7 +221,7 @@ async fn shell_task_start_impl(args: &Value) -> CmdResult {
         status: BgTaskStatus {
             id: id.clone(),
             command: a.command.clone(),
-            cwd: a.cwd.clone(),
+            cwd: cwd.clone(),
             started_at: now_secs(),
             finished_at: None,
             exit_code: None,
@@ -516,5 +537,83 @@ mod cancel_tests {
             !alive(grandchild),
             "cancel killed the shell but left the grandchild ({grandchild}) running",
         );
+    }
+}
+
+#[cfg(test)]
+mod cwd_default_tests {
+    use super::*;
+
+    /// The tool exists for `pnpm install` / `cargo build`, so the folder it
+    /// runs in IS the point. Without an explicit cwd the child used to inherit
+    /// LU's own process directory — the install folder on Windows — so a task
+    /// the model started "in the project" ran somewhere else.
+    #[tokio::test]
+    #[cfg_attr(target_os = "windows", ignore = "uses sh/pwd")]
+    async fn a_task_without_an_explicit_cwd_lands_in_the_workspace() {
+        let ws = std::env::temp_dir().join(format!("lu-bg-ws-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        // macOS hands out /var/... which is a symlink to /private/var; pwd
+        // reports the resolved path, so compare against that.
+        let expected = std::fs::canonicalize(&ws).unwrap();
+
+        let start = shell_task_start_impl(&json!({
+            "command": "pwd",
+            "shell": "sh",
+            "working_directory": ws.to_string_lossy(),
+        }))
+        .await
+        .expect("start");
+        let id = start["id"].as_str().unwrap().to_string();
+
+        let mut seen = String::new();
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let st = shell_task_status_impl(&json!({ "id": id })).await.unwrap();
+            seen = st["output_tail"].as_str().unwrap_or("").to_string();
+            if !seen.trim().is_empty() {
+                break;
+            }
+        }
+        assert_eq!(
+            seen.trim(),
+            expected.to_string_lossy(),
+            "background task did not start in the workspace",
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// An explicit cwd from the caller still wins over the derived default.
+    #[tokio::test]
+    #[cfg_attr(target_os = "windows", ignore = "uses sh/pwd")]
+    async fn an_explicit_cwd_still_wins() {
+        let a = std::env::temp_dir().join(format!("lu-bg-a-{}", std::process::id()));
+        let b = std::env::temp_dir().join(format!("lu-bg-b-{}", std::process::id()));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let expected = std::fs::canonicalize(&b).unwrap();
+
+        let start = shell_task_start_impl(&json!({
+            "command": "pwd",
+            "shell": "sh",
+            "cwd": b.to_string_lossy(),
+            "working_directory": a.to_string_lossy(),
+        }))
+        .await
+        .expect("start");
+        let id = start["id"].as_str().unwrap().to_string();
+
+        let mut seen = String::new();
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let st = shell_task_status_impl(&json!({ "id": id })).await.unwrap();
+            seen = st["output_tail"].as_str().unwrap_or("").to_string();
+            if !seen.trim().is_empty() {
+                break;
+            }
+        }
+        assert_eq!(seen.trim(), expected.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
     }
 }
