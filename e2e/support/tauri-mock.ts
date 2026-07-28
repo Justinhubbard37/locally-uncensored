@@ -41,6 +41,12 @@ export function tauriMockInit(opts: TauriMockOptions) {
   // very next `download_progress` poll so `awaitDownloadComplete` resolves fast.
   const startedDownloads = new Set<string>()
 
+  // ENG-1 mirror: the ctx the "engine" is currently running with. Every
+  // start/swap derives it from the injected tuning (0 = Rust default 8192),
+  // and `bundled_engine_status` reports it back — exactly the loop the token
+  // counter and the expert panel rely on.
+  let engineCtx = 8192
+
   const enc = (s: string) => Array.from(new TextEncoder().encode(s))
 
   // Ordered OpenAI SSE for one assistant turn, ending with [DONE].
@@ -90,12 +96,22 @@ export function tauriMockInit(opts: TauriMockOptions) {
 
       // ── built-in engine lifecycle (engine.rs surface) ─────────────
       case 'start_bundled_engine':
-      case 'swap_bundled_model':
+      case 'swap_bundled_model': {
+        // Record every launch so specs can assert the settings-injected tuning
+        // (api/engine.ts merges settings.builtinEngine into each call).
+        ;(w.__E2E_ENGINE_CALLS__ = w.__E2E_ENGINE_CALLS__ || []).push({
+          cmd,
+          modelPath: args?.modelPath,
+          tuning: args?.tuning,
+        })
+        const t = args?.tuning
+        engineCtx = t && typeof t.ctx === 'number' && t.ctx > 0 ? t.ctx : 8192
         return Promise.resolve(8127)
+      }
       case 'stop_bundled_engine':
         return Promise.resolve(null)
       case 'bundled_engine_status':
-        return Promise.resolve({ running: true, healthy: true, port: 8127, model_path: modelPath })
+        return Promise.resolve({ running: true, healthy: true, port: 8127, model_path: modelPath, ctx: engineCtx })
       case 'list_bundled_models':
         return Promise.resolve({
           dir: MODELS_DIR,
