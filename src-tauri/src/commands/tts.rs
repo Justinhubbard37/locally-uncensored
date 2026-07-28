@@ -61,12 +61,16 @@ pub fn piper_voice_paths(app: &tauri::AppHandle, voice: &str) -> Result<(PathBuf
 /// everywhere while every read-aloud failed with `no_voice` and fell back to the
 /// system voice: green check, chosen voice, still Microsoft George (#77).
 pub(crate) fn voice_is_complete(app: &tauri::AppHandle, voice: &str) -> bool {
-    let (onnx, config) = match piper_voice_paths(app, voice) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    let nonempty = |p: &PathBuf| std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false);
-    nonempty(&onnx) && nonempty(&config)
+    match piper_voices_dir(app) {
+        Ok(dir) => voice_is_complete_in(&dir, voice),
+        Err(_) => false,
+    }
+}
+
+/// The AppHandle-free half, so the rule behind #77 can actually be tested.
+pub(crate) fn voice_is_complete_in(dir: &std::path::Path, voice: &str) -> bool {
+    let nonempty = |p: PathBuf| std::fs::metadata(&p).map(|m| m.len() > 0).unwrap_or(false);
+    nonempty(dir.join(format!("{}.onnx", voice))) && nonempty(dir.join(format!("{}.onnx.json", voice)))
 }
 
 /// Whether neural TTS is usable: the `piper` package is installed AND a voice
@@ -127,12 +131,15 @@ pub fn installed_piper_voices(app: tauri::AppHandle) -> Result<Vec<String>, Stri
 
 /// Every voice id that has a `.onnx` in the voices dir, complete or not.
 fn installed_voice_ids(app: &tauri::AppHandle) -> Vec<String> {
-    let dir = match piper_voices_dir(app) {
-        Ok(d) => d,
-        Err(_) => return vec![],
-    };
+    match piper_voices_dir(app) {
+        Ok(dir) => installed_voice_ids_in(&dir),
+        Err(_) => vec![],
+    }
+}
+
+fn installed_voice_ids_in(dir: &std::path::Path) -> Vec<String> {
     let mut out = vec![];
-    if let Ok(entries) = std::fs::read_dir(&dir) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             if let Some(stem) = name.strip_suffix(".onnx") {
@@ -399,4 +406,84 @@ pub async fn synthesize_external(
 
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Ok(serde_json::json!({ "audio_base64": b64, "mime": mime }))
+}
+
+#[cfg(test)]
+mod voice_completeness_tests {
+    use super::*;
+    use std::fs;
+
+    fn voices_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lu-tts-test-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    /// #77 in one assertion: the badge, the picker and the download check all
+    /// looked at the `.onnx` alone, so a voice whose config never landed read as
+    /// installed everywhere while every read-aloud fell back to the system voice.
+    #[test]
+    fn a_voice_without_its_config_is_not_complete() {
+        let dir = voices_dir("noconfig");
+        fs::write(dir.join("en_US-lessac-medium.onnx"), b"model bytes").unwrap();
+
+        assert!(
+            !voice_is_complete_in(&dir, "en_US-lessac-medium"),
+            "a model without its .onnx.json must never read as usable",
+        );
+        // It IS still listed by the raw scan — that is the contract; both
+        // callers filter it out afterwards.
+        assert_eq!(installed_voice_ids_in(&dir), vec!["en_US-lessac-medium"]);
+
+        fs::write(dir.join("en_US-lessac-medium.onnx.json"), b"{}").unwrap();
+        assert!(voice_is_complete_in(&dir, "en_US-lessac-medium"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A torn download leaves a 0-byte file. Present-but-empty must not count,
+    /// or the same green-check-that-cannot-speak comes back.
+    #[test]
+    fn an_empty_half_does_not_count() {
+        let dir = voices_dir("empty");
+        fs::write(dir.join("v.onnx"), b"model").unwrap();
+        fs::write(dir.join("v.onnx.json"), b"").unwrap();
+        assert!(!voice_is_complete_in(&dir, "v"), "0-byte config counted as usable");
+
+        fs::write(dir.join("w.onnx"), b"").unwrap();
+        fs::write(dir.join("w.onnx.json"), b"{}").unwrap();
+        assert!(!voice_is_complete_in(&dir, "w"), "0-byte model counted as usable");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_voice_and_a_missing_dir_are_both_incomplete() {
+        let dir = voices_dir("missing");
+        assert!(!voice_is_complete_in(&dir, "not-downloaded"));
+        assert!(installed_voice_ids_in(&dir).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+        assert!(!voice_is_complete_in(&dir, "anything"), "gone dir must not be complete");
+        assert!(installed_voice_ids_in(&dir).is_empty());
+    }
+
+    /// The scan keys on `.onnx`; a stray config without its model is not a voice.
+    #[test]
+    fn a_config_alone_is_not_listed_as_a_voice() {
+        let dir = voices_dir("orphan");
+        fs::write(dir.join("orphan.onnx.json"), b"{}").unwrap();
+        assert!(installed_voice_ids_in(&dir).is_empty(), "listed a config as a voice");
+        assert!(!voice_is_complete_in(&dir, "orphan"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The id is interpolated into a download URL and a file path.
+    #[test]
+    fn voice_ids_that_are_not_plain_piper_ids_are_refused() {
+        for bad in ["", "../../etc/passwd", "a/b", "a b", "a;rm -rf /", &"x".repeat(64)] {
+            assert!(!is_valid_voice(bad), "accepted {bad:?}");
+        }
+        for good in ["en_US-lessac-medium", "en_GB-alba-medium", "de_DE-thorsten-high"] {
+            assert!(is_valid_voice(good), "refused {good:?}");
+        }
+    }
 }
