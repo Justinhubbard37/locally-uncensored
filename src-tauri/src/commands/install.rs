@@ -2604,7 +2604,7 @@ pub fn install_whisper(
                 {
                     let already_running = whisper.lock().map(|w| w.ready).unwrap_or(false);
                     if !already_running {
-                        crate::commands::whisper::auto_start_whisper_sync(&app, &target_python, &whisper);
+                        let _ = crate::commands::whisper::auto_start_whisper_sync(&app, &target_python, &whisper);
                     }
                 }
                 let started = whisper.lock().map(|w| w.ready).unwrap_or(false);

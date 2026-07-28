@@ -36,6 +36,12 @@ function sttErrorMessage(err: unknown): string {
     if (err.status >= 500) return "Cloud transcription is unavailable right now, try again";
     return err.message;
   }
+  // Local Whisper rejects with the Rust error STRING, and those are written for
+  // the user ("Speech-to-text needs faster-whisper, which is not installed…").
+  // Swallowing them behind the microphone hint sent people looking in entirely
+  // the wrong place. A real JS Error keeps the generic line — its message is
+  // for us, not for them.
+  if (typeof err === "string" && err.trim()) return err.trim();
   return "Transcription failed, check the microphone and try again";
 }
 

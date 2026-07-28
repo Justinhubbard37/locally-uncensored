@@ -38,6 +38,21 @@ impl WhisperServer {
         if self.process.is_some() {
             return Ok(());
         }
+        // A start that fails halfway must leave nothing behind: `process` is set
+        // before the readiness wait, so an error after that point used to leave a
+        // dead server registered. `needs_start` then saw process.is_some(), never
+        // retried, and every later transcription answered "Whisper server not
+        // ready" until the app was restarted.
+        match self.start_inner(python_bin, script_path) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.stop();
+                Err(e)
+            }
+        }
+    }
+
+    fn start_inner(&mut self, python_bin: &str, script_path: &str) -> Result<(), String> {
 
         println!("[Whisper] Starting persistent server: {} {}", python_bin, script_path);
 
@@ -144,6 +159,7 @@ impl WhisperServer {
         }
         if let Some(ref mut child) = self.process {
             let _ = child.kill();
+            let _ = child.wait(); // reap, or the python server lingers as a zombie
         }
         self.process = None;
         self.stdin_tx = None;
@@ -260,7 +276,7 @@ pub fn transcribe(app: AppHandle, audio_base64: String, content_type: String, st
             if python_bin.is_empty() {
                 return Err("Whisper unavailable: no Python runtime detected. Install Python in the setup step, then retry.".to_string());
             }
-            auto_start_whisper_sync(&app, &python_bin, &state.whisper);
+            auto_start_whisper_sync(&app, &python_bin, &state.whisper)?;
         }
     }
 
@@ -293,8 +309,18 @@ pub fn transcribe(app: AppHandle, audio_base64: String, content_type: String, st
     }
 }
 
-/// Synchronous whisper startup (runs in background thread)
-pub fn auto_start_whisper_sync(app: &tauri::AppHandle, python_bin: &str, whisper: &Arc<Mutex<WhisperServer>>) {
+/// Synchronous whisper startup (runs in background thread).
+///
+/// Returns WHY it could not start. Every failure used to end in a `println!`,
+/// so the four distinct causes — faster-whisper missing, whisper_server.py
+/// missing, the server dying, the model never loading — all reached the user
+/// as the same "Whisper server not ready" from send_command, which says nothing
+/// about what to do next.
+pub fn auto_start_whisper_sync(
+    app: &tauri::AppHandle,
+    python_bin: &str,
+    whisper: &Arc<Mutex<WhisperServer>>,
+) -> Result<(), String> {
     // Check if faster-whisper is installed
     let mut cmd = Command::new(python_bin);
     cmd.args(["-c", "import faster_whisper"]);
@@ -308,7 +334,11 @@ pub fn auto_start_whisper_sync(app: &tauri::AppHandle, python_bin: &str, whisper
         }
         _ => {
             println!("[Whisper] faster-whisper not installed — STT disabled");
-            return;
+            return Err(
+                "Speech-to-text needs faster-whisper, which is not installed. \
+                 Install it from Settings → Voice, then try again."
+                    .to_string(),
+            );
         }
     }
 
@@ -329,10 +359,15 @@ pub fn auto_start_whisper_sync(app: &tauri::AppHandle, python_bin: &str, whisper
             let mut ws = whisper.lock().unwrap();
             if let Err(e) = ws.start(python_bin, &path_str) {
                 println!("[Whisper] Failed to start: {}", e);
+                return Err(format!("Speech-to-text could not start: {}", e));
             }
+            Ok(())
         }
         None => {
             println!("[Whisper] whisper_server.py not found");
+            Err("Speech-to-text is missing its server script (whisper_server.py). \
+                 Reinstall LU to restore it."
+                .to_string())
         }
     }
 }
