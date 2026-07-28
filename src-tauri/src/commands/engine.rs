@@ -221,6 +221,13 @@ fn engine_healthy(port: u16) -> bool {
         .unwrap_or(false)
 }
 
+/// The last `max` non-empty lines of a sidecar's stderr, for an error message.
+fn tail_lines(text: &str, max: usize) -> String {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let start = lines.len().saturating_sub(max);
+    lines[start..].join("\n")
+}
+
 /// Block until `/health` returns 200 or `HEALTH_TIMEOUT` elapses. Returns
 /// `Ok(())` on ready, `Err` with a hint on timeout so the UI can surface a
 /// real message instead of a silent hang.
@@ -307,7 +314,12 @@ fn start_bundled_engine_blocking(
     cmd.args(build_server_args(&model_path, ctx, port))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        // llama-server writes the REASON a start fails here: a GGUF it refuses,
+        // a quant this build has no kernel for, a port already taken, too little
+        // VRAM. Sending it to /dev/null left the user with "did not become
+        // healthy", which names no cause at all. Drained on its own thread so
+        // the pipe can never fill and stall the server (see commands/shell.rs).
+        .stderr(Stdio::piped());
     // Forward the user's GPU pick (CUDA/HIP/OneAPI) exactly like start_ollama;
     // no-op in the default "auto" mode. On mac this is inert (Metal).
     if let Ok(sel) = state.gpu_selection.lock() {
@@ -316,9 +328,10 @@ fn start_bundled_engine_blocking(
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn bundled engine: {e}"))?;
+    let diagnostics = child.stderr.take().map(super::shell::drain);
 
     *state.bundled_engine.lock().unwrap() = Some(BundledEngine {
         child,
@@ -329,8 +342,11 @@ fn start_bundled_engine_blocking(
     // Wait for the model to load. On failure, reap the child so we don't leave
     // a zombie half-loaded server behind.
     if let Err(e) = wait_for_health(port) {
+        let why = diagnostics
+            .map(|(buf, _)| tail_lines(&super::shell::captured_text(&buf), 12))
+            .unwrap_or_default();
         stop_engine_locked(state);
-        return Err(e);
+        return Err(if why.is_empty() { e } else { format!("{e}\n\n{why}") });
     }
 
     println!("[Engine] Built-in engine healthy on port {port}");
@@ -523,16 +539,17 @@ fn start_bundled_embed_blocking(
     cmd.args(build_embed_args(&model_path, port))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     if let Ok(sel) = state.gpu_selection.lock() {
         crate::commands::gpu::apply_gpu_env(&mut cmd, &sel);
     }
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn embeddings server: {e}"))?;
+    let diagnostics = child.stderr.take().map(super::shell::drain);
 
     *state.bundled_embed.lock().unwrap() = Some(BundledEngine {
         child,
@@ -541,8 +558,11 @@ fn start_bundled_embed_blocking(
     });
 
     if let Err(e) = wait_for_health(port) {
+        let why = diagnostics
+            .map(|(buf, _)| tail_lines(&super::shell::captured_text(&buf), 12))
+            .unwrap_or_default();
         stop_embed_locked(state);
-        return Err(e);
+        return Err(if why.is_empty() { e } else { format!("{e}\n\n{why}") });
     }
 
     println!("[Engine] Built-in embeddings server healthy on port {port}");
@@ -691,5 +711,25 @@ mod tests {
     fn scan_missing_dir_is_empty_not_error() {
         let dir = std::env::temp_dir().join("lu-engine-nonexistent-xyz-123");
         assert!(scan_gguf_models(&dir).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod diag_tests {
+    use super::tail_lines;
+
+    #[test]
+    fn tail_keeps_the_last_lines_and_drops_blanks() {
+        let log = "loading model\n\n  error: unknown pre-tokenizer type  \nfailed to load\n\n";
+        assert_eq!(
+            tail_lines(log, 2),
+            "error: unknown pre-tokenizer type\nfailed to load"
+        );
+    }
+
+    #[test]
+    fn tail_of_a_short_log_is_the_whole_log() {
+        assert_eq!(tail_lines("only line", 12), "only line");
+        assert_eq!(tail_lines("", 12), "");
     }
 }
