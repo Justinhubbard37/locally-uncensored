@@ -17,6 +17,7 @@ export function isTauri(): boolean {
   // Tauri v2 renamed the global from `__TAURI__` to `__TAURI_INTERNALS__`.
   // Check both so the app keeps working across both versions (and also
   // during the migration window when people might be on either).
+  if (typeof window === "undefined") return false;
   const w = window as any;
   return !!(w.__TAURI_INTERNALS__ || w.__TAURI__);
 }
@@ -845,6 +846,37 @@ export function isPrivateOrLanHost(hostname: string): boolean {
 /** Lowercase hostname from a URL, or '' if unparseable. */
 export function hostnameOf(url: string): string {
   try { return _canonHost(new URL(url).hostname) } catch { return '' }
+}
+
+/**
+ * Hosts the webview is allowed to fetch DIRECTLY. Mirrors `connect-src` in
+ * src-tauri/tauri.conf.json — keep the two in sync. Everything else has to take
+ * the Rust proxy, because the pinned CSP kills the request inside the webview
+ * before it reaches the network. That is why a user's own cloud endpoint (a
+ * custom OpenAI-compatible provider on their domain, or a vendor LU ships no
+ * preset for) used to fail with an unexplainable network error.
+ */
+const CSP_DIRECT_HOSTS = new Set([
+  'lu-labs.ai',
+  'lrrhheztdytyfpizvuup.supabase.co',
+  'openrouter.ai',
+  'api.openai.com',
+  'api.groq.com',
+  'api.together.xyz',
+  'api.deepseek.com',
+  'api.mistral.ai',
+  'api.anthropic.com',
+  'ollama.com',
+  'huggingface.co',
+  'civitai.com',
+])
+
+export function isDirectFetchAllowed(hostname: string): boolean {
+  const h = _canonHost(hostname)
+  if (!h) return false
+  return CSP_DIRECT_HOSTS.has(h)
+    || h.endsWith('.huggingface.co')
+    || h.endsWith('.civitai.com')
 }
 
 // Hosts already registered with the proxy this session (avoid duplicate IPC).

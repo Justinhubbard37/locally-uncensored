@@ -240,6 +240,29 @@ fn is_registerable_lan_host(host: &str) -> bool {
     !h.contains('.') && !h.contains(':')
 }
 
+/// True for a public hostname a user can legitimately host an OpenAI-compatible
+/// backend on (their own domain, or a cloud vendor LU has no preset for). These
+/// need the proxy too: the pinned webview CSP only permits a DIRECT fetch to the
+/// handful of hosts listed in tauri.conf.json, so anything else is blocked
+/// before it leaves the webview (GH #87 family).
+///
+/// Deliberately narrow: FQDNs only. IP literals are refused — a bare public IP
+/// backend is not a case LU needs to serve, and IP/numeric host forms are the
+/// classic SSRF-bypass surface (decimal `2852039166`, hex `0xA9FEA9FE`).
+fn is_registerable_public_host(host: &str) -> bool {
+    let h = host.trim_matches(|c| c == '[' || c == ']').to_lowercase();
+    if h.is_empty() || !h.contains('.') || h.ends_with('.') || h.starts_with('.') {
+        return false;
+    }
+    if h.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    if h.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return false;
+    }
+    h.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+}
+
 /// Validate that a URL targets either localhost or one of the user-configured
 /// backend hosts (Ollama via `ollama_base`, ComfyUI via `comfy_host`).
 ///
@@ -328,11 +351,13 @@ pub fn register_openai_host(
     if is_blocked_proxy_host(&h) {
         return Err(format!("refused: '{}' is a metadata/link-local address", h));
     }
-    // SSRF hardening (M2): only allow-list private/LAN hosts. The Rust boundary
-    // enforces the LAN-only intent rather than trusting the JS caller — public
-    // endpoints don't need the proxy (they use a direct fetch).
-    if !is_registerable_lan_host(&h) {
-        return Err(format!("refused: '{}' is not a private/LAN host", h));
+    // SSRF hardening (M2): the Rust boundary decides which hosts are usable as a
+    // backend, not the JS caller. Private/LAN hosts (CORS) and public FQDNs (the
+    // pinned CSP blocks a direct fetch to anything outside tauri.conf.json's
+    // connect-src) both need the proxy; IP literals, metadata addresses and
+    // numeric IP encodings stay refused.
+    if !is_registerable_lan_host(&h) && !is_registerable_public_host(&h) {
+        return Err(format!("refused: '{}' is not a usable backend host", h));
     }
     if let Ok(mut hosts) = state.openai_hosts.lock() {
         // Bound the set (m1) — defend against a runaway registration loop.
@@ -897,6 +922,21 @@ mod tests {
                     "::ffff:169.254.169.254", "javascript:alert(1)", "2606:4700::1111",
                     "192.168.0.74:1234"] {
             assert!(!is_registerable_lan_host(bad), "{} should NOT be registerable", bad);
+        }
+    }
+
+    #[test]
+    fn register_accepts_the_users_own_public_backend() {
+        // A custom OpenAI-compatible provider on a public domain has no other
+        // route out: the pinned CSP only allows a direct fetch to the presets.
+        for ok in ["api.fireworks.ai", "llm.example.com", "api.x.ai", "my-vllm.example.org"] {
+            assert!(is_registerable_public_host(ok), "{} should be registerable", ok);
+        }
+        // IP literals and IP-encoding tricks stay out.
+        for bad in ["8.8.8.8", "2606:4700::1111", "2852039166", "0xa9fea9fe",
+                    "169.254.169.254", "nas", "", "javascript:alert(1)",
+                    "evil.com/path", ".example.com", "example.com."] {
+            assert!(!is_registerable_public_host(bad), "{} should NOT be registerable", bad);
         }
     }
 

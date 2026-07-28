@@ -17,15 +17,14 @@ import { ProviderError } from './types'
 import { parseSSEStream } from '../sse'
 import { repairJson } from '../../lib/tool-call-repair'
 import { signalCreditsExhausted } from '../../lib/credits-exhausted'
-import { localFetch, localFetchStream, isPrivateOrLanHost, hostnameOf, ensureProxyAllowsHost } from '../backend'
+import { localFetch, localFetchStream, isPrivateOrLanHost, isDirectFetchAllowed, hostnameOf, ensureProxyAllowsHost } from '../backend'
 
-// Local/LAN vs cloud routing now lives in the `useLocalProxy` getter (below)
-// plus the shared host helpers in backend.ts (isPrivateOrLanHost/hostnameOf).
-// A local OR LAN OpenAI-compat backend (LM Studio/vLLM bound to 0.0.0.0,
-// reached over the network) is hit through the Rust proxy to bypass CORS + the
-// webview CSP; cloud endpoints use a direct fetch. Fixes GH #49 (LAN endpoint
-// "Test" failed because a 192.168.x.x host fell back to a CSP/CORS-blocked
-// direct fetch).
+// Transport routing lives in the `useLocalProxy` getter (below) plus the shared
+// host helpers in backend.ts. A direct webview fetch only works for hosts the
+// pinned CSP lists; everything else — LAN backends (also CORS-blocked, GH #49)
+// and any cloud endpoint LU ships no preset for — goes through the Rust proxy.
+// `isLanBackend` stays separate: it decides local-only BEHAVIOUR (context
+// probing), which must not follow the transport decision.
 
 // ── OpenAI API Types ───────────────────────────────────────────
 
@@ -172,15 +171,26 @@ export class OpenAIProvider implements ProviderClient {
   }
 
   /**
-   * Whether requests must go through the Rust proxy instead of a direct webview
-   * fetch. True for any local/LAN endpoint — declared by the preset
+   * A backend on this machine or the LAN — declared by the preset
    * (`config.isLocal`) OR detected from the host (localhost, RFC1918, CGNAT,
-   * IPv6 ULA/link-local, .local, bare machine name). Cloud endpoints (public
-   * hostnames, isLocal=false) use a direct fetch. Fixes GH #49 where a LAN LM
-   * Studio (e.g. 192.168.1.50) used a direct fetch and was CSP/CORS-blocked.
+   * IPv6 ULA/link-local, .local, bare machine name). Drives behaviour that only
+   * makes sense locally: per-model context probing and the LM Studio enhanced
+   * API. Cloud endpoints must not do those (N+1 requests → rate limits).
+   */
+  private get isLanBackend(): boolean {
+    return this.config.isLocal === true || isPrivateOrLanHost(hostnameOf(this.baseUrl))
+  }
+
+  /**
+   * Whether requests must go through the Rust proxy instead of a direct webview
+   * fetch. Two reasons: a LAN endpoint has no CORS headers for the
+   * tauri.localhost origin (GH #49), and a public host outside the pinned CSP
+   * allow-list gets killed inside the webview before it hits the network — that
+   * is every custom OpenAI-compatible provider a user configures themselves
+   * (their own domain, or a vendor LU ships no preset for).
    */
   private get useLocalProxy(): boolean {
-    return this.config.isLocal === true || isPrivateOrLanHost(hostnameOf(this.baseUrl))
+    return this.isLanBackend || !isDirectFetchAllowed(hostnameOf(this.baseUrl))
   }
 
   private get headers(): Record<string, string> {
@@ -478,7 +488,7 @@ export class OpenAIProvider implements ProviderClient {
     // Context-Limit vom Server. Sonst zeigen wir 8K obwohl das Modell 32K+
     // kann. Probes laufen parallel; bei Cloud-Providers (OpenAI/OpenRouter)
     // wuerde N+1 zu Rate-Limits fuehren, deshalb nur KNOWN_CONTEXT/Heuristik.
-    if (this.useLocalProxy) {
+    if (this.isLanBackend) {
       return Promise.all(models.map(async m => ({
         id: m.id,
         name: m.id,
@@ -545,7 +555,7 @@ export class OpenAIProvider implements ProviderClient {
    * Returnt `null` wenn nichts gefunden, damit Callers cascaden koennen.
    */
   private async probeContextFromServer(model: string): Promise<number | null> {
-    if (!this.useLocalProxy) return null
+    if (!this.isLanBackend) return null
 
     // 1. LM Studio Enhanced API: /api/v0/models/<id>
     //    Base-URL ist typischerweise http://localhost:1234/v1 — wir tauschen
