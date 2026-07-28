@@ -93,6 +93,44 @@ export function bundledEmbedStatus() {
   return backendCall<EngineStatus>('bundled_embed_status')
 }
 
+// Embedding-model GGUFs: never offered in the chat dropdown, and the
+// candidates for the bundled embeddings server. Single source of truth —
+// useModels and the RAG self-heal below share it.
+const EMBEDDING_GGUF_PATTERNS = [/embed/, /nomic-embed/, /bge-/, /e5-/, /gte-/, /sentence-/]
+export function isEmbeddingGgufName(name: string): boolean {
+  const lower = name.toLowerCase()
+  return EMBEDDING_GGUF_PATTERNS.some((p) => p.test(lower))
+}
+
+// Coalesce concurrent RAG calls into one status-probe/restart.
+let embedEnsureInflight: Promise<void> | null = null
+
+/**
+ * Revive the bundled embeddings server after a VRAM offload stopped it —
+ * Create/Music renders call `offload_local_models`, which kills BOTH managed
+ * sidecars with the promise of a lazy reload. This is the embed half of that
+ * reload (the chat half lives in `builtin-ensure.ts`); RAG awaits it before
+ * hitting :8128. Best-effort: a real start failure surfaces on the embeddings
+ * request itself with the server's honest error.
+ */
+export async function ensureBundledEmbedAlive(): Promise<void> {
+  if (embedEnsureInflight) return embedEnsureInflight
+  embedEnsureInflight = (async () => {
+    try {
+      const status = await bundledEmbedStatus()
+      if (status?.healthy) return
+      const models = await listBundledModels()
+      const embed = models.find((m) => isEmbeddingGgufName(m.name))
+      if (embed) await startBundledEmbed(embed.path)
+    } catch {
+      /* best-effort — embedViaBuiltin reports the real error */
+    } finally {
+      embedEnsureInflight = null
+    }
+  })()
+  return embedEnsureInflight
+}
+
 /** List downloaded GGUFs in the app models dir. Refreshes the name→path map. */
 export async function listBundledModels(): Promise<BundledModel[]> {
   const res = await backendCall<{ dir: string; models: BundledModel[] }>('list_bundled_models')

@@ -303,6 +303,16 @@ fn start_bundled_engine_blocking(
     // Different model (or dead) → stop the old process before spawning.
     stop_engine_locked(state);
 
+    // Mirror image of the Create-tab handoff: a render leaves ComfyUI's
+    // checkpoint cached in VRAM (`includeComfyui:false` keeps it warm between
+    // runs). On a single-GPU box the returning chat engine then fights that
+    // cache for memory — llama-server with `-ngl 999` loses as a CUDA OOM
+    // (RTX 5080 field report: ACE-Step → chat = crash until app restart). Ask
+    // ComfyUI to drop its cache first; best-effort no-op when it isn't running.
+    if crate::commands::process::free_comfyui_memory() {
+        println!("[Engine] asked ComfyUI to free VRAM before engine start");
+    }
+
     let binary = resolve_engine_binary(app).ok_or_else(|| {
         format!(
             "Bundled engine binary not found ({}). Run scripts/build-llama.sh to produce the sidecar.",

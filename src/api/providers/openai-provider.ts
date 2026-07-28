@@ -18,6 +18,7 @@ import { parseSSEStream } from '../sse'
 import { repairJson } from '../../lib/tool-call-repair'
 import { signalCreditsExhausted } from '../../lib/credits-exhausted'
 import { localFetch, localFetchStream, isPrivateOrLanHost, isDirectFetchAllowed, hostnameOf, ensureProxyAllowsHost } from '../backend'
+import { ensureBuiltinEngineAlive } from '../builtin-ensure'
 
 // Transport routing lives in the `useLocalProxy` getter (below) plus the shared
 // host helpers in backend.ts. A direct webview fetch only works for hosts the
@@ -285,6 +286,12 @@ export class OpenAIProvider implements ProviderClient {
     // the TokenCounter honest — a char/4 estimate can't see the system prompt.
     body.stream_options = { include_usage: true }
 
+    // Managed built-in engine: Create/Music renders stop the llama-server
+    // child to free VRAM ("reloads lazily on the next message") — this is that
+    // lazy reload. Restart-before-send instead of letting the fetch hit a dead
+    // 127.0.0.1:8127 and look like a crashed backend.
+    if (this.config.managed === true) await ensureBuiltinEngineAlive(model)
+
     if (this.useLocalProxy) await ensureProxyAllowsHost(this.baseUrl)
     const fetcher = this.useLocalProxy ? localFetchStream : fetch
     let res = await fetcher(`${this.baseUrl}/chat/completions`, {
@@ -452,6 +459,10 @@ export class OpenAIProvider implements ProviderClient {
     // Same reasoning_effort gate as chatStream.
     if (options?.thinking === true) body.reasoning_effort = 'high'
     else if (options?.thinking === false) body.reasoning_effort = 'minimal'
+
+    // Same self-heal as chatStream: agent/tool turns after a Create render
+    // must revive the offloaded built-in engine before hitting its port.
+    if (this.config.managed === true) await ensureBuiltinEngineAlive(model)
 
     if (this.useLocalProxy) await ensureProxyAllowsHost(this.baseUrl)
     const fetcher = this.useLocalProxy ? localFetch : fetch

@@ -10,23 +10,16 @@ import { getEnabledProviders, prefixModelName, getProviderIdFromModel } from '..
 import {
   listBundledModels, bundledToAIModels, activateBuiltinModel, isManagedBuiltinActive,
   bundledEngineStatus, bundledEmbedStatus, startBundledEmbed,
+  isEmbeddingGgufName as isEmbeddingModel,
 } from '../api/engine'
 import type { BundledModel } from '../api/engine'
 import type { PullProgress, AIModel, ModelCategory, ImageModel, VideoModel, CloudModel } from '../types/models'
 
 const VIDEO_PATTERNS = [/wan/, /svd/, /animatediff/, /animate/, /video/, /cogvideo/, /ltx/i, /framepack/, /mochi/, /cosmos/, /hunyuan/, /pyramidflow/, /allegro/]
 
-// Embedding models that should never appear in the chat model dropdown
-const EMBEDDING_PATTERNS = [/embed/, /nomic-embed/, /bge-/, /e5-/, /gte-/, /sentence-/]
-
 function isVideoModel(name: string): boolean {
   const lower = name.toLowerCase()
   return VIDEO_PATTERNS.some((p) => p.test(lower))
-}
-
-function isEmbeddingModel(name: string): boolean {
-  const lower = name.toLowerCase()
-  return EMBEDDING_PATTERNS.some((p) => p.test(lower))
 }
 
 // Boot-resume for the managed built-in engine (2.5.7): the llama-server

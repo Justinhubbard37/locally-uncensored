@@ -1,7 +1,7 @@
 import { v4 as uuid } from "uuid"
 import type { DocumentMeta, TextChunk, RAGContext, VectorSearchResult } from "../types/rag"
 import { ollamaUrl, localFetch } from "./backend"
-import { isManagedBuiltinActive, embedBaseUrl, bundledEmbedStatus } from "./engine"
+import { isManagedBuiltinActive, embedBaseUrl, bundledEmbedStatus, ensureBundledEmbedAlive } from "./engine"
 
 export async function extractText(file: File): Promise<string> {
   const ext = file.name.split(".").pop()?.toLowerCase()
@@ -72,6 +72,9 @@ export async function generateEmbeddings(
   // onboarding — use it whenever it is running. Otherwise fall back to the
   // Ollama `/api/embed` path (still supported as an "Advanced" backend).
   if (isManagedBuiltinActive()) {
+    // A Create/Music render may have offloaded the embed sidecar — revive it
+    // before the request instead of failing with "cannot reach :8128".
+    await ensureBundledEmbedAlive()
     return embedViaBuiltin(texts, model)
   }
   try {
