@@ -405,6 +405,22 @@ fn start_bundled_engine_blocking(
     // Different model (or dead) → stop the old process before spawning.
     stop_engine_locked(state);
 
+    // The port must actually be FREE now: our own previous child (if any) was
+    // killed AND reaped above, so anything still answering the health probe is
+    // an orphaned or foreign llama-server — left over from a crashed /
+    // hard-killed session, or user-run. Spawning against it would LOOK green:
+    // the health probe below is answered by the stranger while our child is
+    // still loading its model and only later dies on "address already in use"
+    // — so chats would silently hit an unknown model with unknown ctx, tuning
+    // would never apply, and no shutdown of ours could ever reap it. (Live
+    // repro 2026-07-28: an embed server orphaned by a hard-killed dev session
+    // made every later start look successful.)
+    if engine_healthy(port) {
+        return Err(format!(
+            "Port {port} is already serving another llama-server that this app does not manage (likely left over from a previous session or crash). Quit that process or reboot, then try again."
+        ));
+    }
+
     // Mirror image of the Create-tab handoff: a render leaves ComfyUI's
     // checkpoint cached in VRAM (`includeComfyui:false` keeps it warm between
     // runs). On a single-GPU box the returning chat engine then fights that
@@ -462,6 +478,32 @@ fn start_bundled_engine_blocking(
             .unwrap_or_default();
         stop_engine_locked(state);
         return Err(if why.is_empty() { e } else { format!("{e}\n\n{why}") });
+    }
+
+    // Health said OK — but was it OUR child that answered? A spawn that loses
+    // the port to an orphaned llama-server (left behind by a crashed or
+    // hard-killed session) dies on "address already in use" within
+    // milliseconds, and the probe above then hits the STRANGER: unknown model,
+    // unknown ctx, tuning that silently never applies, and a process no
+    // shutdown of ours can ever reap. Fail honestly with the child's own
+    // stderr instead of adopting it. (Live repro 2026-07-28: an embed server
+    // orphaned by a previous dev session made every later start look green.)
+    let spawn_died = {
+        let mut guard = state.bundled_engine.lock().unwrap();
+        match guard.as_mut() {
+            Some(e) => e.child.try_wait().ok().flatten().is_some(),
+            None => true,
+        }
+    };
+    if spawn_died {
+        let why = diagnostics
+            .map(|(buf, _)| tail_lines(&super::shell::captured_text(&buf), 12))
+            .unwrap_or_default();
+        stop_engine_locked(state);
+        return Err(format!(
+            "Port {port} answers health checks, but the engine this app just started exited immediately — another llama-server (likely left over from a previous session or crash) is occupying the port. Quit that process or reboot, then try again.{}",
+            if why.is_empty() { String::new() } else { format!("\n\n{why}") }
+        ));
     }
 
     println!("[Engine] Built-in engine healthy on port {port}");
@@ -656,6 +698,15 @@ fn start_bundled_embed_blocking(
 
     stop_embed_locked(state);
 
+    // Same stranger-on-the-port refusal as the chat engine (see there for the
+    // full story): a health answer on a port we hold no child for is an
+    // orphan/foreign server, and spawning against it only looks like success.
+    if engine_healthy(port) {
+        return Err(format!(
+            "Port {port} is already serving another llama-server that this app does not manage (likely left over from a previous session or crash). Quit that process or reboot, then try again."
+        ));
+    }
+
     let binary = resolve_engine_binary(app).ok_or_else(|| {
         format!(
             "Bundled engine binary not found ({}). Run scripts/build-llama.sh to produce the sidecar.",
@@ -696,6 +747,28 @@ fn start_bundled_embed_blocking(
             .unwrap_or_default();
         stop_embed_locked(state);
         return Err(if why.is_empty() { e } else { format!("{e}\n\n{why}") });
+    }
+
+    // Same stranger-on-the-port guard as the chat engine: a healthy probe is
+    // only proof of SOME server on the port. If our spawn already exited, the
+    // answerer is an orphan/foreign process — embeddings would come from an
+    // unknown model and our shutdown could never reap it.
+    let spawn_died = {
+        let mut guard = state.bundled_embed.lock().unwrap();
+        match guard.as_mut() {
+            Some(e) => e.child.try_wait().ok().flatten().is_some(),
+            None => true,
+        }
+    };
+    if spawn_died {
+        let why = diagnostics
+            .map(|(buf, _)| tail_lines(&super::shell::captured_text(&buf), 12))
+            .unwrap_or_default();
+        stop_embed_locked(state);
+        return Err(format!(
+            "Port {port} answers health checks, but the embeddings server this app just started exited immediately — another llama-server (likely left over from a previous session or crash) is occupying the port. Quit that process or reboot, then try again.{}",
+            if why.is_empty() { String::new() } else { format!("\n\n{why}") }
+        ));
     }
 
     println!("[Engine] Built-in embeddings server healthy on port {port}");
