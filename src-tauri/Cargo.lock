@@ -2528,10 +2528,11 @@ dependencies = [
 
 [[package]]
 name = "locally-uncensored"
-version = "2.5.9"
+version = "2.5.10"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "chrono",
  "dirs",
  "futures-util",
  "glob",

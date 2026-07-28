@@ -56,6 +56,10 @@ socket2 = "0.5"
 # Structured tracing — used for the JSON-log mode behind `LU_LOG_FORMAT=json`
 # (uselu Phase 3 parity). Default formatter is the compact text layer so
 # the existing console output stays readable for a desktop user.
+# Local time with a real UTC offset for the agent's get_current_time tool.
+# Already resolved in the lock (jsonwebtoken pulls it with `clock` +
+# iana-time-zone), so declaring it directly adds no crate to the build.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
