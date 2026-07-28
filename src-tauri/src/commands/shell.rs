@@ -35,7 +35,7 @@ fn workspace_cwd(chat_id: Option<&str>) -> PathBuf {
 const MAX_CAPTURE: usize = 256 * 1024;
 
 #[derive(Default)]
-struct Captured {
+pub(crate) struct Captured {
     kept: Vec<u8>,
     total: usize,
 }
@@ -45,7 +45,7 @@ struct Captured {
 /// blocks on write forever. Reading only after `try_wait()` reports an exit
 /// therefore deadlocks on any command with real output — it hit the full timeout
 /// and returned nothing at all.
-fn drain(mut pipe: impl Read + Send + 'static) -> (Arc<Mutex<Captured>>, Arc<AtomicBool>) {
+pub(crate) fn drain(mut pipe: impl Read + Send + 'static) -> (Arc<Mutex<Captured>>, Arc<AtomicBool>) {
     let buf = Arc::new(Mutex::new(Captured::default()));
     let done = Arc::new(AtomicBool::new(false));
     let sink = Arc::clone(&buf);
@@ -74,7 +74,7 @@ fn drain(mut pipe: impl Read + Send + 'static) -> (Arc<Mutex<Captured>>, Arc<Ato
 /// Decode captured bytes leniently. Build tools on a non-UTF-8 Windows codepage
 /// emit bytes `read_to_string` rejects outright — that used to throw the whole
 /// output away and hand the model an empty string next to a successful exit code.
-fn captured_text(buf: &Arc<Mutex<Captured>>) -> String {
+pub(crate) fn captured_text(buf: &Arc<Mutex<Captured>>) -> String {
     let c = match buf.lock() {
         Ok(c) => c,
         Err(poisoned) => poisoned.into_inner(),
@@ -91,7 +91,7 @@ fn captured_text(buf: &Arc<Mutex<Captured>>) -> String {
 }
 
 /// Every process descending from `root`, deepest last.
-fn descendants(root: u32, sys: &sysinfo::System) -> Vec<u32> {
+pub(crate) fn descendants(root: u32, sys: &sysinfo::System) -> Vec<u32> {
     let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
     for (pid, proc_) in sys.processes() {
         if let Some(parent) = proc_.parent() {
@@ -119,7 +119,7 @@ fn descendants(root: u32, sys: &sysinfo::System) -> Vec<u32> {
 /// shell itself, so a timed-out `npm run dev`, build script or spawned server
 /// kept running after the tool call gave up — still holding its port and CPU,
 /// and still writing into a pipe nobody reads.
-fn kill_tree(root: u32) {
+pub(crate) fn kill_tree(root: u32) {
     use sysinfo::{Pid, ProcessesToUpdate, System};
     let mut sys = System::new();
     sys.refresh_processes(ProcessesToUpdate::All, true);
@@ -137,7 +137,7 @@ fn kill_tree(root: u32) {
 /// Give the reader threads a moment to hit EOF after the child is gone. Never
 /// joins them: a grandchild can keep the pipe open (a spawned dev server), and
 /// joining would hang the command instead of returning what we already have.
-fn settle(a: &Arc<AtomicBool>, b: &Arc<AtomicBool>, max: std::time::Duration) {
+pub(crate) fn settle(a: &Arc<AtomicBool>, b: &Arc<AtomicBool>, max: std::time::Duration) {
     let deadline = std::time::Instant::now() + max;
     while std::time::Instant::now() < deadline {
         if a.load(Ordering::Acquire) && b.load(Ordering::Acquire) {

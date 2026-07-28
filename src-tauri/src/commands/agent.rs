@@ -1,5 +1,4 @@
 use std::fs;
-use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -315,6 +314,13 @@ pub fn execute_code(
     let mut child = cmd.spawn()
         .map_err(|e| format!("Spawn Python: {}", e))?;
 
+    // Both pipes are drained on their own threads from here on. A script that
+    // prints more than a pipe buffer would otherwise block on write and never
+    // exit — the tool call ate the full timeout and returned nothing. Same
+    // machinery as the shell tool (commands/shell.rs).
+    let (out_buf, out_done) = super::shell::drain(child.stdout.take().expect("stdout is piped"));
+    let (err_buf, err_done) = super::shell::drain(child.stderr.take().expect("stderr is piped"));
+
     // Poll-based timeout since std::process::Child has no wait_timeout
     let start = std::time::Instant::now();
     let timeout_dur = std::time::Duration::from_millis(timeout_ms);
@@ -322,30 +328,30 @@ pub fn execute_code(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stdout_str = String::new();
-                let mut stderr_str = String::new();
-                if let Some(mut stdout) = child.stdout.take() {
-                    let _ = stdout.read_to_string(&mut stdout_str);
-                }
-                if let Some(mut stderr) = child.stderr.take() {
-                    let _ = stderr.read_to_string(&mut stderr_str);
-                }
-
+                super::shell::settle(&out_done, &err_done, std::time::Duration::from_millis(500));
                 let _ = fs::remove_file(&script_path);
                 return Ok(serde_json::json!({
-                    "stdout": stdout_str,
-                    "stderr": stderr_str,
+                    "stdout": super::shell::captured_text(&out_buf),
+                    "stderr": super::shell::captured_text(&err_buf),
                     "exitCode": status.code().unwrap_or(-1),
                     "timedOut": false,
                 }));
             }
             Ok(None) => {
                 if start.elapsed() > timeout_dur {
+                    super::shell::kill_tree(child.id());
                     let _ = child.kill();
+                    let _ = child.wait();
+                    super::shell::settle(&out_done, &err_done, std::time::Duration::from_millis(200));
                     let _ = fs::remove_file(&script_path);
+                    let mut stderr_str = super::shell::captured_text(&err_buf);
+                    if !stderr_str.is_empty() {
+                        stderr_str.push('\n');
+                    }
+                    stderr_str.push_str(&format!("Execution timed out after {}ms", timeout_ms));
                     return Ok(serde_json::json!({
-                        "stdout": "",
-                        "stderr": format!("Execution timed out after {}ms", timeout_ms),
+                        "stdout": super::shell::captured_text(&out_buf),
+                        "stderr": stderr_str,
                         "exitCode": -1,
                         "timedOut": true,
                     }));
