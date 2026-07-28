@@ -695,14 +695,14 @@ async function executeWebFetch(args: Record<string, any>): Promise<string> {
 
 async function executeFileRead(args: Record<string, any>): Promise<string> {
   const data = await backendCall('fs_read', { path: args.path, ...chatCtx() })
-  // Binary files come back base64-encoded (encoding: 'base64'). Returning that
-  // raw base64 as if it were the file's text is a corruption trap: the model
-  // treats it as content and a later file_write persists the base64 STRING,
-  // silently mangling the binary. Surface a clear marker instead so the model
-  // knows it is binary and leaves it alone.
-  if (data.encoding === 'base64') {
-    const approxBytes = Math.floor((String(data.content || '').length * 3) / 4)
-    return `[binary file — ${formatBytes(approxBytes)}, not shown. This tool reads text only; do not write binary content back through file_write.]`
+  // A binary file comes back as a marker with its size, never as content.
+  // Handing the model raw bytes-as-text is a corruption trap: it treats them as
+  // content and a later file_write persists that string, mangling the file.
+  if (data.encoding === 'binary' || data.encoding === 'base64') {
+    const bytes = typeof data.bytes === 'number'
+      ? data.bytes
+      : Math.floor((String(data.content || '').length * 3) / 4)
+    return `[binary file — ${formatBytes(bytes)}, not shown. This tool reads text only; do not write binary content back through file_write.]`
   }
   return data.content || ''
 }
@@ -771,7 +771,7 @@ async function executeFileEdit(args: Record<string, any>): Promise<string> {
   } catch (e) {
     return `Error: file_edit could not read ${path}: ${e instanceof Error ? e.message : String(e)}. To create a new file use file_write.`
   }
-  if (data.encoding === 'base64') return `Error: file_edit cannot edit a binary file (${path}).`
+  if (data.encoding === 'binary' || data.encoding === 'base64') return `Error: file_edit cannot edit a binary file (${path}).`
   const content = typeof data.content === 'string' ? data.content : ''
 
   const res = applyUniqueEdit(content, oldString, newString)

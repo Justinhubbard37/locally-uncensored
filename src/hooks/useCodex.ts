@@ -1394,7 +1394,7 @@ export function useCodex() {
           } else {
             try {
               const r = await backendCall<{ content?: string; encoding?: string }>('fs_read', { path: resolvedPath, ...stageReadCtx })
-              if (r?.encoding === 'base64') return `file_edit: cannot edit a binary file (${path}).`
+              if (r?.encoding === 'binary' || r?.encoding === 'base64') return `file_edit: cannot edit a binary file (${path}).`
               baseContent = diskContent = r?.content ?? ''
             } catch {
               return `file_edit: could not read ${path}. To create a new file use file_write.`

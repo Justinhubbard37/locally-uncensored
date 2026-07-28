@@ -175,13 +175,19 @@ pub fn fs_read(path: String, chatId: Option<String>, workingDirectory: Option<St
         return Err(format!("File not found: {}", full.display()));
     }
 
-    // Try text first, fall back to base64 for binary
+    // Text, or a binary MARKER — never the binary payload.
+    //
+    // This used to base64-encode the whole file and ship it over IPC. Every
+    // consumer discards it: the model-facing file_read turns it into a "binary,
+    // not shown" line, and both file_edit paths refuse outright. So a 500 MB
+    // model file cost ~667 MB of base64 in Rust plus the JSON and JS copies of
+    // it, all to be thrown away — the desktop half of a guard the phone relay
+    // already had (f3542ff).
     match fs::read_to_string(&full) {
         Ok(content) => Ok(serde_json::json!({ "content": content, "encoding": "utf8" })),
         Err(_) => {
-            let bytes = fs::read(&full).map_err(|e| format!("Read error: {}", e))?;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            Ok(serde_json::json!({ "content": b64, "encoding": "base64" }))
+            let bytes = fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
+            Ok(serde_json::json!({ "encoding": "binary", "bytes": bytes }))
         }
     }
 }
@@ -747,5 +753,72 @@ mod jail_adversarial_tests {
         assert!(contain_within(root, Path::new("/Users/dave/project/src/x.rs")).is_ok());
         // The root itself.
         assert!(contain_within(root, root).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod binary_read_tests {
+    use super::*;
+    use std::fs;
+
+    fn ws(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("lu-fsread-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A binary must come back as a MARKER, not as a payload. Every consumer
+    /// discards the bytes, so encoding them only bought a memory spike
+    /// proportional to the file — the phone relay already refused to do it.
+    #[test]
+    fn a_binary_file_reports_its_size_and_no_content() {
+        let dir = ws("bin");
+        // Invalid UTF-8 — what read_to_string rejects.
+        fs::write(dir.join("model.gguf"), [0xff, 0xfe, 0x00, 0x01, 0x80]).unwrap();
+
+        let v = fs_read(
+            "model.gguf".into(),
+            None,
+            Some(dir.to_string_lossy().to_string()),
+        )
+        .expect("read");
+
+        assert_eq!(v["encoding"], "binary");
+        assert_eq!(v["bytes"], 5);
+        assert!(v.get("content").is_none(), "the payload must not be shipped");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_text_file_still_comes_back_verbatim() {
+        let dir = ws("txt");
+        fs::write(dir.join("a.txt"), "hallo\nwelt\n").unwrap();
+
+        let v = fs_read("a.txt".into(), None, Some(dir.to_string_lossy().to_string()))
+            .expect("read");
+
+        assert_eq!(v["encoding"], "utf8");
+        assert_eq!(v["content"], "hallo\nwelt\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The whole point: cost must not scale with the file any more.
+    #[test]
+    fn a_large_binary_is_cheap_to_read() {
+        let dir = ws("big");
+        let mut big = vec![0x80u8; 8 * 1024 * 1024]; // 8 MiB, invalid UTF-8
+        big[0] = 0xff;
+        fs::write(dir.join("big.bin"), &big).unwrap();
+
+        let started = std::time::Instant::now();
+        let v = fs_read("big.bin".into(), None, Some(dir.to_string_lossy().to_string()))
+            .expect("read");
+        let took = started.elapsed();
+
+        assert_eq!(v["bytes"], 8 * 1024 * 1024_u64);
+        assert!(v.get("content").is_none());
+        assert!(took < std::time::Duration::from_millis(200), "took {took:?}");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
