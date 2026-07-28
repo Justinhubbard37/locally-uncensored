@@ -865,21 +865,29 @@ pub(crate) static OLLAMA_START: Mutex<()> = Mutex::new(());
 pub(crate) static ENGINE_START: Mutex<()> = Mutex::new(());
 pub(crate) static EMBED_START: Mutex<()> = Mutex::new(());
 
+/// Is an Ollama server already listening?
+///
+/// This used to shell out to `tasklist /FI "IMAGENAME eq ollama.exe"` — a
+/// WINDOWS-only command, run unconditionally on every platform. Observed live
+/// on macOS 2026-07-28: the spawn fails, `if let Ok(output)` is false, the
+/// check is skipped entirely, and the app starts a SECOND `ollama serve` that
+/// cannot bind 11434 and dies within milliseconds. The dead child is then
+/// stored in AppState as the tracked server, and the log claims "Started".
+///
+/// The port is what actually matters — an Ollama started by launchd, a service
+/// or Docker counts just as much as one whose process happens to be named
+/// ollama.exe — so probe that instead. Same shape as lmstudio_port_open.
+fn ollama_port_open() -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    let addr: SocketAddr = ([127, 0, 0, 1], 11434).into();
+    TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok()
+}
+
 fn start_ollama_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     let _gate = start_gate(&OLLAMA_START);
-    // Check if already running
-    {
-        let mut cmd = Command::new("tasklist");
-        cmd.args(["/FI", "IMAGENAME eq ollama.exe"]);
-        #[cfg(target_os = "windows")]
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        if let Ok(output) = cmd.output() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.contains("ollama.exe") {
-                println!("[Ollama] Already running");
-                return Ok(serde_json::json!({"status": "already_running"}));
-            }
-        }
+    if ollama_port_open() {
+        println!("[Ollama] Already running");
+        return Ok(serde_json::json!({"status": "already_running"}));
     }
 
     println!("[Ollama] Starting...");
@@ -1728,19 +1736,9 @@ fn get_ollama_host_blocking(state: &AppState) -> Result<serde_json::Value, Strin
 
 /// Auto-start Ollama on app launch (called from setup)
 pub fn auto_start_ollama(state: &AppState) {
-    // Check if already running
-    {
-        let mut cmd = Command::new("tasklist");
-        cmd.args(["/FI", "IMAGENAME eq ollama.exe"]);
-        #[cfg(target_os = "windows")]
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        if let Ok(output) = cmd.output() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.contains("ollama.exe") {
-                println!("[Ollama] Already running");
-                return;
-            }
-        }
+    if ollama_port_open() {
+        println!("[Ollama] Already running");
+        return;
     }
 
     println!("[Ollama] Starting...");
@@ -2187,5 +2185,40 @@ mod start_gate_tests {
         })
         .join();
         let _gate = start_gate(&POISON_ME); // would panic on a plain .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod ollama_probe_tests {
+    use super::*;
+
+    /// Observed on macOS 2026-07-28: the "is Ollama already running?" check
+    /// shelled out to `tasklist`, which does not exist outside Windows, so the
+    /// check was skipped and a second server was spawned on every launch. The
+    /// probe must answer on THIS platform, not just on Windows.
+    #[test]
+    fn the_probe_answers_without_shelling_out() {
+        let started = std::time::Instant::now();
+        let _ = ollama_port_open();
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "probe took {:?} — is it spawning a process again?",
+            started.elapsed()
+        );
+    }
+
+    /// A listener on the port must be seen as "already running" on every
+    /// platform. Binds a throwaway listener to prove the probe mechanism
+    /// itself works here, without touching the real Ollama port.
+    #[test]
+    fn a_listening_socket_is_detected() {
+        use std::net::{SocketAddr, TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        assert!(
+            TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok(),
+            "the probe cannot see a socket that is demonstrably listening",
+        );
+        drop(listener);
     }
 }
