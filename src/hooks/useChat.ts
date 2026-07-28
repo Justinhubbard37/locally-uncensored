@@ -14,6 +14,7 @@ import { requestGenerationCancel } from "../api/vram-handoff"
 import { effectiveContextWindow } from "../lib/context-window"
 import { useAgentChat } from "./useAgentChat"
 import { parseAgentCommand, parseLoopSpec } from '../lib/agent-commands'
+import { planResend } from '../lib/resend-plan'
 import { applyGoalCommand } from '../lib/goal-command'
 import { useMemory } from "./useMemory"
 import { useAgentModeStore } from "../stores/agentModeStore"
@@ -611,38 +612,31 @@ export function useChat() {
     requestGenerationCancel()
   }, [])
 
-  const regenerateMessage = useCallback((conversationId: string, assistantMessageId: string) => {
+  /**
+   * Regenerate and Edit both replace the turn: the question leaves the thread
+   * together with everything after it and goes back in through sendMessage,
+   * attachments included. Deleting only the ANSWER left the question in place
+   * for sendMessage to add a second time — the thread grew one more copy of it
+   * per click and the model was asked it twice.
+   */
+  const resend = useCallback((conversationId: string, targetId: string, override?: string) => {
+    // sendMessage bails without a model; deleting first would eat the question.
+    if (!useModelStore.getState().activeModel) return
     const conv = useChatStore.getState().conversations.find(c => c.id === conversationId)
     if (!conv) return
-
-    // Find the assistant message and the preceding user message
-    const msgIndex = conv.messages.findIndex(m => m.id === assistantMessageId)
-    if (msgIndex < 1) return
-
-    const userMsg = conv.messages[msgIndex - 1]
-    if (userMsg.role !== 'user') return
-
-    // Delete from the assistant message onward, then resend
-    useChatStore.getState().deleteMessagesAfter(conversationId, assistantMessageId)
-    sendMessage(userMsg.content)
+    const plan = planResend(conv.messages, targetId, override)
+    if (!plan) return
+    useChatStore.getState().deleteMessagesAfter(conversationId, plan.deleteFromId)
+    sendMessage(plan.content, plan.images)
   }, [sendMessage])
+
+  const regenerateMessage = useCallback((conversationId: string, assistantMessageId: string) => {
+    resend(conversationId, assistantMessageId)
+  }, [resend])
 
   const editAndResend = useCallback((conversationId: string, messageId: string, newContent: string) => {
-    const conv = useChatStore.getState().conversations.find(c => c.id === conversationId)
-    if (!conv) return
-
-    const msgIndex = conv.messages.findIndex(m => m.id === messageId)
-    if (msgIndex < 0) return
-
-    // Update content and delete everything after this message
-    useChatStore.getState().updateMessageContent(conversationId, messageId, newContent)
-    // Find next message to delete from
-    const nextMsg = conv.messages[msgIndex + 1]
-    if (nextMsg) {
-      useChatStore.getState().deleteMessagesAfter(conversationId, nextMsg.id)
-    }
-    sendMessage(newContent)
-  }, [sendMessage])
+    resend(conversationId, messageId, newContent)
+  }, [resend])
 
   return {
     sendMessage,
