@@ -14,7 +14,17 @@
 import { backendCall } from './backend'
 import { prefixModelName } from './providers'
 import { useProviderStore } from '../stores/providerStore'
+import { useSettingsStore } from '../stores/settingsStore'
 import type { CloudModel } from '../types/models'
+import type { BuiltinEngineTuning } from '../types/settings'
+
+/** The user's Built-in Engine expert tuning (settings-backed). Injected into
+ * every start/swap below, so Onboarding, Discover, the model picker and the
+ * post-offload self-heal all honor it without threading it through callsites.
+ * Undefined (pre-migration blob) is fine — Rust falls back to its defaults. */
+function tuningFromSettings(): BuiltinEngineTuning | undefined {
+  return useSettingsStore.getState().settings.builtinEngine
+}
 
 export interface BundledModel {
   /** File name without the `.gguf` extension. The id shown in the picker. */
@@ -32,6 +42,9 @@ export interface EngineStatus {
   healthy: boolean
   port: number
   model_path: string | null
+  /** Context size the chat engine was started with (null when not running or
+   * for the embed server). The TRUE token-counter denominator. */
+  ctx?: number | null
 }
 
 /** Loopback base URL of the managed embeddings server (P5). Mirrors the Rust
@@ -57,9 +70,10 @@ export function isManagedBuiltinActive(): boolean {
   return cfg.enabled && cfg.managed === true
 }
 
-/** Start the built-in engine with a specific GGUF. Idempotent for the same model. */
-export function startBundledEngine(modelPath: string, ctx?: number) {
-  return backendCall('start_bundled_engine', { modelPath, ctx })
+/** Start the built-in engine with a specific GGUF. Idempotent for the same
+ * model + tuning (the Rust side compares the resulting argv). */
+export function startBundledEngine(modelPath: string, tuning?: BuiltinEngineTuning) {
+  return backendCall('start_bundled_engine', { modelPath, tuning: tuning ?? tuningFromSettings() })
 }
 
 /** Stop the managed engine child if one is running. */
@@ -73,8 +87,8 @@ export function bundledEngineStatus() {
 }
 
 /** Swap the loaded model (stop → start on the same port). */
-export function swapBundledModel(modelPath: string, ctx?: number) {
-  return backendCall('swap_bundled_model', { modelPath, ctx })
+export function swapBundledModel(modelPath: string, tuning?: BuiltinEngineTuning) {
+  return backendCall('swap_bundled_model', { modelPath, tuning: tuning ?? tuningFromSettings() })
 }
 
 /** Start the built-in embeddings server (P5) with a specific embedding GGUF.
@@ -160,10 +174,10 @@ export function bundledToAIModels(models: BundledModel[]): CloudModel[] {
  * Resolves the GGUF path from the last listBundledModels() and swaps the engine.
  * No-op if the path is unknown (list not yet fetched).
  */
-export async function activateBuiltinModel(nameOrPrefixed: string, ctx?: number): Promise<boolean> {
+export async function activateBuiltinModel(nameOrPrefixed: string, tuning?: BuiltinEngineTuning): Promise<boolean> {
   const name = nameOrPrefixed.includes('::') ? nameOrPrefixed.split('::')[1] : nameOrPrefixed
   const path = pathByName.get(name)
   if (!path) return false
-  await swapBundledModel(path, ctx)
+  await swapBundledModel(path, tuning)
   return true
 }

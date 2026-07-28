@@ -65,11 +65,65 @@ pub(crate) fn host_target_triple() -> String {
     }
 }
 
+/// Expert tuning for the chat engine, settable from the app's Built-in Engine
+/// settings. `Default` reproduces the exact argv the app has always used, so
+/// an absent/partial tuning is never a behavior change. Values are whitelisted
+/// in `build_server_args` — an unknown string falls back to the default flag
+/// (settings files are user-editable; never pass them through verbatim).
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EngineTuning {
+    /// Context window (`--ctx-size`). 0 is NOT forwarded as llama-server's
+    /// "use model default" — a 128k-trained model would allocate a huge KV
+    /// cache unprompted; 0/absent means our 8192 default.
+    pub ctx: u32,
+    /// Flash Attention: "auto" (binary default, omitted), "on", "off".
+    pub flash_attn: String,
+    /// KV cache quantization for K / V: "f16" (default, omitted), "bf16",
+    /// "q8_0", "q4_0". Quantized V requires Flash Attention in llama.cpp.
+    pub cache_type_k: String,
+    pub cache_type_v: String,
+    /// CPU threads for generation. <=0 = auto (omitted).
+    pub threads: i32,
+    /// GPU layers to offload. <0 = all (999, today's behavior); >=0 explicit
+    /// (0 = CPU-only is a valid expert choice on RAM-starved boxes).
+    pub gpu_layers: i32,
+    /// Pin model in RAM (`--mlock`).
+    pub mlock: bool,
+    /// Disable mmap (`--no-mmap`): slower load, fewer pageouts.
+    pub no_mmap: bool,
+}
+
+impl Default for EngineTuning {
+    fn default() -> Self {
+        Self {
+            ctx: 8192,
+            flash_attn: "auto".into(),
+            cache_type_k: "f16".into(),
+            cache_type_v: "f16".into(),
+            threads: -1,
+            gpu_layers: -1,
+            mlock: false,
+            no_mmap: false,
+        }
+    }
+}
+
+/// KV cache types this build of llama-server accepts and we consider sane.
+const KV_CACHE_TYPES: &[&str] = &["f16", "bf16", "q8_0", "q4_0"];
+
+/// The context size actually passed to the server (`tuning.ctx`, with 0
+/// falling back to the 8192 default — see `EngineTuning::ctx`).
+pub(crate) fn effective_ctx(tuning: &EngineTuning) -> u32 {
+    if tuning.ctx == 0 { 8192 } else { tuning.ctx }
+}
+
 /// Build the `llama-server` argv for a chat engine. `-ngl 999` offloads every
 /// layer to the GPU (Metal on mac); llama-server clamps to the real layer
 /// count, so an over-large value is the idiomatic "all layers" request.
-pub(crate) fn build_server_args(model_path: &str, ctx: u32, port: u16) -> Vec<String> {
-    vec![
+/// Default tuning yields exactly the legacy argv (pinned by regression test).
+pub(crate) fn build_server_args(model_path: &str, tuning: &EngineTuning, port: u16) -> Vec<String> {
+    let mut args: Vec<String> = vec![
         "-m".into(),
         model_path.into(),
         "--host".into(),
@@ -77,10 +131,37 @@ pub(crate) fn build_server_args(model_path: &str, ctx: u32, port: u16) -> Vec<St
         "--port".into(),
         port.to_string(),
         "--ctx-size".into(),
-        ctx.to_string(),
+        effective_ctx(tuning).to_string(),
         "-ngl".into(),
-        "999".into(),
-    ]
+        if tuning.gpu_layers < 0 {
+            "999".into()
+        } else {
+            tuning.gpu_layers.to_string()
+        },
+    ];
+    if matches!(tuning.flash_attn.as_str(), "on" | "off") {
+        args.push("-fa".into());
+        args.push(tuning.flash_attn.clone());
+    }
+    if tuning.cache_type_k != "f16" && KV_CACHE_TYPES.contains(&tuning.cache_type_k.as_str()) {
+        args.push("-ctk".into());
+        args.push(tuning.cache_type_k.clone());
+    }
+    if tuning.cache_type_v != "f16" && KV_CACHE_TYPES.contains(&tuning.cache_type_v.as_str()) {
+        args.push("-ctv".into());
+        args.push(tuning.cache_type_v.clone());
+    }
+    if tuning.threads > 0 {
+        args.push("-t".into());
+        args.push(tuning.threads.to_string());
+    }
+    if tuning.mlock {
+        args.push("--mlock".into());
+    }
+    if tuning.no_mmap {
+        args.push("--no-mmap".into());
+    }
+    args
 }
 
 /// Build the `llama-server` argv for the EMBEDDINGS server (P5). `--embeddings`
@@ -260,12 +341,12 @@ fn wait_for_health(port: u16) -> Result<(), String> {
 pub async fn start_bundled_engine(
     app: AppHandle,
     model_path: String,
-    ctx: Option<u32>,
+    tuning: Option<EngineTuning>,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        start_bundled_engine_blocking(&app, &state, model_path, ctx, port)
+        start_bundled_engine_blocking(&app, &state, model_path, tuning, port)
     })
     .await
     .map_err(|e| format!("Engine start task failed to run: {e}"))?
@@ -275,26 +356,31 @@ fn start_bundled_engine_blocking(
     app: &AppHandle,
     state: &State<'_, AppState>,
     model_path: String,
-    ctx: Option<u32>,
+    tuning: Option<EngineTuning>,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
     let _gate = crate::commands::process::start_gate(&crate::commands::process::ENGINE_START);
-    let ctx = ctx.unwrap_or(8192);
+    let tuning = tuning.unwrap_or_default();
     let port = port.unwrap_or(DEFAULT_ENGINE_PORT);
 
     if !Path::new(&model_path).exists() {
         return Err(format!("Model file not found: {model_path}"));
     }
 
-    // Already serving this exact model and healthy → no-op.
+    let desired_args = build_server_args(&model_path, &tuning, port);
+
+    // Already serving this exact argv and healthy → no-op. The argv is the
+    // idempotence key: a ctx/KV-quant/flash-attn change restarts the server,
+    // an identical request reuses the running process.
     {
         let guard = state.bundled_engine.lock().unwrap();
         if let Some(engine) = guard.as_ref() {
-            if engine.model_path == model_path && engine_healthy(engine.port) {
+            if engine.args == desired_args && engine_healthy(engine.port) {
                 return Ok(serde_json::json!({
                     "status": "already_running",
                     "port": engine.port,
                     "model_path": engine.model_path,
+                    "ctx": engine.ctx,
                 }));
             }
         }
@@ -322,7 +408,7 @@ fn start_bundled_engine_blocking(
 
     println!("[Engine] Starting built-in llama-server on port {port} — {model_path}");
     let mut cmd = Command::new(&binary);
-    cmd.args(build_server_args(&model_path, ctx, port))
+    cmd.args(&desired_args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         // llama-server writes the REASON a start fails here: a GGUF it refuses,
@@ -348,6 +434,8 @@ fn start_bundled_engine_blocking(
         child,
         model_path: model_path.clone(),
         port,
+        ctx: Some(effective_ctx(&tuning)),
+        args: desired_args,
     });
 
     // Wait for the model to load. On failure, reap the child so we don't leave
@@ -365,6 +453,7 @@ fn start_bundled_engine_blocking(
         "status": "started",
         "port": port,
         "model_path": model_path,
+        "ctx": effective_ctx(&tuning),
     }))
 }
 
@@ -393,20 +482,22 @@ pub async fn bundled_engine_status(app: AppHandle) -> Result<serde_json::Value, 
         let state = app.state::<AppState>();
         let probe = {
             let guard = state.bundled_engine.lock().unwrap();
-            guard.as_ref().map(|e| (e.port, e.model_path.clone()))
+            guard.as_ref().map(|e| (e.port, e.model_path.clone(), e.ctx))
         };
         match probe {
-            Some((port, model_path)) => serde_json::json!({
+            Some((port, model_path, ctx)) => serde_json::json!({
                 "running": true,
                 "healthy": engine_healthy(port),
                 "port": port,
                 "model_path": model_path,
+                "ctx": ctx,
             }),
             None => serde_json::json!({
                 "running": false,
                 "healthy": false,
                 "port": DEFAULT_ENGINE_PORT,
                 "model_path": null,
+                "ctx": null,
             }),
         }
     })
@@ -422,7 +513,7 @@ pub async fn bundled_engine_status(app: AppHandle) -> Result<serde_json::Value, 
 pub async fn swap_bundled_model(
     app: AppHandle,
     model_path: String,
-    ctx: Option<u32>,
+    tuning: Option<EngineTuning>,
 ) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -433,7 +524,7 @@ pub async fn swap_bundled_model(
             .as_ref()
             .map(|e| e.port)
             .unwrap_or(DEFAULT_ENGINE_PORT);
-        start_bundled_engine_blocking(&app, &state, model_path, ctx, Some(port))
+        start_bundled_engine_blocking(&app, &state, model_path, tuning, Some(port))
     })
     .await
     .map_err(|e| format!("Engine swap task failed to run: {e}"))?
@@ -577,6 +668,10 @@ fn start_bundled_embed_blocking(
         child,
         model_path: model_path.clone(),
         port,
+        // No --ctx-size on the embed server; args recorded for symmetry (its
+        // idempotence check stays model_path-based, embeds have no tuning).
+        ctx: None,
+        args: build_embed_args(&model_path, port),
     });
 
     if let Err(e) = wait_for_health(port) {
@@ -656,8 +751,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn args_include_model_ctx_port_and_full_gpu_offload() {
-        let args = build_server_args("/models/qwen.gguf", 8192, 8127);
+    fn default_tuning_args_match_legacy_shape() {
+        // Pin: absent/default tuning must produce EXACTLY the argv the app has
+        // shipped since 2.5.7 — expert settings are opt-in, never a drift.
+        let args = build_server_args("/models/qwen.gguf", &EngineTuning::default(), 8127);
         assert_eq!(
             args,
             vec![
@@ -668,6 +765,83 @@ mod tests {
                 "-ngl", "999",
             ]
         );
+    }
+
+    #[test]
+    fn expert_tuning_adds_all_flags_in_stable_order() {
+        let tuning = EngineTuning {
+            ctx: 16384,
+            flash_attn: "on".into(),
+            cache_type_k: "q8_0".into(),
+            cache_type_v: "q8_0".into(),
+            threads: 8,
+            gpu_layers: 20,
+            mlock: true,
+            no_mmap: true,
+        };
+        let args = build_server_args("/m.gguf", &tuning, 8127);
+        assert_eq!(
+            args,
+            vec![
+                "-m", "/m.gguf",
+                "--host", "127.0.0.1",
+                "--port", "8127",
+                "--ctx-size", "16384",
+                "-ngl", "20",
+                "-fa", "on",
+                "-ctk", "q8_0",
+                "-ctv", "q8_0",
+                "-t", "8",
+                "--mlock",
+                "--no-mmap",
+            ]
+        );
+    }
+
+    #[test]
+    fn junk_tuning_values_fall_back_to_legacy_argv() {
+        // Settings files are user-editable JSON — junk enum strings must be
+        // dropped (binary defaults), never passed through to the argv.
+        let tuning = EngineTuning {
+            ctx: 0,
+            flash_attn: "banana".into(),
+            cache_type_k: "'; rm -rf /".into(),
+            cache_type_v: "zzz".into(),
+            threads: -4,
+            gpu_layers: -1,
+            mlock: false,
+            no_mmap: false,
+        };
+        let args = build_server_args("/m.gguf", &tuning, 8127);
+        assert_eq!(
+            args,
+            vec![
+                "-m", "/m.gguf",
+                "--host", "127.0.0.1",
+                "--port", "8127",
+                "--ctx-size", "8192",
+                "-ngl", "999",
+            ]
+        );
+    }
+
+    #[test]
+    fn gpu_layers_zero_means_cpu_only_not_all() {
+        let tuning = EngineTuning { gpu_layers: 0, ..Default::default() };
+        let args = build_server_args("/m.gguf", &tuning, 8127);
+        let ngl = args.iter().position(|a| a == "-ngl").unwrap();
+        assert_eq!(args[ngl + 1], "0");
+    }
+
+    #[test]
+    fn partial_tuning_json_deserializes_with_defaults() {
+        // The frontend sends partial objects ({ctx: 16384}); serde(default)
+        // must fill the rest so a partial settings write never breaks starts.
+        let t: EngineTuning = serde_json::from_str(r#"{"ctx":16384,"cacheTypeK":"q8_0"}"#).unwrap();
+        assert_eq!(t.ctx, 16384);
+        assert_eq!(t.cache_type_k, "q8_0");
+        assert_eq!(t.flash_attn, "auto");
+        assert_eq!(t.gpu_layers, -1);
     }
 
     #[test]

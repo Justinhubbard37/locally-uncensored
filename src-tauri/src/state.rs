@@ -40,6 +40,14 @@ pub struct BundledEngine {
     pub child: Child,
     pub model_path: String,
     pub port: u16,
+    /// Context size the CHAT engine was started with (`None` for the embed
+    /// server, which never sets `--ctx-size`). Surfaced by the status command
+    /// so the UI shows the true token-counter denominator.
+    pub ctx: Option<u32>,
+    /// Full argv the process was spawned with — the idempotence key: a start
+    /// request resolving to the same argv reuses the running process, any
+    /// difference (model, ctx, tuning, port) triggers a stop→start.
+    pub args: Vec<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]

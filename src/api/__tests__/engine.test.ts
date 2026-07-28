@@ -25,27 +25,44 @@ import {
   type BundledModel,
 } from '../engine'
 import { backendCall } from '../backend'
+import { DEFAULT_SETTINGS } from '../../lib/constants'
+import type { BuiltinEngineTuning } from '../../types/settings'
+
+// v18: the wrappers inject the settings-backed expert tuning on every
+// start/swap; the real settings store is loaded here, so "no explicit tuning"
+// must resolve to DEFAULT_SETTINGS.builtinEngine — that IS the chokepoint.
+const DEFAULT_TUNING = DEFAULT_SETTINGS.builtinEngine
 
 beforeEach(() => {
   vi.mocked(backendCall).mockReset()
 })
 
 describe('engine command wrappers', () => {
-  it('starts the engine with camelCase args (Tauri maps → snake_case)', async () => {
+  it('starts the engine with camelCase args and an explicit tuning', async () => {
     vi.mocked(backendCall).mockResolvedValue({ port: 8127 } as never)
-    await startBundledEngine('/models/qwen.gguf', 4096)
+    const tuning: BuiltinEngineTuning = { ...DEFAULT_TUNING, ctx: 4096, cacheTypeK: 'q8_0' }
+    await startBundledEngine('/models/qwen.gguf', tuning)
     expect(backendCall).toHaveBeenCalledWith('start_bundled_engine', {
       modelPath: '/models/qwen.gguf',
-      ctx: 4096,
+      tuning,
     })
   })
 
-  it('swaps the loaded model by path', async () => {
+  it('injects the settings-backed tuning when none is passed (chokepoint)', async () => {
+    vi.mocked(backendCall).mockResolvedValue({ port: 8127 } as never)
+    await startBundledEngine('/models/qwen.gguf')
+    expect(backendCall).toHaveBeenCalledWith('start_bundled_engine', {
+      modelPath: '/models/qwen.gguf',
+      tuning: DEFAULT_TUNING,
+    })
+  })
+
+  it('swaps the loaded model by path with the settings tuning', async () => {
     vi.mocked(backendCall).mockResolvedValue({ port: 8127 } as never)
     await swapBundledModel('/models/other.gguf')
     expect(backendCall).toHaveBeenCalledWith('swap_bundled_model', {
       modelPath: '/models/other.gguf',
-      ctx: undefined,
+      tuning: DEFAULT_TUNING,
     })
   })
 
@@ -111,7 +128,7 @@ describe('activateBuiltinModel', () => {
     expect(ok).toBe(true)
     expect(backendCall).toHaveBeenCalledWith('swap_bundled_model', {
       modelPath: '/m/qwen.gguf',
-      ctx: undefined,
+      tuning: DEFAULT_TUNING,
     })
   })
 

@@ -6,6 +6,26 @@ export type CavemanMode = 'off' | 'lite' | 'full' | 'ultra'
 
 export type AppMode = 'local' | 'cloud'
 
+/** Expert tuning for the bundled llama-server. Mirrors Rust `EngineTuning`
+ *  (camelCase over IPC); values are whitelisted on the Rust side. */
+export interface BuiltinEngineTuning {
+  /** `--ctx-size`. 0 = app default (8192). */
+  ctx: number
+  /** Flash Attention: 'auto' (binary default), 'on', 'off'. */
+  flashAttn: 'auto' | 'on' | 'off'
+  /** KV-cache quantization for K/V. 'f16' = off. Quantized V needs flash attention. */
+  cacheTypeK: 'f16' | 'bf16' | 'q8_0' | 'q4_0'
+  cacheTypeV: 'f16' | 'bf16' | 'q8_0' | 'q4_0'
+  /** CPU threads for generation. <=0 = auto. */
+  threads: number
+  /** GPU layers to offload. -1 = all layers, 0 = CPU-only. */
+  gpuLayers: number
+  /** Pin the model in RAM (`--mlock`). */
+  mlock: boolean
+  /** Disable mmap (`--no-mmap`): slower load, fewer pageouts. */
+  noMmap: boolean
+}
+
 export interface Settings {
   apiEndpoint: string
   temperature: number
@@ -91,6 +111,12 @@ export interface Settings {
   // providers ignore this field — they manage context themselves.
   /** User-side context-window override (forwarded as Ollama's num_ctx). 0 = auto. */
   contextWindowOverride: number
+  // Built-in engine expert tuning (2.6.0 Engine-Sweep). Forwarded to the Rust
+  // EngineTuning (whitelisted there) on every engine start/swap — Onboarding,
+  // Discover, model picker and the post-offload self-heal all inherit it via
+  // the api/engine chokepoint. Defaults reproduce the pre-2.6.0 argv exactly.
+  /** Expert settings for the bundled llama-server (chat engine only). */
+  builtinEngine: BuiltinEngineTuning
   // Bug BB v2.5.0 — BobbyT Discord 2026-05-26. GPU vendor + indices to
   // forward as CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES /
   // ONEAPI_DEVICE_SELECTOR on next Ollama / ComfyUI spawn. "auto" + empty

@@ -17,6 +17,13 @@ vi.mock('../../stores/providerStore', () => ({
   },
 }))
 
+const TUNING = { ctx: 16384, flashAttn: 'on', cacheTypeK: 'q8_0', cacheTypeV: 'q8_0', threads: -1, gpuLayers: -1, mlock: false, noMmap: false }
+vi.mock('../../stores/settingsStore', () => ({
+  useSettingsStore: {
+    getState: () => ({ settings: { builtinEngine: TUNING } }),
+  },
+}))
+
 const backendCall = vi.fn()
 vi.mock('../backend', () => ({
   backendCall: (...args: any[]) => backendCall(...args),
@@ -57,12 +64,14 @@ describe('ensureBuiltinEngineAlive', () => {
     expect(callsTo('start_bundled_engine')).toHaveLength(0)
   })
 
-  it('restarts a dead engine with the bundled GGUF path (prefixed name too)', async () => {
+  it('restarts a dead engine with the bundled GGUF path AND the user tuning (prefixed name too)', async () => {
     mockEngine({ healthy: false })
     await ensureBuiltinEngineAlive('openai::qwen2.5-0.5b')
     const starts = callsTo('start_bundled_engine')
     expect(starts).toHaveLength(1)
-    expect(starts[0][1]).toEqual({ modelPath: '/models/qwen2.5-0.5b.gguf' })
+    // Tuning rides along so a self-heal never silently drops configured
+    // ctx/KV-quant back to defaults.
+    expect(starts[0][1]).toEqual({ modelPath: '/models/qwen2.5-0.5b.gguf', tuning: TUNING })
   })
 
   it('leaves foreign models alone (openai-compat server that is not ours)', async () => {

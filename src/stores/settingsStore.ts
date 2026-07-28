@@ -49,7 +49,11 @@ import { DEFAULT_SETTINGS, BUILT_IN_PERSONAS } from '../lib/constants'
 // v17 (2.5.10): added settings.codexAutoApply (default false) — auto-apply
 // staged changes when the run finishes. Additive merge backfills the default;
 // stage-mode behaviour is unchanged until the user turns the new switch on.
-const STORE_VERSION = 17
+// v18 (2.6.0): added settings.builtinEngine (expert tuning for the bundled
+// llama-server: ctx, flash attention, KV-cache quant, threads, GPU layers,
+// mlock/mmap; defaults = the exact pre-2.6.0 argv). Additive merge backfills
+// the default object; engine behaviour is unchanged until the user edits it.
+const STORE_VERSION = 18
 
 interface SettingsState {
   settings: Settings

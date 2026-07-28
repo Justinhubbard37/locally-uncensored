@@ -16,6 +16,7 @@
 
 import { backendCall } from './backend'
 import { useProviderStore } from '../stores/providerStore'
+import { useSettingsStore } from '../stores/settingsStore'
 
 interface EngineStatusLite {
   running: boolean
@@ -68,7 +69,11 @@ export async function ensureBuiltinEngineAlive(modelName: string): Promise<void>
       const hit = models.find((m) => m.name === bare)
       if (!hit) return // not a bundled GGUF — some other openai-compat server
 
-      await backendCall('start_bundled_engine', { modelPath: hit.path })
+      // Restart with the user's expert tuning, not bare defaults — otherwise a
+      // self-heal would silently drop a configured ctx/KV-quant until the next
+      // manual model pick.
+      const tuning = useSettingsStore.getState().settings.builtinEngine
+      await backendCall('start_bundled_engine', { modelPath: hit.path, tuning })
     } finally {
       inflight = null
     }
