@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::state::AppState;
 
@@ -373,8 +373,20 @@ pub fn start_claude_code(
 
 // ── Stop Claude Code ──────────────────────────────────────────────────────
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn stop_claude_code(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn stop_claude_code(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        stop_claude_code_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("stop_claude_code task: {e}"))?
+}
+
+fn stop_claude_code_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     let mut proc = state.claude_code_process.lock().unwrap();
     if let Some(ref mut child) = *proc {
         let pid = child.id();

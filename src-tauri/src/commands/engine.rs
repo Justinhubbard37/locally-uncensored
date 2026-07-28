@@ -431,10 +431,20 @@ pub async fn swap_bundled_model(
 /// List `*.gguf` files in the built-in models dir, marking the one currently
 /// loaded. Used by the frontend instead of `/v1/models` (which would only
 /// report the single loaded model).
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn list_bundled_models(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
+pub async fn list_bundled_models(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        list_bundled_models_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("list_bundled_models task: {e}"))?
+}
+
+fn list_bundled_models_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     let dir = builtin_models_dir()?;
     let loaded = state
         .bundled_engine

@@ -169,8 +169,20 @@ impl WhisperServer {
     }
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn whisper_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn whisper_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        whisper_status_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("whisper_status task: {e}"))?
+}
+
+fn whisper_status_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     let (running, ready, backend) = {
         let whisper = state.whisper.lock().unwrap();
         (whisper.process.is_some(), whisper.ready, whisper.backend.clone())
@@ -181,7 +193,7 @@ pub fn whisper_status(state: State<'_, AppState>) -> Result<serde_json::Value, S
     // relaunch — the "reinstall every launch" report (#78, ElBiggus). If the
     // server is up it's obviously installed; otherwise probe the resolved
     // interpreter for the faster_whisper package.
-    let available = running || whisper_package_installed(state.inner());
+    let available = running || whisper_package_installed(state);
     Ok(serde_json::json!({
         "available": available,
         "backend": backend,

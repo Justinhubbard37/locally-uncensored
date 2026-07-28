@@ -62,8 +62,20 @@ fn check_install_disk_pressure(target_dir: &Path) -> Option<String> {
     None
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn cancel_comfyui_install(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn cancel_comfyui_install(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        cancel_comfyui_install_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("cancel_comfyui_install task: {e}"))?
+}
+
+fn cancel_comfyui_install_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     state.comfyui_install_cancel.store(true, Ordering::SeqCst);
     if let Ok(mut s) = state.install_status.lock() {
         // Mark as cancelling immediately so the UI can switch to a
@@ -1484,8 +1496,20 @@ fn install_ollama_macos_impl<F: Fn(&str, &str)>(
     );
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn install_ollama_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn install_ollama_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        install_ollama_status_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("install_ollama_status task: {e}"))?
+}
+
+fn install_ollama_status_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     let install = state.ollama_install.lock().unwrap();
     Ok(serde_json::json!({
         "status": install.status,

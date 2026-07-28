@@ -683,8 +683,20 @@ pub fn character_training_status(state: State<'_, AppState>) -> Result<serde_jso
     }))
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn cancel_character_training(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn cancel_character_training(app: tauri::AppHandle) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        cancel_character_training_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("cancel_character_training task: {e}"))?
+}
+
+fn cancel_character_training_blocking(state: &AppState) -> Result<(), String> {
     state.trainer_cancel.store(true, Ordering::SeqCst);
     // Kill the live child directly too — pip/accelerate ignore the flag.
     if let Ok(slot) = state.trainer_process.lock() {
