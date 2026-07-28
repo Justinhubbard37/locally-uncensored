@@ -19,6 +19,13 @@ pub struct DownloadProgress {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Absolute path of the file this transfer is writing. The map is keyed by
+    /// bare filename, which two different models can share, so this is what
+    /// tells a restart of the SAME download apart from a name collision — and
+    /// it is how cancel finds the right `.download` temp file instead of
+    /// guessing a handful of subfolders.
+    #[serde(default)]
+    pub dest: String,
 }
 
 /// Handle to a running bundled `llama-server`. One model per process, so

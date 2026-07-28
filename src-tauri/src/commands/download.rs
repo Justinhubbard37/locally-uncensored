@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -215,24 +215,26 @@ pub async fn download_model(
         0
     };
 
+    // Claim the id before anything else touches shared state, so a second
+    // start for the same file cannot take over the first one's token.
+    match claim_download(&mut state.downloads.lock().unwrap(), &id, &filename, &dest_file, resume_offset) {
+        Claim::Ok => {}
+        Claim::AlreadyRunning => {
+            return Ok(serde_json::json!({"status": "already_running", "id": id}));
+        }
+        Claim::NameConflict(other) => {
+            return Ok(serde_json::json!({
+                "status": "error",
+                "error": format!("Another download is already writing a file called {filename} (to {other}). Wait for it to finish, then start this one again."),
+            }));
+        }
+    }
+
     // Create cancellation token
     let token = CancellationToken::new();
     {
         let mut tokens = state.download_tokens.lock().unwrap();
         tokens.insert(id.clone(), token.clone());
-    }
-
-    // Initialize progress
-    {
-        let mut downloads = state.downloads.lock().unwrap();
-        downloads.insert(id.clone(), DownloadProgress {
-            progress: resume_offset,
-            total: 0,
-            speed: 0.0,
-            filename: filename.clone(),
-            status: "connecting".to_string(),
-            error: None,
-        });
     }
 
     let downloads_arc = Arc::clone(&state.downloads);
@@ -280,6 +282,62 @@ pub async fn download_model(
     });
 
     Ok(serde_json::json!({"status": "started", "id": id}))
+}
+
+/// Outcome of trying to start a transfer under the id `filename`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Claim {
+    /// Nobody else is on this id — the caller owns it.
+    Ok,
+    /// The very same file is already in flight. Harmless: the caller can just
+    /// follow the existing progress entry.
+    AlreadyRunning,
+    /// A DIFFERENT file with the same name is in flight. Starting anyway would
+    /// point two transfers at one `.download` temp file.
+    NameConflict(String),
+}
+
+/// Decide whether `id` may start, and register its progress entry, in ONE
+/// critical section.
+///
+/// Two starts for the same id used to overwrite each other: the second
+/// clobbered the first's cancel token, so the first became impossible to pause
+/// or cancel, and both tokio tasks then wrote the same `.download` file — one
+/// truncating it via `File::create` while the other kept appending at its own
+/// offset. The result still reached `total` bytes and was reported
+/// "complete", so the user got a silently corrupt model.
+pub fn claim_download(
+    downloads: &mut HashMap<String, DownloadProgress>,
+    id: &str,
+    filename: &str,
+    dest: &Path,
+    resume_offset: u64,
+) -> Claim {
+    let dest_str = dest.to_string_lossy().to_string();
+    if let Some(p) = downloads.get(id) {
+        if matches!(p.status.as_str(), "connecting" | "downloading" | "pausing") {
+            // An older entry predating `dest` carries an empty string; treat it
+            // as the same file rather than inventing a conflict.
+            return if p.dest.is_empty() || p.dest == dest_str {
+                Claim::AlreadyRunning
+            } else {
+                Claim::NameConflict(p.dest.clone())
+            };
+        }
+    }
+    downloads.insert(
+        id.to_string(),
+        DownloadProgress {
+            progress: resume_offset,
+            total: 0,
+            speed: 0.0,
+            filename: filename.to_string(),
+            status: "connecting".to_string(),
+            error: None,
+            dest: dest_str,
+        },
+    );
+    Claim::Ok
 }
 
 /// Bytes already on disk that count toward this download. Only a 206 means the
@@ -503,24 +561,29 @@ pub fn cancel_download(id: String, state: State<'_, AppState>) -> Result<serde_j
     // entries otherwise live in the map forever and resurrect the bundle
     // card's error state on every Models-tab remount after the user hit
     // Clear (the_mr_pickles) — refresh() re-reads this map on mount.
-    let cleanup_now = if let Ok(dl) = state.downloads.lock() {
-        dl.get(&id)
-            .map(|p| p.status == "paused" || p.status == "error")
-            .unwrap_or(false)
+    // Take the recorded destination out with the entry: guessing five
+    // subfolders missed every other one (controlnet, upscale_models, clip_vision)
+    // and every download_model_to_path target outside the ComfyUI tree, so those
+    // partial files were left behind for good.
+    let dest = if let Ok(mut dl) = state.downloads.lock() {
+        match dl.get(&id) {
+            Some(p) if p.status == "paused" || p.status == "error" => {
+                let d = p.dest.clone();
+                dl.remove(&id);
+                Some(d)
+            }
+            _ => None,
+        }
     } else {
-        false
+        None
     };
 
-    if cleanup_now {
-        // Remove from progress
-        if let Ok(mut dl) = state.downloads.lock() {
-            dl.remove(&id);
-        }
-        // Delete temp file — need comfy_path to find it
-        // The temp file cleanup is best-effort
-        if let Ok(comfy_path) = state.comfy_path.lock() {
+    if let Some(dest) = dest {
+        if !dest.is_empty() {
+            let _ = std::fs::remove_file(PathBuf::from(&dest).with_extension("download"));
+        } else if let Ok(comfy_path) = state.comfy_path.lock() {
+            // Entry from before `dest` existed — fall back to the old guess.
             if let Some(ref path) = *comfy_path {
-                // Try common subfolders
                 for subfolder in &["diffusion_models", "checkpoints", "vae", "text_encoders", "loras"] {
                     let tmp = PathBuf::from(path).join("models").join(subfolder).join(&id).with_extension("download");
                     let _ = std::fs::remove_file(&tmp);
@@ -554,28 +617,29 @@ pub async fn resume_download(
         0
     };
 
+    // Same claim as a fresh start: resuming a transfer that is already running
+    // would put a second writer on the temp file.
+    {
+        let mut downloads = state.downloads.lock().unwrap();
+        match claim_download(&mut downloads, &id, &id.clone(), &dest_file, resume_offset) {
+            Claim::Ok => {}
+            Claim::AlreadyRunning => {
+                return Ok(serde_json::json!({"status": "already_running", "id": id}));
+            }
+            Claim::NameConflict(other) => {
+                return Ok(serde_json::json!({
+                    "status": "error",
+                    "error": format!("Another download is already writing a file called {id} (to {other})."),
+                }));
+            }
+        }
+    }
+
     // Create new cancellation token
     let token = CancellationToken::new();
     {
         let mut tokens = state.download_tokens.lock().unwrap();
         tokens.insert(id.clone(), token.clone());
-    }
-
-    // Update status
-    {
-        let mut downloads = state.downloads.lock().unwrap();
-        if let Some(p) = downloads.get_mut(&id) {
-            p.status = "connecting".to_string();
-        } else {
-            downloads.insert(id.clone(), DownloadProgress {
-                progress: resume_offset,
-                total: 0,
-                speed: 0.0,
-                filename: id.clone(),
-                status: "connecting".to_string(),
-                error: None,
-            });
-        }
     }
 
     let downloads_arc = Arc::clone(&state.downloads);
@@ -778,21 +842,23 @@ pub async fn download_model_to_path(
         0
     };
 
+    match claim_download(&mut state.downloads.lock().unwrap(), &id, &filename, &dest_file, resume_offset) {
+        Claim::Ok => {}
+        Claim::AlreadyRunning => {
+            return Ok(serde_json::json!({"status": "already_running", "id": id}));
+        }
+        Claim::NameConflict(other) => {
+            return Ok(serde_json::json!({
+                "status": "error",
+                "error": format!("Another download is already writing a file called {filename} (to {other}). Wait for it to finish, then start this one again."),
+            }));
+        }
+    }
+
     let token = CancellationToken::new();
     {
         let mut tokens = state.download_tokens.lock().unwrap();
         tokens.insert(id.clone(), token.clone());
-    }
-    {
-        let mut downloads = state.downloads.lock().unwrap();
-        downloads.insert(id.clone(), DownloadProgress {
-            progress: resume_offset,
-            total: 0,
-            speed: 0.0,
-            filename: filename.clone(),
-            status: "connecting".to_string(),
-            error: None,
-        });
     }
 
     let downloads_arc = Arc::clone(&state.downloads);
@@ -936,5 +1002,100 @@ mod tests {
         // Range ignored — the whole body arrives and the part file is restarted.
         assert_eq!(resumed_bytes(4096, 200), 0);
         assert_eq!(resumed_bytes(0, 206), 0);
+    }
+}
+
+/// One transfer per destination file.
+///
+/// The map is keyed by bare filename. A second start under the same key used
+/// to overwrite the first entry AND the first cancel token, so the first
+/// download could no longer be paused or cancelled and both tokio tasks wrote
+/// the same `.download` file — one truncating it, the other appending at its
+/// own offset. The file still reached `total` bytes and was reported
+/// "complete": a silently corrupt model, several GB of it.
+#[cfg(test)]
+mod claim_tests {
+    use super::*;
+
+    fn running(dest: &str) -> DownloadProgress {
+        DownloadProgress {
+            progress: 1024,
+            total: 4096,
+            speed: 10.0,
+            filename: "model.safetensors".into(),
+            status: "downloading".into(),
+            error: None,
+            dest: dest.into(),
+        }
+    }
+
+    fn claim(map: &mut HashMap<String, DownloadProgress>, dest: &str) -> Claim {
+        claim_download(map, "model.safetensors", "model.safetensors", Path::new(dest), 0)
+    }
+
+    #[test]
+    fn an_untouched_id_is_claimed_and_records_its_destination() {
+        let mut map = HashMap::new();
+        assert_eq!(claim(&mut map, "/models/vae/model.safetensors"), Claim::Ok);
+        let p = &map["model.safetensors"];
+        assert_eq!(p.status, "connecting");
+        assert_eq!(p.dest, "/models/vae/model.safetensors");
+    }
+
+    #[test]
+    fn a_second_start_of_the_same_file_is_refused_and_leaves_the_first_alone() {
+        let mut map = HashMap::new();
+        map.insert("model.safetensors".to_string(), running("/models/vae/model.safetensors"));
+
+        assert_eq!(claim(&mut map, "/models/vae/model.safetensors"), Claim::AlreadyRunning);
+        // The caller returns before it can insert a token, so the running
+        // transfer keeps the one that can still cancel it.
+        let p = &map["model.safetensors"];
+        assert_eq!(p.status, "downloading");
+        assert_eq!(p.progress, 1024);
+    }
+
+    #[test]
+    fn two_different_models_sharing_a_file_name_collide_visibly() {
+        // "model.safetensors", "ae.safetensors", "diffusion_pytorch_model.safetensors"
+        // are all over HuggingFace, so this is the normal case, not a corner.
+        let mut map = HashMap::new();
+        map.insert("model.safetensors".to_string(), running("/models/vae/model.safetensors"));
+
+        assert_eq!(
+            claim(&mut map, "/models/checkpoints/model.safetensors"),
+            Claim::NameConflict("/models/vae/model.safetensors".to_string()),
+        );
+    }
+
+    #[test]
+    fn a_transfer_on_its_way_out_still_counts_as_running() {
+        let mut map = HashMap::new();
+        let mut p = running("/models/vae/model.safetensors");
+        p.status = "pausing".into();
+        map.insert("model.safetensors".to_string(), p);
+
+        assert_eq!(claim(&mut map, "/models/vae/model.safetensors"), Claim::AlreadyRunning);
+    }
+
+    #[test]
+    fn a_finished_paused_or_failed_entry_may_be_restarted() {
+        for status in ["complete", "paused", "error"] {
+            let mut map = HashMap::new();
+            let mut p = running("/models/vae/model.safetensors");
+            p.status = status.into();
+            map.insert("model.safetensors".to_string(), p);
+
+            assert_eq!(claim(&mut map, "/models/vae/model.safetensors"), Claim::Ok, "{status}");
+            assert_eq!(map["model.safetensors"].status, "connecting");
+        }
+    }
+
+    #[test]
+    fn an_entry_from_before_this_field_is_not_mistaken_for_a_collision() {
+        let mut map = HashMap::new();
+        map.insert("model.safetensors".to_string(), running(""));
+
+        assert_eq!(claim(&mut map, "/models/vae/model.safetensors"), Claim::AlreadyRunning);
     }
 }
