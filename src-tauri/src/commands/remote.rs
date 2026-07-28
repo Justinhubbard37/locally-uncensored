@@ -528,13 +528,47 @@ pub(crate) fn resolve_remote_path(
     Ok(contained.to_string_lossy().to_string())
 }
 
+/// What a remote tool needs before it may run.
+#[derive(Debug, PartialEq)]
+enum ToolGate {
+    /// Harmless to a paired device: no toggle required.
+    Open,
+    /// Requires the named permission to be ON.
+    Needs(&'static str),
+    /// Not decided → refused. See `gate_for`.
+    Unknown,
+}
+
+/// Permission decision per tool. Fails CLOSED on purpose: the old mapping ended
+/// in `_ => None`, so anything not listed ran ungated — and `process_list` did
+/// exactly that. It hands a remote client the desktop's running processes,
+/// which is the same "look at what this person is doing" class as `screenshot`,
+/// and screenshot was gated. With the default flipped, a tool added to the
+/// dispatch without a decision here is refused instead of silently exposed.
+fn gate_for(tool: &str) -> ToolGate {
+    match tool {
+        // RCE-equivalent: gated behind the dedicated, default-OFF `shell`
+        // permission (NOT `filesystem`) so a remote client can't get arbitrary
+        // command/code execution just by having file access enabled.
+        "shell_execute" | "code_execute" => ToolGate::Needs("shell"),
+        "file_read" | "file_write" | "file_list" | "file_search" | "screenshot" => {
+            ToolGate::Needs("filesystem")
+        }
+        "image_generate" | "process_list" => ToolGate::Needs("process_control"),
+        // Read-only and not about this machine's contents.
+        "web_search" | "web_fetch" | "system_info" | "get_current_time" => ToolGate::Open,
+        _ => ToolGate::Unknown,
+    }
+}
+
 /// Run a single agent tool on behalf of an authenticated mobile client.
 /// Mirrors `executeTool` in `src/api/agents.ts`. Permission-gated so a
 /// remote client cannot reach into the desktop without explicit toggle:
 ///   - file_read / file_write   → requires `filesystem`
 ///   - shell_execute / code_execute → requires `shell` (default OFF, RCE-class)
-///   - image_generate           → requires `process_control`
-///   - web_search               → no permission required
+///   - image_generate / process_list → requires `process_control`
+///   - web_search / web_fetch / system_info / get_current_time → no permission
+///   - anything else            → refused (see `gate_for`)
 ///
 /// Bug fix (mobile agent HTTP 500): all tool failures (missing arg,
 /// permission denied, underlying tool error) are returned as HTTP 200
@@ -561,21 +595,25 @@ async fn handle_agent_tool(
 
     // Permission gate up-front. Returns a graceful 200 + {error,permission}
     // so the mobile UI can render a single-line hint instead of "HTTP 403".
-    let needs = match tool_name.as_str() {
-        // RCE-equivalent: gated behind the dedicated, default-OFF `shell`
-        // permission (NOT `filesystem`) so a remote client can't get arbitrary
-        // command/code execution just by having file access enabled.
-        "shell_execute" | "code_execute"
-            => Some(("shell", perms.shell)),
-        "file_read" | "file_write" | "file_list" | "file_search" | "screenshot"
-            => Some(("filesystem", perms.filesystem)),
-        "image_generate"
-            => Some(("process_control", perms.process_control)),
-        _ => None,
-    };
-    if let Some((perm, on)) = needs {
-        if !on {
-            return graceful_perm_error(&tool_name, perm);
+    match gate_for(&tool_name) {
+        ToolGate::Open => {}
+        ToolGate::Needs(perm) => {
+            let on = match perm {
+                "shell" => perms.shell,
+                "filesystem" => perms.filesystem,
+                "process_control" => perms.process_control,
+                _ => false,
+            };
+            if !on {
+                return graceful_perm_error(&tool_name, perm);
+            }
+        }
+        ToolGate::Unknown => {
+            eprintln!("[Remote agent] tool `{}` has no permission decision — refused", tool_name);
+            return graceful_error(&format!(
+                "`{}` is not available to remote clients.",
+                tool_name
+            ));
         }
     }
 
@@ -5366,6 +5404,43 @@ mod remote_path_tests {
 
         // `..` climbing out → rejected.
         assert!(resolve_remote_path("../../../../etc/passwd", Some("__remote__"), &state).is_err());
+    }
+
+    #[test]
+    fn every_dispatched_tool_has_a_permission_decision() {
+        use super::{gate_for, ToolGate};
+        // The list mirrors the match in handle_agent_tool's dispatch. If a tool
+        // is added there without a decision in gate_for, this fails instead of
+        // the tool quietly running ungated.
+        for tool in [
+            "file_read", "file_write", "file_list", "file_search", "screenshot",
+            "shell_execute", "code_execute", "image_generate", "process_list",
+            "web_search", "web_fetch", "system_info", "get_current_time",
+        ] {
+            assert_ne!(gate_for(tool), ToolGate::Unknown, "{} has no gate", tool);
+        }
+    }
+
+    #[test]
+    fn looking_at_the_desktop_needs_a_toggle() {
+        use super::{gate_for, ToolGate};
+        // Both show what the person is doing on their machine.
+        assert_eq!(gate_for("screenshot"), ToolGate::Needs("filesystem"));
+        assert_eq!(gate_for("process_list"), ToolGate::Needs("process_control"));
+    }
+
+    #[test]
+    fn code_execution_never_rides_on_file_access() {
+        use super::{gate_for, ToolGate};
+        assert_eq!(gate_for("shell_execute"), ToolGate::Needs("shell"));
+        assert_eq!(gate_for("code_execute"), ToolGate::Needs("shell"));
+    }
+
+    #[test]
+    fn an_unlisted_tool_is_refused() {
+        use super::{gate_for, ToolGate};
+        assert_eq!(gate_for("file_delete"), ToolGate::Unknown);
+        assert_eq!(gate_for(""), ToolGate::Unknown);
     }
 
     #[test]
