@@ -23,6 +23,17 @@ pub struct WhisperServer {
     pub backend: Option<String>,
 }
 
+/// Throw away replies still sitting in the channel from an earlier, abandoned
+/// request. Returns how many were dropped (for the log — a non-zero count means
+/// a previous transcription overran its timeout).
+fn drain_stale(rx: &mpsc::Receiver<serde_json::Value>) -> usize {
+    let mut n = 0;
+    while rx.try_recv().is_ok() {
+        n += 1;
+    }
+    n
+}
+
 impl WhisperServer {
     pub fn new() -> Self {
         Self {
@@ -132,6 +143,24 @@ impl WhisperServer {
     pub fn send_command(&mut self, cmd: &serde_json::Value) -> Result<serde_json::Value, String> {
         if !self.ready {
             return Err("Whisper server not ready".to_string());
+        }
+
+        // Discard anything already queued BEFORE sending. The protocol is
+        // strictly one request, one response, and the channel carries no
+        // correlation id — so a reply that arrived after its caller gave up
+        // would be handed to the NEXT caller as if it were theirs. Concretely:
+        // a long dictation trips the 60 s timeout and reports "timed out"; the
+        // server finishes anyway and pushes that text into the channel; the
+        // user records something new and gets the PREVIOUS recording's words
+        // back — and every dictation after that stays one behind, until the
+        // server is restarted. Any stray JSON line the server logs desyncs it
+        // the same way.
+        let stale = {
+            let rx = self.response_rx.as_ref().ok_or("No response channel")?;
+            drain_stale(rx)
+        };
+        if stale > 0 {
+            println!("[Whisper] dropped {} stale response(s) before sending", stale);
         }
 
         let stdin = self.stdin_tx.as_mut().ok_or("No stdin connection")?;
@@ -403,5 +432,58 @@ pub fn auto_start_whisper_sync(
                  Reinstall LU to restore it."
                 .to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod response_channel_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The exact sequence a user hits: a long dictation overruns the 60 s
+    /// timeout, the server finishes anyway and pushes its text into the shared
+    /// channel, and the NEXT dictation would read that as its own answer.
+    #[test]
+    fn a_reply_that_arrived_too_late_is_not_handed_to_the_next_caller() {
+        let (tx, rx) = mpsc::channel::<serde_json::Value>();
+
+        // Dictation A times out; its reply lands afterwards.
+        tx.send(json!({ "text": "the FIRST recording" })).unwrap();
+
+        // Dictation B starts: everything queued is by definition not ours.
+        assert_eq!(drain_stale(&rx), 1);
+
+        // Now B's own reply arrives and is the one that gets read.
+        tx.send(json!({ "text": "the SECOND recording" })).unwrap();
+        let got = rx.recv_timeout(std::time::Duration::from_millis(200)).unwrap();
+        assert_eq!(got["text"], "the SECOND recording");
+    }
+
+    /// More than one abandoned call, plus any stray JSON the server logs.
+    #[test]
+    fn several_stale_messages_are_all_dropped() {
+        let (tx, rx) = mpsc::channel::<serde_json::Value>();
+        tx.send(json!({ "text": "old one" })).unwrap();
+        tx.send(json!({ "progress": 0.5 })).unwrap();
+        tx.send(json!({ "text": "old two" })).unwrap();
+
+        assert_eq!(drain_stale(&rx), 3);
+        assert!(rx.try_recv().is_err(), "channel should be empty");
+    }
+
+    #[test]
+    fn an_empty_channel_costs_nothing_and_drops_nothing() {
+        let (_tx, rx) = mpsc::channel::<serde_json::Value>();
+        assert_eq!(drain_stale(&rx), 0);
+    }
+
+    /// Draining must not block when the sender is still alive and idle.
+    #[test]
+    fn draining_does_not_wait_for_a_live_sender() {
+        let (tx, rx) = mpsc::channel::<serde_json::Value>();
+        let started = std::time::Instant::now();
+        assert_eq!(drain_stale(&rx), 0);
+        assert!(started.elapsed() < std::time::Duration::from_millis(50));
+        drop(tx);
     }
 }
