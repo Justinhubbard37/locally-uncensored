@@ -150,6 +150,25 @@ function guessContextFromName(model: string): number {
 // applyMaxTokens and getContextLength read it through another.
 const catalogContext = new Map<string, number>()
 
+/**
+ * Which accumulator slot a tool-call delta without an `index` belongs to. The
+ * field is required by the OpenAI spec but several compatible servers omit it.
+ * A delta carrying a fresh id opens the next slot; anything else continues the
+ * call currently being filled.
+ */
+function keyForUnindexedDelta(
+  accum: Map<number, { id: string; name: string; args: string }>,
+  id?: string,
+): number {
+  if (id) {
+    for (const [key, call] of accum) {
+      if (call.id === id) return key
+    }
+    return accum.size
+  }
+  return Math.max(0, accum.size - 1)
+}
+
 /** Test-only: reset the endpoint catalogue between test cases. */
 export function __clearContextCatalogForTests(): void {
   catalogContext.clear()
@@ -367,11 +386,21 @@ export class OpenAIProvider implements ProviderClient {
       // Accumulate streamed tool calls
       if (choice.delta?.tool_calls) {
         for (const tc of choice.delta.tool_calls) {
-          const existing = toolCallAccum.get(tc.index)
+          const key = tc.index ?? keyForUnindexedDelta(toolCallAccum, tc.id)
+          const existing = toolCallAccum.get(key)
           if (existing) {
+            // id and name do NOT always arrive in the first delta — several
+            // OpenAI-compat servers send the id one chunk later, or open with a
+            // bare index. Ignoring them left a call with an empty name (dispatch
+            // fails on "") or an empty tool_call_id, which 422s the follow-up
+            // turn — the exact break the server-side normalizer had to heal.
+            // Set-if-empty, not append: servers that repeat the full name in
+            // every delta are far more common than ones that stream it in parts.
+            if (tc.id && !existing.id) existing.id = tc.id
+            if (tc.function?.name && !existing.name) existing.name = tc.function.name
             if (tc.function?.arguments) existing.args += tc.function.arguments
           } else {
-            toolCallAccum.set(tc.index, {
+            toolCallAccum.set(key, {
               id: tc.id || '',
               name: tc.function?.name || '',
               args: tc.function?.arguments || '',
@@ -650,9 +679,11 @@ export class OpenAIProvider implements ProviderClient {
     if (accum.size === 0) return []
 
     const calls: ToolCall[] = []
-    for (const [, tc] of accum) {
+    for (const [index, tc] of accum) {
       calls.push({
-        id: tc.id,
+        // A server that never sent an id would otherwise put an empty
+        // tool_call_id in the follow-up message and 422 the next turn.
+        id: tc.id || `call_${index}`,
         function: {
           name: tc.name,
           arguments: this.safeParseArgs(tc.args),
