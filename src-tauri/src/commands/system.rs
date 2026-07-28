@@ -88,6 +88,8 @@ fn screenshot_blocking() -> Result<serde_json::Value, String> {
 /// `'` untouched, so any user whose profile contains an apostrophe
 /// (C:\Users\O'Brien\AppData\Local\Temp) ended the string early and the script
 /// died with a parse error.
+// Only the Windows capture path calls this; its tests run on every platform.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn ps_single_quoted(s: &str) -> String {
     s.replace('\'', "''")
 }
