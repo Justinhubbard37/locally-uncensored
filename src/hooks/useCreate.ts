@@ -346,9 +346,14 @@ export function useCreate() {
 
   const generateInner = useCallback(async () => {
     const state = useCreateStore.getState()
-    // AI-CSAM gate — applies before any backend is touched.
+    // AI-CSAM gate — applies before any backend is touched. On this path there
+    // is no server gate behind it: a local render goes straight to ComfyUI/MLX
+    // on the user's own machine. triggerWord is in here because local character
+    // training runs through this same function a few lines down, and the cloud
+    // gate already treats that field as prompt-bearing (useCloudCreate.ts).
+    // musicLyrics is not: music is a hosted-only op and cannot reach this path.
     {
-      const verdict = checkPromptSafety(`${state.prompt} ${state.negativePrompt}`)
+      const verdict = checkPromptSafety(`${state.prompt} ${state.negativePrompt} ${state.triggerWord}`)
       if (verdict.blocked) {
         state.setError(SAFETY_BLOCK_MESSAGE)
         return
