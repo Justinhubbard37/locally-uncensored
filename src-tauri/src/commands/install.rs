@@ -1250,8 +1250,23 @@ fn git_download_url() -> &'static str {
 }
 
 /// Cross-platform git availability check for the Codex view's install banner.
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread,
+// so every millisecond spent here is a frozen window. Same treatment
+// `lmstudio_server_status` already got — this one was simply missed.
 #[tauri::command]
-pub fn check_git_installed() -> GitStatus {
+pub async fn check_git_installed() -> GitStatus {
+    tokio::task::spawn_blocking(check_git_installed_blocking)
+        .await
+        .unwrap_or_else(|e| GitStatus {
+            installed: false,
+            native: false,
+            version: None,
+            hint: Some(format!("git probe task failed: {e}")),
+            download_url: git_download_url().to_string(),
+        })
+}
+
+fn check_git_installed_blocking() -> GitStatus {
     let download_url = git_download_url().to_string();
     let version = git_version_string();
 
@@ -1985,8 +2000,17 @@ pub fn install_lmstudio_status(state: State<'_, AppState>) -> Result<serde_json:
 /// Best-effort: spawn `lms server start` so we don't make the user open the
 /// LM Studio GUI just to flip the Server toggle. Idempotent — quick early-exit
 /// if the server is already responding.
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread,
+// so every millisecond spent here is a frozen window. Same treatment
+// `lmstudio_server_status` already got — this one was simply missed.
 #[tauri::command]
-pub fn start_lmstudio_server() -> Result<serde_json::Value, String> {
+pub async fn start_lmstudio_server() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(start_lmstudio_server_blocking)
+        .await
+        .map_err(|e| format!("start_lmstudio_server task: {e}"))?
+}
+
+fn start_lmstudio_server_blocking() -> Result<serde_json::Value, String> {
     if lmstudio_server_running() {
         return Ok(serde_json::json!({"status": "already_running"}));
     }
@@ -2091,9 +2115,19 @@ pub async fn lmstudio_list_loaded() -> Result<serde_json::Value, String> {
     .map_err(|e| format!("lmstudio_list_loaded task: {e}"))?
 }
 
-#[allow(non_snake_case)]
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread,
+// so every millisecond spent here is a frozen window. Same treatment
+// `lmstudio_server_status` already got — this one was simply missed.
 #[tauri::command]
-pub fn lmstudio_load_model(model: String, contextLength: Option<u32>) -> Result<serde_json::Value, String> {
+#[allow(non_snake_case)]
+pub async fn lmstudio_load_model(model: String, contextLength: Option<u32>) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || lmstudio_load_model_blocking(model, contextLength))
+        .await
+        .map_err(|e| format!("lmstudio_load_model task: {e}"))?
+}
+
+#[allow(non_snake_case)]
+fn lmstudio_load_model_blocking(model: String, contextLength: Option<u32>) -> Result<serde_json::Value, String> {
     let lms = lmstudio_lms_path()
         .ok_or_else(|| "lms CLI not found — install LM Studio first".to_string())?;
     // `lms load` blocks until the model is in memory. The caller is expected
@@ -2215,8 +2249,17 @@ pub async fn lmstudio_model_context(model: String) -> Result<serde_json::Value, 
     .map_err(|e| format!("lmstudio_model_context task: {e}"))?
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread,
+// so every millisecond spent here is a frozen window. Same treatment
+// `lmstudio_server_status` already got — this one was simply missed.
 #[tauri::command]
-pub fn lmstudio_unload_model(model: String) -> Result<serde_json::Value, String> {
+pub async fn lmstudio_unload_model(model: String) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || lmstudio_unload_model_blocking(model))
+        .await
+        .map_err(|e| format!("lmstudio_unload_model task: {e}"))?
+}
+
+fn lmstudio_unload_model_blocking(model: String) -> Result<serde_json::Value, String> {
     let lms = lmstudio_lms_path()
         .ok_or_else(|| "lms CLI not found".to_string())?;
     let mut cmd = Command::new(&lms);

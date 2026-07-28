@@ -14,8 +14,17 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 // ── Detect Claude Code CLI ────────────────────────────────────────────────
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread,
+// so every millisecond spent here is a frozen window. Same treatment
+// `lmstudio_server_status` already got — this one was simply missed.
 #[tauri::command]
-pub fn detect_claude_code() -> Result<serde_json::Value, String> {
+pub async fn detect_claude_code() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(detect_claude_code_blocking)
+        .await
+        .map_err(|e| format!("detect_claude_code task: {e}"))?
+}
+
+fn detect_claude_code_blocking() -> Result<serde_json::Value, String> {
     let mut cmd = Command::new("claude");
     cmd.args(["--version"])
         .stdout(Stdio::piped())

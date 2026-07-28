@@ -52,8 +52,17 @@ pub fn process_list() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({ "processes": processes, "count": processes.len() }))
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread,
+// so every millisecond spent here is a frozen window. Same treatment
+// `lmstudio_server_status` already got — this one was simply missed.
 #[tauri::command]
-pub fn screenshot() -> Result<serde_json::Value, String> {
+pub async fn screenshot() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(screenshot_blocking)
+        .await
+        .map_err(|e| format!("screenshot task: {e}"))?
+}
+
+fn screenshot_blocking() -> Result<serde_json::Value, String> {
     // Use PowerShell to capture screen on Windows
     #[cfg(target_os = "windows")]
     {

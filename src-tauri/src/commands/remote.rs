@@ -742,7 +742,7 @@ async fn handle_agent_tool(
         }
         "system_info" => crate::commands::system::system_info(),
         "process_list" => crate::commands::system::process_list(),
-        "screenshot" => crate::commands::system::screenshot(),
+        "screenshot" => crate::commands::system::screenshot().await,
         "get_current_time" => crate::commands::system::get_current_time(),
         "image_generate" => {
             // Image generation requires the desktop Agent path — too much
