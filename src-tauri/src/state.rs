@@ -430,6 +430,18 @@ impl AppState {
             }
         }
 
+        // Character-LoRA training. The PID sits in AppState like every other
+        // long-running child, but shutdown skipped it — so quitting during a
+        // training run left an orphaned Python process holding the GPU, and
+        // the UI that could have cancelled it was gone. Training is the
+        // longest-lived and most VRAM-hungry child the app spawns.
+        if let Ok(mut slot) = self.trainer_process.lock() {
+            if let Some(pid) = slot.take() {
+                crate::commands::trainer::kill_trainer_tree(pid);
+                println!("[Trainer] Training stopped (explicit shutdown)");
+            }
+        }
+
         if let Ok(mut whisper) = self.whisper.lock() {
             whisper.stop();
         }

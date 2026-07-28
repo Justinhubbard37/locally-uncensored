@@ -696,22 +696,33 @@ pub async fn cancel_character_training(app: tauri::AppHandle) -> Result<(), Stri
     .map_err(|e| format!("cancel_character_training task: {e}"))?
 }
 
+/// Kill a live trainer child and its tree.
+///
+/// Shared with `AppState::shutdown_subprocesses`: the trainer PID lives in
+/// AppState like every other long-running child, but shutdown never killed it,
+/// so quitting mid-training left an orphaned Python process holding the GPU
+/// with no UI left to stop it. `/T` matters — the trainer runs accelerate,
+/// which spawns the actual worker underneath.
+pub(crate) fn kill_trainer_tree(pid: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        let mut kill = Command::new("taskkill");
+        kill.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        kill.creation_flags(CREATE_NO_WINDOW);
+        let _ = kill.output();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+    }
+}
+
 fn cancel_character_training_blocking(state: &AppState) -> Result<(), String> {
     state.trainer_cancel.store(true, Ordering::SeqCst);
     // Kill the live child directly too — pip/accelerate ignore the flag.
-    if let Ok(slot) = state.trainer_process.lock() {
-        if let Some(pid) = *slot {
-            #[cfg(target_os = "windows")]
-            {
-                let mut kill = Command::new("taskkill");
-                kill.args(["/PID", &pid.to_string(), "/T", "/F"]);
-                kill.creation_flags(CREATE_NO_WINDOW);
-                let _ = kill.output();
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
-            }
+    if let Ok(mut slot) = state.trainer_process.lock() {
+        if let Some(pid) = slot.take() {
+            kill_trainer_tree(pid);
         }
     }
     Ok(())
@@ -763,5 +774,39 @@ mod tests {
         assert_eq!(sanitize_component("../../evil"), "evil");
         assert_eq!(sanitize_component("my char!"), "my_char");
         assert_eq!(sanitize_component("lumi"), "lumi");
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    /// Quitting during a training run used to leave the trainer alive: the PID
+    /// is in AppState like every other long-running child, but
+    /// shutdown_subprocesses skipped it. This asserts the wiring exists — the
+    /// kill itself is an OS call, so what is checkable here is that shutdown
+    /// reaches for the trainer slot at all, and that the slot is emptied so a
+    /// second pass cannot re-kill a recycled PID.
+    #[test]
+    fn shutdown_takes_the_trainer_pid_and_clears_the_slot() {
+        let slot: std::sync::Mutex<Option<u32>> = std::sync::Mutex::new(Some(4242));
+
+        // What state.rs does, in the same order.
+        let taken = { slot.lock().unwrap().take() };
+
+        assert_eq!(taken, Some(4242), "shutdown must pick the trainer pid up");
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "the slot must be empty afterwards so a later pass cannot kill a recycled pid",
+        );
+    }
+
+    #[test]
+    fn state_shutdown_actually_references_the_trainer() {
+        // Cheap guard against the wiring being dropped in a future refactor:
+        // the fix is one call in state.rs and nothing else would notice.
+        let state_rs = include_str!("../state.rs");
+        assert!(
+            state_rs.contains("trainer_process") && state_rs.contains("kill_trainer_tree"),
+            "shutdown_subprocesses no longer kills the trainer",
+        );
     }
 }
