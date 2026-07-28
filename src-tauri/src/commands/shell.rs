@@ -134,6 +134,40 @@ pub(crate) fn kill_tree(root: u32) {
     }
 }
 
+/// Run a short-lived probe command with a HARD deadline and return its stdout.
+///
+/// `Command::output()` waits forever, and the tools this app probes with can
+/// hang for real: a wedged NVIDIA driver makes `nvidia-smi` block for minutes,
+/// `wmic` stalls on a busy WMI service, `lspci` can sit on a slow bus scan.
+/// Those are exactly the machines whose owner opens the Troubleshoot panel or
+/// the hardware picker — and an unbounded probe left both spinning with no
+/// answer at all. Returns None on timeout, spawn failure or a non-zero exit.
+pub(crate) fn output_bounded(mut cmd: Command, max: std::time::Duration) -> Option<String> {
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().ok()?;
+    let (out_buf, out_done) = drain(child.stdout.take()?);
+    let (_err_buf, err_done) = drain(child.stderr.take()?);
+    let deadline = std::time::Instant::now() + max;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                settle(&out_done, &err_done, std::time::Duration::from_millis(200));
+                return if status.success() { Some(captured_text(&out_buf)) } else { None };
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    kill_tree(child.id());
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
 /// Give the reader threads a moment to hit EOF after the child is gone. Never
 /// joins them: a grandchild can keep the pipe open (a spawned dev server), and
 /// joining would hang the command instead of returning what we already have.
@@ -313,6 +347,32 @@ mod tests {
     fn small_output_comes_back_whole_and_unannotated() {
         let text = capture(b"hello\n".to_vec());
         assert_eq!(text, "hello\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bounded_probe_returns_output_and_gives_up_on_a_hang() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let mut ok = Command::new("bash");
+        ok.arg("-c").arg("echo '12288, 4096'");
+        assert_eq!(
+            output_bounded(ok, Duration::from_secs(5)).as_deref().map(str::trim),
+            Some("12288, 4096"),
+        );
+
+        // A wedged probe must not hold the caller hostage.
+        let mut hang = Command::new("bash");
+        hang.arg("-c").arg("sleep 30");
+        let started = Instant::now();
+        assert!(output_bounded(hang, Duration::from_millis(400)).is_none());
+        assert!(started.elapsed() < Duration::from_secs(5), "the deadline did not bite");
+
+        // A non-zero exit reads as "no answer", same as before.
+        let mut fails = Command::new("bash");
+        fails.arg("-c").arg("exit 3");
+        assert!(output_bounded(fails, Duration::from_secs(5)).is_none());
     }
 
     #[cfg(unix)]
