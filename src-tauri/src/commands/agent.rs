@@ -397,8 +397,22 @@ pub fn file_read(
     if !full_path.exists() {
         return Err(format!("File not found: {}", full_path.display()));
     }
-    let content = fs::read_to_string(&full_path)
-        .map_err(|e| format!("Read error: {}", e))?;
+    // A file that is not valid UTF-8 used to come back as a raw
+    // "stream did not contain valid UTF-8" error, leaving the caller with no
+    // way forward — and that hits more than images: a legacy CP1252 source file
+    // is enough. The desktop path (fs_read + builtin-tools) answers with a
+    // marker instead, so the model knows to leave the file alone rather than
+    // writing mangled text back over it. Same answer here, same wording.
+    let content = match fs::read_to_string(&full_path) {
+        Ok(c) => c,
+        Err(_) => {
+            let bytes = fs::metadata(&full_path).map(|m| m.len()).unwrap_or(0);
+            format!(
+                "[binary file — {}, not shown. This tool reads text only; do not write binary content back through file_write.]",
+                format_bytes(bytes)
+            )
+        }
+    };
     Ok(serde_json::json!({"content": content}))
 }
 
@@ -475,4 +489,34 @@ pub fn get_chat_workspace_override(
 ) -> Result<Option<String>, String> {
     let map = state.chat_workspace_overrides.lock().map_err(|e| e.to_string())?;
     Ok(map.get(chatId.trim()).map(|p| p.to_string_lossy().to_string()))
+}
+
+
+/// Human byte size for tool messages. Mirrors formatBytes in builtin-tools.ts
+/// so the desktop and relay paths say the same thing about the same file.
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < KB {
+        format!("{} B", bytes)
+    } else if b < KB * KB {
+        format!("{:.1} KB", b / KB)
+    } else if b < KB * KB * KB {
+        format!("{:.1} MB", b / (KB * KB))
+    } else {
+        format!("{:.1} GB", b / (KB * KB * KB))
+    }
+}
+
+#[cfg(test)]
+mod read_tests {
+    use super::format_bytes;
+
+    #[test]
+    fn byte_sizes_read_like_the_desktop_path() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(2048), "2.0 KB");
+        assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
+    }
 }
