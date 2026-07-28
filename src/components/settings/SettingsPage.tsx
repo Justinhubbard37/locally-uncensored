@@ -913,7 +913,7 @@ export function SettingsPage() {
 
   const refreshTts = () => {
     setTtsLoading(true)
-    return checkTtsAvailable()
+    return checkTtsAvailable(voiceSettings.piperVoice)
       .then((s) => {
         setTtsStatus(s)
         // Same as STT: drive the read-aloud button availability from this probe

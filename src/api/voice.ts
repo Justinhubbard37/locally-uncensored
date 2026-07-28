@@ -292,17 +292,20 @@ export async function synthesizeCloud(text: string, voice?: string, signal?: Abo
 
 let ttsChecked = false;
 let ttsAvailableFlag = false;
+let ttsCheckedVoice: string | undefined;
 
-export async function checkTtsAvailable(): Promise<{ available: boolean; piper?: boolean; voice?: boolean }> {
+/** Probe neural TTS. Pass the SELECTED voice — readiness is per voice: having
+ *  some other voice on disk says nothing about the one that is about to speak. */
+export async function checkTtsAvailable(voice?: string): Promise<{ available: boolean; piper?: boolean; voice?: boolean }> {
   try {
-    if (isTauri()) return await backendCall("tts_status");
+    if (isTauri()) return await backendCall("tts_status", { voice });
     return { available: false };
   } catch {
     return { available: false };
   }
 }
 
-export async function initTtsCheck(): Promise<boolean> {
+export async function initTtsCheck(voice?: string): Promise<boolean> {
   // Cache only a POSITIVE result. A negative probe at boot is frequently a
   // race — resolve_lu_python / the ComfyUI venv may not be ready when App.tsx
   // fires this — and caching `false` would stick for the whole session, so
@@ -310,21 +313,24 @@ export async function initTtsCheck(): Promise<boolean> {
   // never spoke at all (#77, ElBiggus). On a negative we leave ttsChecked
   // false so the next caller (the lazy re-probe in useVoice, or Settings)
   // gets a fresh probe instead of the stale miss.
-  if (ttsChecked && ttsAvailableFlag) return ttsAvailableFlag;
+  // The cache is per voice: a positive for the voice that was selected earlier
+  // must not vouch for the one the user switched to.
+  if (ttsChecked && ttsAvailableFlag && ttsCheckedVoice === voice) return ttsAvailableFlag;
   try {
-    ttsAvailableFlag = (await checkTtsAvailable()).available;
+    ttsAvailableFlag = (await checkTtsAvailable(voice)).available;
   } catch {
     ttsAvailableFlag = false;
   }
   ttsChecked = ttsAvailableFlag;
+  ttsCheckedVoice = voice;
   return ttsAvailableFlag;
 }
 
 // Force a fresh probe (after the in-app install, or when a Speaker button mounts
 // while neural TTS still shows unavailable).
-export async function recheckTtsAvailable(): Promise<boolean> {
+export async function recheckTtsAvailable(voice?: string): Promise<boolean> {
   ttsChecked = false;
-  return initTtsCheck();
+  return initTtsCheck(voice);
 }
 
 /** Synthesize text to a playable WAV data URL via a local Piper voice. */

@@ -176,7 +176,7 @@ export function useVoice() {
 
   // Re-probe neural TTS on demand (after install) and sync the store.
   const recheckTts = useCallback(async (): Promise<boolean> => {
-    const ok = await recheckTtsAvailable();
+    const ok = await recheckTtsAvailable(store.piperVoice);
     store.setTtsAvailable(ok);
     return ok;
   }, [store]);
@@ -348,7 +348,7 @@ export function useVoice() {
           let piperReady = store.ttsAvailable;
           if (!piperReady && lazyTtsReprobes < MAX_LAZY_TTS_REPROBES && store.ttsMode !== "external") {
             lazyTtsReprobes++;
-            piperReady = await recheckTtsAvailable();
+            piperReady = await recheckTtsAvailable(store.piperVoice);
             if (stopped()) return;
             if (piperReady) store.setTtsAvailable(true);
           }
