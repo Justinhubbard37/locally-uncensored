@@ -51,6 +51,31 @@ function baseNormalize(text: string): string {
     .replace(/[^\u0000-\u007F]/g, (ch) => HOMOGLYPHS[ch] ?? ch)
 }
 
+// Boundary-free twins of the term lists, derived from the same sources so the
+// two can never drift (the LEET_CLASS trick above). Used ONLY on the joined
+// letter-spacing runs below, where there are no real word boundaries left.
+const MINOR_TERMS_ANYWHERE = new RegExp(MINOR_TERMS.source.replace(/\\b/g, ''), 'i')
+const SEXUAL_TERMS_ANYWHERE = new RegExp(SEXUAL_TERMS.source.replace(/\\b/g, ''), 'i')
+
+/**
+ * Pull out runs of single characters — "a t e e n   g i r l" — and join them.
+ *
+ * Stripping separators from the WHOLE string (the `compact` projection) does not
+ * catch this: the term ends up mid-word, so the `\b` in the term lists no longer
+ * matches. Measured before this was added, "a t e e n girl, naked" passed the
+ * gate outright. A run of spaced single characters is by construction not
+ * ordinary prose, so matching it without word boundaries does not create the
+ * "canteen" / "sussex" false positives that boundary-free matching on normal
+ * text would.
+ */
+function spacedRuns(text: string): string[] {
+  const runs: string[] = []
+  for (const m of text.matchAll(/(?:\b[a-z0-9]\s+){2,}[a-z0-9]\b/g)) {
+    runs.push(m[0].replace(/\s+/g, ''))
+  }
+  return runs
+}
+
 export interface SafetyVerdict {
   blocked: boolean
   reason?: string
@@ -64,15 +89,27 @@ export function checkPromptSafety(text: string): SafetyVerdict {
   // Leet-folded copy for word terms. NOT used for age digits — folding maps
   // '1'→'i'/'4'→'a', which would destroy "14 yo"; ages are matched on `base`.
   const deleeted = base.replace(LEET_CLASS, (ch) => LEET[ch] ?? ch)
-  const compact = base.replace(/[\s._-]+/g, '')
+  const variants = [base, deleeted]
+  // Strip EVERY non-alphanumeric, not just [\s._-]: the old class let any other
+  // separator through, so `c*h*i*l*d*p*o*r*n` and `c/h/i/l/d/p/o/r/n` walked
+  // straight past the always-blocked list that exists to catch exactly this.
+  const compacts = variants.map((v) => v.replace(/[^a-z0-9]+/g, ''))
+  const runs = variants.flatMap(spacedRuns)
 
-  if (ALWAYS_BLOCKED.test(base) || ALWAYS_BLOCKED.test(deleeted) || ALWAYS_BLOCKED_COMPACT.test(compact)) {
+  if (variants.some((v) => ALWAYS_BLOCKED.test(v)) || compacts.some((c) => ALWAYS_BLOCKED_COMPACT.test(c))) {
     return { blocked: true, reason: 'csam' }
   }
-  // Also test `compact` (separators stripped) so single-term letter-spacing
-  // ("t e e n") is caught; \b still prevents mid-word substring matches.
-  const minor = MINOR_TERMS.test(base) || MINOR_TERMS.test(deleeted) || MINOR_TERMS.test(compact)
-  const sexual = SEXUAL_TERMS.test(base) || SEXUAL_TERMS.test(deleeted) || SEXUAL_TERMS.test(compact)
+  // `compact` keeps \b, so it only catches a term that survives as its own word.
+  // The joined letter-spacing runs are matched without boundaries — see
+  // spacedRuns for why that is safe there and not on ordinary text.
+  const minor =
+    variants.some((v) => MINOR_TERMS.test(v)) ||
+    compacts.some((c) => MINOR_TERMS.test(c)) ||
+    runs.some((r) => MINOR_TERMS_ANYWHERE.test(r))
+  const sexual =
+    variants.some((v) => SEXUAL_TERMS.test(v)) ||
+    compacts.some((c) => SEXUAL_TERMS.test(c)) ||
+    runs.some((r) => SEXUAL_TERMS_ANYWHERE.test(r))
   if (minor && sexual) {
     return { blocked: true, reason: 'minor+sexual' }
   }
