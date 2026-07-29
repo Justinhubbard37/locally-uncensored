@@ -85,3 +85,45 @@ describe('toolStrategyFor — the run gets the shape the UI promised', () => {
     expect(toolStrategyFor({ name: 'ollama::mythomax:13b' })).toBe('hermes_xml')
   })
 })
+
+// ── The unrestricted models, 2026-07-29 ───────────────────────────────
+//
+// LU Cloud used to declare supports_tools:false for the roleplay fine-tunes
+// because DeepInfra 405s on a `tools` payload for them. The proxy translates
+// into the Hermes prompt convention now and declares true, and the point of
+// these cases is that NOTHING in the app had to change for that to land: the
+// shipped 2.5.10 build reads the same flag, so a server deploy reaches every
+// installed copy.
+describe('unrestricted models follow the server, no app update needed', () => {
+  const UNRESTRICTED = [
+    'lu-cloud::Sao10K/L3-8B-Lunaris-v1-Turbo',
+    'lu-cloud::Gryphe/MythoMax-L2-13b',
+    'lu-cloud::NousResearch/Hermes-3-Llama-3.1-70B',
+    'lu-cloud::NousResearch/Hermes-3-Llama-3.1-405B',
+    'lu-cloud::Sao10K/L3.1-70B-Euryale-v2.2',
+    'lu-cloud::meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8',
+  ]
+
+  it('a server-declared yes puts every one of them in Agent and Code', () => {
+    for (const name of UNRESTRICTED) {
+      expect(resolveToolSupport({ name, supportsTools: true }), name).toBe('native')
+      expect(canUseTools({ name, supportsTools: true }), name).toBe(true)
+      expect(toolStrategyFor({ name, supportsTools: true }), name).toBe('native')
+    }
+  })
+
+  it('a cached rejection from the old build cannot outlive the deploy', () => {
+    // Evidence still beats a claim, which is right: a model that really does
+    // reject tools must stay out. What must not happen is a negative from
+    // BEFORE the proxy learned to translate keeping the model greyed out. The
+    // cache key was bumped for exactly that, so an old entry is not read at
+    // all; here we prove the fresh cache starts clean and the flag decides.
+    for (const name of UNRESTRICTED) {
+      expect(resolveToolSupport({ name, supportsTools: true }), name).toBe('native')
+    }
+    markToolsUnsupported(UNRESTRICTED[0])
+    expect(resolveToolSupport({ name: UNRESTRICTED[0], supportsTools: true })).toBe('none')
+    resetToolCapabilityCache()
+    expect(resolveToolSupport({ name: UNRESTRICTED[0], supportsTools: true })).toBe('native')
+  })
+})
