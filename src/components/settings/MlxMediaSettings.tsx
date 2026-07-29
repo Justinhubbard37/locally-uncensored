@@ -59,7 +59,11 @@ function progressLine(p: { download_progress: number; download_total: number; do
   return `${pct}% — ${formatBytes(p.download_progress)} of ${formatBytes(p.download_total)}${speed}`
 }
 
-export function MlxMediaSettings() {
+/** `only` lets the Model Manager show just one half under its Image / Video
+ *  rail; Settings passes nothing and gets both. */
+export function MlxMediaSettings({ only }: { only?: 'image' | 'video' } = {}) {
+  const showImage = only !== 'video'
+  const showVideo = only !== 'image'
   const [engine, setEngine] = useState<MlxStatus | null>(null)
   const [images, setImages] = useState<MlxImageModel[]>([])
   const [video, setVideo] = useState<VideoStatus | null>(null)
@@ -251,6 +255,7 @@ export function MlxMediaSettings() {
       )}
 
       {/* ── Image ─────────────────────────────────────────── */}
+      {showImage && (<>
       <div className="flex items-center gap-1.5 pt-1">
         <ImageIcon size={12} className="text-gray-500" />
         <span className="text-[0.7rem] text-gray-700 dark:text-gray-300">Images</span>
@@ -274,8 +279,10 @@ export function MlxMediaSettings() {
       </div>
 
       {images.map((m) => modelRow('image', m, imageEngineReady))}
+      </>)}
 
       {/* ── Video ─────────────────────────────────────────── */}
+      {showVideo && (<>
       <div className="flex items-center gap-1.5 pt-1">
         <Film size={12} className="text-gray-500" />
         <span className="text-[0.7rem] text-gray-700 dark:text-gray-300">Video</span>
@@ -313,6 +320,7 @@ export function MlxMediaSettings() {
       <div className="text-[0.6rem] text-gray-500 leading-relaxed">
         Video models are large and generation is slow — minutes per clip, not seconds. Start with the smallest model.
       </div>
+      </>)}
 
       {/* ── Live install output ───────────────────────────── */}
       {(anyBusy || log.length > 0) && (

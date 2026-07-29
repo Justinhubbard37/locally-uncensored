@@ -174,6 +174,29 @@ test('fresh mac: Create itself offers the setup, and it is the MLX one', async (
   expect(comfy).toHaveLength(0)
 })
 
+test('mac: the Model Manager offers MLX media instead of hiding the rails', async ({ page }) => {
+  // The Image/Video rails used to be removed on macOS because the grid behind
+  // them is ComfyUI-driven and dead there. Removing them left a Mac user with
+  // no model surface for media at all — "where do I get models" had no answer
+  // in the place that is literally called Models.
+  await page.addInitScript(tauriMockInit, MAC_OPTS)
+  await seedOnboardingDone(page)
+  await routeCloud(page, { license: 'active', access: true, mediaLive: true })
+  await page.goto('/')
+  await expect(cloudSwitch(page)).toBeVisible({ timeout: 20_000 })
+
+  await page.getByRole('button', { name: /^Models$/ }).first().click()
+  await page.getByRole('button', { name: /^Image$/ }).first().click()
+
+  await expect(page.getByText(/Local media on this Mac runs on Apple MLX/i)).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByText('SD Turbo', { exact: true })).toBeVisible()
+  // Video belongs under its own rail, not doubled up in the image one.
+  await expect(page.getByText('Wan 2.1 T2V 1.3B', { exact: true })).toHaveCount(0)
+
+  await page.getByRole('button', { name: /^Video$/ }).first().click()
+  await expect(page.getByText('Wan 2.1 T2V 1.3B', { exact: true })).toBeVisible({ timeout: 15_000 })
+})
+
 test('windows local is unchanged: ComfyUI lanes still offered', async ({ page }) => {
   // Guard against fixing the Mac by breaking everyone else.
   await bootLocalCreate(page, { ...MAC_OPTS, platform: 'windows' })
