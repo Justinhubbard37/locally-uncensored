@@ -215,9 +215,10 @@ export function AccountPanel() {
       {licenseActive && quota ? (
         <div className="space-y-2">
           {/* One shared compute-credit wallet, chat, images, video and voice
-              all draw from the same monthly budget. */}
+              all draw from the same budget. It refills on the subscription's
+              renewal date, not on the 1st (server migration 0027). */}
           <Meter
-            label="Cloud credits (this month)"
+            label="Cloud credits (this billing period)"
             used={Number(quota.used.credits_used)}
             limit={quota.limits.credits}
           />

@@ -23,9 +23,9 @@ export function CreditsExhaustedModal() {
     <Modal open={open} onClose={() => setOpen(false)} title="You're out of credits">
       <div className="space-y-4">
         <p className="text-sm text-gray-600 dark:text-gray-300">
-          Your plan credits for this month are used up. Top-up credits are
-          one-time, never expire, and are only used after your monthly plan
-          credits.
+          Your plan credits for this billing period are used up — they refill on
+          your next renewal date. Top-up credits are one-time, never expire, and
+          are only used after your plan credits.
         </p>
         <div className="flex flex-col gap-2">
           <button
