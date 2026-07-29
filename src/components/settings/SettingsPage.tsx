@@ -1157,9 +1157,16 @@ export function SettingsPage() {
           {/* Bug BB v2.5.0 — BobbyT GPU picker. Lazy-loads the GPU list when
               the section opens via detect_gpus probe (nvidia-smi + rocm-smi +
               lspci/wmic). */}
-          <Section title="Hardware (GPU picker)">
-            <HardwareSettings />
-          </Section>
+          {/* Not on macOS: every knob in there is a no-op on Apple Silicon.
+              The vendor picker forwards CUDA_VISIBLE_DEVICES / HIP_* /
+              ONEAPI_* to Ollama and ComfyUI — none of which exist here (Metal,
+              unified memory, and ComfyUI never launches). Showing a dead
+              NVIDIA/AMD/Intel selector is worse than showing nothing. */}
+          {!isMlxImageHost() && (
+            <Section title="Hardware (GPU picker)">
+              <HardwareSettings />
+            </Section>
+          )}
 
           {/* Feature CC v2.5.0 — MikeS++ chatbot export importer. Parses
               ChatGPT / Claude / Gemini export JSON (or .zip), pre-selects
