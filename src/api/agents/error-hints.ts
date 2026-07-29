@@ -78,7 +78,11 @@ const TOOL_HINTS: Record<string, HintRule[]> = {
     { pattern: /no image models|not available|ComfyUI has no/i, hint: 'No image model installed. Surface to the user, they need to install one in Model Manager.' },
     { pattern: /timed out|timeout/i, hint: 'Generation timed out. Try a smaller resolution or simpler prompt.' },
     { pattern: /CUDA|out of memory|OOM/i, hint: 'GPU out of memory. Pick a lighter model or lower resolution.' },
-    { pattern: /Generation failed/i, hint: 'ComfyUI returned an error. Surface the full error to the user; do not retry without changes.' },
+    // Do not name the engine here. This hint goes into the agent's context, and
+    // on a Mac the image backend is MLX — telling the model "ComfyUI returned
+    // an error" made it advise users to check software their machine has never
+    // had. The raw error the hint is appended to already names the real one.
+    { pattern: /Generation failed/i, hint: 'The image backend returned an error. Surface the full error to the user; do not retry without changes.' },
   ],
   run_workflow: [
     { pattern: /not found/i, hint: 'Workflow name unknown. The error already lists available names, pick one.' },

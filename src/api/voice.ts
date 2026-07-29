@@ -327,6 +327,15 @@ export async function synthesizeCloud(text: string, voice?: string, signal?: Abo
 let ttsChecked = false;
 let ttsAvailableFlag = false;
 let ttsCheckedVoice: string | undefined;
+/** The last full probe, not just its boolean. `tts_status` distinguishes "the
+ *  piper package is missing" from "no complete voice on disk"; collapsing that
+ *  to one flag is what made read-aloud tell a user with no Piper at all that
+ *  Piper "is installed but not responding". */
+let lastTtsStatus: { available: boolean; piper?: boolean; voice?: boolean } = { available: false };
+
+export function getLastTtsStatus(): { available: boolean; piper?: boolean; voice?: boolean } {
+  return lastTtsStatus;
+}
 
 /** Probe neural TTS. Pass the SELECTED voice — readiness is per voice: having
  *  some other voice on disk says nothing about the one that is about to speak. */
@@ -351,8 +360,10 @@ export async function initTtsCheck(voice?: string): Promise<boolean> {
   // must not vouch for the one the user switched to.
   if (ttsChecked && ttsAvailableFlag && ttsCheckedVoice === voice) return ttsAvailableFlag;
   try {
-    ttsAvailableFlag = (await checkTtsAvailable(voice)).available;
+    lastTtsStatus = await checkTtsAvailable(voice);
+    ttsAvailableFlag = lastTtsStatus.available;
   } catch {
+    lastTtsStatus = { available: false };
     ttsAvailableFlag = false;
   }
   ttsChecked = ttsAvailableFlag;

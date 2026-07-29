@@ -19,6 +19,7 @@ import {
   createAudioRecorder,
   transcribeAudio,
   transcribeAudioCloud,
+  getLastTtsStatus,
   type AudioRecorder,
 } from "../api/voice";
 import { CloudJobError } from "../api/cloud/client";
@@ -370,8 +371,17 @@ export function useVoice() {
               );
             }
           } else if (store.ttsMode !== "external") {
+            // Say which of the three things is actually missing. The old text
+            // asserted "installed but not responding" for all of them, so a
+            // user who had never set Piper up was sent looking for a fault
+            // that did not exist.
+            const st = getLastTtsStatus();
             store.setTtsFallbackReason(
-              "Piper is installed but not responding, so read-aloud used the system voice instead.",
+              st.piper === false
+                ? "Neural TTS (Piper) is not set up yet, so read-aloud used the system voice. Install it in Settings → Voice."
+                : st.voice === false
+                  ? "No Piper voice is fully downloaded yet, so read-aloud used the system voice. Pick one in Settings → Voice."
+                  : "Piper is installed but not responding, so read-aloud used the system voice instead.",
             );
           }
         }
