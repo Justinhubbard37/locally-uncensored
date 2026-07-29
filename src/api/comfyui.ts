@@ -1285,7 +1285,20 @@ export function getImageUrl(filename: string, subfolder: string = '', type: stri
  * SEES the picture it made and can comment on it.
  */
 export async function fetchComfyImageBase64(url: string): Promise<string> {
-  const bytes = await fetchLocalhostBytes(url)
+  // Not every generated image is a ComfyUI /view URL any more. The macOS MLX
+  // lane hands the chat agent a `blob:` URL (an in-memory PNG, no server), and
+  // the localhost proxy below cannot fetch one — it threw, the caller swallowed
+  // it, and the vision-feedback step silently gave up. The model then described
+  // the picture it had just made from the prompt alone, i.e. hallucinated it:
+  // exactly the failure the provider-aware fix cured on Windows.
+  if (url.startsWith('blob:') || url.startsWith('data:')) {
+    const buf = await (await fetch(url)).arrayBuffer()
+    return bytesToBase64(new Uint8Array(buf))
+  }
+  return bytesToBase64(await fetchLocalhostBytes(url))
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
   let binary = ''
   const CHUNK = 0x8000 // avoid arg-count limits on String.fromCharCode
   for (let i = 0; i < bytes.length; i += CHUNK) {
