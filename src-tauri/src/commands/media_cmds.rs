@@ -142,7 +142,14 @@ pub fn video_cancel(state: State<'_, AppState>, args: Value) -> Result<Value, St
 /// output today (MLX images are never written to disk — see above); add
 /// more roots here if a future in-process media backend gains one.
 fn allowed_media_roots() -> Vec<PathBuf> {
-    vec![crate::commands::video::outputs_root()]
+    vec![
+        crate::commands::video::outputs_root(),
+        // Stills from the MLX image lane. They land on disk so the gallery
+        // survives a restart — the in-memory data URL does not (createStore's
+        // partialize strips it), and without a file there was nothing left to
+        // re-read.
+        crate::commands::mlx::images_root(),
+    ]
 }
 
 /// Read a file from one of the app's own media output directories and

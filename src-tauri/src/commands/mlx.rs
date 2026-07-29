@@ -666,11 +666,61 @@ pub async fn mlx_generate(_state: &AppState, args: &Value) -> CmdResult {
         let text = res.text().await.unwrap_or_default();
         return Err(crate::commands::internal(format!("HTTP {s}: {text}")));
     }
-    let payload: Value = res
+    let mut payload: Value = res
         .json()
         .await
         .map_err(|e| crate::commands::internal(e.to_string()))?;
+
+    // Also put the PNG on disk and hand back its path.
+    //
+    // The base64 alone is not enough to build a gallery: createStore's
+    // partialize strips `dataUrl` (megabytes of base64 would blow the
+    // localStorage quota), so after a restart a Mac-generated image had
+    // nothing left to display and the gallery fell through to a ComfyUI
+    // /view URL that can never resolve here. A file under the app's own
+    // media root can be re-read through read_media_file, exactly like the
+    // MLX video lane already does with its mp4.
+    //
+    // Best effort on purpose: a full disk must not fail a render the user
+    // is looking at. They lose durability, not the image.
+    if let Some(b64) = payload.get("image_base64").and_then(|v| v.as_str()) {
+        match write_generated_png(b64) {
+            Ok(path) => {
+                if let Some(obj) = payload.as_object_mut() {
+                    obj.insert("output".into(), json!(path.to_string_lossy()));
+                }
+            }
+            Err(e) => println!("[MLX] could not persist the render ({e}) — gallery entry stays session-only"),
+        }
+    }
     Ok(payload)
+}
+
+/// Where generated stills live. Sibling of the video lane's outputs root and
+/// covered by the same read_media_file allow-list.
+pub(crate) fn images_root() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("lu-labs")
+        .join("images")
+}
+
+fn write_generated_png(b64: &str) -> Result<PathBuf, String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| format!("decode: {e}"))?;
+    let dir = images_root();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    // Millisecond stamp + the process id: two renders inside the same
+    // millisecond (batching, a retry) must not overwrite each other.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = dir.join(format!("mlx-{stamp}-{}.png", std::process::id()));
+    std::fs::write(&path, bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(path)
 }
 
 pub fn mlx_start(_state: &AppState, _args: &Value) -> CmdResult {

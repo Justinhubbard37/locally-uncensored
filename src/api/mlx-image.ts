@@ -70,6 +70,10 @@ export interface MlxGenerateResult {
   image_base64: string
   width: number
   height: number
+  /** Absolute path of the PNG Rust also wrote to disk. Absent only when that
+   *  write failed (best-effort — a full disk must not fail a render), which
+   *  costs the gallery entry its life beyond this session, nothing more. */
+  output?: string
 }
 
 export async function mlxStatus(): Promise<MlxStatus> {
@@ -154,7 +158,7 @@ async function waitForMlxRunning(timeoutMs = 30_000): Promise<void> {
  */
 export async function generateMlxImageDataUrl(
   args: MlxGenerateArgs,
-): Promise<{ dataUrl: string; width: number; height: number }> {
+): Promise<{ dataUrl: string; width: number; height: number; localPath?: string }> {
   const status = await mlxStatus()
   if (!status.installed) {
     throw new Error(
@@ -181,6 +185,7 @@ export async function generateMlxImageDataUrl(
     dataUrl: `data:image/png;base64,${result.image_base64}`,
     width: result.width,
     height: result.height,
+    localPath: result.output,
   }
 }
 

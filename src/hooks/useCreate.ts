@@ -523,7 +523,7 @@ export function useCreate() {
       try {
         state.setProgressPhase('sampling')
         setProgress(40, 'Generating with MLX...')
-        const { dataUrl, width: outW, height: outH } = await generateMlxImageDataUrl({
+        const { dataUrl, width: outW, height: outH, localPath } = await generateMlxImageDataUrl({
           prompt, steps, seed, width, height,
           model: mlxModelIdFor(effImageModel),
           negativePrompt: negativePrompt || undefined,
@@ -534,7 +534,9 @@ export function useCreate() {
         state.setLastGenTime(`${elapsed}s`)
         addToGallery({
           id: uuid(), type: 'image', filename: `mlx-${Date.now()}.png`, subfolder: '',
-          dataUrl, prompt, negativePrompt, model: imageModel, modelType: 'unknown',
+          // localPath is what survives the restart: partialize strips dataUrl,
+          // and there is no ComfyUI /view to fall back to on a Mac.
+          dataUrl, localPath, prompt, negativePrompt, model: imageModel, modelType: 'unknown',
           seed: seed === -1 ? 0 : seed, steps, cfgScale, sampler, scheduler,
           width: outW || width, height: outH || height, batchSize: 1,
           createdAt: Date.now(), builderUsed: 'dynamic', intent,

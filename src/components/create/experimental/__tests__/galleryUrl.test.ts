@@ -25,9 +25,16 @@ vi.mock('../../../../api/cloud/jobs', () => ({
   refreshResultUrl: vi.fn(),
   resolveResultUrl: vi.fn(),
 }))
+// Only backendCall is faked — fetchLocalhostBytes/isTauri keep their real
+// behaviour, which the ComfyUI-path tests below depend on.
+vi.mock('../../../../api/backend', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../../api/backend')>()),
+  backendCall: vi.fn(),
+}))
 
 import { fetchGalleryItemBlob, recoverGalleryUrl } from '../galleryUrl'
 import { refreshResultUrl, resolveResultUrl } from '../../../../api/cloud/jobs'
+import { backendCall } from '../../../../api/backend'
 import { useCreateStore, type GalleryItem } from '../../../../stores/createStore'
 
 const baseItem: GalleryItem = {
@@ -119,5 +126,67 @@ describe('recoverGalleryUrl — expired cloud renders', () => {
     recoverGalleryUrl(item)
     await flush()
     expect(useCreateStore.getState().gallery[0].unavailable).toBeUndefined()
+  })
+})
+
+/**
+ * Local MLX renders (Mac). partialize strips `dataUrl` on persist, so after a
+ * restart the tile has only a filename — and galleryItemUrl turns that into a
+ * ComfyUI /view URL, which on a Mac can never answer. Every locally generated
+ * image therefore died on the next launch. The file on disk is the way back.
+ */
+describe('recoverGalleryUrl — local MLX renders on disk', () => {
+  beforeEach(() => {
+    vi.mocked(backendCall).mockReset()
+    useCreateStore.setState({ gallery: [] })
+    ;(URL as unknown as { createObjectURL: (b: unknown) => string }).createObjectURL = () => 'blob:restored'
+  })
+
+  const flush = () => new Promise((r) => setTimeout(r, 0))
+
+  it('re-reads the file and hands the tile a fresh blob URL', async () => {
+    const item = { ...baseItem, id: 'disk-ok', localPath: '/tmp/mlx-1.png' }
+    useCreateStore.setState({ gallery: [item] })
+    // base64 of "PNG" — content is irrelevant, the decode path is what matters.
+    vi.mocked(backendCall).mockResolvedValueOnce('UE5H' as never)
+
+    recoverGalleryUrl(item)
+    await flush()
+    expect(vi.mocked(backendCall)).toHaveBeenCalledWith('read_media_file', { path: '/tmp/mlx-1.png' })
+    expect(useCreateStore.getState().gallery[0].dataUrl).toBe('blob:restored')
+    expect(useCreateStore.getState().gallery[0].unavailable).toBeUndefined()
+  })
+
+  it('marks the tile unavailable when the file is gone', async () => {
+    const item = { ...baseItem, id: 'disk-gone', localPath: '/tmp/deleted.png' }
+    useCreateStore.setState({ gallery: [item] })
+    vi.mocked(backendCall).mockRejectedValueOnce(new Error('no such file'))
+
+    recoverGalleryUrl(item)
+    await flush()
+    expect(useCreateStore.getState().gallery[0].unavailable).toBe(true)
+  })
+
+  it('reads the file once, not on every remount', async () => {
+    // Tiles call this from onError, which can fire repeatedly.
+    const item = { ...baseItem, id: 'disk-once', localPath: '/tmp/mlx-2.png' }
+    useCreateStore.setState({ gallery: [item] })
+    vi.mocked(backendCall).mockResolvedValue('UE5H' as never)
+
+    recoverGalleryUrl(item)
+    await flush()
+    recoverGalleryUrl(item)
+    await flush()
+    expect(vi.mocked(backendCall).mock.calls.length).toBe(1)
+  })
+
+  it('still marks a ComfyUI item unavailable — no localPath, nothing to re-read', async () => {
+    const item = { ...baseItem, id: 'comfy-dead' }
+    useCreateStore.setState({ gallery: [item] })
+
+    recoverGalleryUrl(item)
+    await flush()
+    expect(vi.mocked(backendCall)).not.toHaveBeenCalled()
+    expect(useCreateStore.getState().gallery[0].unavailable).toBe(true)
   })
 })
