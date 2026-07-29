@@ -2,6 +2,7 @@ import { motion } from 'framer-motion'
 import { Cpu, Sparkles, ImageDown, Maximize2, Download, Wand2, MonitorOff, AudioLines } from 'lucide-react'
 import { useCreateStore, type GalleryItem, type ProgressPhase } from '../../../stores/createStore'
 import { backendCall, downloadComfyFile, isTauri } from '../../../api/backend'
+import { isMlxImageHost } from '../../../api/mlx-image'
 import { refreshResultUrl } from '../../../api/cloud/jobs'
 import { markGalleryItemAvailable } from './galleryUrl'
 import { useComfyMedia } from './useComfyMedia'
@@ -128,7 +129,15 @@ async function downloadGalleryItem(item: GalleryItem): Promise<void> {
   if (item.filename && item.unavailable) {
     // The item's media already failed to load — the ComfyUI fetch would only
     // fail again (and downloadComfyFile swallows its errors). Be honest.
-    useCreateStore.getState().setError('Download needs the local engine. Start it and try again.')
+    // Only reachable for a ComfyUI-backed item. On a Mac that can only be a
+    // pre-2.6.0 leftover whose file was never written — there is no engine to
+    // start there, so "start it" would be the last piece of advice a Mac user
+    // could still be given about software they never had.
+    useCreateStore.getState().setError(
+      isMlxImageHost()
+        ? 'This render is not on disk any more, so there is nothing to save.'
+        : 'Download needs the local engine. Start it and try again.',
+    )
     return
   }
   try {

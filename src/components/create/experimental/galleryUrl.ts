@@ -119,7 +119,11 @@ function guessMime(filename: string): string {
  * use whenever ComfyUI allows the origin.
  */
 export async function proxiedComfyBlobUrl(item: GalleryItem): Promise<string | null> {
-  if (!isTauri() || item.jobId || item.remoteUrl || item.dataUrl) return null
+  // `localPath` marks an item whose bytes we own on disk (the MLX lanes). It is
+  // not a ComfyUI output, so asking ComfyUI for its filename can only waste a
+  // round trip — and on a Mac that happens to run ComfyUI for something else,
+  // ask the wrong server about a file it never made.
+  if (!isTauri() || item.jobId || item.remoteUrl || item.dataUrl || item.localPath) return null
   try {
     const bytes = await fetchLocalhostBytes(getImageUrl(item.filename, item.subfolder))
     return URL.createObjectURL(new Blob([bytes], { type: guessMime(item.filename) }))

@@ -32,7 +32,7 @@ vi.mock('../../../../api/backend', async (importOriginal) => ({
   backendCall: vi.fn(),
 }))
 
-import { fetchGalleryItemBlob, recoverGalleryUrl } from '../galleryUrl'
+import { fetchGalleryItemBlob, recoverGalleryUrl, proxiedComfyBlobUrl } from '../galleryUrl'
 import { refreshResultUrl, resolveResultUrl } from '../../../../api/cloud/jobs'
 import { backendCall } from '../../../../api/backend'
 import { useCreateStore, type GalleryItem } from '../../../../stores/createStore'
@@ -178,6 +178,14 @@ describe('recoverGalleryUrl — local MLX renders on disk', () => {
     recoverGalleryUrl(item)
     await flush()
     expect(vi.mocked(backendCall).mock.calls.length).toBe(1)
+  })
+
+  it('never asks ComfyUI about a file we own on disk', async () => {
+    // Without this guard the recovery took a pointless round trip to port 8188
+    // first — and on a Mac that happens to run ComfyUI for something else, it
+    // asked the wrong server about a file it never made.
+    const item = { ...baseItem, id: 'disk-noproxy', localPath: '/tmp/mlx-3.png' }
+    expect(await proxiedComfyBlobUrl(item)).toBeNull()
   })
 
   it('still marks a ComfyUI item unavailable — no localPath, nothing to re-read', async () => {
