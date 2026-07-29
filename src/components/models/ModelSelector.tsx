@@ -825,12 +825,14 @@ export function ModelSelector({ openUpward = false, surface = 'chat' }: ModelSel
                           )}
                           {/* 2.5.8 — tool-calling capability at a glance. Ban =
                               no function calling, so Agent/Code can't use it:
-                              either the server declared it (LU Cloud
-                              supports_tools === false — Hermes 3, Euryale,
-                              MythoMax, Llama-4-Maverick, …) or we've SEEN it
-                              reject tools at runtime (cloud 405 / ollama "does
-                              not support tools"). Wrench = tool-capable. Text
-                              models only. */}
+                              either the server declared it (supports_tools ===
+                              false) or we've SEEN it reject tools at runtime
+                              (cloud 405 / ollama "does not support tools").
+                              Wrench = tool-capable. Text models only.
+                              Since 2026-07-29 the LU Cloud catalogue is
+                              wrench across the board: the unrestricted models
+                              are served through the proxy's prompt transport
+                              rather than being flagged unsupported. */}
                           {model.type === 'text' && (
                             (getToolCapability(model.name) === 'unsupported' || model.supportsTools === false) ? (
                               <span
