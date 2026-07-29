@@ -366,6 +366,22 @@ export function shouldAutoLoadForSelect(
  */
 export const LMS_AUTOLOAD_CONTEXT = 16384
 
+// A full agent tool set is about 5k tokens of definitions before the
+// conversation starts, so a 4k model calls tools in Chat but cannot carry
+// Agent or Code (MythoMax holds 4k and the upstream refuses the request
+// outright, reproduced against production 2026-07-29). Saying that on the row
+// beats letting the user find out from an error after the first message.
+const TIGHT_CONTEXT = 8192
+
+export function toolBadgeTitle(model: AIModel): string {
+  const ctx =
+    'contextLength' in model && typeof model.contextLength === 'number' ? model.contextLength : 0
+  if (ctx > 0 && ctx < TIGHT_CONTEXT) {
+    return `Supports tool calling, but its ${Math.round(ctx / 1024)}k context window is too small for a full Agent or Code tool set`
+  }
+  return 'Supports tool calling (Agent, Code, and tools in Chat)'
+}
+
 export function lmsAutoLoadContext(model: AIModel): number {
   const max =
     'contextLength' in model && typeof model.contextLength === 'number' && model.contextLength > 0
@@ -844,7 +860,7 @@ export function ModelSelector({ openUpward = false, surface = 'chat' }: ModelSel
                             ) : model.supportsTools !== false ? (
                               <span
                                 className="inline-flex items-center shrink-0 text-emerald-500/90"
-                                title="Supports tool calling (Agent, Code, and tools in Chat)"
+                                title={toolBadgeTitle(model)}
                               >
                                 <Wrench size={9} />
                               </span>
