@@ -88,9 +88,6 @@ const INITIAL_STATE = {
   currentPromptId: null,
   error: null,
   lastGenTime: null,
-  preflightReady: null,
-  preflightErrors: [],
-  preflightWarnings: [],
   gallery: [],
   promptHistory: [],
 }

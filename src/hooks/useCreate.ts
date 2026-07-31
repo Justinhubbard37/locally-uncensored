@@ -47,7 +47,6 @@ import {
 import { useCreateStore } from '../stores/createStore'
 import { useWorkflowStore } from '../stores/workflowStore'
 import { injectParameters } from '../api/workflows'
-import { preflightCheck } from '../api/preflight'
 import {
   generateMlxImageDataUrl, isMlxImageHost, isMlxImageModel,
   mlxStatus, listMlxImageModels, buildMlxImageModels, mergeImageModels, mlxModelIdFor,
@@ -92,33 +91,6 @@ export function useCreate() {
     // CreateTopControls stays in sync with the deeper useCreate state.
     useCreateStore.getState().setComfyRunning(ok)
     return ok
-  }, [])
-
-  const runPreflight = useCallback(async () => {
-    const state = useCreateStore.getState()
-    // Preflight validates a model against ComfyUI's installed node graph. On a
-    // Mac that question has no meaning — and asking it reaches out to port 8188,
-    // where a ComfyUI the user runs for something else would answer about nodes
-    // that have nothing to do with the MLX model being checked.
-    if (isMlxImageHost()) {
-      state.setPreflightStatus(null, [], [])
-      return
-    }
-    const activeModel = state.mode === 'image' ? state.imageModel : state.videoModel
-    if (!activeModel) {
-      state.setPreflightStatus(null, [], [])
-      return
-    }
-    try {
-      const result = await preflightCheck(activeModel, state.mode, state.width, state.height)
-      state.setPreflightStatus(
-        result.ready,
-        result.errors,
-        result.warnings.map(w => w.message),
-      )
-    } catch {
-      state.setPreflightStatus(null, [], [])
-    }
   }, [])
 
   const zeroModelRetries = useRef(0)
@@ -309,13 +281,11 @@ export function useCreate() {
           state.setImageModel(imgModels[0].name, imgModels[0].type)
         }
       }
-      // Run preflight check after models are loaded
-      setTimeout(() => runPreflight(), 100)
     } catch (err) {
       console.error('[useCreate] Failed to fetch models:', err)
       setModelLoadError(`Failed to load models: ${err instanceof Error ? err.message : 'ComfyUI API error'}`)
     }
-  }, [runPreflight])
+  }, [])
 
   // Auto-refresh models when a ComfyUI model download completes.
   // Schedules three fetches because real-world ComfyUI scans take longer than
@@ -1376,7 +1346,6 @@ export function useCreate() {
     mlxMissing,
     checkConnection,
     fetchModels,
-    runPreflight,
     generate,
     cancel,
   }

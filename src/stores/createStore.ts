@@ -2,7 +2,6 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { ModelType, ClassifiedModel } from '../api/comfyui'
 import { classifyModel } from '../api/comfyui'
-import type { PreflightError } from '../api/preflight'
 // ModelType includes: flux, flux2, zimage, sdxl, sd15, wan, hunyuan, unknown
 
 export type ProgressPhase = 'idle' | 'queued' | 'loading-model' | 'loading-clip' | 'loading-vae' | 'sampling' | 'decoding' | 'complete'
@@ -278,9 +277,6 @@ interface CreateState {
   currentPromptId: string | null
   error: string | null
   lastGenTime: string | null
-  preflightReady: boolean | null
-  preflightErrors: PreflightError[]
-  preflightWarnings: string[]
   gallery: GalleryItem[]
   promptHistory: string[]
   /** Runtime-only (not persisted): populated by useCreate.fetchModels so the
@@ -300,7 +296,6 @@ interface CreateState {
    *  back to animated .webp; the modal resolves with the user's choice. */
   vhsInstallPrompt: ((choice: 'install' | 'webp' | 'cancel') => void) | null
 
-  setPreflightStatus: (ready: boolean | null, errors: PreflightError[], warnings: string[]) => void
   setMode: (mode: 'image' | 'video') => void
   setVideoBackend: (backend: VideoBackendKind) => void
   setImageSubMode: (subMode: 'text2img' | 'img2img') => void
@@ -455,9 +450,6 @@ export const useCreateStore = create<CreateState>()(
       currentPromptId: null,
       error: null,
       lastGenTime: null,
-      preflightReady: null,
-      preflightErrors: [],
-      preflightWarnings: [],
       gallery: [],
       promptHistory: [],
       imageModelList: [],
@@ -468,7 +460,6 @@ export const useCreateStore = create<CreateState>()(
       comfyRunning: false,
       vhsInstallPrompt: null,
 
-      setPreflightStatus: (ready, errors, warnings) => set({ preflightReady: ready, preflightErrors: errors, preflightWarnings: warnings }),
       setVideoBackend: (videoBackend) => set({ videoBackend, videoBackendInitialized: true }),
       setMode: (mode) => set((state) => {
         // Reset parameters to the correct defaults when switching modes
