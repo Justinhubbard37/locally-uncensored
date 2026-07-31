@@ -54,6 +54,9 @@ export interface MlxInstallStatus {
   status: 'idle' | 'installing' | 'complete' | 'error'
   logs: string[]
   error: string | null
+  download_progress: number
+  download_total: number
+  download_speed: number
 }
 
 export interface MlxGenerateArgs {

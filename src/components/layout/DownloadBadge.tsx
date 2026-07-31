@@ -3,6 +3,8 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { ArrowDownToLine, Pause, Play, X, CheckCircle, RotateCcw } from 'lucide-react'
 import { useModels } from '../../hooks/useModels'
 import { useDownloadStore } from '../../stores/downloadStore'
+import { useMlxInstallStore } from '../../stores/mlxInstallStore'
+import { isMlxImageHost } from '../../api/mlx-image'
 import { formatBytes } from '../../lib/formatters'
 
 function ProgressBar({ progress }: { progress: number }) {
@@ -38,8 +40,20 @@ export function DownloadBadge() {
     comfyBundles.get(bundleName)!.push({ id, d })
   }
 
-  const totalActive = textActiveCount + comfyActiveCount
-  const hasAny = textEntries.length > 0 || comfyEntries.length > 0
+  // MLX installs (macOS image/video engines + models) — fed by the Rust
+  // install slots via mlxInstallStore.
+  const mlxEntryMap = useMlxInstallStore(s => s.entries)
+  const mlxEntries = Object.values(mlxEntryMap)
+  const mlxActiveCount = mlxEntries.filter(e => e.status === 'installing').length
+
+  // An install can already be running with no page watching it (started in
+  // Settings, view unmounted). The badge is always mounted, so it adopts.
+  useEffect(() => {
+    if (isMlxImageHost()) void useMlxInstallStore.getState().adopt()
+  }, [])
+
+  const totalActive = textActiveCount + comfyActiveCount + mlxActiveCount
+  const hasAny = textEntries.length > 0 || comfyEntries.length > 0 || mlxEntries.length > 0
 
   // Click outside to close
   useEffect(() => {
@@ -114,13 +128,14 @@ export function DownloadBadge() {
             {/* Header */}
             <div className="flex items-center justify-between px-3 pt-2.5 pb-1">
               <span className="text-[0.65rem] font-semibold uppercase tracking-widest text-gray-500">
-                Downloads {hasAny && `(${textEntries.length + comfyEntries.length})`}
+                Downloads {hasAny && `(${textEntries.length + comfyEntries.length + mlxEntries.length})`}
               </span>
-              {(textEntries.some(([, s]) => s.complete) || comfyEntries.some(([, d]) => d.status === 'complete')) && (
+              {(textEntries.some(([, s]) => s.complete) || comfyEntries.some(([, d]) => d.status === 'complete') || mlxEntries.some(e => e.status === 'complete')) && (
                 <button
                   onClick={() => {
                     textEntries.filter(([, s]) => s.complete).forEach(([n]) => dismissPull(n))
                     comfyEntries.filter(([, d]) => d.status === 'complete').forEach(([id]) => useDownloadStore.getState().dismiss(id))
+                    mlxEntries.filter(e => e.status === 'complete').forEach(e => useMlxInstallStore.getState().dismiss(e.kind))
                   }}
                   className="text-[0.6rem] text-gray-500 hover:text-gray-300 transition-colors"
                 >
@@ -252,6 +267,37 @@ export function DownloadBadge() {
                           </div>
                         )}
                       </>
+                    )}
+                  </div>
+                )
+              })}
+
+              {/* MLX installs (macOS image/video engines + models) */}
+              {mlxEntries.map((e) => {
+                const prog = e.total > 0 ? (e.progress / e.total) * 100 : 0
+                return (
+                  <div key={e.kind} className="px-3 py-2 border-t border-gray-100 dark:border-white/[0.04] first:border-t-0">
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <p className="text-[0.7rem] text-gray-700 dark:text-gray-300 truncate">{e.label}</p>
+                      {e.status !== 'installing' && (
+                        <button onClick={() => useMlxInstallStore.getState().dismiss(e.kind)} className="p-0.5 rounded hover:bg-white/10 text-gray-500 hover:text-gray-300 transition-colors shrink-0" title="Dismiss"><X size={11} /></button>
+                      )}
+                    </div>
+                    {e.status === 'complete' ? (
+                      <div className="flex items-center gap-1.5 text-green-400"><CheckCircle size={11} /><span className="text-[0.65rem]">Complete</span></div>
+                    ) : e.status === 'error' ? (
+                      <p className="text-[0.6rem] text-red-400 break-words">{e.error || 'Install failed.'}</p>
+                    ) : e.total > 0 ? (
+                      <>
+                        <ProgressBar progress={prog} />
+                        <p className="text-[0.55rem] text-gray-500 mt-0.5">
+                          {formatBytes(e.progress)} / {formatBytes(e.total)}
+                          {prog > 0 && <span className="ml-1.5 text-blue-400">{Math.round(prog)}%</span>}
+                          {e.speed > 0 && <span className="ml-1.5 text-gray-400">{formatBytes(e.speed)}/s</span>}
+                        </p>
+                      </>
+                    ) : (
+                      <p className="text-[0.6rem] text-gray-500 truncate">{e.lastLog || 'Preparing…'}</p>
                     )}
                   </div>
                 )

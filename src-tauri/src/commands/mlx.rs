@@ -493,7 +493,9 @@ pub fn mlx_image_models(_state: &AppState, _args: &Value) -> CmdResult {
                 "id": c.id,
                 "name": c.name,
                 "repo": c.repo,
-                "sizeGB": c.size_gb,
+                // f32→JSON goes through f64 and turns 2.6 into
+                // 2.5999999046325684 — round to the tenth the catalog means.
+                "sizeGB": (c.size_gb as f64 * 10.0).round() / 10.0,
                 "minRamGB": c.min_ram_gb,
                 "steps": c.steps,
                 "guidance": c.guidance,
@@ -542,6 +544,11 @@ pub fn mlx_image_install_model(state: &AppState, args: &Value) -> CmdResult {
     }
     slot.start();
     slot.log(format!("pulling {} ({} GB)", entry.repo, entry.size_gb));
+    crate::install_state::watch_dir_size(
+        slot.clone(),
+        image_model_cache_dir(entry.repo),
+        (entry.size_gb as f64 * 1e9) as u64,
+    );
     let slot2 = slot.clone();
     let entry2 = entry.clone();
     std::thread::spawn(move || {

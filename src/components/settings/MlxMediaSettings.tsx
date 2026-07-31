@@ -34,6 +34,7 @@ import {
   type VideoModel,
 } from '../../api/mlx-video'
 import { formatBytes } from '../../lib/formatters'
+import { useMlxInstallStore } from '../../stores/mlxInstallStore'
 
 const POLL_MS = 1500
 
@@ -149,13 +150,16 @@ export function MlxMediaSettings({ only }: { only?: 'image' | 'video' } = {}) {
     }
   }, [busy, refresh])
 
-  const start = async (next: NonNullable<Busy>, fn: () => Promise<unknown>) => {
+  const start = async (next: NonNullable<Busy>, fn: () => Promise<unknown>, trayLabel: string) => {
     setError(null)
     setLog([])
     setProgress(null)
     setBusy(next)
     try {
       await fn()
+      // Mirror the install into the titlebar download tray, which keeps
+      // following it after this panel unmounts.
+      useMlxInstallStore.getState().watch(next.kind, trayLabel)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       setBusy(null)
@@ -224,6 +228,7 @@ export function MlxMediaSettings({ only }: { only?: 'image' | 'video' } = {}) {
                 start(
                   { kind: kind === 'image' ? 'image-model' : 'video-model', id: m.id },
                   () => (kind === 'image' ? installMlxImageModel(m.id) : installVideoModel(m.id)),
+                  m.name,
                 )
               }
             >
@@ -271,7 +276,7 @@ export function MlxMediaSettings({ only }: { only?: 'image' | 'video' } = {}) {
           </div>
         </div>
         {!imageEngineReady && (
-          <button className={primaryCls} disabled={anyBusy} onClick={() => start({ kind: 'image-engine' }, installMlxImageEngine)}>
+          <button className={primaryCls} disabled={anyBusy} onClick={() => start({ kind: 'image-engine' }, installMlxImageEngine, 'MLX image engine')}>
             {busy?.kind === 'image-engine' ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}
             {busy?.kind === 'image-engine' ? 'Installing…' : 'Install engine'}
           </button>
@@ -307,7 +312,7 @@ export function MlxMediaSettings({ only }: { only?: 'image' | 'video' } = {}) {
           <button
             className={primaryCls}
             disabled={anyBusy || (video ? !video.appleSilicon : false)}
-            onClick={() => start({ kind: 'video-engine' }, installMlxVideo)}
+            onClick={() => start({ kind: 'video-engine' }, installMlxVideo, 'MLX video engine')}
           >
             {busy?.kind === 'video-engine' ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}
             {busy?.kind === 'video-engine' ? 'Installing…' : 'Install engine'}

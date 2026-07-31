@@ -14,6 +14,7 @@
 // downloader really is abortable).
 
 import { waitOrAbort } from '../lib/bundle-install'
+import { useMlxInstallStore } from '../stores/mlxInstallStore'
 import {
   mlxStatus,
   listMlxImageModels,
@@ -96,6 +97,7 @@ export async function installMlxStack(
     if (!st?.installed) {
       onProgress?.('Setting up the image engine (about 3 GB, one time)…')
       await installMlxImageEngine()
+      useMlxInstallStore.getState().watch('image-engine', 'MLX image engine')
       await awaitSlot(getMlxImageEngineStatus, 'Image engine install', onProgress, signal)
     }
     const pick = smallest(await listMlxImageModels())
@@ -104,6 +106,7 @@ export async function installMlxStack(
     if (!pick) return
     onProgress?.(`Downloading ${pick.name} (${pick.sizeGB} GB)…`)
     await installMlxImageModel(pick.id)
+    useMlxInstallStore.getState().watch('image-model', pick.name)
     await awaitSlot(getMlxImageInstallStatus, `${pick.name} download`, onProgress, signal)
     return
   }
@@ -115,11 +118,13 @@ export async function installMlxStack(
   if (!vs?.mlxInstalled) {
     onProgress?.('Setting up the video engine (one time)…')
     await installMlxVideo()
+    useMlxInstallStore.getState().watch('video-engine', 'MLX video engine')
     await awaitSlot(getMlxInstallStatus, 'Video engine install', onProgress, signal)
   }
   const pick = smallest(await listVideoModels())
   if (!pick) return
   onProgress?.(`Downloading ${pick.name} (${pick.sizeGB} GB)…`)
   await installVideoModel(pick.id)
+  useMlxInstallStore.getState().watch('video-model', pick.name)
   await awaitSlot(getModelInstallStatus, `${pick.name} download`, onProgress, signal)
 }
