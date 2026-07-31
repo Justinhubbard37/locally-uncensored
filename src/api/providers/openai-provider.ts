@@ -272,6 +272,12 @@ export class OpenAIProvider implements ProviderClient {
 
     if (options?.temperature !== undefined) body.temperature = options.temperature
     if (options?.topP !== undefined) body.top_p = options.topP
+    // Streaming tool turn: same wire shape as chatWithTools, but the calls
+    // come back as deltas which the accumulator below already merges.
+    if (options?.tools?.length) {
+      body.tools = options.tools
+      body.tool_choice = 'auto'
+    }
     await this.applyMaxTokens(model, body, options)
     // Reasoning-model knob (o1, o3, gpt-5-thinking, etc.). Toggle OFF →
     // "minimal" (least reasoning the API allows). Toggle ON → "high".

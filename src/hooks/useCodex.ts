@@ -15,7 +15,8 @@ import { useAgentGoalStore, renderGoalSection } from '../stores/agentGoalStore'
 import { useAgentLoopStore } from '../stores/agentLoopStore'
 import { CODEX_CONFIRM_TOOLS, codexConfirmEnabled } from './codexShellGate'
 import { buildHermesToolPrompt, buildHermesToolResult, parseHermesToolCalls, stripToolCallTags, hasToolCallTags } from '../api/hermes-tool-calling'
-import { chatNonStreaming } from '../api/agents'
+import { streamProviderTurn, type StreamedProviderTurn } from '../lib/provider-stream'
+import { createHermesDisplayFilter } from '../lib/hermes-stream'
 import { setActiveChatId, clearActiveChatId, chatWorkspaceSlug, setActiveWorkspace, setActiveAgentModel } from '../api/agent-context'
 import { resolveWorkspace } from '../api/agents/workspace-resolve'
 import { useAgentModeStore } from '../stores/agentModeStore'
@@ -741,6 +742,19 @@ export function useCodex() {
           // Compaction is best-effort; fall through with raw history.
         }
 
+        // Live paint for EVERY transport branch below (Ollama, openai-compat
+        // stream, Hermes). Takes the cumulative content of the current model
+        // call. Echo guard: while a turn is streaming we keep updating the
+        // visible message — but if the partial content already matches the
+        // system-prompt echo pattern we stop pushing updates so the "Hello,
+        // I am the Coding Agent…" line never lands in the chat. The
+        // post-stream echoDetected branch then drops the buffer entirely and
+        // forces a silent retry.
+        const liveContent = (c: string) => {
+          if (echoRetriesRemaining > 0 && isSystemPromptEcho(c)) return
+          useChatStore.getState().updateMessageContent(convId!, assistantMsg.id, fullContent ? fullContent + '\n\n' + c : c)
+        }
+
         if (strategy === 'native') {
           const lastUserMsg = messages.filter(m => m.role === 'user').pop()?.content || ''
           // CODEX_CATEGORIES filter: Codex is a CODING agent — screenshot,
@@ -811,17 +825,8 @@ export function useCodex() {
             // Shows live content/thinking tokens so the user isn't staring
             // at an empty bubble for 2+ minutes while the model generates.
             //
-            // Echo guard: while a turn is streaming we keep updating the
-            // visible message — but if the partial content already
-            // matches the system-prompt echo pattern we stop pushing
-            // updates so the "Hello, I am the Coding Agent…" line never
-            // lands in the chat. The post-stream echoDetected branch then drops
-            // the buffer entirely and forces a silent retry.
+            // Echo guard lives in the shared liveContent above.
             let turn: { content: string; toolCalls: ToolCall[]; thinking: string; promptEvalCount?: number; evalCount?: number }
-            const liveContent = (c: string) => {
-              if (echoRetriesRemaining > 0 && isSystemPromptEcho(c)) return
-              useChatStore.getState().updateMessageContent(convId!, assistantMsg.id, fullContent ? fullContent + '\n\n' + c : c)
-            }
             // Token counter (David 2026-06-12): reflect the REAL prompt size —
             // system prompt + tool defs + repo map + history — immediately, not a
             // char/4 guess of just the visible messages. Provisional estimate that
@@ -944,21 +949,41 @@ export function useCodex() {
             // Only drop it when nothing but punctuation/whitespace remains.
             if (extractedFromContent && !/[A-Za-z0-9]/.test(turnContent)) turnContent = ''
           } else {
-            // ── Non-streaming fallback for OpenAI/Anthropic providers ──
-            let turn: { content: string; toolCalls: ToolCall[] }
+            // ── Streaming path for OpenAI-compat / Anthropic / LU Cloud ──
+            // chatStream carries the tool defs (ChatOptions.tools) and the
+            // provider accumulates tool-call deltas into the done chunk.
+            // Until 2.6.0 this branch waited on chatWithTools and painted the
+            // whole turn in one tick — 22k chars after 40 s of dead air on
+            // the built-in engine (David 2026-07-31).
+            let turn: StreamedProviderTurn
+            const streamOpts = { ...chatOptions, tools }
+            const liveThinking = (t: string) => {
+              if (keepThinking) {
+                const combined = thinkingContent ? thinkingContent + '\n\n' + t : t
+                useChatStore.getState().updateMessageThinking(convId!, assistantMsg.id, combined)
+              }
+            }
             try {
-              turn = await provider.chatWithTools(modelToUse, messages, tools, chatOptions)
+              turn = await streamProviderTurn(provider, modelToUse, messages, streamOpts, liveContent, liveThinking)
             } catch (thinkErr: any) {
               if (thinkErr?.message?.includes('does not support thinking') || thinkErr?.statusCode === 400) {
-                turn = await provider.chatWithTools(modelToUse, messages, tools, { ...chatOptions, thinking: undefined as unknown as boolean })
+                turn = await streamProviderTurn(provider, modelToUse, messages, { ...streamOpts, thinking: undefined as unknown as boolean }, liveContent, () => {})
               } else {
                 throw thinkErr
               }
             }
             toolCalls = turn.toolCalls
             turnContent = turn.content || ''
-            if (keepThinking && (turn as any).thinking) {
-              thinkingContent += (thinkingContent ? '\n\n' : '') + (turn as any).thinking
+            if (turn.promptEvalCount || turn.evalCount) {
+              useChatStore.getState().updateMessageUsage(convId!, assistantMsg.id, {
+                promptTokens: turn.promptEvalCount || 0,
+                completionTokens: turn.evalCount || 0,
+                totalTokens: (turn.promptEvalCount || 0) + (turn.evalCount || 0),
+                estimated: false,
+              })
+            }
+            if (keepThinking && turn.thinking) {
+              thinkingContent += (thinkingContent ? '\n\n' : '') + turn.thinking
               useChatStore.getState().updateMessageThinking(convId!, assistantMsg.id, thinkingContent)
             }
           }
@@ -977,11 +1002,28 @@ export function useCodex() {
           )
           const hermesSystem = buildHermesToolPrompt(hermesTools) + `\n\n${systemPrompt}`
           messages[0] = { role: 'system', content: hermesSystem }
-          const raw = await chatNonStreaming(
+          // Streamed prompt-transport turn (David 2026-07-31): prose renders
+          // token by token while the display filter keeps <tool_call> XML
+          // from ever flashing into the bubble. The parse below still runs
+          // on the FULL raw text, so extraction cannot differ from the old
+          // non-streaming path. This also retires chatNonStreaming here,
+          // which spoke Ollama's /api/chat and quietly mis-routed hermes
+          // turns on every other provider.
+          const display = createHermesDisplayFilter()
+          let shown = ''
+          const hermesTurn = await streamProviderTurn(
+            provider,
             modelToUse,
             messages.map(m => ({ role: m.role, content: m.content })),
-            abort.signal,
+            { ...chatOptions, thinking: undefined as unknown as boolean, contextWindow: numCtx },
+            (_full, delta) => {
+              shown += display.feed(delta)
+              liveContent(shown)
+            },
           )
+          shown += display.flush()
+          if (shown) liveContent(shown)
+          const raw = hermesTurn.content
           if (hasToolCallTags(raw)) {
             toolCalls = parseHermesToolCalls(raw).map(tc => ({
               function: { name: tc.name, arguments: tc.arguments },
