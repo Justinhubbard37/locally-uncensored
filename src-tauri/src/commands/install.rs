@@ -2722,6 +2722,9 @@ pub fn install_whisper_status(state: State<'_, AppState>) -> Result<serde_json::
     Ok(serde_json::json!({
         "status": install.status,
         "logs": install.logs,
+        // The frontend shows `error` verbatim; without it every failure read
+        // as a bare "Install failed." while the diagnosis sat in `logs`.
+        "error": if install.status == "error" { install.logs.last().cloned() } else { None },
         "download_progress": install.download_progress,
         "download_total": install.download_total,
         "download_speed": install.download_speed,
@@ -2822,19 +2825,41 @@ pub fn install_tts(
             }
         };
 
-        update(
-            "installing",
-            &format!("Installing piper-tts via {} (this can take a few minutes)…", target_python),
-        );
+        // When `piper.download_voices` already imports (package AND its deps),
+        // pip would only re-resolve pins — and that upgrade can collide with a
+        // python process using the same site-packages: live repro 2026-07-31
+        // (Windows), the app's own running ComfyUI held onnxruntime's DLL and
+        // pip died on WinError 5, so read-aloud never got its voice. All that
+        // is actually missing then is the voice file — go straight to it.
+        let piper_ready = {
+            let mut probe = Command::new(&target_python);
+            probe
+                .args(["-c", "import piper.download_voices"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            #[cfg(target_os = "windows")]
+            probe.creation_flags(CREATE_NO_WINDOW);
+            probe.status().map(|s| s.success()).unwrap_or(false)
+        };
 
-        let mut args = build_tts_pip_args();
-        // PEP 668 escape hatch (Arch / Debian 12+ / Fedora 38+) — see
-        // install_whisper. No-op on Windows/macOS/venv Pythons.
-        if is_pep668_protected(&target_python) {
-            args.push("--break-system-packages");
-            args.push("--user");
-        }
-        match pip_install_streaming_with_retry_cancellable(&args, &target_python, 3, &install_state, None) {
+        let pip_result = if piper_ready {
+            update("installing", "piper-tts is already installed — skipping pip.");
+            Ok(())
+        } else {
+            update(
+                "installing",
+                &format!("Installing piper-tts via {} (this can take a few minutes)…", target_python),
+            );
+            let mut args = build_tts_pip_args();
+            // PEP 668 escape hatch (Arch / Debian 12+ / Fedora 38+) — see
+            // install_whisper. No-op on Windows/macOS/venv Pythons.
+            if is_pep668_protected(&target_python) {
+                args.push("--break-system-packages");
+                args.push("--user");
+            }
+            pip_install_streaming_with_retry_cancellable(&args, &target_python, 3, &install_state, None)
+        };
+        match pip_result {
             Ok(()) => {
                 update(
                     "installing",
@@ -2889,6 +2914,8 @@ pub fn install_tts_status(state: State<'_, AppState>) -> Result<serde_json::Valu
     Ok(serde_json::json!({
         "status": install.status,
         "logs": install.logs,
+        // Same contract as install_whisper_status: the frontend reads `error`.
+        "error": if install.status == "error" { install.logs.last().cloned() } else { None },
     }))
 }
 
