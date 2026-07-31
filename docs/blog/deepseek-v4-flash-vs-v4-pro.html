@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepSeek V4 Flash vs V4 Pro: Which One and When</title>
+<meta name="description" content="DeepSeek V4 Flash vs V4 Pro compared: 284B vs 1.6T, agent benchmarks where Flash 0731 wins, the 3x price gap, local runability, and which to pick for each workload.">
+<meta name="keywords" content="deepseek v4 flash vs v4 pro, deepseek v4 flash vs pro, deepseek v4 comparison, deepseek v4 pro vs flash, deepseek v4 which model, deepseek v4 flash or pro">
+<meta property="og:title" content="DeepSeek V4 Flash vs V4 Pro: Which One and When">
+<meta property="og:description" content="DeepSeek V4 Flash vs V4 Pro compared: 284B vs 1.6T, agent benchmarks where Flash 0731 wins, the 3x price gap, local runability, and which to pick for each workload.">
+<meta property="og:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<meta property="og:url" content="https://locallyuncensored.com/blog/deepseek-v4-flash-vs-v4-pro.html">
+<meta property="og:type" content="article">
+<meta property="article:published_time" content="2026-07-31">
+<meta property="article:author" content="PurpleDoubleD">
+<meta property="article:tag" content="Comparison">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="DeepSeek V4 Flash vs V4 Pro: Which One and When">
+<meta name="twitter:description" content="DeepSeek V4 Flash vs V4 Pro compared: 284B vs 1.6T, agent benchmarks where Flash 0731 wins, the 3x price gap, local runability, and which to pick for each workload.">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<link rel="canonical" href="https://locallyuncensored.com/blog/deepseek-v4-flash-vs-v4-pro.html">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="../favicon.png">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BlogPosting","headline":"DeepSeek V4 Flash vs V4 Pro: Which One and When","description":"Full comparison of DeepSeek V4 Flash and V4 Pro: architecture (284B/13B active vs 1.6T/49B active), the agent benchmarks where Flash 0731 beats Pro Preview, API pricing, local runability, and a workload based verdict.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-07-31","dateModified":"2026-07-31","inLanguage":"en","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/deepseek-v4-flash-vs-v4-pro.html"},"keywords":"deepseek v4 flash vs v4 pro, deepseek v4 comparison, deepseek v4 which model"}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is DeepSeek V4 Flash or V4 Pro better for coding agents?","acceptedAnswer":{"@type":"Answer","text":"Flash, since the 0731 build. It scores 82.7 on Terminal Bench 2.1 and beats the V4 Pro Preview on several code and agent benchmarks while costing about a third as much and supporting the Responses API format that Codex style tools expect. Pro has not received an equivalent agent focused update yet."}},{"@type":"Question","name":"How much cheaper is V4 Flash than V4 Pro?","acceptedAnswer":{"@type":"Answer","text":"On the official API, Flash is $0.14 in and $0.28 out per million tokens versus $0.435 in and $0.87 out for Pro, so output is about 3.1x cheaper on Flash. Both get extreme cache hit discounts on input."}},{"@type":"Question","name":"Can either model run locally?","acceptedAnswer":{"@type":"Answer","text":"Flash yes, Pro no. Flash is about 155 GB at 4 bit and runs on a 192 GB Mac Studio or a big RAM workstation. Pro is a 1.6T parameter model that approaches 900 GB at 4 bit, which is multi GPU server territory."}},{"@type":"Question","name":"When is V4 Pro worth the premium?","acceptedAnswer":{"@type":"Answer","text":"When raw reasoning depth is the bottleneck: hard math, difficult proofs, long multi document analysis where the 49B active parameters and larger expert pool earn their keep. For everyday chat, coding, and agent loops, Flash 0731 is the better value and often the better model."}}]}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/lu.css">
+<script defer src="/assets/lu.js"></script>
+  <script data-goatcounter="https://lu-uncensored.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<nav class="lu-nav">
+  <a class="lu-nav-brand" href="/" aria-label="Locally Uncensored">
+    <span class="lu-mono" data-mono="nav" data-size="40" aria-hidden="true"></span>
+    <span class="lu-nav-word">Locally <span class="accent">Uncensored</span></span>
+  </a>
+  <div class="lu-nav-links" id="lu-nav-links">
+    <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/blog/">Blog</a>
+    <a class="lu-nav-link" href="/guide/">Guide</a>
+    <a class="lu-nav-link" href="/remote-access/">Remote</a>
+  </div>
+  <div class="lu-nav-right">
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">908&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">300+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <span class="lu-nav-sep"></span>
+    <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
+    <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</nav>
+<div class="container lu-doc">
+  <div class="breadcrumb"><a href="../">Locally Uncensored</a> / <a href="./">Blog</a> / This Post</div>
+
+  <div class="post-meta">
+    <span class="post-tag">Comparison</span>
+    <span>July 31, 2026</span>
+    <span>·</span>
+    <span>7 min read</span>
+  </div>
+
+  <article>
+    <h1>DeepSeek V4 Flash vs V4 Pro: Which One and When</h1>
+
+    <p>DeepSeek's V4 family splits into two very different animals: <strong>Flash</strong> (284B MoE, 13B active), which got its big <a href="deepseek-v4-flash-0731-explained.html">0731 release today</a>, and <strong>Pro</strong> (1.6T MoE, 49B active), the reasoning heavyweight still in preview on the API. Same 1M context, same MIT open weights policy, very different jobs. Here is the practical breakdown.</p>
+
+    <h2>Spec Sheet</h2>
+
+    <table>
+      <thead><tr><th></th><th>V4 Flash (0731)</th><th>V4 Pro (Preview)</th></tr></thead>
+      <tbody>
+        <tr><td>Total parameters</td><td>284B</td><td>1.6T</td></tr>
+        <tr><td>Active per token</td><td>13B</td><td>49B</td></tr>
+        <tr><td>Context</td><td>1M in / 384K out</td><td>1M in / 384K out</td></tr>
+        <tr><td>API price / M tokens</td><td>$0.14 in, $0.28 out</td><td>$0.435 in, $0.87 out</td></tr>
+        <tr><td>Responses API / Codex</td><td>Yes, native (0731)</td><td>No</td></tr>
+        <tr><td>Open weights</td><td>MIT, on HF</td><td>MIT, on HF</td></tr>
+        <tr><td>4 bit GGUF size</td><td>~155 GB</td><td>~900 GB (server only)</td></tr>
+        <tr><td>Runs at home</td><td>Yes, 192 GB memory class</td><td>No</td></tr>
+      </tbody>
+    </table>
+
+    <h2>The Plot Twist: Flash Beats Pro at Agent Work</h2>
+
+    <p>Until this morning the story was simple: Pro is the smart one, Flash is the cheap one. The 0731 re post training broke that. On Terminal Bench 2.1, Flash 0731 posts <strong>82.7</strong>; on DeepSWE it jumped from 7.3 to <strong>54.4</strong>; and across several code and agent benchmarks it now outscores the V4 Pro Preview, a model activating nearly four times the parameters per token. DeepSeek trained the small model into a specialist and, for agent loop workloads, the specialist wins.</p>
+
+    <p>Pro keeps the crown where breadth and depth dominate: hard math, long proofs, dense multi document reasoning. The 1.6T expert pool is not decoration; on deep reasoning evals Pro Preview remains ahead, and a future Pro release trained with the same agent recipe would presumably retake the lead. But that model is not here today, and Flash 0731 is.</p>
+
+    <h2>Cost in Practice</h2>
+
+    <p>The sticker gap says 3.1x on output, but agent reality widens it: agent loops burn output tokens (Flash's cheap side) and resend context (where cache hits cost fractions of a cent on both). A day of heavy agent work that costs single digit dollars on Flash lands in the tens on Pro. On flat plans the gap disappears from your bill: LU Labs carries <strong>both models in the Hosted Pro plan at 49&euro;/mo</strong> against one quota, which makes switching per task free, in the way that produces the honest comparison: use both, notice which one you stop switching away from.</p>
+
+    <h2>The Local Angle</h2>
+
+    <p>This one is not close. Flash fits in 155 GB at 4 bit and runs on a 192 GB Mac Studio or big RAM workstation at interactive speeds (full math in the <a href="deepseek-v4-flash-hardware-requirements.html">hardware post</a>, setup in the <a href="how-to-run-deepseek-v4-flash-locally.html">local guide</a>). Pro at 4 bit approaches 900 GB and wants a multi GPU node (details in the <a href="how-to-run-deepseek-v4-pro.html">Pro guide</a>). If owning the model matters to you, the family decision is already made, and the community agrees: the abliterated Flash build is the <a href="deepseek-v4-flash-abliterated.html">most downloaded uncensored model of 2026</a>.</p>
+
+    <h2>Verdict by Workload</h2>
+
+    <table>
+      <thead><tr><th>Workload</th><th>Pick</th></tr></thead>
+      <tbody>
+        <tr><td>Coding agents, terminal work, repo tasks</td><td><strong>Flash 0731</strong>, it benchmarks ahead and speaks Responses API</td></tr>
+        <tr><td>Everyday chat and writing</td><td><strong>Flash</strong>, the quality gap does not justify 3x</td></tr>
+        <tr><td>Hard math, proofs, research grade reasoning</td><td><strong>Pro</strong></td></tr>
+        <tr><td>Very long document analysis at full 1M context</td><td><strong>Pro</strong> (hosted; nobody runs 1M locally)</td></tr>
+        <tr><td>Running on your own hardware</td><td><strong>Flash</strong>, by forfeit</td></tr>
+      </tbody>
+    </table>
+  </article>
+
+  <div class="post-footer">
+    <p>Try both sides of the family: Flash on your GPU, Pro in the cloud, one interface.</p>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored" class="cta-btn" target="_blank">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+      Get Started on GitHub
+    </a>
+  </div>
+</div>
+
+<footer>
+  <div class="footer-row footer-meta"><span>&copy; 2026 &middot; Locally Uncensored &middot; AGPL-3.0</span></div>
+  <div class="footer-row footer-links">
+    <a href="https://locallyuncensored.com/blog/">Blog</a>
+    <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
+    <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions">Discussions</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
+    <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
+    <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+  </div>
+</footer>
+</body>
+</html>
