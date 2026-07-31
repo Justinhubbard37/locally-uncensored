@@ -40,7 +40,7 @@ export function DownloadBadge() {
     comfyBundles.get(bundleName)!.push({ id, d })
   }
 
-  // MLX installs (macOS image/video engines + models) — fed by the Rust
+  // MLX installs (macOS image/video engines + models), fed by the Rust
   // install slots via mlxInstallStore.
   const mlxEntryMap = useMlxInstallStore(s => s.entries)
   const mlxEntries = Object.values(mlxEntryMap)

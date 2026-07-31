@@ -40,7 +40,7 @@ function slot(over: Record<string, unknown> = {}) {
   }
 }
 
-// The immediate tick in watch() is pure microtasks — no timer advance needed.
+// The immediate tick in watch() is pure microtasks, no timer advance needed.
 async function flush() {
   for (let i = 0; i < 5; i++) await Promise.resolve()
 }

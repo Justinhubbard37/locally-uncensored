@@ -67,7 +67,13 @@ def _idle_unload_loop():
             _release_pipe()
 
 
-def _ensure_pipe(repo: str, dtype: str, variant: Optional[str], disable_safety_checker: bool):
+def _ensure_pipe(
+    repo: str,
+    dtype: str,
+    variant: Optional[str],
+    disable_safety_checker: bool,
+    local_files_only: bool = False,
+):
     global _pipe, _pipe_repo
     # Caller already holds _pipe_lock.
     if _pipe is not None and _pipe_repo == repo:
@@ -83,6 +89,13 @@ def _ensure_pipe(repo: str, dtype: str, variant: Optional[str], disable_safety_c
         torch_dtype = torch.bfloat16 if dtype == "bfloat16" else torch.float16
 
     kwargs = {"torch_dtype": torch_dtype}
+    # A model the app already installed must load from disk alone. Without
+    # this, diffusers re-validates all ~18 files against the hub on every
+    # load: measured at 26 s per already-present file when the hub throttles
+    # anonymous traffic, and an outright failure with no network. "Local"
+    # image generation silently depended on being online.
+    if local_files_only:
+        kwargs["local_files_only"] = True
     if variant:
         kwargs["variant"] = variant
     if disable_safety_checker:
@@ -117,6 +130,8 @@ class GenerateRequest(BaseModel):
     guidance: float = 0.0
     cfg_param: str = "guidance_scale"
     disable_safety_checker: bool = False
+    # Set by the bridge when it has verified the model is fully on disk.
+    local_files_only: bool = False
 
 
 @app.get("/health")
@@ -147,7 +162,13 @@ def generate(req: GenerateRequest):
 
     with _pipe_lock:
         try:
-            pipe = _ensure_pipe(req.model_repo, req.dtype, req.variant, req.disable_safety_checker)
+            pipe = _ensure_pipe(
+                req.model_repo,
+                req.dtype,
+                req.variant,
+                req.disable_safety_checker,
+                req.local_files_only,
+            )
         except Exception as exc:
             # A half-loaded pipeline must not shadow the previous model.
             _release_pipe()

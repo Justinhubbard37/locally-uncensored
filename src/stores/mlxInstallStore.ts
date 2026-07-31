@@ -1,6 +1,6 @@
 // The MLX install slots live in Rust and were only ever polled by whichever
 // page started the install (Settings, Model Manager, Create). The download
-// tray in the titlebar — the one place the user actually watches — never saw
+// tray in the titlebar, the one place the user actually watches, never saw
 // them, so a 2.6 GB model pull showed nothing but a spinning "Installing…"
 // button (David, 2026-07-31). This store is the tray's window into those
 // slots: watch() follows one install to its terminal state, adopt() picks up
@@ -64,7 +64,7 @@ export const useMlxInstallStore = create<MlxInstallStoreState>()((set, get) => (
       try {
         s = await READERS[kind]()
       } catch {
-        return // transient — the slot is being written; next tick retries
+        return // transient: the slot is being written; next tick retries
       }
       // 'idle' can only mean the app restarted under us; the install is gone.
       const status = s.status === 'installing' ? 'installing' : s.status === 'complete' ? 'complete' : s.status === 'error' ? 'error' : null
@@ -98,7 +98,7 @@ export const useMlxInstallStore = create<MlxInstallStoreState>()((set, get) => (
     void tick()
   },
 
-  // Pick up installs already running in Rust that nobody is watching — e.g.
+  // Pick up installs already running in Rust that nobody is watching, e.g.
   // the user started one in Settings, the view unmounted, and the tray is the
   // only surface left. Callers gate this on macOS; the commands 400 elsewhere.
   adopt: async () => {

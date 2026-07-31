@@ -100,7 +100,7 @@ fn dir_size(path: &std::path::Path) -> u64 {
 /// Feed a slot's byte progress from the size of the directory the download
 /// writes into, until the slot leaves "installing". The installers shell out
 /// to `huggingface_hub.snapshot_download`, which reports nothing machine-
-/// readable on stdout — the growing target directory is the one progress
+/// readable on stdout; the growing target directory is the one progress
 /// signal that exists on every platform.
 pub fn watch_dir_size(slot: InstallSlot, dir: std::path::PathBuf, total_bytes: u64) {
     std::thread::spawn(move || {
@@ -149,7 +149,7 @@ mod tests {
         std::fs::write(sub.join("b.bin"), vec![0u8; 50]).unwrap();
         assert_eq!(dir_size(&root), 150);
         std::fs::remove_dir_all(&root).unwrap();
-        // A directory that does not exist yet reads as empty, not an error —
+        // A directory that does not exist yet reads as empty, not an error;
         // the watcher starts before snapshot_download creates the target.
         assert_eq!(dir_size(&root), 0);
     }

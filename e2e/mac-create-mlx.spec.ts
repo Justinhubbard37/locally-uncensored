@@ -207,3 +207,52 @@ test('windows local is unchanged: ComfyUI lanes still offered', async ({ page })
   await expect(page.getByRole('radio', { name: 'Animate Image', exact: true })).toBeVisible()
   await expect(page.getByRole('radio', { name: 'Music', exact: true })).toBeVisible()
 })
+
+test('mac: saving the HuggingFace token in Settings pushes it to Rust', async ({ page }) => {
+  // #160: without a token every hub download is anonymous and throttled.
+  // Saving in Settings must arm Rust immediately, and the recorded call may
+  // only say that a token is present, never echo the value.
+  await page.addInitScript(tauriMockInit, MAC_OPTS)
+  await seedOnboardingDone(page)
+  await routeCloud(page, { license: 'active', access: true, mediaLive: true })
+  await page.goto('/')
+  await expect(cloudSwitch(page)).toBeVisible({ timeout: 20_000 })
+
+  await page.getByRole('button', { name: /^Settings$/ }).click()
+  await page.getByRole('button', { name: /AI Backends/i }).click()
+  await page.getByRole('button', { name: /Local Media \(Apple MLX\)/i }).click()
+
+  await page.getByLabel('HuggingFace token').fill('hf_e2e_probe')
+  await page.getByRole('button', { name: /^Save$/ }).click()
+  await expect(page.getByRole('button', { name: /Saved/i })).toBeVisible({ timeout: 10_000 })
+
+  const token = await page.evaluate(() => (window as unknown as { __E2E_HF_TOKEN__?: string }).__E2E_HF_TOKEN__)
+  expect(token).toBe('hf_e2e_probe')
+
+  const call = ((await mlxCalls(page)) as any[]).find((c) => c.cmd === 'set_hf_token')
+  expect(call).toMatchObject({ present: true })
+  expect(JSON.stringify(call)).not.toContain('hf_e2e_probe')
+})
+
+test('mac: a stored token reaches Rust at boot, without opening Settings', async ({ page }) => {
+  // The keychain is the store of record and Rust holds the token in memory
+  // only, so a fresh app start must push it down again on its own. If it did
+  // not, a download started straight from Create or the Model Manager would
+  // still go out anonymous.
+  await page.addInitScript(tauriMockInit, MAC_OPTS)
+  await page.addInitScript(() => {
+    ;(window as unknown as { __E2E_SECRETS__: Record<string, string> }).__E2E_SECRETS__ = {
+      'huggingface-token': 'hf_boot_probe',
+    }
+  })
+  await seedOnboardingDone(page)
+  await routeCloud(page, { license: 'active', access: true, mediaLive: true })
+  await page.goto('/')
+  await expect(cloudSwitch(page)).toBeVisible({ timeout: 20_000 })
+
+  await expect
+    .poll(async () => page.evaluate(() => (window as unknown as { __E2E_HF_TOKEN__?: string }).__E2E_HF_TOKEN__), {
+      timeout: 15_000,
+    })
+    .toBe('hf_boot_probe')
+})

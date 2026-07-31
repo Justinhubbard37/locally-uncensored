@@ -518,6 +518,7 @@ fn install_model_steps(
     );
     let mut cmd = Command::new(python);
     cmd.args(["-c", &script]);
+    crate::commands::mlx::apply_hf_token(&mut cmd);
     run_streamed(slot, &mut cmd)?;
 
     if !entry.needs_convert {

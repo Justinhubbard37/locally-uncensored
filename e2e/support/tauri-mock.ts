@@ -100,8 +100,14 @@ export function tauriMockInit(opts: TauriMockOptions) {
     images: new Set<string>(opts.mlx?.installedImages ?? ['sd-turbo']),
     videos: new Set<string>(opts.mlx?.installedVideos ?? ['wan21-t2v-1.3b']),
   }
-  // One install slot per kind, exactly like the Rust side.
-  const slot = { image: 0, imageEngine: 0, video: 0, videoEngine: 0 }
+  // One install slot per kind, exactly like the Rust side: null means idle
+  // (nothing was ever started), a number counts polls since the install began.
+  const slot: Record<'image' | 'imageEngine' | 'video' | 'videoEngine', number | null> = {
+    image: null,
+    imageEngine: null,
+    video: null,
+    videoEngine: null,
+  }
   let pendingImageId: string | null = null
   let pendingVideoId: string | null = null
   // 1x1 transparent PNG — enough for the gallery to render something real.
@@ -113,8 +119,24 @@ export function tauriMockInit(opts: TauriMockOptions) {
   }
   /** Advance an install slot; report 'complete' once it has been polled enough. */
   function installStatus(key: keyof typeof slot, extra?: Record<string, unknown>) {
-    slot[key] += 1
-    const done = slot[key] >= MLX_INSTALL_POLLS
+    const n = slot[key]
+    // Rust semantics: a slot nobody started reads 'idle', and polling it does
+    // not advance anything. The download tray probes all four slots at boot
+    // (adopt), so a mock that advances on read would install engines by
+    // merely being looked at.
+    if (n === null) {
+      return {
+        status: 'idle',
+        logs: [] as string[],
+        error: null,
+        download_progress: 0,
+        download_total: 0,
+        download_speed: 0,
+        ...extra,
+      }
+    }
+    slot[key] = n + 1
+    const done = n + 1 >= MLX_INSTALL_POLLS
     return {
       status: done ? 'complete' : 'installing',
       logs: done ? ['download complete', 'ready'] : ['starting…', 'downloading…'],
@@ -245,6 +267,16 @@ export function tauriMockInit(opts: TauriMockOptions) {
         return Promise.resolve({ ok: true, was_loaded: false, running: true })
       case 'mlx_image_models':
         return Promise.resolve(mlxImageCatalog.map((m) => ({ ...m, installed: mlx.images.has(m.id) })))
+      // Rust holds the HF token in memory only, so a spec has to be able to
+      // see that the frontend pushed it down, not just that it was stored.
+      case 'set_hf_token': {
+        const token = String(m?.token ?? '').trim()
+        w.__E2E_HF_TOKEN__ = token || null
+        record('__E2E_MLX_CALLS__', { cmd, present: !!token })
+        return Promise.resolve({ ok: true, present: !!token })
+      }
+      case 'hf_token_present':
+        return Promise.resolve({ present: !!w.__E2E_HF_TOKEN__ })
       case 'install_mlx_diffusion':
         slot.imageEngine = 0
         record('__E2E_MLX_CALLS__', { cmd })

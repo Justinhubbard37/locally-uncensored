@@ -49,6 +49,16 @@ pub fn mlx_image_models(state: State<'_, AppState>, args: Value) -> Result<Value
 }
 
 #[tauri::command]
+pub fn set_hf_token(state: State<'_, AppState>, args: Value) -> Result<Value, String> {
+    crate::commands::mlx::set_hf_token(state.inner(), &args)
+}
+
+#[tauri::command]
+pub fn hf_token_present(state: State<'_, AppState>, args: Value) -> Result<Value, String> {
+    crate::commands::mlx::hf_token_present(state.inner(), &args)
+}
+
+#[tauri::command]
 pub fn mlx_image_install_model(state: State<'_, AppState>, args: Value) -> Result<Value, String> {
     crate::commands::mlx::mlx_image_install_model(state.inner(), &args)
 }

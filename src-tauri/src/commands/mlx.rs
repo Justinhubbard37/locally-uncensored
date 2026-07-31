@@ -43,6 +43,49 @@ fn venv_pip() -> PathBuf {
     mlx_root().join("venv/bin/pip")
 }
 
+/// The HuggingFace token the user stored in Settings, held in memory for the
+/// lifetime of the process. `None` until the frontend pushes one.
+static HF_TOKEN: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Every HuggingFace download this app makes goes out through here, so the
+/// hub credentials are attached the same way in all of them.
+///
+/// Anonymous hub traffic is rate-limited hard: it does not fail outright, it
+/// *crawls*, which reads as a broken app rather than a throttle (a pull
+/// measured at 2.6 KB/s was misdiagnosed as a dead network line). Gated repos are out
+/// of reach entirely without a token. HF_HOME stays with the caller: the image
+/// lane shares one cache, the video lane downloads into per-model directories.
+pub(crate) fn apply_hf_token(cmd: &mut Command) {
+    let token = HF_TOKEN.read().ok().and_then(|t| t.clone());
+    if let Some(t) = token {
+        cmd.env("HF_TOKEN", t);
+    }
+}
+
+/// Store the token from Settings. An empty string clears it, because that is
+/// how the user removes the token again; it must not be stored as `Some("")`.
+pub fn set_hf_token(_state: &AppState, args: &Value) -> CmdResult {
+    let token = args
+        .get("token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let present = !token.is_empty();
+    *HF_TOKEN
+        .write()
+        .map_err(|_| crate::commands::internal("hf token lock poisoned"))? =
+        present.then_some(token);
+    Ok(json!({ "ok": true, "present": present }))
+}
+
+/// Whether a token is set. Never returns the token itself: the frontend
+/// already has it, and nothing else has any business reading it back.
+pub fn hf_token_present(_state: &AppState, _args: &Value) -> CmdResult {
+    let present = HF_TOKEN.read().ok().and_then(|t| t.clone()).is_some();
+    Ok(json!({ "present": present }))
+}
+
 fn sidecar_running() -> bool {
     std::net::TcpStream::connect_timeout(
         &format!("127.0.0.1:{MLX_PORT}").parse().unwrap(),
@@ -212,9 +255,12 @@ fn install_mlx_steps(slot: &crate::install_state::InstallSlot) -> Result<(), Str
         p = patterns,
     );
     let prefetch = prefetch.as_str();
-    let out = Command::new(venv_python())
+    let mut prefetch_cmd = Command::new(venv_python());
+    prefetch_cmd
         .args(["-c", prefetch])
-        .env("HF_HOME", mlx_root().join("cache"))
+        .env("HF_HOME", mlx_root().join("cache"));
+    apply_hf_token(&mut prefetch_cmd);
+    let out = prefetch_cmd
         .output()
         .map_err(|e| format!("model prefetch spawn: {e}"))?;
     if !out.status.success() {
@@ -494,7 +540,7 @@ pub fn mlx_image_models(_state: &AppState, _args: &Value) -> CmdResult {
                 "name": c.name,
                 "repo": c.repo,
                 // f32→JSON goes through f64 and turns 2.6 into
-                // 2.5999999046325684 — round to the tenth the catalog means.
+                // 2.5999999046325684, so round to the tenth the catalog means.
                 "sizeGB": (c.size_gb as f64 * 10.0).round() / 10.0,
                 "minRamGB": c.min_ram_gb,
                 "steps": c.steps,
@@ -576,6 +622,7 @@ pub fn mlx_image_install_model(state: &AppState, args: &Value) -> CmdResult {
         let mut cmd = Command::new(&python);
         cmd.args(["-c", &script])
             .env("HF_HOME", mlx_root().join("cache"));
+        apply_hf_token(&mut cmd);
         if let Err(e) = crate::commands::video::run_streamed(&slot2, &mut cmd) {
             slot2.fail(e);
         } else if !image_model_is_installed(&entry2) {
@@ -661,6 +708,9 @@ pub async fn mlx_generate(_state: &AppState, args: &Value) -> CmdResult {
         "guidance": entry.guidance,
         "cfg_param": entry.cfg_param,
         "disable_safety_checker": entry.disable_safety_checker,
+        // We already own every file of this model — say so, and the load stops
+        // going to the hub. That is what makes an offline render possible.
+        "local_files_only": image_model_is_installed(entry),
     });
     let res = client
         .post(format!("http://127.0.0.1:{MLX_PORT}/generate"))
@@ -752,12 +802,17 @@ pub fn mlx_start(_state: &AppState, _args: &Value) -> CmdResult {
         .try_clone()
         .map_err(|e| crate::commands::internal(e.to_string()))?;
 
-    Command::new(venv_python())
+    // The sidecar re-validates every file of a model against the hub when it
+    // loads one, so it needs the token as much as the installer does.
+    let mut server_cmd = Command::new(venv_python());
+    server_cmd
         .arg(&server)
         .env("LU_MLX_PORT", MLX_PORT.to_string())
         .env("HF_HOME", mlx_root().join("cache"))
         .stdout(stdout)
-        .stderr(stderr)
+        .stderr(stderr);
+    apply_hf_token(&mut server_cmd);
+    server_cmd
         .spawn()
         .map_err(|e| crate::commands::internal(format!("spawn mlx server: {e}")))?;
 
@@ -778,6 +833,59 @@ const SERVER_PY: &str = include_str!("../../resources/mlx/server.py");
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The token is a process-wide secret, so these run as one test — two
+    /// #[test]s would race each other through the same lock.
+    #[test]
+    fn hf_token_round_trip_and_clear() {
+        let state = AppState::new();
+
+        // Absent by default: a fresh install has no token and must not send one.
+        *HF_TOKEN.write().unwrap() = None;
+        let mut cmd = Command::new("true");
+        apply_hf_token(&mut cmd);
+        assert!(
+            !cmd.get_envs().any(|(k, _)| k == "HF_TOKEN"),
+            "no token stored → no HF_TOKEN on the download process"
+        );
+
+        set_hf_token(&state, &json!({ "token": "  hf_secret  " })).unwrap();
+        assert_eq!(
+            hf_token_present(&state, &json!({})).unwrap()["present"],
+            json!(true)
+        );
+        let mut cmd = Command::new("true");
+        apply_hf_token(&mut cmd);
+        let sent = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "HF_TOKEN")
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned());
+        // Trimmed: a token pasted with a trailing newline must still work.
+        assert_eq!(sent.as_deref(), Some("hf_secret"));
+
+        // Clearing is how the user removes the token — an empty string must
+        // not be stored as a token that then goes out as an empty header.
+        set_hf_token(&state, &json!({ "token": "   " })).unwrap();
+        assert_eq!(
+            hf_token_present(&state, &json!({})).unwrap()["present"],
+            json!(false)
+        );
+        let mut cmd = Command::new("true");
+        apply_hf_token(&mut cmd);
+        assert!(!cmd.get_envs().any(|(k, _)| k == "HF_TOKEN"));
+    }
+
+    /// `hf_token_present` answers yes/no; leaking the value back to any caller
+    /// would put a live credential into logs and remote responses.
+    #[test]
+    fn hf_token_status_never_returns_the_token() {
+        let state = AppState::new();
+        set_hf_token(&state, &json!({ "token": "hf_do_not_leak" })).unwrap();
+        let body = hf_token_present(&state, &json!({})).unwrap();
+        assert!(!body.to_string().contains("hf_do_not_leak"));
+        *HF_TOKEN.write().unwrap() = None;
+    }
 
     #[test]
     fn mlx_root_lives_under_data_dir() {
