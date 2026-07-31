@@ -1789,6 +1789,12 @@ export function useCodex() {
       clearActiveChatId()
       codexStore.setThreadStatus(convId, 'idle')
 
+      // The per-batch bump above only fires when a batch RETURNS. A user who
+      // aborts mid-run (David 2026-07-31: files on disk, panel still showing
+      // the old listing) never reaches it — so reload the tree once at run
+      // end, whatever way the run ended.
+      useCodexStore.getState().bumpFileTreeVersion()
+
       // ── /loop driver ───────────────────────────────────────────────────
       // The pass is over. A loop is not "one long turn": it is the model being
       // brought BACK with its own work in front of it and asked to prove the
