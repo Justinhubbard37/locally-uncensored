@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo } from 'react'
 import { listModels, pullModel as pullModelApi, pullModelTauri, deleteModel as deleteModelApi } from '../api/ollama'
 import { isTauri } from '../api/backend'
-import { getCheckpoints as getComfyCheckpoints, getDiffusionModels as getComfyDiffusionModels, checkComfyConnection, filterPartialFiles } from '../api/comfyui'
+import { getImageModels as getComfyImageModels, getVideoModels as getComfyVideoModels, checkComfyConnection, } from '../api/comfyui'
 import { parseNDJSONStream } from '../api/stream'
 import { useModelStore } from '../stores/modelStore'
 import { useProviderStore } from '../stores/providerStore'
@@ -14,15 +14,8 @@ import {
 import type { BundledModel } from '../api/engine'
 import type { PullProgress, AIModel, ModelCategory, ImageModel, VideoModel, CloudModel } from '../types/models'
 
-const VIDEO_PATTERNS = [/wan/, /svd/, /animatediff/, /animate/, /video/, /cogvideo/, /ltx/i, /framepack/, /mochi/, /cosmos/, /hunyuan/, /pyramidflow/, /allegro/]
-
 // Embedding models that should never appear in the chat model dropdown
 const EMBEDDING_PATTERNS = [/embed/, /nomic-embed/, /bge-/, /e5-/, /gte-/, /sentence-/]
-
-function isVideoModel(name: string): boolean {
-  const lower = name.toLowerCase()
-  return VIDEO_PATTERNS.some((p) => p.test(lower))
-}
 
 function isEmbeddingModel(name: string): boolean {
   const lower = name.toLowerCase()
@@ -179,22 +172,76 @@ export function useModels() {
         } catch { /* Ollama might not be running */ }
       }
       let comfyModels: AIModel[] = []
-      const comfyOk = await checkComfyConnection()
-      if (comfyOk) {
-        try {
-          const [checkpoints, diffusionModels] = await Promise.all([getComfyCheckpoints(), getComfyDiffusionModels()])
-          const allNames = [...checkpoints, ...diffusionModels]
-          const complete = await filterPartialFiles(allNames)
+const comfyOk = await checkComfyConnection()
 
-          const classifyComfyModel = (name: string): AIModel => {
-            if (isVideoModel(name)) return { name, model: name, size: 0, format: 'safetensors', architecture: 'unknown', type: 'video', providerName: 'ComfyUI' } as VideoModel
-            return { name, model: name, size: 0, format: 'safetensors', architecture: 'unknown', type: 'image', providerName: 'ComfyUI' } as ImageModel
-          }
-          comfyModels = allNames.filter(name => complete.has(name)).map(classifyComfyModel)
-        } catch { /* continue */ }
-      }
-      setModels([...allModels, ...comfyModels])
-    } catch { /* ignore */ }
+if (comfyOk) {
+  const [imageResult, videoResult] = await Promise.allSettled([
+    getComfyImageModels(),
+    getComfyVideoModels(),
+  ])
+
+  if (imageResult.status === 'rejected') {
+    console.warn(
+      '[useModels] Failed to discover ComfyUI image models:',
+      imageResult.reason,
+    )
+  }
+
+  if (videoResult.status === 'rejected') {
+    console.warn(
+      '[useModels] Failed to discover ComfyUI video models:',
+      videoResult.reason,
+    )
+  }
+
+  const imageModels =
+    imageResult.status === 'fulfilled'
+      ? imageResult.value
+      : []
+
+  const videoModels =
+    videoResult.status === 'fulfilled'
+      ? videoResult.value
+      : []
+
+  console.log('[useModels] ComfyUI models discovered:', {
+    images: imageModels.map((model) => model.name),
+    videos: videoModels.map((model) => model.name),
+  })
+
+  const getFormat = (name: string) =>
+    name.toLowerCase().endsWith('.gguf')
+      ? 'gguf'
+      : 'safetensors'
+
+  const comfyImages: ImageModel[] = imageModels.map((model) => ({
+    name: model.name,
+    model: model.name,
+    size: 0,
+    format: getFormat(model.name),
+    architecture: model.type,
+    type: 'image',
+    providerName: 'ComfyUI',
+  }))
+
+  const comfyVideos: VideoModel[] = videoModels.map((model) => ({
+    name: model.name,
+    model: model.name,
+    size: 0,
+    format: getFormat(model.name),
+    architecture: model.type,
+    type: 'video',
+    providerName: 'ComfyUI',
+  }))
+
+  comfyModels = [...comfyImages, ...comfyVideos]
+}
+
+setModels([...allModels, ...comfyModels])
+
+    } catch (error) {
+      console.warn('[useModels] Failed to fetch models:', error)
+    }
   }, [setModels])
 
   const pullModel = useCallback(
