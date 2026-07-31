@@ -24,14 +24,13 @@ interface JsonRpcResponse {
 }
 
 export class MCPExternalClient {
-  /** The Command — owns the stdout/stderr/close events. */
-  private command: any = null
   /**
-   * The Child that spawn() hands back — owns stdin and kill(). These live on
-   * two different objects in @tauri-apps/plugin-shell, and keeping only the
-   * Command meant `stdin.write` hit undefined on the very first request: every
-   * external server failed to connect with "Cannot read properties of
-   * undefined (reading 'write')".
+   * The Child that spawn() hands back — owns stdin and kill(). The Command
+   * owns the stdout/stderr/close events instead; these live on two different
+   * objects in @tauri-apps/plugin-shell, and keeping only the Command meant
+   * `stdin.write` hit undefined on the very first request: every external
+   * server failed to connect with "Cannot read properties of undefined
+   * (reading 'write')".
    */
   private child: any = null
   private requestId = 0
@@ -53,34 +52,44 @@ export class MCPExternalClient {
       const shellModule = await import('@tauri-apps/plugin-shell')
       const { Command } = shellModule
 
-      // Windows gotcha: Node-based MCP servers are invoked as `npx`, `npm`,
-      // `node` — but on Windows the resolvable PATH entries for those are
-      // `npx.cmd`, `npm.cmd`, etc. Command.create tries to spawn the bare
-      // name which fails with "program not found". Map known command names
-      // to their .cmd shim here.
-      const resolvedCommand = resolveCommandForPlatform(this.config.command)
+      // Windows gotcha: npm-family launchers exist only as `.cmd` shims
+      // (npx.cmd) while node/deno/bun ship a real .exe, and tools like pnpm
+      // exist as either depending on how they were installed. Rust's spawn
+      // finds .exe from the bare name but never resolves .cmd, so neither a
+      // blanket rewrite nor the bare name alone works for every install.
+      // Try the likelier candidate first and fall back to the other.
+      const candidates = commandCandidatesForPlatform(this.config.command)
+      let spawnError: unknown = null
+      for (const program of candidates) {
+        const command = Command.create(program, this.config.args, {
+          env: this.config.env,
+        })
 
-      this.command = Command.create(resolvedCommand, this.config.args, {
-        env: this.config.env,
-      })
+        // Handle stdout — parse JSON-RPC responses
+        command.stdout.on('data', (data: string) => {
+          this.outputBuffer += data
+          this.processBuffer()
+        })
 
-      // Handle stdout — parse JSON-RPC responses
-      this.command.stdout.on('data', (data: string) => {
-        this.outputBuffer += data
-        this.processBuffer()
-      })
+        command.stderr.on('data', (data: string) => {
+          log.warn(`[MCP:${this.config.name}] stderr`, { data })
+        })
 
-      this.command.stderr.on('data', (data: string) => {
-        log.warn(`[MCP:${this.config.name}] stderr`, { data })
-      })
+        command.on('close', () => {
+          this.connected = false
+          this.child = null
+          this.rejectAllPending('Server process exited')
+        })
 
-      this.command.on('close', () => {
-        this.connected = false
-        this.child = null
-        this.rejectAllPending('Server process exited')
-      })
-
-      this.child = await this.command.spawn()
+        try {
+          this.child = await command.spawn()
+          spawnError = null
+          break
+        } catch (err) {
+          spawnError = err
+        }
+      }
+      if (!this.child) throw spawnError
       this.connected = true
 
       // Initialize the MCP connection
@@ -144,7 +153,6 @@ export class MCPExternalClient {
       }
       this.child = null
     }
-    this.command = null
   }
 
   isConnected() {
@@ -223,18 +231,20 @@ export class MCPExternalClient {
 }
 
 /**
- * Map a bare command name to the Windows `.cmd` shim when running on
- * Windows. Commands with an extension or an absolute path are returned
- * unchanged.
+ * Spawn candidates for a configured command, in the order worth trying.
+ * On Windows a bare name can resolve to an .exe (node, deno, native bun)
+ * or exist only as a .cmd shim (npx, npm, or an npm-installed pnpm), so
+ * both spellings are returned with the likelier one first. Commands with
+ * an extension or a path separator are returned as-is.
  */
-export function resolveCommandForPlatform(
+export function commandCandidatesForPlatform(
   command: string,
   platform: string = typeof navigator !== 'undefined' ? navigator.platform : ''
-): string {
+): string[] {
   const isWindows = /Win/i.test(platform)
-  if (!isWindows) return command
-  if (/[\\/]|\.(cmd|bat|exe)$/i.test(command)) return command
-  const NEEDS_CMD = new Set(['npx', 'npm', 'pnpm', 'yarn', 'bun', 'node', 'deno'])
-  if (NEEDS_CMD.has(command)) return `${command}.cmd`
-  return command
+  if (!isWindows) return [command]
+  if (/[\\/]|\.(cmd|bat|exe)$/i.test(command)) return [command]
+  const CMD_SHIM_FIRST = new Set(['npx', 'npm', 'pnpm', 'yarn', 'corepack'])
+  if (CMD_SHIM_FIRST.has(command)) return [`${command}.cmd`, command]
+  return [command, `${command}.cmd`]
 }
