@@ -431,6 +431,15 @@ fn start_bundled_engine_blocking(
         println!("[Engine] asked ComfyUI to free VRAM before engine start");
     }
 
+    // Ollama fights for the same VRAM and, unlike ComfyUI, its freshly-used
+    // pages are hot enough that WDDM won't demote them: on a 12 GB 3060 with a
+    // just-active 14B loaded, this engine's own load crawled through paging and
+    // blew the health budget (live repro 2026-07-31; an IDLE model gets evicted
+    // fine). Evict via keep_alive:0 — Ollama reloads lazily on its next use.
+    if crate::commands::process::offload_ollama_loaded_models() {
+        println!("[Engine] asked Ollama to evict loaded models before engine start");
+    }
+
     let binary = resolve_engine_binary(app).ok_or_else(|| {
         format!(
             "Bundled engine binary not found ({}). Run scripts/build-llama.sh to produce the sidecar.",
