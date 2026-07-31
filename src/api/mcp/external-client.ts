@@ -47,9 +47,10 @@ export class MCPExternalClient {
 
   async connect(): Promise<MCPToolDefinition[]> {
     try {
-      // Dynamic import for Tauri shell plugin — only available in .exe builds
-      // @ts-ignore — module may not exist in dev mode
-      const shellModule = await import(/* @vite-ignore */ '@tauri-apps/plugin-shell')
+      // Lazy so the plugin only loads once a server connects, but vite must
+      // resolve and bundle it: with @vite-ignore the packaged WebView gets a
+      // bare specifier and every connect dies on the import itself (D#90).
+      const shellModule = await import('@tauri-apps/plugin-shell')
       const { Command } = shellModule
 
       // Windows gotcha: Node-based MCP servers are invoked as `npx`, `npm`,
