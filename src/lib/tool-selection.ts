@@ -113,6 +113,19 @@ export function selectRelevantTools(
     }
   }
 
+  // External (MCP) tools can never match TOOL_GROUPS — the groups only know
+  // the builtin names, so on this path a connected server's tools were
+  // unreachable no matter what the user typed. Connecting the server is
+  // itself the signal that its tools are wanted: always offer them.
+  for (const t of allTools) {
+    if (t.source === 'external') selectedNames.add(t.name)
+  }
+
+  // A tool the user names verbatim is always offered, builtin or external.
+  for (const t of allTools) {
+    if (msg.includes(t.name.toLowerCase())) selectedNames.add(t.name)
+  }
+
   // If nothing beyond the always-included tools matched, include a broad set
   // (model might need flexibility). Handles generic messages like "help me with
   // this project". Threshold is ALWAYS_INCLUDE.length so adding an always-tool
@@ -154,7 +167,13 @@ export function selectRelevantTools(
 
   // Small-Model Mode (Knob 1): cap the catalog when maxTools is set. No-op
   // (returns `selected` unchanged) when unset — default behaviour preserved.
-  return applyMaxTools(selected, maxTools)
+  return applyMaxTools(selected, maxTools, undefined, mentionedToolNames(userMessage, allTools))
+}
+
+/** Names of tools the message mentions verbatim (case-insensitive). */
+function mentionedToolNames(userMessage: string, tools: MCPToolDefinition[]): string[] {
+  const msg = userMessage.toLowerCase()
+  return tools.filter((t) => msg.includes(t.name.toLowerCase())).map((t) => t.name)
 }
 
 /**
@@ -173,10 +192,15 @@ export function applyMaxTools(
   defs: MCPToolDefinition[],
   maxTools?: number,
   rankOrder?: string[],
+  pinned?: string[],
 ): MCPToolDefinition[] {
   if (!maxTools || maxTools <= 0 || defs.length <= maxTools) return defs
-  const always = defs.filter((t) => ALWAYS_INCLUDE.includes(t.name))
-  let rest = defs.filter((t) => !ALWAYS_INCLUDE.includes(t.name))
+  // Pinned tools (named verbatim by the user) rank with ALWAYS_INCLUDE and
+  // may push past maxTools: an explicit mention outranks the budget.
+  const keep = (t: MCPToolDefinition) =>
+    ALWAYS_INCLUDE.includes(t.name) || (pinned?.includes(t.name) ?? false)
+  const always = defs.filter(keep)
+  let rest = defs.filter((t) => !keep(t))
   if (rankOrder && rankOrder.length > 0) {
     const idx = (name: string) => {
       const i = rankOrder.indexOf(name)
@@ -208,8 +232,9 @@ export async function selectRelevantToolsAsync(
 ): Promise<MCPToolDefinition[]> {
   const threshold = opts?.embeddingThreshold ?? EMBEDDING_ROUTING_THRESHOLD
   const available = allTools.filter((t) => permissions[t.category] !== 'blocked')
+  const pinned = mentionedToolNames(userMessage, available)
   if (!opts?.embed || available.length <= threshold) {
-    return applyMaxTools(selectRelevantTools(userMessage, allTools, permissions), opts?.maxTools)
+    return applyMaxTools(selectRelevantTools(userMessage, allTools, permissions), opts?.maxTools, undefined, pinned)
   }
   try {
     const semanticNames = await selectToolsByEmbedding(
@@ -224,9 +249,10 @@ export async function selectRelevantToolsAsync(
     // Small-Model Mode (Knob 1): cap the union to maxTools, filling from
     // embedding-rank order so the most relevant tools survive. No-op when
     // maxTools is unset → `selected` (and its original order) is returned
-    // byte-identical, so big-model behaviour is unchanged.
-    return applyMaxTools(selected, opts.maxTools, semanticNames)
+    // byte-identical, so big-model behaviour is unchanged. Verbatim-named
+    // tools are pinned past the cap on both paths.
+    return applyMaxTools(selected, opts.maxTools, semanticNames, pinned)
   } catch {
-    return applyMaxTools(selectRelevantTools(userMessage, allTools, permissions), opts?.maxTools)
+    return applyMaxTools(selectRelevantTools(userMessage, allTools, permissions), opts?.maxTools, undefined, pinned)
   }
 }
