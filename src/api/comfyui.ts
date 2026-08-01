@@ -1455,6 +1455,8 @@ export async function buildWanVideoWorkflow(params: VideoParams): Promise<Record
 
   const vae = await findMatchingVAE('wan')
   const clip = await findMatchingCLIP('wan')
+  const { videoDecodeNode } = await import('./dynamic-workflow')
+  const hasTiledDecode = await nodeExists('VAEDecodeTiled')
 
   const workflow: Record<string, any> = {
     '1': { class_type: 'CLIPLoader', inputs: { clip_name: clip, type: 'wan', device: 'default' } },
@@ -1471,7 +1473,7 @@ export async function buildWanVideoWorkflow(params: VideoParams): Promise<Record
         sampler_name: params.sampler, scheduler: params.scheduler, denoise: 1.0,
       },
     },
-    '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['3', 0] } },
+    '8': videoDecodeNode(['7', 0], ['3', 0], hasTiledDecode),
   }
 
   // Use SaveAnimatedWEBP if available, otherwise fall back to SaveImage (frame
@@ -1503,6 +1505,8 @@ export async function buildAnimateDiffWorkflow(params: VideoParams): Promise<Rec
 
   // AnimateDiff: batch_size=1, motion model handles temporal dimension
   const hasVHS = await nodeExists('VHS_VideoCombine')
+  const { videoDecodeNode } = await import('./dynamic-workflow')
+  const hasTiledDecode = await nodeExists('VAEDecodeTiled')
 
   const workflow: Record<string, any> = {
     '1': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: params.model } },
@@ -1520,7 +1524,7 @@ export async function buildAnimateDiffWorkflow(params: VideoParams): Promise<Rec
         sampler_name: params.sampler, scheduler: params.scheduler, denoise: 1.0,
       },
     },
-    '9': { class_type: 'VAEDecode', inputs: { samples: ['8', 0], vae: ['1', 2] } },
+    '9': videoDecodeNode(['8', 0], ['1', 2], hasTiledDecode),
   }
 
   // Use VHS_VideoCombine if available (produces MP4), otherwise SaveAnimatedWEBP, otherwise SaveImage

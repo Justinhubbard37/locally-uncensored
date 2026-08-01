@@ -933,13 +933,15 @@ export async function buildDynamicWorkflow(
 
   const decodeId = String(n++)
 
-  workflow[decodeId] = {
-    class_type: 'VAEDecode',
-    inputs: {
-      samples: [samplerId, 0],
-      vae: [vaeSourceId, vaeOutputSlot],
-    },
-  }
+  workflow[decodeId] = isVideo
+    ? videoDecodeNode([samplerId, 0], [vaeSourceId, vaeOutputSlot], nodes.decoders.includes('VAEDecodeTiled'))
+    : {
+        class_type: 'VAEDecode',
+        inputs: {
+          samples: [samplerId, 0],
+          vae: [vaeSourceId, vaeOutputSlot],
+        },
+      }
 
   // ─── Phase 6: Output ───
 
@@ -1055,6 +1057,24 @@ function rmbgWidgetDefault(name: string, spec: any): { set: boolean; value?: any
   return { set: false }
 }
 
+/** Decode node for video latents: tiled whenever the install has the node.
+ *  A full-frame WanVAE decode next to a resident 14B UNet left 312 MB of VRAM
+ *  on a 12 GB card; CUDA paged through the Windows driver instead of throwing,
+ *  so ComfyUI's own OOM-then-tiled retry never fired and the decode ran 45+
+ *  minutes at "GPU 100%" (live, David 2026-08-02). Tiles keep the working set
+ *  flat for a quality-neutral overlap cost. Only tile_size is sent: older
+ *  cores lack the overlap/temporal fields, newer ones fill their declared
+ *  defaults for anything omitted. Image decodes stay on plain VAEDecode. */
+export function videoDecodeNode(
+  samplesRef: [string, number],
+  vaeRef: [string, number],
+  hasTiled: boolean,
+): Record<string, any> {
+  return hasTiled
+    ? { class_type: 'VAEDecodeTiled', inputs: { samples: samplesRef, vae: vaeRef, tile_size: 256 } }
+    : { class_type: 'VAEDecode', inputs: { samples: samplesRef, vae: vaeRef } }
+}
+
 function addVideoOutput(workflow: Record<string, any>, n: number, decodeId: string, fps: number, nodes: CategorizedNodes, prompt?: string): number {
   const saveId = String(n++)
   const prefix = promptFilenamePrefix(prompt, true)
@@ -1123,7 +1143,7 @@ function buildSVDWorkflow(params: VideoParams, seed: number, nodes: CategorizedN
     class_type: 'KSampler',
     inputs: { model: [guidanceId, 0], positive: [condId, 0], negative: [condId, 1], latent_image: [condId, 2], seed, steps: params.steps, cfg: params.cfgScale, sampler_name: params.sampler, scheduler: params.scheduler, denoise: 1.0 },
   }
-  workflow[decodeId] = { class_type: 'VAEDecode', inputs: { samples: [samplerId, 0], vae: [loaderId, 2] } }
+  workflow[decodeId] = videoDecodeNode([samplerId, 0], [loaderId, 2], nodes.decoders.includes('VAEDecodeTiled'))
 
   addVideoOutput(workflow, n, decodeId, params.fps, nodes, params.prompt)
   return workflow
@@ -1217,7 +1237,7 @@ function buildWan22Workflow(params: VideoParams, seed: number, nodes: Categorize
     },
   }
   const decodeId = String(n++)
-  workflow[decodeId] = { class_type: 'VAEDecode', inputs: { samples: [samplerId, 0], vae: [vaeId, 0] } }
+  workflow[decodeId] = videoDecodeNode([samplerId, 0], [vaeId, 0], nodes.decoders.includes('VAEDecodeTiled'))
 
   addVideoOutput(workflow, n, decodeId, params.fps, nodes, params.prompt)
   return workflow
@@ -1458,7 +1478,7 @@ export function buildS2VWorkflow(params: LocalOpParams, seed: number, allNodes: 
     },
   }
   const decodeId = String(n++)
-  workflow[decodeId] = { class_type: 'VAEDecode', inputs: { samples: [samplerId, 0], vae: [vaeId, 0] } }
+  workflow[decodeId] = videoDecodeNode([samplerId, 0], [vaeId, 0], 'VAEDecodeTiled' in allNodes)
 
   addVideoWithAudioOutput(workflow, n, decodeId, params.fps || 16, [audioLoadId, 0], allNodes, params.prompt)
   return workflow
@@ -1561,7 +1581,7 @@ export function buildMotionWorkflow(params: LocalOpParams, seed: number, allNode
   const trimId = String(n++)
   workflow[trimId] = { class_type: 'TrimVideoLatent', inputs: { samples: [samplerId, 0], trim_amount: [condId, 3] } }
   const decodeId = String(n++)
-  workflow[decodeId] = { class_type: 'VAEDecode', inputs: { samples: [trimId, 0], vae: [vaeId, 0] } }
+  workflow[decodeId] = videoDecodeNode([trimId, 0], [vaeId, 0], 'VAEDecodeTiled' in allNodes)
 
   addVideoWithAudioOutput(workflow, n, decodeId, params.fps || 16, [componentsId, 1], allNodes, params.prompt)
   return workflow
@@ -1644,7 +1664,7 @@ function buildFramePackWorkflow(params: VideoParams, seed: number, nodes: Catego
       use_teacache: true, teacache_rel_l1_thresh: 0.15,
     },
   }
-  workflow[decodeId] = { class_type: 'VAEDecode', inputs: { samples: [samplerId, 0], vae: [vaeId, 0] } }
+  workflow[decodeId] = videoDecodeNode([samplerId, 0], [vaeId, 0], nodes.decoders.includes('VAEDecodeTiled'))
 
   addVideoOutput(workflow, n, decodeId, params.fps, nodes, params.prompt)
   return workflow
