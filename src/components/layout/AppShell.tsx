@@ -34,6 +34,7 @@ import { CloudExampleModal } from '../cloud/CloudExampleModal'
 import { ShortcutsModal } from './ShortcutsModal'
 import { CreditsExhaustedModal } from './CreditsExhaustedModal'
 import { Titlebar } from './Titlebar'
+import { TagsAndWorkflowsPage } from '../workflows/TagsAndWorkflowsPage'
 
 // The backup triad must never write %APPDATA%/store_backup.json before the
 // restore decision — on a post-NSIS boot the first doBackup would otherwise
@@ -794,9 +795,16 @@ export function AppShell() {
         <StorageQuotaToast />
         <div className="flex-1 flex overflow-hidden gap-2 p-2">
           {!isComparing && <Sidebar />}
-          <main className={`overflow-hidden rounded-xl bg-white dark:bg-[#1e1e1e] ring-1 ring-black/[0.04] dark:ring-white/[0.05] ${currentView === 'models' ? 'flex-none w-[85%] mx-auto' : 'flex-1'}`}>
+           <main
+            className={`overflow-hidden rounded-xl bg-white dark:bg-[#1e1e1e] ring-1 ring-black/[0.04] dark:ring-white/[0.05] ${
+              currentView === 'models' || currentView === 'workflows'
+                ? 'flex-none w-[85%] mx-auto'
+                : 'flex-1'
+            }`}
+          >
             {currentView === 'chat' && <ErrorBoundary><ChatView /></ErrorBoundary>}
             {currentView === 'models' && <ErrorBoundary><ModelManager /></ErrorBoundary>}
+	    {currentView === 'workflows' && <ErrorBoundary><TagsAndWorkflowsPage /></ErrorBoundary>}
             {currentView === 'benchmark' && <ErrorBoundary><BenchmarkView /></ErrorBoundary>}
             {currentView === 'settings' && <ErrorBoundary><SettingsPage /></ErrorBoundary>}
             {currentView === 'create' && <ErrorBoundary><CreateExperimental /></ErrorBoundary>}

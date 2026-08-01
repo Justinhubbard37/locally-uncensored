@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-export type View = 'chat' | 'models' | 'settings' | 'create' | 'benchmark'
+export type View = 'chat' | 'models' | 'settings' | 'create' | 'benchmark' | 'workflows'
 
 /** Which Cloud teaser sheet is open (Local-mode discovery, 2.5.8).
  *  'intent' = a locked Create tab (the cloud-only intents incl. the five
