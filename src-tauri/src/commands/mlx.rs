@@ -525,10 +525,55 @@ fn image_model_is_installed(entry: &ImageCatalogEntry) -> bool {
     let Ok(read) = std::fs::read_dir(&snaps) else {
         return false;
     };
-    // At least one snapshot dir with a model_index.json — a bare refs/blobs
-    // skeleton from an aborted download must not count as installed.
-    read.flatten()
-        .any(|e| e.path().join("model_index.json").exists())
+    read.flatten().any(|e| snapshot_is_complete(&e.path()))
+}
+
+/// A snapshot counts as installed only when the pipeline it manifests can
+/// actually load. `snapshot_download` writes the small JSONs first, so
+/// checking for `model_index.json` alone declared a download aborted after
+/// two seconds "Installed" (live find, 2026-07-31: configs plus the VAE on
+/// disk, unet and text_encoder missing, the row offered Remove and a render
+/// would have died on local_files_only). The manifest itself says which
+/// component directories exist; every model component among them must carry
+/// at least one non-empty weights file. Scheduler/tokenizer entries are
+/// config-only and skipped.
+fn snapshot_is_complete(snap: &std::path::Path) -> bool {
+    let index = snap.join("model_index.json");
+    let Ok(raw) = std::fs::read_to_string(&index) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<Value>(&raw) else {
+        return false;
+    };
+    let Some(map) = json.as_object() else {
+        return false;
+    };
+    map.iter()
+        .filter(|(k, _)| !k.starts_with('_'))
+        // Only real component references count: a ["lib", "Class"] pair.
+        // Manifests also carry scalars (requires_safety_checker: true) and
+        // [null, null] stubs for absent components (feature_extractor,
+        // safety_checker); demanding weights for those declared every
+        // complete install missing.
+        .filter_map(|(k, v)| v.get(1).and_then(|c| c.as_str()).map(|class| (k, class)))
+        .filter(|(_, class)| {
+            !(class.contains("Scheduler")
+                || class.contains("Tokenizer")
+                || class.contains("Processor")
+                || class.contains("FeatureExtractor"))
+        })
+        .all(|(component, _)| {
+            let dir = snap.join(component);
+            let Ok(read) = std::fs::read_dir(&dir) else {
+                return false;
+            };
+            read.flatten().any(|f| {
+                let p = f.path();
+                let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+                (ext == "safetensors" || ext == "bin")
+                    && f.metadata().map(|m| m.len() > 0).unwrap_or(false)
+            })
+        })
 }
 
 pub fn mlx_image_models(_state: &AppState, _args: &Value) -> CmdResult {
@@ -885,6 +930,58 @@ mod tests {
         let body = hf_token_present(&state, &json!({})).unwrap();
         assert!(!body.to_string().contains("hf_do_not_leak"));
         *HF_TOKEN.write().unwrap() = None;
+    }
+
+    /// The live find from 2026-07-31: a download killed two seconds in has
+    /// model_index.json and every config on disk, but no unet weights. That
+    /// snapshot must NOT read as installed, or the row offers Remove and a
+    /// local_files_only render dies. Weights present flips it to installed.
+    #[test]
+    fn aborted_snapshot_is_not_installed_until_weights_exist() {
+        let snap = std::env::temp_dir().join(format!("lu-snap-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&snap);
+        for d in ["unet", "vae", "text_encoder", "scheduler", "tokenizer"] {
+            std::fs::create_dir_all(snap.join(d)).unwrap();
+        }
+        // The stubs real manifests carry (live dump 2026-07-31): [null, null]
+        // components, scalar flags, plain null. None of them may be demanded
+        // as directories, or every complete install reads as missing.
+        std::fs::write(
+            snap.join("model_index.json"),
+            r#"{
+              "_class_name": "StableDiffusionPipeline",
+              "feature_extractor": [null, null],
+              "safety_checker": [null, null],
+              "requires_safety_checker": true,
+              "image_encoder": null,
+              "scheduler": ["diffusers", "EulerDiscreteScheduler"],
+              "text_encoder": ["transformers", "CLIPTextModel"],
+              "tokenizer": ["transformers", "CLIPTokenizer"],
+              "unet": ["diffusers", "UNet2DConditionModel"],
+              "vae": ["diffusers", "AutoencoderKL"]
+            }"#,
+        )
+        .unwrap();
+        // Configs alone (the aborted-download shape): not installed.
+        std::fs::write(snap.join("unet/config.json"), "{}").unwrap();
+        std::fs::write(snap.join("vae/config.json"), "{}").unwrap();
+        assert!(!snapshot_is_complete(&snap), "configs without weights must not count");
+
+        // Weights for two of three model components: still not installed.
+        std::fs::write(snap.join("vae/diffusion_pytorch_model.fp16.safetensors"), b"w").unwrap();
+        std::fs::write(snap.join("text_encoder/model.fp16.safetensors"), b"w").unwrap();
+        assert!(!snapshot_is_complete(&snap), "a missing unet must not count");
+
+        // Zero-byte weights are a torn write, not an install.
+        std::fs::write(snap.join("unet/diffusion_pytorch_model.fp16.safetensors"), b"").unwrap();
+        assert!(!snapshot_is_complete(&snap), "an empty weights file must not count");
+
+        std::fs::write(snap.join("unet/diffusion_pytorch_model.fp16.safetensors"), b"w").unwrap();
+        assert!(snapshot_is_complete(&snap), "all model components carrying weights count");
+
+        // Scheduler and tokenizer are config-only and must not be required
+        // to carry weights (they never do).
+        let _ = std::fs::remove_dir_all(&snap);
     }
 
     #[test]
