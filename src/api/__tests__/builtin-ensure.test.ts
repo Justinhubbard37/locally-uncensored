@@ -74,9 +74,14 @@ describe('ensureBuiltinEngineAlive', () => {
     expect(starts[0][1]).toEqual({ modelPath: '/models/qwen2.5-0.5b.gguf', tuning: TUNING })
   })
 
-  it('leaves foreign models alone (openai-compat server that is not ours)', async () => {
+  it('never starts our engine for a model that is not one of ours, and says why', async () => {
     mockEngine({ healthy: false })
-    await ensureBuiltinEngineAlive('gpt-4o-mini')
+    // The slot is managed, so the send is about to hit our own port with
+    // nothing behind it. Returning quietly here is what handed applejames a
+    // raw "proxy_localhost_stream_chunked" on a fresh install (2026-08-01), so
+    // the guard still refuses to start anything, but it no longer pretends
+    // the send will work.
+    await expect(ensureBuiltinEngineAlive('gpt-4o-mini')).rejects.toThrow(/no model file named "gpt-4o-mini"/i)
     expect(callsTo('start_bundled_engine')).toHaveLength(0)
   })
 
