@@ -40,9 +40,10 @@ export type CloudOp = 'character' | 'lipsync' | 'music' | 'extend' | 'motion'
  *  metadata, the IntentBar lock state and the backend-flip cleanup below —
  *  lives here (lowest layer) so intents.ts can derive from it without a
  *  component→store import cycle. */
-// Character stays cloud-first (David 2026-07-19): its local lane needs a
-// trainer runtime (musubi venv) that 2.5.8 does not ship.
-export const LOCAL_LANE_OPS: ReadonlySet<CloudOp> = new Set(['music', 'lipsync', 'extend', 'motion'])
+// Character joined in 2.6.0: trainer.rs ships the musubi venv install, so
+// the train lane is a real local tab now (it was cloud-first while 2.5.8
+// had no trainer runtime).
+export const LOCAL_LANE_OPS: ReadonlySet<CloudOp> = new Set(['music', 'lipsync', 'extend', 'motion', 'character'])
 
 /** An audio/video file (or training image) staged in the composer before
  *  upload. `blob` carries the bytes for the cloud upload; `url` is a local
@@ -658,10 +659,10 @@ export const useCreateStore = create<CreateState>()(
           if (backend !== 'local') return { backend }
           const patch: Record<string, unknown> = { backend }
           if (s.utilityOp) Object.assign(patch, { utilityOp: null, mask: null, error: null })
-          // 2.5.8: music/lipsync/extend/motion run locally, so a backend flip
-          // keeps them selected; character stays cloud-only (its trainer
-          // runtime does not ship yet), so it drops on a flip to local just
-          // like upscale/eraser. LOCAL_LANE_OPS is the single source of truth.
+          // music/lipsync/extend/motion (2.5.8) and character (2.6.0, local
+          // musubi trainer) run locally, so a backend flip keeps them
+          // selected; only the genuinely hosted-only ops (upscale/eraser)
+          // drop. LOCAL_LANE_OPS is the single source of truth.
           if (s.cloudOp && !LOCAL_LANE_OPS.has(s.cloudOp)) {
             Object.assign(patch, { cloudOp: null, error: null })
           }
