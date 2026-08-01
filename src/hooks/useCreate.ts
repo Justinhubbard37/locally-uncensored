@@ -1004,8 +1004,27 @@ export function useCreate() {
         await new Promise<void>((resolve, reject) => {
           const startTime = Date.now()
           const store = useCreateStore.getState()
+          // The bar and its seconds used to repaint only when ComfyUI sent an
+          // event. Long silent stretches are normal here (a 14B sampling step
+          // or a VAE decode on a full card emits nothing for minutes), so the
+          // label froze mid-run: David watched "Decoding... 266s" stand still
+          // for 10+ minutes while the GPU sat at 100% (2026-08-02). Events now
+          // only change phase and percent; a ticker repaints the elapsed time
+          // every second so a working render never looks hung.
+          let phasePct = 10
+          let phaseLabel = 'Queued...'
+          const paint = () => {
+            const elapsed = Math.round((Date.now() - startTime) / 1000)
+            setProgress(phasePct, `${phaseLabel} ${elapsed}s`)
+          }
+          const setPhase = (pct: number, label: string) => {
+            phasePct = pct
+            phaseLabel = label
+            paint()
+          }
           store.setProgressPhase('queued')
-          setProgress(10, 'Queued...')
+          setPhase(10, 'Queued...')
+          const ticker = setInterval(paint, 1000)
 
           // Activity watchdog (2.5.8): the old hard wall-clock cap killed a
           // REAL render at exactly 60 minutes while ComfyUI was still
@@ -1092,6 +1111,7 @@ export function useCreate() {
           let abortCheck: ReturnType<typeof setInterval> | null = null
 
           const cleanup = () => {
+            clearInterval(ticker)
             clearInterval(timeoutTimer)
             clearInterval(heartbeat)
             if (abortCheck) clearInterval(abortCheck)
@@ -1103,7 +1123,6 @@ export function useCreate() {
             if ('prompt_id' in event.data && event.data.prompt_id !== promptId) return
             lastActivity = Date.now()
 
-            const elapsed = Math.round((Date.now() - startTime) / 1000)
             const st = useCreateStore.getState()
 
             switch (event.type) {
@@ -1116,19 +1135,19 @@ export function useCreate() {
                 const classType = nodeClassMap.get(nodeId) || ''
                 if (LOADER_NODES.has(classType)) {
                   st.setProgressPhase('loading-model')
-                  setProgress(15, `Loading model... ${elapsed}s`)
+                  setPhase(15, 'Loading model...')
                 } else if (CLIP_LOADER_NODES.has(classType)) {
                   st.setProgressPhase('loading-clip')
-                  setProgress(25, `Loading text encoder... ${elapsed}s`)
+                  setPhase(25, 'Loading text encoder...')
                 } else if (VAE_LOADER_NODES.has(classType)) {
                   st.setProgressPhase('loading-vae')
-                  setProgress(30, `Loading VAE... ${elapsed}s`)
+                  setPhase(30, 'Loading VAE...')
                 } else if (SAMPLER_NODES.has(classType)) {
                   st.setProgressPhase('sampling')
-                  setProgress(35, `Sampling... ${elapsed}s`)
+                  setPhase(35, 'Sampling...')
                 } else if (DECODE_NODES.has(classType)) {
                   st.setProgressPhase('decoding')
-                  setProgress(90, `Decoding... ${elapsed}s`)
+                  setPhase(90, 'Decoding frames, the last long stretch...')
                 }
                 break
               }
@@ -1136,7 +1155,7 @@ export function useCreate() {
                 const { value, max } = event.data
                 const stepPct = 35 + (value / max) * 55 // 35% to 90%
                 st.setProgressPhase('sampling')
-                setProgress(Math.round(stepPct), `Sampling step ${value}/${max}... ${elapsed}s`)
+                setPhase(Math.round(stepPct), `Sampling step ${value}/${max}...`)
                 break
               }
               case 'execution_complete': {
