@@ -76,10 +76,13 @@ const classTypes = (wf: Record<string, any>): string[] =>
   Object.values(wf as Record<string, WfNode>).map(n => n.class_type)
 
 describe('videoDecodeNode', () => {
-  it('emits VAEDecodeTiled with ONLY tile_size when the node exists (old cores lack the other fields)', () => {
+  it('emits VAEDecodeTiled with ALL four tiling fields (the live validator refuses omitted required-with-default inputs)', () => {
     const node = videoDecodeNode(['7', 0], ['3', 0], true)
     expect(node.class_type).toBe('VAEDecodeTiled')
-    expect(node.inputs).toEqual({ samples: ['7', 0], vae: ['3', 0], tile_size: 256 })
+    expect(node.inputs).toEqual({
+      samples: ['7', 0], vae: ['3', 0],
+      tile_size: 256, overlap: 64, temporal_size: 64, temporal_overlap: 8,
+    })
   })
   it('falls back to plain VAEDecode when the install has no tiled node', () => {
     const node = videoDecodeNode(['7', 0], ['3', 0], false)

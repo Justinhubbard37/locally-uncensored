@@ -1062,16 +1062,27 @@ function rmbgWidgetDefault(name: string, spec: any): { set: boolean; value?: any
  *  on a 12 GB card; CUDA paged through the Windows driver instead of throwing,
  *  so ComfyUI's own OOM-then-tiled retry never fired and the decode ran 45+
  *  minutes at "GPU 100%" (live, David 2026-08-02). Tiles keep the working set
- *  flat for a quality-neutral overlap cost. Only tile_size is sent: older
- *  cores lack the overlap/temporal fields, newer ones fill their declared
- *  defaults for anything omitted. Image decodes stay on plain VAEDecode. */
+ *  flat for a quality-neutral overlap cost.
+ *
+ *  ALL four tiling fields are sent. The live validator refuses a prompt that
+ *  omits a required-with-default field ("Node 8 (VAEDecodeTiled): Required
+ *  input is missing" three times, e2e 2026-08-02), and cores old enough to
+ *  lack the overlap/temporal fields simply ignore unknown inputs. Values are
+ *  the node's own defaults except tile_size, halved for the low-VRAM cards
+ *  this exists for. Image decodes stay on plain VAEDecode. */
 export function videoDecodeNode(
   samplesRef: [string, number],
   vaeRef: [string, number],
   hasTiled: boolean,
 ): Record<string, any> {
   return hasTiled
-    ? { class_type: 'VAEDecodeTiled', inputs: { samples: samplesRef, vae: vaeRef, tile_size: 256 } }
+    ? {
+        class_type: 'VAEDecodeTiled',
+        inputs: {
+          samples: samplesRef, vae: vaeRef,
+          tile_size: 256, overlap: 64, temporal_size: 64, temporal_overlap: 8,
+        },
+      }
     : { class_type: 'VAEDecode', inputs: { samples: samplesRef, vae: vaeRef } }
 }
 
