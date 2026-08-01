@@ -7,6 +7,52 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// True when a `PYTHONHOME` / `PYTHONPATH` value points inside an AppImage's
+/// throwaway mount instead of a real Python installation.
+///
+/// The Linux AppImage runtime mounts itself at `/tmp/.mount_<random>` and its
+/// launcher exports `PYTHONHOME` / `PYTHONPATH` into that mount. Those are
+/// inherited by every process we spawn, so a system `python3` looks for its
+/// standard library inside our AppImage and dies before it runs a line:
+///
+/// ```text
+/// Fatal Python error: init_fs_encoding: failed to get the Python codec of the filesystem encoding
+/// ModuleNotFoundError: No module named 'encodings'
+/// PYTHONHOME = '/tmp/.mount_LocallieGkad/usr/'
+/// ```
+///
+/// numbrain hit exactly this installing ComfyUI on Linux Mint (Discord
+/// 2026-07-28) with a perfectly healthy Python 3.12, and our diagnosis sent
+/// them off to reinstall Python, which of course changed nothing. No AppImage
+/// user could ever install ComfyUI.
+pub fn is_appimage_python_env(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() {
+        return false;
+    }
+    // PYTHONPATH is a list; poisoned if any entry points into the mount.
+    v.split(':').any(|entry| {
+        let e = entry.trim();
+        e.starts_with("/tmp/.mount_")
+            || std::env::var("APPDIR").is_ok_and(|d| !d.is_empty() && e.starts_with(&d))
+    })
+}
+
+/// Drop AppImage-injected Python variables from our own environment, so every
+/// child process we spawn sees the system Python the way a shell would.
+///
+/// Called once at startup, before any command runs. `LD_LIBRARY_PATH` is left
+/// alone on purpose: the AppImage needs it for our own bundled libraries, and
+/// it was never what broke Python here.
+pub fn sanitize_appimage_python_env() {
+    for key in ["PYTHONHOME", "PYTHONPATH"] {
+        if std::env::var(key).is_ok_and(|v| is_appimage_python_env(&v)) {
+            tracing::info!(key, "dropping AppImage Python env var so child processes get a clean interpreter");
+            std::env::remove_var(key);
+        }
+    }
+}
+
 /// Compute the path to the venv's Python interpreter for a ComfyUI install
 /// at `comfyui_dir`. Layout matches what `python -m venv` produces.
 ///
@@ -255,6 +301,40 @@ pub fn is_real_python(bin: &str) -> bool {
 mod tests {
     use super::*;
     use std::fs;
+
+    // ── AppImage Python env poisoning (numbrain, Discord 2026-07-28) ────────
+
+    /// The exact values from the failing install on Linux Mint. Our own
+    /// AppImage mount, inherited by the python3 we spawn, which then cannot
+    /// find its standard library.
+    #[test]
+    fn appimage_mount_paths_are_recognised() {
+        assert!(is_appimage_python_env("/tmp/.mount_LocallieGkad/usr/"));
+        assert!(is_appimage_python_env("/tmp/.mount_LocallieGkad/usr/share/pyshared/:"));
+        assert!(is_appimage_python_env("/tmp/.mount_ABC123/usr/lib/python3.12"));
+    }
+
+    #[test]
+    fn a_poisoned_entry_anywhere_in_the_list_counts() {
+        // PYTHONPATH is colon-separated; one bad entry breaks the interpreter.
+        assert!(is_appimage_python_env("/home/u/mylib:/tmp/.mount_XY/usr/share/pyshared/"));
+    }
+
+    #[test]
+    fn real_python_installs_are_left_alone() {
+        assert!(!is_appimage_python_env("/usr/lib/python3.12"));
+        assert!(!is_appimage_python_env("/home/user/.local/lib/python3.12"));
+        assert!(!is_appimage_python_env("/opt/python3.11"));
+        assert!(!is_appimage_python_env("C:\\Python312"));
+        // A user's own directory that merely lives under /tmp is not a mount.
+        assert!(!is_appimage_python_env("/tmp/my-python-experiment"));
+    }
+
+    #[test]
+    fn empty_and_whitespace_are_not_poisoned() {
+        assert!(!is_appimage_python_env(""));
+        assert!(!is_appimage_python_env("   "));
+    }
 
     // ── venv_python_path layout (Bug E — Arch PEP 668 venv) ─────────────────
 
