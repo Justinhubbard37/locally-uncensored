@@ -19,9 +19,10 @@ import {
   isPromptQueued,
   buildTxt2ImgWorkflow,
   buildTxt2VidWorkflow,
+  canRunVideoIntent,
   classifyModel,
   isI2VModel,
-  isT2VCapable,
+  videoLaneModels,
   extractComfyOutputFiles,
   galleryTypeForFile,
   MODEL_TYPE_DEFAULTS as COMFY_MODEL_DEFAULTS,
@@ -650,12 +651,19 @@ export function useCreate() {
     // user never saw. Apply the picker's coercion here too (same one-rule
     // philosophy as the cloud op resolver after take-01).
     if (!localOp && mode === 'video' && state.videoModelList.length > 0) {
-      const capable = intent === 'animate' || intent === 'extend'
-        ? state.videoModelList.filter((m) => isI2VModel(m.name))
-        : state.videoModelList.filter((m) => isT2VCapable(m.name))
+      const capable = videoLaneModels(state.videoModelList, intent)
       if (capable.length > 0 && !capable.some((m) => m.name === activeModel)) {
         activeModel = capable[0].name
       }
+    } else if (!localOp && mode === 'video' && !canRunVideoIntent(activeModel, intent)) {
+      // The list has not arrived yet (fresh boot, ComfyUI still waking). The
+      // coercion above cannot run, and a persisted pick the lane cannot use
+      // must not reach the builder: that is how a T2V run right after app
+      // start went out as SVD's LoadImage graph and ComfyUI answered
+      // "Node 2 (LoadImage): Custom validation failed" while the chip already
+      // showed a capable model (David 2026-08-02).
+      setError('Video models are still loading. Give it a few seconds and hit Create again.')
+      return
     }
     // Always re-classify from model name to avoid stale type
     const imageModelType = classifyModel(activeModel)

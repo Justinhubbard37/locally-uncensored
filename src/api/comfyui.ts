@@ -270,6 +270,22 @@ export function isT2VCapable(name: string): boolean {
   return true
 }
 
+/** Can this model run the given video intent? Animate/Extend feed a start
+ *  image (i2v), everything else on the video lane is a text-to-video run.
+ *  ONE rule for the picker, the starter-bundle gate and submit: whenever two
+ *  of them disagreed a real user hit a wall. SVD-only boxes showed
+ *  "No matches" yet never offered the starter bundle, and a fresh boot
+ *  submitted a persisted SVD pick into the T2V lane, which builds SVD's
+ *  LoadImage graph and dies on "Custom validation failed" (David 2026-08-01). */
+export function canRunVideoIntent(name: string, intent: string): boolean {
+  return intent === 'animate' || intent === 'extend' ? isI2VModel(name) : isT2VCapable(name)
+}
+
+/** The video models the CURRENT intent can actually run (see canRunVideoIntent). */
+export function videoLaneModels(list: ClassifiedModel[], intent: string): ClassifiedModel[] {
+  return list.filter((m) => canRunVideoIntent(m.name, intent))
+}
+
 // ─── Default generation parameters per model type ───
 
 export interface ModelTypeDefaults {

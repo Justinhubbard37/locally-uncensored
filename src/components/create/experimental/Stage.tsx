@@ -12,6 +12,7 @@ import { loadImageRef } from './loadImage'
 import { galleryItemUrl, fetchGalleryItemBlob, recoverGalleryUrl } from './galleryUrl'
 import { InstallCancelled } from '../../../lib/bundle-install'
 import { isMlxImageHost } from '../../../api/mlx-image'
+import { videoLaneModels } from '../../../api/comfyui'
 
 interface Props {
   displayed?: GalleryItem
@@ -49,9 +50,14 @@ export function Stage({ displayed, onOpenMaskEditor, onEditResult, onFullscreen 
   // one-click starter-bundle card. connected === false also gates — the same
   // button installs ComfyUI itself first. connected === null (still probing)
   // gates nothing, so the card never flashes during startup.
+  // "Missing" for the video lane must use the same op-gating as the picker:
+  // SVD and FramePack are i2v-only, so a box whose only video model was SVD
+  // passed a bare length check and never offered the starter bundle, while
+  // the T2V picker showed "No matches" (David 2026-08-01).
+  const videoLaneList = videoLaneModels(videoModelList, intent)
   const listForKind: Record<NonNullable<typeof meta.requiresModels>, unknown[]> = {
     image: imageModelList,
-    video: videoModelList,
+    video: videoLaneList,
     audio: audioModelList,
     lipsync: lipsyncModelList,
     motion: motionModelList,
