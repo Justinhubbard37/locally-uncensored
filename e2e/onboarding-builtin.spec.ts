@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { tauriMockInit, DEFAULT_ASSISTANT_REPLY, DEFAULT_MODEL_NAME } from './support/tauri-mock'
+import { openNewChat } from './support/ui'
 
 /**
  * P3b acceptance test — fresh onboarding → first chat over the built-in engine.
@@ -53,9 +54,8 @@ test('fresh onboarding boots the built-in engine and answers a chat', async ({ p
   await page.getByRole('button', { name: /Get Started/i }).click()
 
   // chat — open a fresh conversation, which reveals the composer
-  await page.getByRole('button', { name: /New Chat/i }).click()
+  await openNewChat(page)
   const composer = page.locator('textarea').first()
-  await expect(composer).toBeVisible({ timeout: 20_000 })
   await composer.fill('ping the built-in engine')
   await page.getByRole('button', { name: /Send message/i }).click()
 

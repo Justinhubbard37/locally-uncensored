@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
 import { tauriMockInit, DEFAULT_ASSISTANT_REPLY, DEFAULT_MODEL_NAME } from './support/tauri-mock'
 import { routeCloud, seedOnboardingDone, signInViaGate, cloudSwitch } from './support/cloud-mock'
+import { openNewChat } from './support/ui'
 
 /**
  * 2.5.7 cloud onboarding — purple header switch → gate login → cloud mode.
@@ -40,7 +41,7 @@ test('Max account: switch → login → cloud mode with the hosted catalog', asy
   await expect(page.getByRole('button', { name: /^Benchmark$/ })).toBeHidden()
 
   // The chat picker lists the hosted catalog (and only it).
-  await page.getByRole('button', { name: /New Chat/i }).click()
+  await openNewChat(page)
   const picker = page.getByText(/Llama 3\.1 8B Turbo/i).first()
   await expect(picker).toBeVisible({ timeout: 20_000 })
 

@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { tauriMockInit, DEFAULT_ASSISTANT_REPLY, DEFAULT_MODEL_NAME } from './support/tauri-mock'
+import { openNewChat } from './support/ui'
 
 /**
  * ENG-5 acceptance — the built-in engine's context window is HONEST end to end:
@@ -42,9 +43,8 @@ test('context dropdown relaunches the built-in engine and the counter follows', 
   await completeBuiltinOnboarding(page)
 
   // Chat once so the TokenCounter renders (it needs messages).
-  await page.getByRole('button', { name: /New Chat/i }).click()
+  await openNewChat(page)
   const composer = page.locator('textarea').first()
-  await expect(composer).toBeVisible({ timeout: 20_000 })
   await composer.fill('ping the built-in engine')
   await page.getByRole('button', { name: /Send message/i }).click()
   await expect(page.getByText(/PONG_BUILTIN_OK/)).toBeVisible({ timeout: 20_000 })

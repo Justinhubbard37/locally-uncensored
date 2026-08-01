@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { tauriMockInit, DEFAULT_ASSISTANT_REPLY, DEFAULT_MODEL_NAME } from './support/tauri-mock'
+import { openNewChat } from './support/ui'
 
 /**
  * Sharded-GGUF download flow, end to end on the real UI (2.6.0, DeepSeek V4
@@ -69,6 +70,12 @@ async function bootThroughBuiltinOnboarding(page: Page) {
   await expect(page.getByRole('button', { name: /Skip for now/i })).toBeVisible({ timeout: 30_000 })
   await page.getByRole('button', { name: /Skip for now/i }).click()
   await page.getByRole('button', { name: /Get Started/i }).click()
+  // The download flow below branches on the ACTIVE provider (built-in →
+  // flat dir, LM Studio → <user>/<repo> nesting), and the active model is
+  // only set once the async model list lands. Prove the managed engine is
+  // live before touching Discover, or a slow machine tests the wrong branch.
+  await openNewChat(page)
+  await expect(page.getByText(/qwen2\.5-0\.5b/i).first()).toBeVisible()
 }
 
 test('0731 card resolves the real shard set, confirms 3 parts, starts all downloads into one dir', async ({ page }) => {
