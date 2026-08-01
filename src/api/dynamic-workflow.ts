@@ -424,7 +424,7 @@ export async function buildDynamicWorkflow(
     return buildSVDWorkflow(params as VideoParams, seed, nodes)
   }
   if (strategy === 'wan22') {
-    return buildWan22Workflow(params as VideoParams, seed, nodes)
+    return buildWan22Workflow(params as VideoParams, seed, nodes, allNodes)
   }
   if (strategy === 'framepack') {
     return buildFramePackWorkflow(params as VideoParams, seed, nodes)
@@ -530,10 +530,7 @@ export async function buildDynamicWorkflow(
       }
     }
 
-    workflow[unetId] = {
-      class_type: 'UNETLoader',
-      inputs: { unet_name: params.model, weight_dtype: 'default' },
-    }
+    addUnetLoader(workflow, unetId, params.model, allNodes)
     workflow[clipId] = useDualFluxClip && fluxPair
       ? {
           class_type: 'DualCLIPLoader',
@@ -1155,7 +1152,7 @@ export function snapWanLength(frames: number): number {
  * the source into the generation size, so the first frame matches the still
  * instead of being squished — the same fix proven on the SVD path.
  */
-function buildWan22Workflow(params: VideoParams, seed: number, nodes: CategorizedNodes): Record<string, any> {
+function buildWan22Workflow(params: VideoParams, seed: number, nodes: CategorizedNodes, allNodes: Record<string, any>): Record<string, any> {
   const workflow: Record<string, any> = {}
   let n = 1
 
@@ -1171,7 +1168,7 @@ function buildWan22Workflow(params: VideoParams, seed: number, nodes: Categorize
   const posId = String(n++)
   const negId = String(n++)
 
-  workflow[unetId] = { class_type: 'UNETLoader', inputs: { unet_name: params.model, weight_dtype: 'default' } }
+  addUnetLoader(workflow, unetId, params.model, allNodes)
   workflow[clipId] = { class_type: 'CLIPLoader', inputs: { clip_name: 'umt5_xxl_fp8_e4m3fn_scaled.safetensors', type: 'wan', device: 'default' } }
   workflow[vaeId] = { class_type: 'VAELoader', inputs: { vae_name: 'wan2.2_vae.safetensors' } }
   workflow[posId] = { class_type: 'CLIPTextEncode', inputs: { text: params.prompt, clip: [clipId, 0] } }
