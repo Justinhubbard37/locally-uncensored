@@ -62,7 +62,8 @@
       "icons/icon.png"
     ],
     "macOS": {
-      "entitlements": "./Entitlements.plist"
+      "entitlements": "./Entitlements.plist",
+      "signingIdentity": "-"
     },
     "windows": {
       "wix": {
