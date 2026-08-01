@@ -182,6 +182,18 @@ pub(crate) fn build_embed_args(model_path: &str, port: u16) -> Vec<String> {
         "mean".into(),
         "-ngl".into(),
         "999".into(),
+        // One chunk is embedded in a single batch, and llama-server's default
+        // physical batch is 512 tokens. A document whose text has few sentence
+        // breaks produced longer chunks and Document Chat died on
+        // "input (658 tokens) is too large to process, increase the physical
+        // batch size" (ChrisMcSheehy, D#91). The chunker keeps chunks well
+        // under this now; the headroom means a near-miss is not a failed
+        // import. Cheap: these models are small and the batch only bounds a
+        // scratch buffer.
+        "-b".into(),
+        "2048".into(),
+        "-ub".into(),
+        "2048".into(),
     ]
 }
 
@@ -1023,12 +1035,27 @@ mod tests {
                 "--embeddings",
                 "--pooling", "mean",
                 "-ngl", "999",
+                "-b", "2048",
+                "-ub", "2048",
             ]
         );
         // The whole point of P5: the embed server must NOT carry --ctx-size
         // (chat-only) and MUST carry --embeddings so /v1/embeddings works.
         assert!(args.iter().any(|a| a == "--embeddings"));
         assert!(!args.iter().any(|a| a == "--ctx-size"));
+    }
+
+    /// D#91: the default physical batch is 512 tokens and one chunk is one
+    /// batch, so a document with long unbroken passages failed to index with
+    /// "input (658 tokens) is too large to process".
+    #[test]
+    fn embed_args_raise_the_physical_batch_past_the_512_default() {
+        let args = build_embed_args("/models/nomic-embed.gguf", 8128);
+        for flag in ["-b", "-ub"] {
+            let at = args.iter().position(|a| a == flag).unwrap_or_else(|| panic!("{flag} missing"));
+            let value: u32 = args[at + 1].parse().expect("batch size is a number");
+            assert!(value > 512, "{flag} must clear the 512 default, got {value}");
+        }
     }
 
     #[test]
