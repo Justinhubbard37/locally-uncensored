@@ -36,6 +36,12 @@ export interface TauriMockOptions {
    * behaviour must pin it; the default matches the historical CI target.
    */
   platform?: 'mac' | 'windows'
+  /**
+   * Canned HuggingFace file tree served to `fetch_external` for exactly one
+   * repo (the URL resolveHfGgufFiles queries). Lets the sharded-download flow
+   * run against a byte-accurate snapshot of the real API with no network.
+   */
+  hfTree?: { repo: string; entries: Array<{ type: string; path: string; size: number }> }
 }
 
 export const DEFAULT_ASSISTANT_REPLY = 'PONG_BUILTIN_OK the built-in engine answered.'
@@ -185,6 +191,14 @@ export function tauriMockInit(opts: TauriMockOptions) {
       case 'download_model_to_path': {
         const fn = args?.filename
         if (fn) startedDownloads.add(fn)
+        // Recorded so specs can assert the exact URLs, target dir and byte
+        // sizes a download kicked off with (sharded sets: one call per part).
+        record('__E2E_DL_CALLS__', {
+          url: args?.url,
+          destDir: args?.destDir,
+          filename: fn,
+          expectedBytes: args?.expectedBytes,
+        })
         return Promise.resolve({ status: 'started', id: `dl-${fn}` })
       }
       case 'download_progress': {
@@ -426,6 +440,19 @@ export function tauriMockInit(opts: TauriMockOptions) {
           return Promise.resolve(JSON.stringify({ models: [] }))
         }
         return Promise.reject('error sending request: connection refused (e2e)')
+      }
+
+      // ── external fetch (HF tree resolve etc.) ────────────────────
+      // Serves the canned tree for the one configured repo; every other URL
+      // gets JSON null, which callers treat as "API unreachable" and fall
+      // back gracefully (resolveHfGgufFiles returns null → guessed file).
+      case 'fetch_external': {
+        const url: string = args?.url || ''
+        const t = opts.hfTree
+        if (t && url.includes(`/api/models/${t.repo}/tree/main`)) {
+          return Promise.resolve(JSON.stringify(t.entries))
+        }
+        return Promise.resolve('null')
       }
 
       // ── LU Cloud keychain session (secret_* → in-memory map) ─────
