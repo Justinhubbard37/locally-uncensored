@@ -1043,6 +1043,11 @@ fn download_file_blocking(
     let client = reqwest::blocking::Client::builder()
         .user_agent("LocallyUncensored/2.3")
         .redirect(reqwest::redirect::Policy::limited(10))
+        // This path pulls installers and archives (hundreds of MB), so the
+        // whole-request deadline still fits. The blocking client has no
+        // read_timeout; the model downloader, which handles the 40 GB+ files,
+        // uses the async client and bounds the stall instead of the size.
+        .connect_timeout(std::time::Duration::from_secs(30))
         .timeout(std::time::Duration::from_secs(7200))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
