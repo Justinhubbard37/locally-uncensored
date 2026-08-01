@@ -196,12 +196,42 @@ pub struct BundledModel {
     pub size: u64,
 }
 
+/// Parse a llama.cpp gguf-split file stem: `<base>-NNNNN-of-MMMMM` (4 or 5
+/// digit groups, mirroring the frontend's GGUF_SHARD_RE). Returns
+/// (base, part, total) or None for ordinary single-file stems.
+fn split_shard_stem(stem: &str) -> Option<(&str, u32, u32)> {
+    let (rest, total_s) = stem.rsplit_once("-of-")?;
+    let (base, part_s) = rest.rsplit_once('-')?;
+    for s in [part_s, total_s] {
+        if !(4..=5).contains(&s.len()) || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+    }
+    let part: u32 = part_s.parse().ok()?;
+    let total: u32 = total_s.parse().ok()?;
+    if base.is_empty() || part == 0 || total == 0 || part > total {
+        return None;
+    }
+    Some((base, part, total))
+}
+
 /// Scan a directory (non-recursive) for `*.gguf` files. Case-insensitive on
 /// the extension so `Model.GGUF` from a manual copy still shows up. Sorted by
 /// name for a stable UI ordering. Missing dir → empty list (not an error): a
 /// fresh install has no models yet.
+///
+/// Split GGUFs (`-NNNNN-of-NNNNN`, e.g. the 80+ GB DeepSeek V4 Flash 0731
+/// quants) collapse into ONE entry: name without the shard suffix, path of
+/// part 1 (llama-server loads the rest from the same folder itself), size as
+/// the sum of all parts. Listing each shard would offer parts 2..N as
+/// "models" that can never load. A set with missing parts is not listed at
+/// all, so a paused or aborted multi-part download never impersonates an
+/// installed model (same rule a9ea114 established for MLX downloads).
 pub(crate) fn scan_gguf_models(dir: &Path) -> Vec<BundledModel> {
     let mut out = Vec::new();
+    // (base, total) → (part-numbers seen, path of part 1, byte sum)
+    let mut sets: std::collections::HashMap<(String, u32), (Vec<u32>, Option<String>, u64)> =
+        std::collections::HashMap::new();
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return out,
@@ -228,11 +258,34 @@ pub(crate) fn scan_gguf_models(dir: &Path) -> Vec<BundledModel> {
             continue;
         }
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        if let Some((base, part, total)) = split_shard_stem(&name) {
+            let slot = sets
+                .entry((base.to_string(), total))
+                .or_insert((Vec::new(), None, 0));
+            slot.0.push(part);
+            if part == 1 {
+                slot.1 = Some(path.to_string_lossy().to_string());
+            }
+            slot.2 += size;
+            continue;
+        }
         out.push(BundledModel {
             name,
             path: path.to_string_lossy().to_string(),
             size,
         });
+    }
+    for ((base, total), (mut parts, first_path, size)) in sets {
+        parts.sort_unstable();
+        parts.dedup();
+        let complete = parts.len() as u32 == total && parts.first() == Some(&1);
+        if let (true, Some(path)) = (complete, first_path) {
+            out.push(BundledModel {
+                name: base,
+                path,
+                size,
+            });
+        }
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
@@ -1021,6 +1074,54 @@ mod tests {
     fn scan_missing_dir_is_empty_not_error() {
         let dir = std::env::temp_dir().join("lu-engine-nonexistent-xyz-123");
         assert!(scan_gguf_models(&dir).is_empty());
+    }
+
+    #[test]
+    fn scan_collapses_a_complete_shard_set_into_one_model() {
+        let dir = std::env::temp_dir().join(format!("lu-engine-shards-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Big-UD-IQ1_S-00001-of-00003.gguf"), b"aa").unwrap();
+        std::fs::write(dir.join("Big-UD-IQ1_S-00002-of-00003.gguf"), b"bbb").unwrap();
+        std::fs::write(dir.join("Big-UD-IQ1_S-00003-of-00003.gguf"), b"c").unwrap();
+        std::fs::write(dir.join("solo.gguf"), b"dddd").unwrap();
+
+        let models = scan_gguf_models(&dir);
+        let names: Vec<&str> = models.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["Big-UD-IQ1_S", "solo"]);
+        let set = &models[0];
+        assert!(set.path.ends_with("Big-UD-IQ1_S-00001-of-00003.gguf"));
+        assert_eq!(set.size, 6); // sum of all three parts
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn scan_hides_incomplete_shard_sets() {
+        let dir = std::env::temp_dir().join(format!("lu-engine-partial-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // part 2 missing → mid-download, must not impersonate a loadable model
+        std::fs::write(dir.join("Half-00001-of-00003.gguf"), b"a").unwrap();
+        std::fs::write(dir.join("Half-00003-of-00003.gguf"), b"c").unwrap();
+        // part 1 missing → can never load
+        std::fs::write(dir.join("Tail-00002-of-00002.gguf"), b"z").unwrap();
+
+        assert!(scan_gguf_models(&dir).is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn shard_stem_parser_rejects_lookalikes() {
+        assert_eq!(
+            split_shard_stem("M-00001-of-00003"),
+            Some(("M", 1, 3))
+        );
+        assert_eq!(split_shard_stem("M-0001-of-0002"), Some(("M", 1, 2)));
+        assert_eq!(split_shard_stem("plain-model"), None);
+        assert_eq!(split_shard_stem("v2-out-of-band"), None); // non-numeric groups
+        assert_eq!(split_shard_stem("M-001-of-002"), None); // too short
+        assert_eq!(split_shard_stem("M-00004-of-00003"), None); // part > total
+        assert_eq!(split_shard_stem("-00001-of-00002"), None); // empty base
     }
 }
 
