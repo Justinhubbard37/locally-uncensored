@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AnimatePresence, motion } from 'framer-motion'
 import {
   Check,
   FileJson,
@@ -22,6 +21,7 @@ import {
   type WorkflowTagMode,
 } from '../../stores/workflowStore'
 import { TagPicker } from '../workflows/TagPicker'
+import { Modal } from '../ui/Modal'
 import { Button } from './ui/Button'
 import { EmptyState } from './ui/EmptyState'
 import { Segmented } from './ui/Segmented'
@@ -41,7 +41,9 @@ const INPUT =
   'rounded-[var(--radius-control)] bg-white/[0.04] border border-white/[0.08] ' +
   'outline-none focus:border-white/20 transition-colors'
 
-/** Full-surface workflow manager, opened from the Create composer. */
+/** Workflow manager popup, opened from the Create composer. A centered
+ *  dialog over the Create surface (David 2026-08-02: a window, not a page),
+ *  on the same house Modal the VHS install prompt uses. */
 export function WorkflowsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   useEffect(() => {
     if (!open) return
@@ -51,13 +53,13 @@ export function WorkflowsModal({ open, onClose }: { open: boolean; onClose: () =
   }, [open, onClose])
 
   return (
-    <AnimatePresence>
-      {open && <WorkflowsModalInner onClose={onClose} />}
-    </AnimatePresence>
+    <Modal open={open} onClose={onClose} title="Workflows & tags" hideHeader maxWidth="max-w-2xl" panelPad="p-0">
+      <WorkflowsModalInner />
+    </Modal>
   )
 }
 
-function WorkflowsModalInner({ onClose }: { onClose: () => void }) {
+function WorkflowsModalInner() {
   const [tab, setTab] = useState<PageTab>('workflows')
 
   const {
@@ -186,34 +188,28 @@ function WorkflowsModalInner({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.15 }}
-      className="fixed inset-0 z-[90] bg-white dark:bg-[#141414] flex flex-col"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Workflows and tags"
-    >
-      <div className="flex items-center gap-3 px-4 h-12 border-b border-white/[0.06] shrink-0">
-        <Workflow size={15} className="text-lu-accent shrink-0" />
-        <span className="t-title text-gray-200">Workflows &amp; tags</span>
-        <div className="flex-1" />
-        <Segmented
-          size="sm"
-          layoutId="workflows-tab"
-          value={tab}
-          onChange={setTab}
-          options={TABS}
-          ariaLabel="Workflow manager section"
-        />
-        <div className="flex-1" />
-        <Button variant="ghost" size="sm" icon={X} iconOnly onClick={onClose} title="Close" />
+    <div className="flex flex-col">
+      {/* The Modal's floating X sits top-right; the tab switcher is centered
+          on its own row so it never fights the title for the middle. */}
+      <div className="px-5 pt-4 pb-3 border-b border-gray-200 dark:border-white/[0.06] space-y-3">
+        <div className="flex items-center gap-2">
+          <Workflow size={15} className="text-lu-accent shrink-0" />
+          <span className="t-title text-gray-900 dark:text-gray-200">Workflows &amp; tags</span>
+        </div>
+        <div className="flex justify-center">
+          <Segmented
+            size="sm"
+            layoutId="workflows-tab"
+            value={tab}
+            onChange={setTab}
+            options={TABS}
+            ariaLabel="Workflow manager section"
+          />
+        </div>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin">
-        <div className="mx-auto w-full max-w-[860px] px-5 py-5">
+      <div className="max-h-[62vh] overflow-y-auto scrollbar-thin">
+        <div className="px-5 py-4">
           {tab === 'workflows' && (
             <div className="space-y-4">
               <section className="rounded-[var(--radius-panel)] bg-white/[0.03] border border-white/[0.06] p-4">
@@ -510,7 +506,7 @@ function WorkflowsModalInner({ onClose }: { onClose: () => void }) {
           )}
         </div>
       </div>
-    </motion.div>
+    </div>
   )
 }
 

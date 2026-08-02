@@ -14,6 +14,7 @@ import {
   runCredits,
 } from '../../../stores/cloudCatalogStore'
 import { INTENT_MAP } from './intents'
+import { useWorkflowStore, shouldShowManagerNotice } from '../../../stores/workflowStore'
 import { noPromptHint, shouldShowLaneHint } from './laneHint'
 import { ModelChip } from './ModelChip'
 import { SpecialControls } from './SpecialIntentControls'
@@ -59,6 +60,7 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
   const videoInput = useCreateStore((s) => s.videoInput)
   const extendSource = useCreateStore((s) => s.extendSource)
   const musicDuration = useCreateStore((s) => s.musicDuration)
+  const managerNoticeSeen = useWorkflowStore((s) => s.managerNoticeSeen)
   const { generate, cancel, quota } = useCreateExp()
 
   // The Create button turns into Cancel in place — a double-click's second
@@ -225,10 +227,21 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
               </Tooltip>
             )}
             {/* Custom ComfyUI graphs only run on the local backend, so the
-                manager only shows where it can do something. */}
+                manager only shows where it can do something. Until the button
+                was clicked once, a small dot marks it as new (David
+                2026-08-02: no banner line, just a minimal marker that goes
+                away on click). */}
             {backend === 'local' && (
               <Tooltip content="Your own ComfyUI workflows, and the tags that pair them with models.">
-                <Button variant="ghost" size="sm" icon={Workflow} iconOnly onClick={onOpenWorkflows} title="Workflows and tags" />
+                <div className="relative">
+                  <Button variant="ghost" size="sm" icon={Workflow} iconOnly onClick={onOpenWorkflows} title="Workflows and tags" />
+                  {shouldShowManagerNotice(backend, managerNoticeSeen) && (
+                    <span
+                      aria-hidden
+                      className="absolute top-0 right-0 w-1.5 h-1.5 rounded-full bg-lu-accent pointer-events-none"
+                    />
+                  )}
+                </div>
               </Tooltip>
             )}
             {!isUtility && (

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { AlertTriangle, Cloud, Workflow, X } from 'lucide-react'
+import { AlertTriangle, Cloud, X } from 'lucide-react'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
 import { useCloudNoticeStore, CLOUD_RETENTION_DAYS, shouldShowRetentionNotice } from '../../../stores/cloudNoticeStore'
-import { useWorkflowStore, shouldShowManagerNotice } from '../../../stores/workflowStore'
+import { useWorkflowStore } from '../../../stores/workflowStore'
 import { CreateExpProvider, useCreateExp } from './CreateContext'
 import { IntentBar } from './IntentBar'
 import { Stage } from './Stage'
@@ -38,7 +38,6 @@ function CreateExperimentalInner() {
   const isGenerating = useCreateStore((s) => s.isGenerating)
   const retentionNoticeSeen = useCloudNoticeStore((s) => s.retentionNoticeSeen)
   const setRetentionNoticeSeen = useCloudNoticeStore((s) => s.setRetentionNoticeSeen)
-  const managerNoticeSeen = useWorkflowStore((s) => s.managerNoticeSeen)
   const setManagerNoticeSeen = useWorkflowStore((s) => s.setManagerNoticeSeen)
   const { modelLoadError, connected, comfyOnCpu } = useCreateExp()
 
@@ -219,34 +218,6 @@ function CreateExperimentalInner() {
             className="shrink-0 px-2 py-0.5 rounded bg-purple-500/15 hover:bg-purple-500/25 text-purple-100 transition-colors whitespace-nowrap"
           >
             Do not show again
-          </button>
-        </div>
-      )}
-
-      {/* Workflow manager arrival (2.6.2). Own ComfyUI graphs used to be a
-          dead end here, so the surface says once that they are not any more
-          and opens the manager from the notice. Local only, same shape as the
-          retention notice above: no auto-hide, dismissed by the explicit
-          button, and it stays dismissed across updates. */}
-      {shouldShowManagerNotice(backend, managerNoticeSeen) && (
-        <div className="flex items-start gap-2 px-4 py-2 bg-lu-accent-soft border-b border-white/[0.06] text-gray-300 text-xs shrink-0">
-          <Workflow size={12} className="shrink-0 mt-0.5 text-lu-accent" />
-          <span className="flex-1 min-w-0">
-            You can bring your own ComfyUI workflows now. Import one, tag it, and any model
-            with a matching tag will offer it.
-          </span>
-          <button
-            onClick={() => { setWorkflowsOpen(true); setManagerNoticeSeen(true) }}
-            className="shrink-0 px-2 py-0.5 rounded bg-white/10 hover:bg-white/15 text-gray-100 transition-colors whitespace-nowrap"
-          >
-            Take a look
-          </button>
-          <button
-            onClick={() => setManagerNoticeSeen(true)}
-            className="shrink-0 text-gray-500 hover:text-gray-200"
-            title="Dismiss"
-          >
-            <X size={14} />
           </button>
         </div>
       )}

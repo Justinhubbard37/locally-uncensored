@@ -65,7 +65,7 @@ interface WorkflowState {
   civitaiApiKey: string
   civitaiHost: string
 
-  /** One-time "the manager is here" notice on the Create surface. */
+  /** One-time "new" dot on the Composer's workflow button. */
   managerNoticeSeen: boolean
   setManagerNoticeSeen: (v: boolean) => void
 
@@ -443,11 +443,12 @@ export const useWorkflowStore = create<WorkflowState>()(
 )
 
 /**
- * Visibility rule for the one-time workflow manager notice, kept pure so it is
- * unit-testable (the JSX condition would otherwise only be provable live).
- * Local backend only — a custom ComfyUI workflow has nothing to run on in cloud
- * mode — and never again once dismissed. 'workflow-store' is in the AppShell
- * backup key list, so the dismissal survives an NSIS update.
+ * Visibility rule for the one-time "new" dot on the Composer's workflow
+ * button (David 2026-08-02: a minimal marker, not a banner), kept pure so it
+ * is unit-testable. Local backend only — a custom ComfyUI workflow has
+ * nothing to run on in cloud mode — and gone for good after the first click.
+ * 'workflow-store' is in the AppShell backup key list, so that click survives
+ * an NSIS update.
  */
 export function shouldShowManagerNotice(
   backend: 'local' | 'cloud',
