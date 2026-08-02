@@ -369,6 +369,40 @@ pub fn register_openai_host(
     Ok(())
 }
 
+/// Attach the body and the caller's headers to a proxied request.
+///
+/// reqwest's `.header()` APPENDS, it does not replace. Setting Content-Type
+/// here and forwarding a caller that sends its own put the header on the wire
+/// twice, and aiohttp answers that with "Duplicate 'Content-Type' header
+/// found" — every Create submit on a ComfyUI with aiohttp 3.9+ died on it
+/// (GH #95). The caller's own value wins; we only fill in the default.
+fn apply_body_and_headers(
+    mut request: reqwest::RequestBuilder,
+    body: Option<String>,
+    headers: Option<std::collections::HashMap<String, String>>,
+) -> reqwest::RequestBuilder {
+    let caller_sets_content_type = headers
+        .as_ref()
+        .is_some_and(|h| h.keys().any(|k| k.eq_ignore_ascii_case("content-type")));
+
+    if let Some(body_str) = body {
+        if !caller_sets_content_type {
+            request = request.header("Content-Type", "application/json");
+        }
+        request = request.body(body_str);
+    }
+
+    // Caller headers (Authorization for keyed backends) — dropping them made
+    // every proxied request to an authed OpenAI-compat server 401.
+    if let Some(hdrs) = headers {
+        for (k, v) in hdrs {
+            request = request.header(k.as_str(), v.as_str());
+        }
+    }
+
+    request
+}
+
 /// Generic localhost proxy — fetch any localhost or configured-backend URL
 /// bypassing CORS. Used for Ollama and ComfyUI API calls in production mode.
 ///
@@ -407,17 +441,7 @@ pub async fn proxy_localhost(
         _ => client.get(&url),
     };
 
-    if let Some(body_str) = body {
-        request = request.header("Content-Type", "application/json").body(body_str);
-    }
-
-    // Caller headers (Authorization for keyed backends) — dropping them made
-    // every proxied request to an authed OpenAI-compat server 401.
-    if let Some(hdrs) = headers {
-        for (k, v) in hdrs {
-            request = request.header(k.as_str(), v.as_str());
-        }
-    }
+    request = apply_body_and_headers(request, body, headers);
 
     let resp = request
         .send()
@@ -455,15 +479,7 @@ pub async fn proxy_localhost_stream(url: String, method: Option<String>, body: O
         _ => client.get(&url),
     };
 
-    if let Some(body_str) = body {
-        request = request.header("Content-Type", "application/json").body(body_str);
-    }
-
-    if let Some(hdrs) = headers {
-        for (k, v) in hdrs {
-            request = request.header(k.as_str(), v.as_str());
-        }
-    }
+    request = apply_body_and_headers(request, body, headers);
 
     let resp = request
         .send()
@@ -532,15 +548,7 @@ pub async fn proxy_localhost_stream_chunked(
             _ => client.get(&url),
         };
 
-        if let Some(body_str) = body {
-            request = request.header("Content-Type", "application/json").body(body_str);
-        }
-
-        if let Some(hdrs) = headers {
-            for (k, v) in hdrs {
-                request = request.header(k.as_str(), v.as_str());
-            }
-        }
+        request = apply_body_and_headers(request, body, headers);
 
         // Race the request against cancellation even during connect/headers.
         let resp = tokio::select! {
@@ -840,6 +848,76 @@ pub async fn ollama_search(query: String) -> Result<serde_json::Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn built_headers(
+        body: Option<String>,
+        headers: Option<std::collections::HashMap<String, String>>,
+    ) -> reqwest::header::HeaderMap {
+        apply_body_and_headers(
+            reqwest::Client::new().post("http://127.0.0.1:8188/prompt"),
+            body,
+            headers,
+        )
+        .build()
+        .unwrap()
+        .headers()
+        .clone()
+    }
+
+    fn caller(name: &str, value: &str) -> std::collections::HashMap<String, String> {
+        let mut h = std::collections::HashMap::new();
+        h.insert(name.to_string(), value.to_string());
+        h
+    }
+
+    /// GH #95: the Create submit sends its own Content-Type, the proxy appended
+    /// a second one, and ComfyUI (aiohttp) answered "Duplicate 'Content-Type'
+    /// header found" — Create was dead on 2.6.0 for anyone on a current aiohttp.
+    #[test]
+    fn caller_content_type_is_never_sent_twice() {
+        for name in ["Content-Type", "content-type", "CONTENT-TYPE"] {
+            let sent = built_headers(
+                Some(r#"{"prompt":{}}"#.to_string()),
+                Some(caller(name, "application/json")),
+            );
+            assert_eq!(
+                sent.get_all(reqwest::header::CONTENT_TYPE).iter().count(),
+                1,
+                "{} produced a duplicate Content-Type",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn the_callers_own_content_type_wins() {
+        let sent = built_headers(
+            Some("<xml/>".to_string()),
+            Some(caller("Content-Type", "application/xml")),
+        );
+        assert_eq!(sent.get(reqwest::header::CONTENT_TYPE).unwrap(), "application/xml");
+    }
+
+    #[test]
+    fn a_body_without_caller_headers_still_gets_json() {
+        let sent = built_headers(Some("{}".to_string()), None);
+        assert_eq!(sent.get(reqwest::header::CONTENT_TYPE).unwrap(), "application/json");
+    }
+
+    /// The reason caller headers are forwarded at all: a keyed OpenAI-compat
+    /// backend answered 401 without them.
+    #[test]
+    fn authorization_still_rides_along() {
+        let sent = built_headers(Some("{}".to_string()), Some(caller("Authorization", "Bearer k")));
+        assert_eq!(sent.get(reqwest::header::AUTHORIZATION).unwrap(), "Bearer k");
+        assert_eq!(sent.get_all(reqwest::header::CONTENT_TYPE).iter().count(), 1);
+    }
+
+    #[test]
+    fn a_get_without_body_carries_no_content_type() {
+        let sent = built_headers(None, Some(caller("Authorization", "Bearer k")));
+        assert!(sent.get(reqwest::header::CONTENT_TYPE).is_none());
+    }
 
     #[test]
     fn blocks_cloud_metadata_and_link_local() {
