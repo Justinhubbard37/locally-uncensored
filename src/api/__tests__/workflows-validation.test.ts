@@ -1,11 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import {
-  validateWorkflowJson,
-  extractSearchTerms,
-  autoDetectParameterMap,
-  getBuiltinTemplates,
-  parseImportedWorkflow,
-} from '../workflows'
+import { validateWorkflowJson, extractSearchTerms, autoDetectParameterMap, injectParameters, getBuiltinTemplates, parseImportedWorkflow, } from '../workflows'
 import type { ModelType } from '../comfyui'
 
 describe('workflows — pure functions', () => {
@@ -70,6 +64,132 @@ describe('workflows — pure functions', () => {
     })
   })
 
+it('injects LU dimensions into a legacy ImageResizeKJv2 workflow', async () => {
+  const wf = {
+    '10': {
+      class_type: 'LoadImage',
+      inputs: {
+        image: 'placeholder.png',
+      },
+    },
+    '16': {
+      class_type: 'ImageResizeKJv2',
+      inputs: {
+        width: 512,
+        height: 512,
+        image: ['10', 0],
+      },
+    },
+    '9': {
+      class_type: 'WanImageToVideo',
+      inputs: {
+        width: ['16', 1],
+        height: ['16', 2],
+        start_image: ['16', 0],
+      },
+    },
+  }
+
+  const injected = await injectParameters(
+    wf,
+    {},
+    {
+      prompt: 'test',
+      negativePrompt: '',
+      model: 'test.safetensors',
+      sampler: 'euler',
+      scheduler: 'normal',
+      steps: 20,
+      cfgScale: 5,
+      width: 832,
+      height: 480,
+      seed: 1,
+      batchSize: 1,
+      frames: 81,
+      fps: 16,
+      inputImage: 'source.png',
+    },
+    'wan',
+  )
+
+  expect(injected['16'].inputs.width).toBe(832)
+  expect(injected['16'].inputs.height).toBe(480)
+
+  // WanImageToVideo must remain connected to the resize node.
+  expect(injected['9'].inputs.width).toEqual(['16', 1])
+  expect(injected['9'].inputs.height).toEqual(['16', 2])
+})
+
+  describe('injectParameters — source image', () => {
+    const videoParams = {
+      model: 'wan2.2_i2v.safetensors',
+      prompt: 'gentle camera movement',
+      negativePrompt: '',
+      sampler: 'euler',
+      scheduler: 'simple',
+      steps: 20,
+      cfgScale: 5,
+      width: 832,
+      height: 480,
+      seed: 7,
+      batchSize: 1,
+      frames: 33,
+      fps: 16,
+      inputImage: 'lu-selected-image.png',
+    }
+
+    it('injects the LU image into the mapped LoadImage node', async () => {
+      const workflow = {
+        '12': {
+          class_type: 'LoadImage',
+          inputs: {
+            image: 'placeholder.png',
+          },
+        },
+      }
+
+      const parameterMap = autoDetectParameterMap(workflow)
+
+      const result = await injectParameters(
+        workflow,
+        parameterMap,
+        videoParams as any,
+        'wan' as ModelType,
+      )
+
+      expect(result['12'].inputs.image).toBe(
+        'lu-selected-image.png',
+      )
+
+      // Injection works on a cloned workflow.
+      expect(workflow['12'].inputs.image).toBe(
+        'placeholder.png',
+      )
+    })
+
+    it('supports older saved maps without inputImage metadata', async () => {
+      const workflow = {
+        '27': {
+          class_type: 'LoadImage',
+          inputs: {
+            image: 'old-image.png',
+          },
+        },
+      }
+
+      const result = await injectParameters(
+        workflow,
+        {},
+        videoParams as any,
+        'wan' as ModelType,
+      )
+
+      expect(result['27'].inputs.image).toBe(
+        'lu-selected-image.png',
+      )
+    })
+  })
+
   // ─── extractSearchTerms ───
 
   describe('extractSearchTerms', () => {
@@ -123,6 +243,45 @@ describe('workflows — pure functions', () => {
   })
 
   // ─── autoDetectParameterMap ───
+
+it('detects ImageResizeKJv2 dimensions for custom I2V workflows', () => {
+  const wf = {
+    '10': {
+      class_type: 'LoadImage',
+      inputs: {
+        image: 'placeholder.png',
+      },
+    },
+    '16': {
+      class_type: 'ImageResizeKJv2',
+      inputs: {
+        width: 512,
+        height: 512,
+        image: ['10', 0],
+      },
+    },
+    '9': {
+      class_type: 'WanImageToVideo',
+      inputs: {
+        width: ['16', 1],
+        height: ['16', 2],
+        start_image: ['16', 0],
+      },
+    },
+  }
+
+  const map = autoDetectParameterMap(wf)
+
+  expect(map.width).toEqual({
+    nodeId: '16',
+    inputKey: 'width',
+  })
+
+  expect(map.height).toEqual({
+    nodeId: '16',
+    inputKey: 'height',
+  })
+})
 
   describe('autoDetectParameterMap', () => {
     it('detects KSampler parameters (seed, steps, cfg, sampler, scheduler)', () => {

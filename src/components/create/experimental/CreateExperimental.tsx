@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { AlertTriangle, Cloud, X } from 'lucide-react'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
 import { useCloudNoticeStore, CLOUD_RETENTION_DAYS, shouldShowRetentionNotice } from '../../../stores/cloudNoticeStore'
+import { useWorkflowStore } from '../../../stores/workflowStore'
 import { CreateExpProvider, useCreateExp } from './CreateContext'
 import { IntentBar } from './IntentBar'
 import { Stage } from './Stage'
@@ -10,6 +11,7 @@ import { Composer } from './Composer'
 import { CreatePanel } from './CreatePanel'
 import { Lightbox } from './Lightbox'
 import { AdvancedDrawer } from './AdvancedDrawer'
+import { WorkflowsModal } from '../WorkflowsModal'
 import { MaskEditor } from './MaskEditor'
 import { VhsInstallModal } from './VhsInstallModal'
 import { INTENT_MAP, isIntentAvailable } from './intents'
@@ -36,6 +38,7 @@ function CreateExperimentalInner() {
   const isGenerating = useCreateStore((s) => s.isGenerating)
   const retentionNoticeSeen = useCloudNoticeStore((s) => s.retentionNoticeSeen)
   const setRetentionNoticeSeen = useCloudNoticeStore((s) => s.setRetentionNoticeSeen)
+  const setManagerNoticeSeen = useWorkflowStore((s) => s.setManagerNoticeSeen)
   const { modelLoadError, connected, comfyOnCpu } = useCreateExp()
 
   const [shownId, setShownId] = useState<string | null>(null)
@@ -43,6 +46,7 @@ function CreateExperimentalInner() {
   const [maskOpen, setMaskOpen] = useState(false)
   const [lightbox, setLightbox] = useState<GalleryItem | null>(null)
   const [panelOpen, setPanelOpen] = useState(false)
+  const [workflowsOpen, setWorkflowsOpen] = useState(false)
 
   // One-click CORS fix (David 2026-07-17): restart the user-managed ComfyUI
   // under LU's management so it carries --enable-cors-header. On success the
@@ -233,9 +237,13 @@ function CreateExperimentalInner() {
       </div>
 
       {/* Prompt window — full width, beneath the viewer + gallery. */}
-      <Composer onOpenAdvanced={() => setAdvancedOpen(true)} />
+      <Composer
+        onOpenAdvanced={() => setAdvancedOpen(true)}
+        onOpenWorkflows={() => { setWorkflowsOpen(true); setManagerNoticeSeen(true) }}
+      />
 
       <AdvancedDrawer open={advancedOpen} onClose={() => setAdvancedOpen(false)} />
+      <WorkflowsModal open={workflowsOpen} onClose={() => setWorkflowsOpen(false)} />
       <MaskEditor open={maskOpen} onClose={() => setMaskOpen(false)} />
 
       <Lightbox item={lightbox} onClose={() => setLightbox(null)} />

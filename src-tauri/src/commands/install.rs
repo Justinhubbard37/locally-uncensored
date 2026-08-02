@@ -330,6 +330,16 @@ fn diagnose_pip_error_inner(stderr: &str) -> String {
          • Arch:   sudo pacman -S python-virtualenv\n\
          • Debian/Ubuntu: sudo apt install python3-venv\n\
          • Fedora: sudo dnf install python3-virtualenv"
+    } else if lower.contains("ssl module in python is not available") {
+        // numbrain (Discord, 2026-08-02): a pyenv/source-built python without
+        // the _ssl extension can't reach pypi AT ALL, and the generic SSL hint
+        // below (antivirus/clock) sent him in the wrong direction.
+        "This Python was built without the ssl module, so pip cannot reach \
+         pypi.org at all. Use your distro's regular python3 (it ships with \
+         ssl): check with  python3 -c \"import ssl\"  — if that fails, \
+         reinstall python3 via your package manager (pyenv builds need the \
+         OpenSSL headers installed first, e.g. libssl-dev / openssl-devel), \
+         then retry."
     } else if lower.contains("ssl") {
         "SSL error reaching pypi.org. Often caused by an antivirus / firewall \
          intercepting TLS, or a stale system clock. Disable TLS interception \
@@ -3481,6 +3491,20 @@ mod tests {
         let msg = diagnose_pip_error("SSLError(SSLZeroReturnError(...))");
         let lower = msg.to_lowercase();
         assert!(lower.contains("antivirus") || lower.contains("firewall") || lower.contains("clock"));
+    }
+
+    #[test]
+    fn a_python_without_ssl_is_named_not_blamed_on_antivirus() {
+        // numbrain's exact pip wording (Discord 2026-08-02): the interpreter
+        // itself has no _ssl, so the antivirus/clock hint is the wrong trail.
+        let msg = diagnose_pip_error(
+            "WARNING: pip is configured with locations that require TLS/SSL, \
+             however the ssl module in Python is not available.",
+        );
+        let lower = msg.to_lowercase();
+        assert!(lower.contains("built without the ssl module"));
+        assert!(lower.contains("import ssl"));
+        assert!(!lower.contains("antivirus"));
     }
 
     #[test]

@@ -7,7 +7,13 @@ import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
  *  remoteUrl (cloud signed URL) → dataUrl (in-memory self-contained fallback)
  *  → ComfyUI /view path (filename/subfolder). */
 export function galleryItemUrl(item: GalleryItem): string {
-  return item.remoteUrl ?? item.dataUrl ?? getImageUrl(item.filename, item.subfolder)
+  return item.remoteUrl
+    ?? item.dataUrl
+    ?? getImageUrl(
+      item.filename,
+      item.subfolder,
+      item.comfyType ?? 'output',
+    )
 }
 
 // Cloud signed URLs expire ~1 h after the last read, so a persisted item's
@@ -125,7 +131,13 @@ export async function proxiedComfyBlobUrl(item: GalleryItem): Promise<string | n
   // ask the wrong server about a file it never made.
   if (!isTauri() || item.jobId || item.remoteUrl || item.dataUrl || item.localPath) return null
   try {
-    const bytes = await fetchLocalhostBytes(getImageUrl(item.filename, item.subfolder))
+    const bytes = await fetchLocalhostBytes(
+    getImageUrl(
+    item.filename,
+    item.subfolder,
+    item.comfyType ?? 'output',
+  ),
+)
     return URL.createObjectURL(new Blob([bytes], { type: guessMime(item.filename) }))
   } catch {
     return null

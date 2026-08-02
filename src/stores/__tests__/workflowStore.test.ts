@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { useWorkflowStore } from '../workflowStore'
+import { useWorkflowStore, shouldShowManagerNotice } from '../workflowStore'
 import type { WorkflowTemplate } from '../../types/workflows'
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -23,7 +23,12 @@ const INITIAL_STATE = {
   installedWorkflows: [],
   modelTypeAssignments: {},
   modelNameAssignments: {},
+  tags: [],
+  workflowTags: {},
+  modelTags: {},
   civitaiApiKey: '',
+  civitaiHost: 'civitai.com',
+  managerNoticeSeen: false,
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -271,6 +276,376 @@ describe('workflowStore', () => {
     })
   })
 
+  // ── workflow and model tags ──────────────────────────────────
+
+  describe('tags', () => {
+    it('creates a trimmed tag and deduplicates names case-insensitively', () => {
+      const firstId = useWorkflowStore
+        .getState()
+        .createTag('  Wan   2.2  ')
+
+      const duplicateId = useWorkflowStore
+        .getState()
+        .createTag('wan 2.2')
+
+      expect(firstId).not.toBeNull()
+      expect(duplicateId).toBe(firstId)
+
+      const tags = useWorkflowStore.getState().tags
+
+      expect(tags).toHaveLength(1)
+      expect(tags[0].name).toBe('Wan 2.2')
+    })
+
+    it('blocks an explicitly assigned workflow that does not match the model tags', () => {
+      const wanTag = useWorkflowStore
+        .getState()
+        .createTag('Wan 2.2')!
+
+      const i2vTag = useWorkflowStore
+        .getState()
+        .createTag('I2V')!
+
+      const t2vTag = useWorkflowStore
+        .getState()
+        .createTag('T2V')!
+
+      useWorkflowStore
+        .getState()
+        .installWorkflow(
+          makeWorkflow('wf-t2v', 'Wan T2V', {
+            mode: 'video',
+          }),
+        )
+
+      useWorkflowStore
+        .getState()
+        .setWorkflowTags(
+          'wf-t2v',
+          [wanTag, t2vTag],
+        )
+
+      useWorkflowStore
+        .getState()
+        .setModelTags(
+          'wan-i2v.gguf',
+          'video',
+          [wanTag, i2vTag],
+        )
+
+      useWorkflowStore
+        .getState()
+        .assignToModelName(
+          'wan-i2v.gguf',
+          'wf-t2v',
+        )
+
+      expect(
+        useWorkflowStore
+          .getState()
+          .getWorkflowForModel(
+            'wan-i2v.gguf',
+            'wan',
+          ),
+      ).toBeNull()
+    })
+
+    it('rejects an empty tag name', () => {
+      const id = useWorkflowStore.getState().createTag('   ')
+
+      expect(id).toBeNull()
+      expect(useWorkflowStore.getState().tags).toEqual([])
+    })
+
+    it('renames a tag', () => {
+      const id = useWorkflowStore
+        .getState()
+        .createTag('Old name')!
+
+      useWorkflowStore
+        .getState()
+        .renameTag(id, 'New name')
+
+      expect(useWorkflowStore.getState().tags[0].name)
+        .toBe('New name')
+    })
+
+    it('removes a deleted tag from workflows and models', () => {
+      const id = useWorkflowStore
+        .getState()
+        .createTag('Wan')!
+
+      useWorkflowStore
+        .getState()
+        .setWorkflowTags('wf-1', [id])
+
+      useWorkflowStore
+        .getState()
+        .setModelTags('wan.gguf', 'video', [id])
+
+      useWorkflowStore
+        .getState()
+        .deleteTag(id)
+
+      const state = useWorkflowStore.getState()
+
+      expect(state.tags).toEqual([])
+      expect(state.workflowTags).toEqual({})
+      expect(state.modelTags).toEqual({})
+    })
+
+    it('filters unknown and duplicate tag IDs from assignments', () => {
+      const id = useWorkflowStore
+        .getState()
+        .createTag('I2V')!
+
+      useWorkflowStore
+        .getState()
+        .setWorkflowTags('wf-1', [
+          id,
+          'missing-tag',
+          id,
+        ])
+
+      expect(
+        useWorkflowStore.getState().workflowTags['wf-1'],
+      ).toEqual([id])
+    })
+
+    it('matches a workflow when the model has every required tag', () => {
+      const wanTag = useWorkflowStore
+        .getState()
+        .createTag('Wan 2.2')!
+
+      const i2vTag = useWorkflowStore
+        .getState()
+        .createTag('I2V')!
+
+      useWorkflowStore
+        .getState()
+        .installWorkflow(
+          makeWorkflow('wf-i2v', 'Wan I2V', {
+            mode: 'video',
+          }),
+        )
+
+      useWorkflowStore
+        .getState()
+        .setWorkflowTags('wf-i2v', [
+          wanTag,
+          i2vTag,
+        ])
+
+      useWorkflowStore
+        .getState()
+        .setModelTags(
+          'wan-i2v.gguf',
+          'video',
+          [wanTag],
+        )
+
+      expect(
+        useWorkflowStore
+          .getState()
+          .getMatchingWorkflows(
+            'wan-i2v.gguf',
+            'video',
+          ),
+      ).toEqual([])
+
+      useWorkflowStore
+        .getState()
+        .setModelTags(
+          'wan-i2v.gguf',
+          'video',
+          [wanTag, i2vTag],
+        )
+
+      expect(
+        useWorkflowStore
+          .getState()
+          .getMatchingWorkflows(
+            'wan-i2v.gguf',
+            'video',
+          )
+          .map((workflow) => workflow.id),
+      ).toEqual(['wf-i2v'])
+    })
+
+    it('normalises model casing and Windows path separators', () => {
+      const tagId = useWorkflowStore
+        .getState()
+        .createTag('Wan')!
+
+      useWorkflowStore
+        .getState()
+        .installWorkflow(
+          makeWorkflow('wf-video', 'Wan Video', {
+            mode: 'video',
+          }),
+        )
+
+      useWorkflowStore
+        .getState()
+        .setWorkflowTags('wf-video', [tagId])
+
+      useWorkflowStore
+        .getState()
+        .setModelTags(
+          'Models\\WAN.GGUF',
+          'video',
+          [tagId],
+        )
+
+      const matches = useWorkflowStore
+        .getState()
+        .getMatchingWorkflows(
+          'models/wan.gguf',
+          'video',
+        )
+
+      expect(matches.map((workflow) => workflow.id))
+        .toEqual(['wf-video'])
+    })
+
+    it('does not offer an image-only workflow for a video model', () => {
+      const tagId = useWorkflowStore
+        .getState()
+        .createTag('Shared')!
+
+      useWorkflowStore
+        .getState()
+        .installWorkflow(
+          makeWorkflow('wf-image', 'Image only', {
+            mode: 'image',
+          }),
+        )
+
+      useWorkflowStore
+        .getState()
+        .setWorkflowTags('wf-image', [tagId])
+
+      useWorkflowStore
+        .getState()
+        .setModelTags(
+          'wan.gguf',
+          'video',
+          [tagId],
+        )
+
+      expect(
+        useWorkflowStore
+          .getState()
+          .getMatchingWorkflows(
+            'wan.gguf',
+            'video',
+          ),
+      ).toEqual([])
+    })
+
+    it('sorts more specific matching workflows first', () => {
+      const wanTag = useWorkflowStore
+        .getState()
+        .createTag('Wan')!
+
+      const i2vTag = useWorkflowStore
+        .getState()
+        .createTag('I2V')!
+
+      useWorkflowStore
+        .getState()
+        .installWorkflow(
+          makeWorkflow('wf-general', 'Wan general', {
+            mode: 'video',
+          }),
+        )
+
+      useWorkflowStore
+        .getState()
+        .installWorkflow(
+          makeWorkflow('wf-specific', 'Wan I2V', {
+            mode: 'video',
+          }),
+        )
+
+      useWorkflowStore
+        .getState()
+        .setWorkflowTags('wf-general', [
+          wanTag,
+        ])
+
+      useWorkflowStore
+        .getState()
+        .setWorkflowTags('wf-specific', [
+          wanTag,
+          i2vTag,
+        ])
+
+      useWorkflowStore
+        .getState()
+        .setModelTags(
+          'wan-i2v.gguf',
+          'video',
+          [wanTag, i2vTag],
+        )
+
+      expect(
+        useWorkflowStore
+          .getState()
+          .getMatchingWorkflows(
+            'wan-i2v.gguf',
+            'video',
+          )
+          .map((workflow) => workflow.id),
+      ).toEqual([
+        'wf-specific',
+        'wf-general',
+      ])
+    })
+
+    it('does not activate a tag match automatically', () => {
+      const tagId = useWorkflowStore
+        .getState()
+        .createTag('SDXL')!
+
+      useWorkflowStore
+        .getState()
+        .installWorkflow(
+          makeWorkflow('wf-tagged', 'Tagged SDXL'),
+        )
+
+      useWorkflowStore
+        .getState()
+        .setWorkflowTags('wf-tagged', [tagId])
+
+      useWorkflowStore
+        .getState()
+        .setModelTags(
+          'model.safetensors',
+          'image',
+          [tagId],
+        )
+
+      expect(
+        useWorkflowStore
+          .getState()
+          .getMatchingWorkflows(
+            'model.safetensors',
+            'image',
+          ),
+      ).toHaveLength(1)
+
+      expect(
+        useWorkflowStore
+          .getState()
+          .getWorkflowForModel(
+            'model.safetensors',
+            'sdxl',
+          ),
+      ).toBeNull()
+    })
+  })
+
   // ── setCivitaiApiKey ───────────────────────────────────────
 
   describe('setCivitaiApiKey', () => {
@@ -304,6 +679,29 @@ describe('workflowStore', () => {
       useWorkflowStore.getState().removeWorkflow('wf-1')
       expect(useWorkflowStore.getState().getWorkflowForModel('special-sdxl.safetensors', 'sdxl')).toBeNull()
       expect(useWorkflowStore.getState().getWorkflowForModel('other-sdxl.safetensors', 'sdxl')).toBeNull()
+    })
+  })
+
+  // ── The one-time Create notice ─────────────────────────────
+
+  describe('manager notice', () => {
+    it('shows on the local backend until it is dismissed', () => {
+      expect(shouldShowManagerNotice('local', false)).toBe(true)
+      expect(shouldShowManagerNotice('local', true)).toBe(false)
+    })
+
+    it('never shows in cloud mode, where a local graph cannot run', () => {
+      expect(shouldShowManagerNotice('cloud', false)).toBe(false)
+      expect(shouldShowManagerNotice('cloud', true)).toBe(false)
+    })
+
+    it('starts undismissed and stays dismissed once set', () => {
+      expect(useWorkflowStore.getState().managerNoticeSeen).toBe(false)
+      useWorkflowStore.getState().setManagerNoticeSeen(true)
+      expect(useWorkflowStore.getState().managerNoticeSeen).toBe(true)
+      // Installing a workflow must not resurrect the notice.
+      useWorkflowStore.getState().installWorkflow(makeWorkflow('wf-9', 'Any'))
+      expect(useWorkflowStore.getState().managerNoticeSeen).toBe(true)
     })
   })
 })

@@ -4,6 +4,43 @@ All notable changes to Locally Uncensored are documented here.
 
 ## [Unreleased]
 
+## [2.6.2] - 2026-08-02
+
+Custom workflows are back, built on community code: Kizerfluid's PR (#94)
+brought the store, the import path and the I2V input injection, and the
+surface around it was rebuilt into the Create design. Plus two fixes straight
+from today's reports.
+
+### Added
+
+- **Bring your own ComfyUI workflows.** The workflow button in the Create
+  prompt bar (marked with a dot until first opened) opens a manager popup:
+  import a workflow saved with ComfyUI's Save (API Format), by file or pasted
+  JSON, then pair it with models through shared tags. Tag the workflow, tag a
+  model on the Models view, and the Workflow selector under Advanced settings
+  offers it for every matching model; Auto returns to the built-in graph.
+  A How it works guide lives next to the popup's close button. Prompt, size,
+  steps and seed are still injected into custom graphs, custom I2V workflows
+  get the source image wired in, and a VHS_VideoCombine node is switched to
+  save mode so clips land in the gallery. Thanks to Kizerfluid for the
+  foundation (#94).
+
+### Fixed
+
+- **Read aloud on Windows N editions.** On Windows without the Media Feature
+  Pack, every Piper playback failed with "neural audio playback failed" even
+  though the voice was installed and fine (#77): the audio element decodes
+  through the OS media stack that N editions do not have. Playback now falls
+  back to Web Audio with hand-decoded PCM, which needs no system codec at all.
+- **ComfyUI installs with a broken Python name the real problem.** When pip
+  says the ssl module is unavailable, the interpreter itself was built
+  without ssl, and the previous antivirus/clock hint pointed the wrong way.
+  The install error now says exactly that, with the one-liner to check and
+  the package-manager route to fix it.
+- **ComfyUI model discovery survives a failing folder.** Image and video
+  model listing are probed independently now, so one unreadable folder costs
+  that lane instead of emptying the whole list.
+
 ## [2.6.1] - 2026-08-02
 
 A one-bug release, reported the night 2.6.0 went out.

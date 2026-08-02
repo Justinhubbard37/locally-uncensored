@@ -1,4 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import {
+  fetchGalleryItemBlob,
+  galleryItemUrl,
+  proxiedComfyBlobUrl,
+  recoverGalleryUrl,
+} from '../galleryUrl'
+import {
+  refreshResultUrl,
+  resolveResultUrl,
+} from '../../../../api/cloud/jobs'
+import { backendCall } from '../../../../api/backend'
+import {
+  useCreateStore,
+  type GalleryItem,
+} from '../../../../stores/createStore'
 
 // zustand persist reads window.localStorage at store-module load (node env
 // has no DOM) — same hoisted Map shim as createStore.test.ts.
@@ -6,25 +21,46 @@ vi.hoisted(() => {
   const map = new Map<string, string>()
   const ls = {
     getItem: (k: string) => (map.has(k) ? map.get(k)! : null),
-    setItem: (k: string, v: string) => { map.set(k, String(v)) },
-    removeItem: (k: string) => { map.delete(k) },
-    clear: () => { map.clear() },
+    setItem: (k: string, v: string) => {
+      map.set(k, String(v))
+    },
+    removeItem: (k: string) => {
+      map.delete(k)
+    },
+    clear: () => {
+      map.clear()
+    },
     key: (i: number) => [...map.keys()][i] ?? null,
-    get length() { return map.size },
+    get length() {
+      return map.size
+    },
   }
+
   ;(globalThis as unknown as { localStorage: unknown }).localStorage = ls
-  const g = globalThis as unknown as { window?: Record<string, unknown> }
-  g.window = Object.assign(g.window ?? {}, { localStorage: ls })
+
+  const g = globalThis as unknown as {
+    window?: Record<string, unknown>
+  }
+
+  g.window = Object.assign(g.window ?? {}, {
+    localStorage: ls,
+  })
 })
 
 vi.mock('../../../../api/comfyui', () => ({
-  getImageUrl: vi.fn((filename: string, subfolder?: string) => `http://127.0.0.1:8188/view?filename=${filename}&subfolder=${subfolder ?? ''}`),
-  classifyModel: vi.fn(() => 'unknown'),
+  getImageUrl: vi.fn((
+    filename: string,
+    subfolder?: string,
+    type: string = 'output',
+  ) =>
+    `http://127.0.0.1:8188/view?filename=${filename}&subfolder=${subfolder ?? ''}&type=${type}`),
 }))
+
 vi.mock('../../../../api/cloud/jobs', () => ({
   refreshResultUrl: vi.fn(),
   resolveResultUrl: vi.fn(),
 }))
+
 // Only backendCall is faked — fetchLocalhostBytes/isTauri keep their real
 // behaviour, which the ComfyUI-path tests below depend on.
 vi.mock('../../../../api/backend', async (importOriginal) => ({
@@ -32,17 +68,32 @@ vi.mock('../../../../api/backend', async (importOriginal) => ({
   backendCall: vi.fn(),
 }))
 
-import { fetchGalleryItemBlob, recoverGalleryUrl, proxiedComfyBlobUrl } from '../galleryUrl'
-import { refreshResultUrl, resolveResultUrl } from '../../../../api/cloud/jobs'
-import { backendCall } from '../../../../api/backend'
-import { useCreateStore, type GalleryItem } from '../../../../stores/createStore'
-
 const baseItem: GalleryItem = {
   id: 'g1', filename: 'out.png', subfolder: '', type: 'image', prompt: '',
   negativePrompt: '', model: 'm', modelType: 'unknown', seed: 1, steps: 1,
   cfgScale: 1, sampler: 's', scheduler: 's', width: 8, height: 8,
   batchSize: 1, createdAt: 1,
 } as GalleryItem
+
+describe('galleryItemUrl — ComfyUI file location', () => {
+  it('preserves temp outputs from VHS_VideoCombine', () => {
+    const url = galleryItemUrl({
+      ...baseItem,
+      type: 'video',
+      filename: 'AnimateDiff_00002.mp4',
+      comfyType: 'temp',
+    })
+
+    expect(url).toContain('filename=AnimateDiff_00002.mp4')
+    expect(url).toContain('type=temp')
+  })
+
+  it('defaults older gallery entries to output', () => {
+    const url = galleryItemUrl(baseItem)
+
+    expect(url).toContain('type=output')
+  })
+})
 
 describe('fetchGalleryItemBlob', () => {
   beforeEach(() => {

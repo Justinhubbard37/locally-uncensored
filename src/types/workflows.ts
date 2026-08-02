@@ -2,6 +2,12 @@ import type { ModelType } from '../api/comfyui'
 
 export type WorkflowSource = 'civitai' | 'manual'
 
+export interface WorkflowTag {
+  id: string
+  name: string
+  createdAt: number
+}
+
 export interface ParameterMapping {
   nodeId: string
   inputKey: string
@@ -23,6 +29,10 @@ export interface ParameterMap {
   batchSize?: ParameterMapping
   sampler?: ParameterMapping
   scheduler?: ParameterMapping
+
+  // I2I / I2V source image
+  inputImage?: ParameterMapping
+
   // Video-specific
   frames?: ParameterMapping
   fps?: ParameterMapping

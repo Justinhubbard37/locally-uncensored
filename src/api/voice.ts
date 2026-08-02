@@ -414,6 +414,86 @@ export async function listInstalledPiperVoices(): Promise<string[]> {
 
 let neuralAudio: HTMLAudioElement | null = null;
 let neuralAudioDone: (() => void) | null = null;
+let webAudioPlayback: { source: AudioBufferSourceNode; done: () => void } | null = null;
+
+/** Parse a PCM WAV (16-bit int or 32-bit float, the formats piper and every
+ *  TTS wav here produce) into raw channel data. Pure byte-walking on the RIFF
+ *  chunks, no platform decoder involved — that independence is the point (see
+ *  playNeuralAudio). Returns null for anything that isn't such a wav. */
+export function parseWavPcm(
+  bytes: ArrayBuffer,
+): { sampleRate: number; channels: Float32Array[] } | null {
+  const view = new DataView(bytes);
+  if (bytes.byteLength < 44) return null;
+  if (view.getUint32(0, false) !== 0x52494646) return null; // 'RIFF'
+  if (view.getUint32(8, false) !== 0x57415645) return null; // 'WAVE'
+
+  let format = 0, channelCount = 0, sampleRate = 0, bitsPerSample = 0;
+  let data: { offset: number; length: number } | null = null;
+  let pos = 12;
+  while (pos + 8 <= bytes.byteLength) {
+    const id = view.getUint32(pos, false);
+    const size = view.getUint32(pos + 4, true);
+    if (id === 0x666d7420) { // 'fmt '
+      format = view.getUint16(pos + 8, true);
+      channelCount = view.getUint16(pos + 10, true);
+      sampleRate = view.getUint32(pos + 12, true);
+      bitsPerSample = view.getUint16(pos + 22, true);
+    } else if (id === 0x64617461) { // 'data'
+      data = { offset: pos + 8, length: Math.min(size, bytes.byteLength - pos - 8) };
+    }
+    pos += 8 + size + (size % 2); // chunks are word-aligned
+  }
+  const pcm16 = format === 1 && bitsPerSample === 16;
+  const float32 = format === 3 && bitsPerSample === 32;
+  if (!data || !channelCount || !sampleRate || (!pcm16 && !float32)) return null;
+
+  const bytesPerSample = bitsPerSample / 8;
+  const frames = Math.floor(data.length / (bytesPerSample * channelCount));
+  if (frames === 0) return null;
+  const channels = Array.from({ length: channelCount }, () => new Float32Array(frames));
+  for (let f = 0; f < frames; f++) {
+    for (let c = 0; c < channelCount; c++) {
+      const at = data.offset + (f * channelCount + c) * bytesPerSample;
+      channels[c][f] = pcm16 ? view.getInt16(at, true) / 32768 : view.getFloat32(at, true);
+    }
+  }
+  return { sampleRate, channels };
+}
+
+/** Codec-free playback path: hand-parsed PCM into Web Audio, with Chromium's
+ *  bundled decodeAudioData for compressed formats. Used when the media element
+ *  fails (ElBiggus GH #77: on a Windows N edition without the Media Feature
+ *  Pack, `new Audio(wav)` errors even though piper wrote a perfect wav —
+ *  HTMLAudioElement decodes through Media Foundation, Web Audio does not). */
+async function playViaWebAudio(dataUrl: string): Promise<void> {
+  const bytes = await (await fetch(dataUrl)).arrayBuffer();
+  const ctx = new AudioContext();
+  try {
+    const pcm = parseWavPcm(bytes);
+    let buffer: AudioBuffer;
+    if (pcm) {
+      buffer = ctx.createBuffer(pcm.channels.length, pcm.channels[0].length, pcm.sampleRate);
+      pcm.channels.forEach((ch, i) => buffer.copyToChannel(ch, i));
+    } else {
+      buffer = await ctx.decodeAudioData(bytes);
+    }
+    await ctx.resume().catch(() => { /* best effort */ });
+    await new Promise<void>((resolve) => {
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      webAudioPlayback = { source, done: resolve };
+      source.onended = () => {
+        if (webAudioPlayback?.source === source) webAudioPlayback = null;
+        resolve();
+      };
+      source.start();
+    });
+  } finally {
+    void ctx.close().catch(() => { /* already closed */ });
+  }
+}
 
 /** Play a WAV data URL or MP3 blob URL; resolves when playback ends (or is
  *  stopped via stopNeuralAudio). Replaces any current clip. Object URLs are
@@ -426,14 +506,20 @@ export function playNeuralAudio(dataUrl: string): Promise<void> {
       if (neuralAudio === audio) { neuralAudio = null; neuralAudioDone = null; }
       if (dataUrl.startsWith("blob:")) URL.revokeObjectURL(dataUrl);
     };
+    // Media element failed — retry through Web Audio before giving up. The
+    // blob: URL must stay alive until the fallback has fetched it, so this
+    // path revokes late instead of via cleanup().
+    const fallback = () => {
+      if (neuralAudio === audio) { neuralAudio = null; neuralAudioDone = null; }
+      playViaWebAudio(dataUrl)
+        .then(resolve, () => reject(new Error("neural audio playback failed")))
+        .finally(() => { if (dataUrl.startsWith("blob:")) URL.revokeObjectURL(dataUrl); });
+    };
     neuralAudio = audio;
     neuralAudioDone = () => { cleanup(); resolve(); };
     audio.onended = () => { cleanup(); resolve(); };
-    audio.onerror = () => {
-      cleanup();
-      reject(new Error("neural audio playback failed"));
-    };
-    audio.play().catch((err) => { cleanup(); reject(err); });
+    audio.onerror = fallback;
+    audio.play().catch(fallback);
   });
 }
 
@@ -447,6 +533,14 @@ export function stopNeuralAudio(): void {
     neuralAudio = null;
     neuralAudioDone = null;
     done?.();
+  }
+  if (webAudioPlayback) {
+    // Same contract for the Web Audio fallback: stop() fires onended, but
+    // settle explicitly in case the source never started.
+    const { source, done } = webAudioPlayback;
+    webAudioPlayback = null;
+    try { source.stop(); } catch { /* never started */ }
+    done();
   }
 }
 

@@ -1,9 +1,14 @@
-
-import { useRef, useState, useMemo } from 'react'
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronDown, Check, Search } from 'lucide-react'
 import { cn } from './cn'
-import { useClickAway } from './useClickAway'
 
 export interface SelectOption {
   value: string
@@ -24,106 +29,377 @@ interface Props {
   maxHeight?: number
 }
 
-export function Select({ options, value, onChange, searchable = false, placeholder = 'Select…', size = 'md', align = 'left', className, maxHeight = 280 }: Props) {
+interface MenuPosition {
+  top?: number
+  bottom?: number
+  left: number
+  width: number
+  maxHeight: number
+  dropUp: boolean
+}
+
+export function Select({
+  options,
+  value,
+  onChange,
+  searchable = false,
+  placeholder = 'Select...',
+  size = 'md',
+  align = 'left',
+  className,
+  maxHeight = 280,
+}: Props) {
   const [open, setOpen] = useState(false)
-  const [dropUp, setDropUp] = useState(false)
   const [query, setQuery] = useState('')
-  const ref = useRef<HTMLDivElement>(null)
-  useClickAway(ref, () => setOpen(false), open)
+  const [menuPosition, setMenuPosition] =
+    useState<MenuPosition | null>(null)
 
-  // Open upward when there isn't room below (e.g. the model chip in the
-  // bottom composer bar) so the list never clips off the viewport.
-  const toggle = () => {
-    if (!open && ref.current) {
-      const rect = ref.current.getBoundingClientRect()
-      setDropUp(window.innerHeight - rect.bottom < maxHeight + 64)
-    }
-    setOpen((o) => !o)
-  }
+  const triggerRef = useRef<HTMLDivElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
 
-  const current = options.find((o) => o.value === value)
+  const current = options.find((option) => option.value === value)
+
   const filtered = useMemo(() => {
     if (!query.trim()) return options
-    const q = query.toLowerCase()
-    return options.filter((o) => o.label.toLowerCase().includes(q) || o.sublabel?.toLowerCase().includes(q))
+
+    const normalizedQuery = query.toLowerCase()
+
+    return options.filter(
+      (option) =>
+        option.label.toLowerCase().includes(normalizedQuery) ||
+        option.sublabel?.toLowerCase().includes(normalizedQuery),
+    )
   }, [options, query])
 
-  const h = size === 'sm' ? 'h-[var(--control-h-sm)]' : 'h-[var(--control-h-md)]'
+  const closeMenu = () => {
+    setOpen(false)
+    setQuery('')
+    setMenuPosition(null)
+  }
+
+  const toggle = () => {
+    if (open) {
+      closeMenu()
+    } else {
+      setOpen(true)
+    }
+  }
+
+  useEffect(() => {
+    if (!open) return
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node
+
+      if (
+        !triggerRef.current?.contains(target) &&
+        !menuRef.current?.contains(target)
+      ) {
+        closeMenu()
+      }
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeMenu()
+      }
+    }
+
+    document.addEventListener('pointerdown', onPointerDown)
+    window.addEventListener('keydown', onKeyDown)
+
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [open])
+
+  useLayoutEffect(() => {
+    if (!open || !triggerRef.current) return
+
+    const updatePosition = () => {
+      const trigger = triggerRef.current
+      if (!trigger) return
+
+      const rect = trigger.getBoundingClientRect()
+      const viewportPadding = 8
+      const gap = 4
+
+      const spaceBelow =
+        window.innerHeight - rect.bottom - viewportPadding - gap
+      const spaceAbove =
+        rect.top - viewportPadding - gap
+
+      const searchHeight = searchable ? 48 : 0
+      const menuChromeHeight = searchHeight + 8
+      const estimatedRowsHeight =
+        Math.max(filtered.length, 1) * 32
+
+      const desiredHeight = Math.min(
+        maxHeight + menuChromeHeight,
+        estimatedRowsHeight + menuChromeHeight,
+      )
+
+      // Prefer opening downward whenever there is enough usable space.
+      // The menu can scroll internally when all options do not fit.
+      const minimumUsefulHeight = Math.min(desiredHeight, 160)
+      const dropUp =
+        spaceBelow < minimumUsefulHeight &&
+        spaceAbove > spaceBelow
+
+      const availableSpace = Math.max(
+        80,
+        dropUp ? spaceAbove : spaceBelow,
+      )
+
+      const width = rect.width
+      const preferredLeft =
+        align === 'right'
+          ? rect.right - width
+          : rect.left
+
+      const maximumLeft = Math.max(
+        viewportPadding,
+        window.innerWidth - width - viewportPadding,
+      )
+
+      const left = Math.min(
+        Math.max(viewportPadding, preferredLeft),
+        maximumLeft,
+      )
+
+      setMenuPosition({
+        top: dropUp ? undefined : rect.bottom + gap,
+        bottom: dropUp
+          ? window.innerHeight - rect.top + gap
+          : undefined,
+        left,
+        width,
+        maxHeight: Math.min(desiredHeight, availableSpace),
+        dropUp,
+      })
+    }
+
+    updatePosition()
+
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', updatePosition, true)
+
+    const resizeObserver = new ResizeObserver(updatePosition)
+    resizeObserver.observe(triggerRef.current)
+
+    return () => {
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', updatePosition, true)
+      resizeObserver.disconnect()
+    }
+  }, [
+    align,
+    filtered.length,
+    maxHeight,
+    open,
+    searchable,
+  ])
+
+  const controlHeight =
+    size === 'sm'
+      ? 'h-[var(--control-h-sm)]'
+      : 'h-[var(--control-h-md)]'
+
+  const optionsMaxHeight = Math.max(
+    64,
+    (menuPosition?.maxHeight ?? maxHeight) -
+      (searchable ? 48 : 8),
+  )
 
   return (
-    <div ref={ref} className={cn('relative', className)}>
-      <button
-        onClick={toggle}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        className={cn(
-          't-control inline-flex items-center justify-between gap-2 w-full px-2.5 rounded-[var(--radius-control)] transition-colors lu-focus-ring',
-          'bg-white/[0.04] border border-white/[0.08] hover:border-white/15 text-gray-200',
-          h,
-        )}
+    <>
+      <div
+        ref={triggerRef}
+        className={cn('relative', className)}
       >
-        <span className="flex items-center gap-1.5 min-w-0">
-          {current?.badge && <Badge color={current.badge.color} label={current.badge.label} />}
-          <span className="truncate">{current?.label ?? placeholder}</span>
-        </span>
-        <ChevronDown size={13} className={cn('shrink-0 text-gray-500 transition-transform', open && 'rotate-180')} />
-      </button>
+        <button
+          type="button"
+          onClick={toggle}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          className={cn(
+            't-control inline-flex w-full items-center justify-between gap-2 px-2.5',
+            'rounded-[var(--radius-control)] transition-colors lu-focus-ring',
+            'bg-white/[0.04] border border-white/[0.08]',
+            'hover:border-white/15 text-gray-200',
+            controlHeight,
+          )}
+        >
+          <span className="flex min-w-0 items-center gap-1.5">
+            {current?.badge && (
+              <Badge
+                color={current.badge.color}
+                label={current.badge.label}
+              />
+            )}
 
-      <AnimatePresence>
-        {open && (
-          <motion.div
-            initial={{ opacity: 0, y: -4, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -4, scale: 0.98 }}
-            transition={{ duration: 0.12 }}
+            <span className="truncate">
+              {current?.label ?? placeholder}
+            </span>
+          </span>
+
+          <ChevronDown
+            size={13}
             className={cn(
-              'lu-elevated absolute z-50 min-w-full rounded-[var(--radius-panel)] p-1 overflow-hidden',
-              dropUp ? 'bottom-full mb-1' : 'top-full mt-1',
-              align === 'right' ? 'right-0' : 'left-0',
+              'shrink-0 text-gray-500 transition-transform',
+              open && 'rotate-180',
             )}
-          >
-            {searchable && (
-              <div className="flex items-center gap-1.5 px-2 py-1.5 mb-1 border-b border-white/[0.06]">
-                <Search size={13} className="text-gray-500" />
-                <input
-                  autoFocus
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search…"
-                  className="t-control bg-transparent outline-none w-full text-gray-200 placeholder-gray-600"
-                />
-              </div>
+          />
+        </button>
+      </div>
+
+      {typeof document !== 'undefined' &&
+        createPortal(
+          <AnimatePresence>
+            {open && (
+              <motion.div
+                ref={menuRef}
+                initial={{
+                  opacity: 0,
+                  y: menuPosition?.dropUp ? 4 : -4,
+                  scale: 0.98,
+                }}
+                animate={{
+                  opacity: 1,
+                  y: 0,
+                  scale: 1,
+                }}
+                exit={{
+                  opacity: 0,
+                  y: menuPosition?.dropUp ? 4 : -4,
+                  scale: 0.98,
+                }}
+                transition={{ duration: 0.12 }}
+                style={{
+                  top: menuPosition?.top,
+                  bottom: menuPosition?.bottom,
+                  left: menuPosition?.left ?? 0,
+                  width: menuPosition?.width,
+                  maxHeight:
+                    menuPosition?.maxHeight ?? maxHeight,
+                  visibility: menuPosition
+                    ? 'visible'
+                    : 'hidden',
+                }}
+                className={cn(
+                  'lu-elevated fixed z-[100] min-w-0',
+                  'rounded-[var(--radius-panel)]',
+                  'p-1 overflow-hidden',
+                )}
+              >
+                {searchable && (
+                  <div className="mb-1 flex items-center gap-1.5 border-b border-white/[0.06] px-2 py-1.5">
+                    <Search
+                      size={13}
+                      className="text-gray-500"
+                    />
+
+                    <input
+                      autoFocus
+                      value={query}
+                      onChange={(event) =>
+                        setQuery(event.target.value)
+                      }
+                      placeholder="Search..."
+                      className="t-control w-full bg-transparent text-gray-200 outline-none placeholder-gray-600"
+                    />
+                  </div>
+                )}
+
+                <div
+                  role="listbox"
+                  className="overflow-y-auto overscroll-contain scrollbar-thin"
+                  style={{ maxHeight: optionsMaxHeight }}
+                  onWheel={(event) => event.stopPropagation()}
+                >
+                  {filtered.length === 0 && (
+                    <div className="t-control px-2.5 py-2 text-gray-600">
+                      No matches
+                    </div>
+                  )}
+
+                  {filtered.map((option) => {
+                    const selected =
+                      option.value === value
+
+                    return (
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={selected}
+                        key={option.value}
+                        onClick={() => {
+                          onChange(option.value)
+                          closeMenu()
+                        }}
+                        className={cn(
+                          't-control flex w-full items-center justify-between gap-2',
+                          'rounded-[6px] px-2.5 py-1.5 text-left transition-colors',
+                          selected
+                            ? 'bg-white/10 text-white'
+                            : 'text-gray-300 hover:bg-white/[0.06]',
+                        )}
+                      >
+                        <span className="flex min-w-0 items-center gap-1.5">
+                          {option.badge && (
+                            <Badge
+                              color={option.badge.color}
+                              label={option.badge.label}
+                            />
+                          )}
+
+                          <span className="truncate">
+                            {option.label}
+                          </span>
+
+                          {option.sublabel && (
+                            <span className="t-mono truncate text-gray-600">
+                              {option.sublabel}
+                            </span>
+                          )}
+                        </span>
+
+                        {selected && (
+                          <Check
+                            size={13}
+                            className="shrink-0 text-gray-300"
+                          />
+                        )}
+                      </button>
+                    )
+                  })}
+                </div>
+              </motion.div>
             )}
-            <div className="overflow-y-auto scrollbar-thin" style={{ maxHeight }}>
-              {filtered.length === 0 && <div className="t-control text-gray-600 px-2.5 py-2">No matches</div>}
-              {filtered.map((o) => {
-                const selected = o.value === value
-                return (
-                  <button
-                    key={o.value}
-                    onClick={() => { onChange(o.value); setOpen(false); setQuery('') }}
-                    className={cn(
-                      't-control w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-[6px] text-left transition-colors',
-                      selected ? 'bg-white/10 text-white' : 'text-gray-300 hover:bg-white/[0.06]',
-                    )}
-                  >
-                    <span className="flex items-center gap-1.5 min-w-0">
-                      {o.badge && <Badge color={o.badge.color} label={o.badge.label} />}
-                      <span className="truncate">{o.label}</span>
-                      {o.sublabel && <span className="t-mono text-gray-600 truncate">{o.sublabel}</span>}
-                    </span>
-                    {selected && <Check size={13} className="shrink-0 text-gray-300" />}
-                  </button>
-                )
-              })}
-            </div>
-          </motion.div>
+          </AnimatePresence>,
+          document.body,
         )}
-      </AnimatePresence>
-    </div>
+    </>
   )
 }
 
-function Badge({ color, label }: { color: string; label: string }) {
-  return <span className={cn('px-1.5 py-0.5 rounded text-[0.55rem] font-semibold shrink-0', color)}>{label}</span>
+function Badge({
+  color,
+  label,
+}: {
+  color: string
+  label: string
+}) {
+  return (
+    <span
+      className={cn(
+        'shrink-0 rounded px-1.5 py-0.5',
+        'text-[0.55rem] font-semibold',
+        color,
+      )}
+    >
+      {label}
+    </span>
+  )
 }

@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useMemo } from 'react'
 import { listModels, pullModel as pullModelApi, pullModelTauri, deleteModel as deleteModelApi } from '../api/ollama'
 import { isTauri, isMacOS } from '../api/backend'
-import { getCheckpoints as getComfyCheckpoints, getDiffusionModels as getComfyDiffusionModels, checkComfyConnection, filterPartialFiles } from '../api/comfyui'
+import {
+  getImageModels as getComfyImageModels,
+  getVideoModels as getComfyVideoModels,
+  checkComfyConnection,
+  filterPartialFiles,
+} from '../api/comfyui'
 import { parseNDJSONStream } from '../api/stream'
+import { log } from '../lib/logger'
 import { useModelStore } from '../stores/modelStore'
 import { useProviderStore } from '../stores/providerStore'
 import { useSettingsStore } from '../stores/settingsStore'
@@ -15,12 +21,6 @@ import {
 import type { BundledModel } from '../api/engine'
 import type { PullProgress, AIModel, ModelCategory, ImageModel, VideoModel, CloudModel } from '../types/models'
 
-const VIDEO_PATTERNS = [/wan/, /svd/, /animatediff/, /animate/, /video/, /cogvideo/, /ltx/i, /framepack/, /mochi/, /cosmos/, /hunyuan/, /pyramidflow/, /allegro/]
-
-function isVideoModel(name: string): boolean {
-  const lower = name.toLowerCase()
-  return VIDEO_PATTERNS.some((p) => p.test(lower))
-}
 
 // Boot-resume for the managed built-in engine (2.5.7): the llama-server
 // children are reaped on app quit and nothing on the Rust side respawns them,
@@ -171,26 +171,48 @@ export function useModels() {
             .map(m => ({ ...m, provider: 'ollama' as const, providerName: 'Ollama' })))
         } catch { /* Ollama might not be running */ }
       }
+
       let comfyModels: AIModel[] = []
       // Hard rule: Mac local media is MLX-only — ComfyUI never auto-starts
       // there (process.rs::auto_start_comfyui), so skip the probe outright
       // instead of a doomed connection check on every model-list refresh.
       const comfyOk = !isMacOS() && (await checkComfyConnection())
       if (comfyOk) {
-        try {
-          const [checkpoints, diffusionModels] = await Promise.all([getComfyCheckpoints(), getComfyDiffusionModels()])
-          const allNames = [...checkpoints, ...diffusionModels]
-          const complete = await filterPartialFiles(allNames)
+        // Settled, not all: a folder ComfyUI cannot read costs that one lane,
+        // never the whole list. The old code lost both to a single throw.
+        const [imageResult, videoResult] = await Promise.allSettled([
+          getComfyImageModels(),
+          getComfyVideoModels(),
+        ])
+        if (imageResult.status === 'rejected') {
+          log.warn('[useModels] ComfyUI image discovery failed', { err: imageResult.reason })
+        }
+        if (videoResult.status === 'rejected') {
+          log.warn('[useModels] ComfyUI video discovery failed', { err: videoResult.reason })
+        }
+        const imageModels = imageResult.status === 'fulfilled' ? imageResult.value : []
+        const videoModels = videoResult.status === 'fulfilled' ? videoResult.value : []
 
-          const classifyComfyModel = (name: string): AIModel => {
-            if (isVideoModel(name)) return { name, model: name, size: 0, format: 'safetensors', architecture: 'unknown', type: 'video', providerName: 'ComfyUI' } as VideoModel
-            return { name, model: name, size: 0, format: 'safetensors', architecture: 'unknown', type: 'image', providerName: 'ComfyUI' } as ImageModel
-          }
-          comfyModels = allNames.filter(name => complete.has(name)).map(classifyComfyModel)
-        } catch { /* continue */ }
+        // Still drop half-downloaded multipart files, as before.
+        const complete = await filterPartialFiles([
+          ...imageModels.map((m) => m.name),
+          ...videoModels.map((m) => m.name),
+        ])
+        const format = (name: string) =>
+          name.toLowerCase().endsWith('.gguf') ? 'gguf' : 'safetensors'
+        const toModel = <T extends 'image' | 'video'>(m: { name: string; type: string }, type: T) => ({
+          name: m.name, model: m.name, size: 0, format: format(m.name),
+          architecture: m.type, type, providerName: 'ComfyUI' as const,
+        })
+        comfyModels = [
+          ...imageModels.filter((m) => complete.has(m.name)).map((m) => toModel(m, 'image') as ImageModel),
+          ...videoModels.filter((m) => complete.has(m.name)).map((m) => toModel(m, 'video') as VideoModel),
+        ]
       }
       setModels([...allModels, ...comfyModels])
-    } catch { /* ignore */ }
+    } catch (err) {
+      log.warn('[useModels] Model list refresh failed', { err })
+    }
   }, [setModels])
 
   const pullModel = useCallback(
