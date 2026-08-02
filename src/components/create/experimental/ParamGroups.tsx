@@ -3,6 +3,7 @@ import { useCreateStore } from '../../../stores/createStore'
 import { useCreateExp } from './CreateContext'
 import { cloudModelById, defaultCloudModel } from '../../../stores/cloudCatalogStore'
 import { classifyModel } from '../../../api/comfyui'
+import { nativeHiresFinalSize, type HiresUpscaleMethod } from '../../../api/hires-fix'
 import { isMlxImageHost } from '../../../api/mlx-image'
 import { INTENT_MAP } from './intents'
 import { SAMPLERS as SAMPLERS_FALLBACK, SCHEDULERS as SCHEDULERS_FALLBACK } from './badges'
@@ -49,6 +50,19 @@ export function ParamGroups() {
     (isVideo ? s.cloudVideoModel : s.cloudImageModel) || defaultCloudModel(isVideo ? 'video' : 'image')?.id || ''
   const showSteps = !(isCloud && isVideo)
   const showCfg = isCloud ? cloudModelById(cloudModelId)?.cfg === true : true
+  // Native HiRes rewrites the local ComfyUI text-to-image graph. It has no
+  // cloud, video, Edit or MLX path, so keep the control honest and scoped to
+  // the one lane that can execute it.
+  const showHiresFix = !isCloud && !isVideo && meta.id === 'image' && !isMlxLocal
+  let hiresFinal: { width: number; height: number } | null = null
+  let hiresSizeError: string | null = null
+  if (showHiresFix && s.hiresFixEnabled) {
+    try {
+      hiresFinal = nativeHiresFinalSize(s.width, s.height, s.hiresScale)
+    } catch (error) {
+      hiresSizeError = error instanceof Error ? error.message : String(error)
+    }
+  }
 
   const samplers = samplerList.length ? samplerList : SAMPLERS_FALLBACK
   const schedulers = schedulerList.length ? schedulerList : SCHEDULERS_FALLBACK
@@ -66,6 +80,60 @@ export function ParamGroups() {
           <NumberField label="Width" value={s.width} min={64} max={4096} step={64} mono onChange={(v) => s.setSize(v, s.height)} suffix="px" />
           <NumberField label="Height" value={s.height} min={64} max={4096} step={64} mono onChange={(v) => s.setSize(s.width, v)} suffix="px" />
         </div>
+        {showHiresFix && (
+          <div className={cn(
+            'overflow-hidden rounded-lg border transition-colors',
+            s.hiresFixEnabled ? 'border-white/15 bg-white/[0.05]' : 'border-white/[0.07]',
+          )}>
+            <button
+              type="button"
+              className="flex w-full items-center justify-between px-3 py-2 text-left"
+              onClick={() => s.setHiresFixEnabled(!s.hiresFixEnabled)}
+              aria-pressed={s.hiresFixEnabled}
+            >
+              <span>
+                <span className="block t-control text-gray-300">Native HiRes</span>
+                <span className="block text-[11px] leading-4 text-gray-600">Latent upscale plus a native refinement pass</span>
+              </span>
+              <span className={cn('t-mono text-xs', s.hiresFixEnabled ? 'text-emerald-400' : 'text-gray-600')}>
+                {s.hiresFixEnabled ? 'on' : 'off'}
+              </span>
+            </button>
+
+            {s.hiresFixEnabled && (
+              <div className="space-y-3 border-t border-white/[0.07] px-3 pb-3 pt-2.5">
+                <div className="rounded-md bg-black/20 px-2.5 py-2 text-[11px] text-gray-500">
+                  {hiresFinal ? (
+                    <>
+                      <span className="t-mono text-gray-400">{s.width}×{s.height}</span>
+                      <span className="px-1.5 text-gray-700">→</span>
+                      <span className="t-mono text-gray-200">{hiresFinal.width}×{hiresFinal.height}</span>
+                    </>
+                  ) : (
+                    <span className="text-amber-400">{hiresSizeError}</span>
+                  )}
+                </div>
+                <Slider label="Upscale" min={1.1} max={3} step={0.1} value={s.hiresScale} onChange={s.setHiresScale} format={(v) => `${v.toFixed(1)}×`} />
+                <Slider label="HiRes steps" min={1} max={40} step={1} value={s.hiresSteps} onChange={s.setHiresSteps} />
+                <Slider label="HiRes denoise" min={0.05} max={1} step={0.05} value={s.hiresDenoise} onChange={s.setHiresDenoise} format={(v) => v.toFixed(2)} />
+                <Field label="Latent upscale method" help="Nearest-exact is the default and preserves hard edges. Bicubic and bilinear provide smoother interpolation; bislerp gives softer latent blending.">
+                  <Select
+                    size="sm"
+                    options={[
+                      { value: 'nearest-exact', label: 'nearest-exact' },
+                      { value: 'bislerp', label: 'bislerp' },
+                      { value: 'bicubic', label: 'bicubic' },
+                      { value: 'bilinear', label: 'bilinear' },
+                      { value: 'area', label: 'area' },
+                    ]}
+                    value={s.hiresUpscaleMethod}
+                    onChange={(value) => s.setHiresUpscaleMethod(value as HiresUpscaleMethod)}
+                  />
+                </Field>
+              </div>
+            )}
+          </div>
+        )}
       </Section>
 
       {/* OUTPUT */}

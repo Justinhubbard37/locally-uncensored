@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { ModelType, ClassifiedModel } from '../api/comfyui'
 import { classifyModel } from '../api/comfyui'
+import type { HiresUpscaleMethod } from '../api/hires-fix'
 // ModelType includes: flux, flux2, zimage, sdxl, sd15, wan, hunyuan, unknown
 
 export type ProgressPhase = 'idle' | 'queued' | 'loading-model' | 'loading-clip' | 'loading-vae' | 'sampling' | 'decoding' | 'complete'
@@ -199,6 +200,12 @@ interface CreateState {
   frames: number
   fps: number
   denoise: number  // Denoise strength for I2I (0.0–1.0)
+  /** Native text-to-image latent upscale + refinement pass (local ComfyUI). */
+  hiresFixEnabled: boolean
+  hiresScale: number
+  hiresDenoise: number
+  hiresSteps: number
+  hiresUpscaleMethod: HiresUpscaleMethod
   i2iImage: string | null  // Uploaded image filename for I2I
   i2vImage: string | null  // Uploaded image filename for I2V models (SVD, FramePack)
 
@@ -315,6 +322,11 @@ interface CreateState {
   setFrames: (frames: number) => void
   setFps: (fps: number) => void
   setDenoise: (denoise: number) => void
+  setHiresFixEnabled: (enabled: boolean) => void
+  setHiresScale: (scale: number) => void
+  setHiresDenoise: (denoise: number) => void
+  setHiresSteps: (steps: number) => void
+  setHiresUpscaleMethod: (method: HiresUpscaleMethod) => void
   setI2iImage: (image: string | null) => void
   setI2vImage: (image: string | null) => void
 
@@ -408,6 +420,11 @@ export const useCreateStore = create<CreateState>()(
       frames: 24,
       fps: 8,
       denoise: 0.7,
+      hiresFixEnabled: false,
+      hiresScale: 1.5,
+      hiresDenoise: 1,
+      hiresSteps: 12,
+      hiresUpscaleMethod: 'nearest-exact' as HiresUpscaleMethod,
       i2iImage: null,
       i2vImage: null,
 
@@ -529,6 +546,17 @@ export const useCreateStore = create<CreateState>()(
       setFrames: (frames) => set({ frames: Math.max(1, Math.min(120, Math.floor(frames))) }),
       setFps: (fps) => set({ fps: Math.max(1, Math.min(60, Math.floor(fps))) }),
       setDenoise: (denoise) => set({ denoise: Math.max(0, Math.min(1, denoise)) }),
+      setHiresFixEnabled: (hiresFixEnabled) => set({ hiresFixEnabled }),
+      setHiresScale: (hiresScale) => set({
+        hiresScale: Math.max(1.1, Math.min(3, Math.round(hiresScale * 10) / 10)),
+      }),
+      setHiresDenoise: (hiresDenoise) => set({
+        hiresDenoise: Math.max(0.05, Math.min(1, hiresDenoise)),
+      }),
+      setHiresSteps: (hiresSteps) => set({
+        hiresSteps: Math.max(1, Math.min(200, Math.floor(hiresSteps))),
+      }),
+      setHiresUpscaleMethod: (hiresUpscaleMethod) => set({ hiresUpscaleMethod }),
       setI2iImage: (image) => set({ i2iImage: image }),
       setI2vImage: (image) => set({ i2vImage: image }),
 
@@ -677,7 +705,21 @@ export const useCreateStore = create<CreateState>()(
         const d = s.mode === 'video'
           ? (MODEL_TYPE_DEFAULTS[classifyModel(s.videoModel)] || MODEL_TYPE_DEFAULTS.unknown)
           : MODEL_TYPE_DEFAULTS[s.imageModelType]
-        set({ sampler: d.sampler, scheduler: d.scheduler, steps: d.steps, cfgScale: d.cfgScale, width: d.width, height: d.height, ...(d.frames ? { frames: d.frames } : {}), ...(d.fps ? { fps: d.fps } : {}) })
+        set({
+          sampler: d.sampler,
+          scheduler: d.scheduler,
+          steps: d.steps,
+          cfgScale: d.cfgScale,
+          width: d.width,
+          height: d.height,
+          hiresFixEnabled: false,
+          hiresScale: 1.5,
+          hiresDenoise: 1,
+          hiresSteps: 12,
+          hiresUpscaleMethod: 'nearest-exact',
+          ...(d.frames ? { frames: d.frames } : {}),
+          ...(d.fps ? { fps: d.fps } : {}),
+        })
       },
 
       setIsGenerating: (generating) => set({ isGenerating: generating, ...(generating ? {} : { progressPhase: 'idle' as ProgressPhase }) }),
@@ -720,6 +762,11 @@ export const useCreateStore = create<CreateState>()(
         frames: state.frames,
         fps: state.fps,
         denoise: state.denoise,
+        hiresFixEnabled: state.hiresFixEnabled,
+        hiresScale: state.hiresScale,
+        hiresDenoise: state.hiresDenoise,
+        hiresSteps: state.hiresSteps,
+        hiresUpscaleMethod: state.hiresUpscaleMethod,
         // Media bytes never go to localStorage — a handful of multi-MB base64
         // dataUrls would blow the origin quota (~5-10 MB in WebView2/WKWebView)
         // and every subsequent set() would throw, killing ALL create-store
