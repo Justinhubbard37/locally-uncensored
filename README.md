@@ -60,7 +60,11 @@ Grab the latest release from [**Releases**](https://github.com/PurpleDoubleD/loc
 
 > **Antivirus warning?** Some engines flag unsigned NSIS installers that download other binaries — a **false positive**. The installer is built by GitHub Actions from the public source on `master`, and the auto-update channel is signed against a public minisign key. Verification steps: [SECURITY.md](SECURITY.md#antivirus--browser-false-positives).
 
-**Current release: v2.6.0** (August 2026). Portable-friendly installers for Windows and Linux (no admin rights required), under the short in-app name **LU** by LU Labs. Full history in [Releases](https://github.com/PurpleDoubleD/locally-uncensored/releases) and [CHANGELOG.md](CHANGELOG.md).
+**Current release: v2.6.1** (August 2026). Portable-friendly installers for Windows and Linux (no admin rights required), under the short in-app name **LU** by LU Labs. Full history in [Releases](https://github.com/PurpleDoubleD/locally-uncensored/releases) and [CHANGELOG.md](CHANGELOG.md).
+
+### What's new in 2.6.1
+
+Create could not submit anything on setups whose ComfyUI runs the pure Python HTTP parser: the app put the Content-Type header on the wire twice and ComfyUI refused the request with a 400. The header a caller sends now wins, and the same trap is closed for the other headers the HTTP stack derives itself.
 
 ### What's new in 2.6.0
 
