@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>How to Run DeepSeek V4 Pro: Every Working Option</title>
+<meta name="description" content="How to run DeepSeek V4 Pro in July 2026: official API with code and prices, LU Labs hosted plans, OpenRouter, and the real math on hosting a 1.6T MoE yourself.">
+<meta name="keywords" content="how to run deepseek v4 pro, deepseek v4 pro api, deepseek v4 pro pricing, deepseek v4 pro local, deepseek v4 pro setup, run deepseek v4 pro, deepseek v4 pro hardware">
+<meta property="og:title" content="How to Run DeepSeek V4 Pro: Every Working Option">
+<meta property="og:description" content="How to run DeepSeek V4 Pro in July 2026: official API with code and prices, LU Labs hosted plans, OpenRouter, and the real math on hosting a 1.6T MoE yourself.">
+<meta property="og:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<meta property="og:url" content="https://locallyuncensored.com/blog/how-to-run-deepseek-v4-pro.html">
+<meta property="og:type" content="article">
+<meta property="article:published_time" content="2026-07-31">
+<meta property="article:author" content="PurpleDoubleD">
+<meta property="article:tag" content="Model Guide">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="How to Run DeepSeek V4 Pro: Every Working Option">
+<meta name="twitter:description" content="How to run DeepSeek V4 Pro in July 2026: official API with code and prices, LU Labs hosted plans, OpenRouter, and the real math on hosting a 1.6T MoE yourself.">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<link rel="canonical" href="https://locallyuncensored.com/blog/how-to-run-deepseek-v4-pro.html">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="../favicon.png">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BlogPosting","headline":"How to Run DeepSeek V4 Pro: Every Working Option","description":"Practical guide to DeepSeek V4 Pro: the official API (OpenAI compatible, $0.435 in / $0.87 out per million), LU Labs hosted plans, OpenRouter, and the honest hardware math on self hosting a 1.6T parameter MoE with 49B active.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-07-31","dateModified":"2026-07-31","inLanguage":"en","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/how-to-run-deepseek-v4-pro.html"},"keywords":"how to run deepseek v4 pro, deepseek v4 pro api, deepseek v4 pro pricing, deepseek v4 pro local"}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"How can I use DeepSeek V4 Pro right now?","acceptedAnswer":{"@type":"Answer","text":"Three ways: the official DeepSeek API (OpenAI compatible, $0.435 per million input tokens on cache miss and $0.87 per million output), a hosted plan like LU Labs Hosted Pro where V4 Pro sits in the model picker at a flat 49 EUR per month, or OpenRouter. Self hosting is possible in theory since the weights are MIT, but it is multi GPU server territory."}},{"@type":"Question","name":"Can I run DeepSeek V4 Pro on my own PC?","acceptedAnswer":{"@type":"Answer","text":"Not on consumer hardware. V4 Pro is a 1.6 trillion parameter MoE with 49B active; at 4 bit the weights alone approach 900 GB. That needs a multi GPU server or a rack, not a workstation. The local play for this family is V4 Flash, which fits in about 155 GB."}},{"@type":"Question","name":"How much does the DeepSeek V4 Pro API cost?","acceptedAnswer":{"@type":"Answer","text":"$0.435 per million input tokens on a cache miss, $0.003625 per million on cache hits, and $0.87 per million output tokens. Both V4 models take 1M tokens of context and up to 384K output tokens. Announced peak hour pricing at 2x has no start date yet."}},{"@type":"Question","name":"Is DeepSeek V4 Pro better than V4 Flash?","acceptedAnswer":{"@type":"Answer","text":"At deep reasoning, yes. At agent and code benchmarks, the new Flash 0731 build beats the V4 Pro Preview on several of them while costing about a third as much. If your workload is agent loops and coding, start with Flash; reach for Pro on the hardest reasoning problems."}}]}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/lu.css">
+<script defer src="/assets/lu.js"></script>
+  <script data-goatcounter="https://lu-uncensored.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<nav class="lu-nav">
+  <a class="lu-nav-brand" href="/" aria-label="Locally Uncensored">
+    <span class="lu-mono" data-mono="nav" data-size="40" aria-hidden="true"></span>
+    <span class="lu-nav-word">Locally <span class="accent">Uncensored</span></span>
+  </a>
+  <div class="lu-nav-links" id="lu-nav-links">
+    <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/blog/">Blog</a>
+    <a class="lu-nav-link" href="/guide/">Guide</a>
+    <a class="lu-nav-link" href="/remote-access/">Remote</a>
+  </div>
+  <div class="lu-nav-right">
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">908&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">300+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <span class="lu-nav-sep"></span>
+    <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
+    <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</nav>
+<div class="container lu-doc">
+  <div class="breadcrumb"><a href="../">Locally Uncensored</a> / <a href="./">Blog</a> / This Post</div>
+
+  <div class="post-meta">
+    <span class="post-tag">Model Guide</span>
+    <span>July 31, 2026</span>
+    <span>·</span>
+    <span>8 min read</span>
+  </div>
+
+  <article>
+    <h1>How to Run DeepSeek V4 Pro: Every Working Option</h1>
+
+    <p>DeepSeek V4 Pro is the big sibling in the V4 family: <strong>1.6 trillion total parameters, 49B active per token, 1M context</strong>, and open MIT weights like everything DeepSeek ships. With today's <a href="deepseek-v4-flash-0731-explained.html">Flash 0731 release</a> stealing the headlines, here is the matching guide for Pro: every way to use it, what it costs, and the straight answer on running it yourself.</p>
+
+    <h2>Your Options at a Glance</h2>
+
+    <table>
+      <thead><tr><th>Option</th><th>Status</th><th>Cost</th><th>Best for</th></tr></thead>
+      <tbody>
+        <tr><td>Official DeepSeek API</td><td>Live (Preview build)</td><td>$0.435 / M in, $0.87 / M out</td><td>Developers</td></tr>
+        <tr><td>LU Labs Hosted Pro</td><td>Live, in the picker</td><td>Flat 49&euro;/mo (quota)</td><td>Chat and agents, no key management</td></tr>
+        <tr><td>OpenRouter</td><td>Live</td><td>Provider price + margin</td><td>Existing OpenRouter apps</td></tr>
+        <tr><td>Your own hardware</td><td>Weights on HF (MIT)</td><td>A server rack</td><td>Almost nobody (math below)</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Option 1: The Official API</h2>
+
+    <p>Same OpenAI compatible surface as every DeepSeek model; only the model string differs:</p>
+
+    <pre><code>from openai import OpenAI
+
+client = OpenAI(
+    api_key="YOUR_DEEPSEEK_KEY",
+    base_url="https://api.deepseek.com",
+)
+
+resp = client.chat.completions.create(
+    model="deepseek-v4-pro",
+    messages=[{"role": "user", "content": "Prove or refute this invariant, step by step."}],
+)
+print(resp.choices[0].message.content)</code></pre>
+
+    <p>Pricing: <strong>$0.435 per million input</strong> on cache miss, $0.003625 on cache hits, <strong>$0.87 per million output</strong>. Context is 1M tokens in, up to 384K out, thinking mode on by default. Notes that matter: the API still serves the <em>Preview</em> build (today's 0731 update touched Flash only), and the Responses API support that Flash 0731 got has not come to Pro. If you are wiring up Codex style tooling, that is a point for Flash.</p>
+
+    <h2>Option 2: LU Labs (flat price)</h2>
+
+    <p>If you want V4 Pro without an API console, <a href="https://lu-labs.ai/" target="_blank" rel="noopener">LU Labs</a> carries it in the model picker on the <strong>Hosted Pro plan (49&euro;/mo)</strong>, right next to V4 Flash, Qwen, GLM and the rest of the open lineup. Flat monthly quota instead of per token billing, EU based, privacy first, and it plugs into the same studio experience as the local app. For most people this is the cheapest way to poke a 1.6T model seriously: an evening of heavy V4 Pro output on the raw API adds up faster than you expect at $0.87 per million.</p>
+
+    <h2>Option 3: OpenRouter</h2>
+
+    <p>Listed as <code>deepseek/deepseek-v4-pro</code>. One string change if you are already there; unified billing; a routing margin on top. With MIT weights public, independent hosts can and do appear under the listing, which over time pressures prices in a way the closed flagships never see.</p>
+
+    <h2>Option 4: Self Hosting (the straight answer)</h2>
+
+    <p>The weights are on Hugging Face under MIT, so nothing legally stops you. Physically is another story. At 4 bit, 1.6T parameters approach <strong>900 GB of weights</strong> before KV cache; the recommended serving setups are multi GPU nodes (think H200 or B200 class, several of them, with expert parallelism). This is server room math: no Mac Studio, no workstation, no dual GPU gaming rig gets there. It is the same conclusion as our <a href="can-you-run-kimi-k3-locally.html">Kimi K3 hardware post</a>, one weight class lower.</p>
+
+    <p>The family answer is division of labor: <strong>V4 Flash is the one you run at home</strong> (155 GB at 4 bit, 13B active, and after 0731 it beats Pro Preview on several agent benchmarks anyway), <strong>V4 Pro is the one you rent</strong> for the hardest reasoning. The full head to head is in <a href="deepseek-v4-flash-vs-v4-pro.html">Flash vs Pro</a>, and the Flash local walkthrough is <a href="how-to-run-deepseek-v4-flash-locally.html">here</a>.</p>
+
+    <h2>Which Option for Whom</h2>
+
+    <table>
+      <thead><tr><th>You are</th><th>Take</th></tr></thead>
+      <tbody>
+        <tr><td>Building products on deep reasoning</td><td>Official API (watch the cache hit rate)</td></tr>
+        <tr><td>A heavy chat or agent user</td><td>LU Labs Hosted Pro, flat price</td></tr>
+        <tr><td>Curious what 1.6T feels like</td><td>LU Labs or OpenRouter, no commitment</td></tr>
+        <tr><td>A local purist</td><td>Run <a href="how-to-run-deepseek-v4-flash-locally.html">V4 Flash</a> instead, it is the same family built for your hardware</td></tr>
+      </tbody>
+    </table>
+  </article>
+
+  <div class="post-footer">
+    <p>Local models on your GPU, cloud muscle when you want it, one app.</p>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored" class="cta-btn" target="_blank">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+      Get Started on GitHub
+    </a>
+  </div>
+</div>
+
+<footer>
+  <div class="footer-row footer-meta"><span>&copy; 2026 &middot; Locally Uncensored &middot; AGPL-3.0</span></div>
+  <div class="footer-row footer-links">
+    <a href="https://locallyuncensored.com/blog/">Blog</a>
+    <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
+    <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions">Discussions</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
+    <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
+    <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+  </div>
+</footer>
+</body>
+</html>
