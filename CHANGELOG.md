@@ -4,6 +4,27 @@ All notable changes to Locally Uncensored are documented here.
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-08-02
+
+The GGUF video release. Most of it came out of running the shipped build end to end on a real 12 GB card and fixing what broke, plus a round of customer reports from Discord and GitHub.
+
+### Fixed
+
+- **GGUF video models can generate for the first time.** The catalog offered GGUF video bundles (19 GB downloads), but the video pipeline only read the two ComfyUI loaders that list `.safetensors`, so an installed GGUF quant could never render a clip. The GGUF loaders are wired in now, the Video lane shows its starter card on an empty model list instead of a blank pane, and a freshly booted app no longer races its own model list when a persisted pick loads slower than the first click (it says the models are still loading and asks for a second try).
+- **Video decode finishes on 12 GB cards.** After sampling, the VAE decode of a video ran full-frame next to the resident UNet, got paged by the Windows driver instead of a clean OOM, and sat at 100% GPU for an hour without finishing. Every video decode now runs tiled whenever the installed ComfyUI has the tiled node, which turns that hour into minutes. Image decodes are untouched.
+- **The render progress bar ticks.** Progress only repainted on ComfyUI events, and the long stretches (model load, frame decode) send none for minutes, so the bar froze on one label and looked hung while the GPU was at 100%. A one second ticker now keeps the phase label and elapsed time moving between events, and GGUF loads show the loading phase too.
+- **The Linux AppImage no longer breaks Python installs.** The AppImage exported its bundled libraries into every child process, so any Python it launched linked against AppImage libs and broke, which made ComfyUI installs fail for every AppImage user. Helper processes start with a clean environment now.
+- **Document chat works on documents without punctuation.** The chunker assumed sentence boundaries exist; a transcript or log with none produced a single unusable chunk and the chat failed.
+- **VRAM is no longer invented above 4 GB.** The fallback probe reported a made-up number on cards the primary probe could not read, which steered model recommendations wrong.
+- **Big model downloads survive.** Large catalog downloads no longer die in a fixed timeout, and an interrupted download resumes where it stopped instead of starting over.
+- **Deleting a chat is findable again**, read aloud installs its Piper voice correctly, the built-in engine handles the LM Studio path end to end, and the Downloads tab shows real per-file progress with proper GB formatting at full width.
+
+### Added
+
+- **DeepSeek V4 Flash in LU Cloud** (Pro and Max catalog), served through the same server-driven catalog as the rest, so it reaches installed apps without an update.
+- **Qwen Image Edit in the cloud Edit lane** (web studio): instruction-based editing, describe the change and it edits the whole frame, no mask needed. The masked flux-dev inpaint stays.
+- **A screenshot tool for the agent**, and Character Studio training and generation on local hardware.
+
 ## [2.5.9] - 2026-07-26
 
 A correctness release. Most of it is things that looked like they worked and did not.
