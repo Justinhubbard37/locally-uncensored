@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  ArrowLeft,
   Check,
   FileJson,
+  HelpCircle,
   Pencil,
   Plus,
   RefreshCw,
@@ -61,6 +63,7 @@ export function WorkflowsModal({ open, onClose }: { open: boolean; onClose: () =
 
 function WorkflowsModalInner() {
   const [tab, setTab] = useState<PageTab>('workflows')
+  const [helpOpen, setHelpOpen] = useState(false)
 
   const {
     installedWorkflows,
@@ -187,10 +190,38 @@ function WorkflowsModalInner() {
     setEditingTagName('')
   }
 
+  if (helpOpen) {
+    return (
+      <div className="flex flex-col">
+        <div className="px-5 pt-4 pb-3 border-b border-gray-200 dark:border-white/[0.06]">
+          <button
+            onClick={() => setHelpOpen(false)}
+            className="flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors lu-focus-ring rounded-md"
+          >
+            <ArrowLeft size={14} />
+            <span className="t-title text-gray-900 dark:text-gray-200">How it works</span>
+          </button>
+        </div>
+        <div className="max-h-[62vh] overflow-y-auto scrollbar-thin px-5 py-4">
+          <HowItWorks />
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col">
-      {/* The Modal's floating X sits top-right; the tab switcher is centered
-          on its own row so it never fights the title for the middle. */}
+      {/* The Modal's floating X sits top-right, the help button right beside
+          it; the tab switcher is centered on its own row so it never fights
+          the title for the middle. */}
+      <button
+        onClick={() => setHelpOpen(true)}
+        title="How it works"
+        aria-label="How it works"
+        className="absolute top-3 right-11 p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-white/10 text-gray-400 hover:text-gray-700 dark:hover:text-white transition-colors"
+      >
+        <HelpCircle size={18} />
+      </button>
       <div className="px-5 pt-4 pb-3 border-b border-gray-200 dark:border-white/[0.06] space-y-3">
         <div className="flex items-center gap-2">
           <Workflow size={15} className="text-lu-accent shrink-0" />
@@ -507,6 +538,69 @@ function WorkflowsModalInner() {
         </div>
       </div>
     </div>
+  )
+}
+
+function HowItWorks() {
+  const steps: Array<{ title: string; body: React.ReactNode }> = [
+    {
+      title: 'Export from ComfyUI',
+      body: (
+        <>Save your graph with <b className="text-gray-300 font-medium">Save (API Format)</b> in
+        ComfyUI. The regular editable export will not import here.</>
+      ),
+    },
+    {
+      title: 'Install it',
+      body: (
+        <>Pick the file or paste the JSON on the Workflows view. Importing again under the
+        same name updates the workflow in place and keeps its tags.</>
+      ),
+    },
+    {
+      title: 'Pair it with a model',
+      body: (
+        <>Create a tag on the Tags view, for example the model family it was built for.
+        Then give that same tag to the workflow here and to a model on the Models view.
+        The shared tag is the whole pairing.</>
+      ),
+    },
+    {
+      title: 'Use it',
+      body: (
+        <>In Create, open <b className="text-gray-300 font-medium">Advanced settings</b> (the
+        sliders next to the Create button). The Workflow selector lists every workflow whose
+        tags match the current model. Pick yours instead of Auto and the next render runs
+        through your graph. Your prompt, size, steps and seed are still injected, so the
+        Create controls keep working.</>
+      ),
+    },
+    {
+      title: 'Back to the built-in graph',
+      body: <>Set the Workflow selector back to <b className="text-gray-300 font-medium">Auto</b>.</>,
+    },
+    {
+      title: 'Remove a workflow or tag',
+      body: (
+        <>Click its trash icon, then click it again to confirm. Deleting a tag also detaches
+        it from every workflow and model that carried it.</>
+      ),
+    },
+  ]
+  return (
+    <ol className="space-y-4">
+      {steps.map((step, i) => (
+        <li key={step.title} className="flex gap-3">
+          <span className="shrink-0 w-5 h-5 rounded-full bg-lu-accent-soft text-lu-accent t-label flex items-center justify-center">
+            {i + 1}
+          </span>
+          <div className="min-w-0 space-y-0.5">
+            <p className="t-control text-gray-900 dark:text-gray-200 font-medium">{step.title}</p>
+            <p className="t-body text-gray-500 leading-relaxed">{step.body}</p>
+          </div>
+        </li>
+      ))}
+    </ol>
   )
 }
 
