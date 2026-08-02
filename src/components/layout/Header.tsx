@@ -275,6 +275,7 @@ export function Header() {
         }>
           {textNav('chat', 'Chat')}
           {textNav('create', 'Create')}
+	  {textNav('workflows', 'Tags & Workflows')}
 
           <button
             onClick={() => {
@@ -316,6 +317,7 @@ export function Header() {
 
                 {dropdownNav('chat', 'Chat')}
                 {dropdownNav('create', 'Create')}
+		{dropdownNav('workflows', 'Tags & Workflows')}
 
                 <button
                   onClick={() => {

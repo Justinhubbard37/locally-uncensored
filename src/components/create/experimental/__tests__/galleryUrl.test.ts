@@ -1,41 +1,72 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+﻿import { describe, it, expect, vi, beforeEach } from 'vitest'
+import {
+  fetchGalleryItemBlob,
+  galleryItemUrl,
+  proxiedComfyBlobUrl,
+  recoverGalleryUrl,
+} from '../galleryUrl'
+import {
+  refreshResultUrl,
+  resolveResultUrl,
+} from '../../../../api/cloud/jobs'
+import { backendCall } from '../../../../api/backend'
+import {
+  useCreateStore,
+  type GalleryItem,
+} from '../../../../stores/createStore'
 
 // zustand persist reads window.localStorage at store-module load (node env
-// has no DOM) — same hoisted Map shim as createStore.test.ts.
+// has no DOM) â€” same hoisted Map shim as createStore.test.ts.
 vi.hoisted(() => {
   const map = new Map<string, string>()
   const ls = {
     getItem: (k: string) => (map.has(k) ? map.get(k)! : null),
-    setItem: (k: string, v: string) => { map.set(k, String(v)) },
-    removeItem: (k: string) => { map.delete(k) },
-    clear: () => { map.clear() },
+    setItem: (k: string, v: string) => {
+      map.set(k, String(v))
+    },
+    removeItem: (k: string) => {
+      map.delete(k)
+    },
+    clear: () => {
+      map.clear()
+    },
     key: (i: number) => [...map.keys()][i] ?? null,
-    get length() { return map.size },
+    get length() {
+      return map.size
+    },
   }
+
   ;(globalThis as unknown as { localStorage: unknown }).localStorage = ls
-  const g = globalThis as unknown as { window?: Record<string, unknown> }
-  g.window = Object.assign(g.window ?? {}, { localStorage: ls })
+
+  const g = globalThis as unknown as {
+    window?: Record<string, unknown>
+  }
+
+  g.window = Object.assign(g.window ?? {}, {
+    localStorage: ls,
+  })
 })
 
 vi.mock('../../../../api/comfyui', () => ({
-  getImageUrl: vi.fn((filename: string, subfolder?: string) => `http://127.0.0.1:8188/view?filename=${filename}&subfolder=${subfolder ?? ''}`),
-  classifyModel: vi.fn(() => 'unknown'),
+  getImageUrl: vi.fn((
+    filename: string,
+    subfolder?: string,
+    type: string = 'output',
+  ) =>
+    `http://127.0.0.1:8188/view?filename=${filename}&subfolder=${subfolder ?? ''}&type=${type}`),
 }))
+
 vi.mock('../../../../api/cloud/jobs', () => ({
   refreshResultUrl: vi.fn(),
   resolveResultUrl: vi.fn(),
 }))
-// Only backendCall is faked — fetchLocalhostBytes/isTauri keep their real
+
+// Only backendCall is faked â€” fetchLocalhostBytes/isTauri keep their real
 // behaviour, which the ComfyUI-path tests below depend on.
 vi.mock('../../../../api/backend', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../../api/backend')>()),
   backendCall: vi.fn(),
 }))
-
-import { fetchGalleryItemBlob, recoverGalleryUrl, proxiedComfyBlobUrl } from '../galleryUrl'
-import { refreshResultUrl, resolveResultUrl } from '../../../../api/cloud/jobs'
-import { backendCall } from '../../../../api/backend'
-import { useCreateStore, type GalleryItem } from '../../../../stores/createStore'
 
 const baseItem: GalleryItem = {
   id: 'g1', filename: 'out.png', subfolder: '', type: 'image', prompt: '',
@@ -43,6 +74,26 @@ const baseItem: GalleryItem = {
   cfgScale: 1, sampler: 's', scheduler: 's', width: 8, height: 8,
   batchSize: 1, createdAt: 1,
 } as GalleryItem
+
+describe('galleryItemUrl â€” ComfyUI file location', () => {
+  it('preserves temp outputs from VHS_VideoCombine', () => {
+    const url = galleryItemUrl({
+      ...baseItem,
+      type: 'video',
+      filename: 'AnimateDiff_00002.mp4',
+      comfyType: 'temp',
+    })
+
+    expect(url).toContain('filename=AnimateDiff_00002.mp4')
+    expect(url).toContain('type=temp')
+  })
+
+  it('defaults older gallery entries to output', () => {
+    const url = galleryItemUrl(baseItem)
+
+    expect(url).toContain('type=output')
+  })
+})
 
 describe('fetchGalleryItemBlob', () => {
   beforeEach(() => {
@@ -88,7 +139,7 @@ describe('fetchGalleryItemBlob', () => {
 // Cloud renders are deleted after seven days (the Create banner says so, and
 // services/render-worker/src/reaper.ts now does it). A tile whose render is
 // gone must settle into an honest state, not retry a dead re-sign forever.
-describe('recoverGalleryUrl — expired cloud renders', () => {
+describe('recoverGalleryUrl â€” expired cloud renders', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
     useCreateStore.setState({ gallery: [] })
@@ -131,11 +182,11 @@ describe('recoverGalleryUrl — expired cloud renders', () => {
 
 /**
  * Local MLX renders (Mac). partialize strips `dataUrl` on persist, so after a
- * restart the tile has only a filename — and galleryItemUrl turns that into a
+ * restart the tile has only a filename â€” and galleryItemUrl turns that into a
  * ComfyUI /view URL, which on a Mac can never answer. Every locally generated
  * image therefore died on the next launch. The file on disk is the way back.
  */
-describe('recoverGalleryUrl — local MLX renders on disk', () => {
+describe('recoverGalleryUrl â€” local MLX renders on disk', () => {
   beforeEach(() => {
     vi.mocked(backendCall).mockReset()
     useCreateStore.setState({ gallery: [] })
@@ -147,7 +198,7 @@ describe('recoverGalleryUrl — local MLX renders on disk', () => {
   it('re-reads the file and hands the tile a fresh blob URL', async () => {
     const item = { ...baseItem, id: 'disk-ok', localPath: '/tmp/mlx-1.png' }
     useCreateStore.setState({ gallery: [item] })
-    // base64 of "PNG" — content is irrelevant, the decode path is what matters.
+    // base64 of "PNG" â€” content is irrelevant, the decode path is what matters.
     vi.mocked(backendCall).mockResolvedValueOnce('UE5H' as never)
 
     recoverGalleryUrl(item)
@@ -182,13 +233,13 @@ describe('recoverGalleryUrl — local MLX renders on disk', () => {
 
   it('never asks ComfyUI about a file we own on disk', async () => {
     // Without this guard the recovery took a pointless round trip to port 8188
-    // first — and on a Mac that happens to run ComfyUI for something else, it
+    // first â€” and on a Mac that happens to run ComfyUI for something else, it
     // asked the wrong server about a file it never made.
     const item = { ...baseItem, id: 'disk-noproxy', localPath: '/tmp/mlx-3.png' }
     expect(await proxiedComfyBlobUrl(item)).toBeNull()
   })
 
-  it('still marks a ComfyUI item unavailable — no localPath, nothing to re-read', async () => {
+  it('still marks a ComfyUI item unavailable â€” no localPath, nothing to re-read', async () => {
     const item = { ...baseItem, id: 'comfy-dead' }
     useCreateStore.setState({ gallery: [item] })
 

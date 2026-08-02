@@ -1,27 +1,105 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { ModelType } from '../api/comfyui'
-import type { WorkflowTemplate } from '../types/workflows'
+import { v4 as uuid } from 'uuid'
+import { isVideoModelType, type ModelType, } from '../api/comfyui'
+import type { WorkflowTag, WorkflowTemplate } from '../types/workflows'
+
+export type WorkflowTagMode = 'image' | 'video'
+
+export function workflowModelKey(
+  modelName: string,
+  mode: WorkflowTagMode,
+): string {
+  const normalisedName = modelName
+    .trim()
+    .replace(/\\/g, '/')
+    .toLowerCase()
+
+  return `${mode}:${normalisedName}`
+}
+
+function normaliseTagName(name: string): string {
+  return name.trim().replace(/\s+/g, ' ')
+}
+
+function validTagIds(
+  tags: WorkflowTag[],
+  requestedIds: string[],
+): string[] {
+  const existingIds = new Set(tags.map((tag) => tag.id))
+
+  return [...new Set(requestedIds)]
+    .filter((id) => existingIds.has(id))
+}
+
+function removeTagFromMap(
+  assignments: Record<string, string[]>,
+  tagId: string,
+): Record<string, string[]> {
+  const next: Record<string, string[]> = {}
+
+  for (const [key, ids] of Object.entries(assignments)) {
+    const remaining = ids.filter((id) => id !== tagId)
+
+    if (remaining.length > 0) {
+      next[key] = remaining
+    }
+  }
+
+  return next
+}
 
 interface WorkflowState {
   installedWorkflows: WorkflowTemplate[]
-  // ModelType -> WorkflowID (e.g., { flux2: 'uuid-123' })
+
+  // Existing explicit workflow selections. These remain the source used when
+  // generating; tag matches only determine which workflows are offered.
   modelTypeAssignments: Record<string, string>
-  // Specific model filename -> WorkflowID (e.g., { 'flux2-klein.safetensors': 'uuid-789' })
   modelNameAssignments: Record<string, string>
-  // CivitAI API key for downloads
+
+  // Shared tag library and its workflow/model relationships.
+  tags: WorkflowTag[]
+  workflowTags: Record<string, string[]>
+  modelTags: Record<string, string[]>
+
   civitaiApiKey: string
-  // CivitAI host — civitai.com by default; swappable to a mirror like
-  // civitai.red for regions where civitai.com is blocked (GitHub #53).
   civitaiHost: string
 
   installWorkflow: (wf: WorkflowTemplate) => void
   removeWorkflow: (id: string) => void
+
   assignToModelType: (modelType: string, workflowId: string) => void
   assignToModelName: (modelName: string, workflowId: string) => void
   unassignModelType: (modelType: string) => void
   unassignModelName: (modelName: string) => void
-  getWorkflowForModel: (modelName: string, modelType: ModelType) => WorkflowTemplate | null
+
+  createTag: (name: string) => string | null
+  renameTag: (id: string, name: string) => void
+  deleteTag: (id: string) => void
+
+  setWorkflowTags: (workflowId: string, tagIds: string[]) => void
+  setModelTags: (
+    modelName: string,
+    mode: WorkflowTagMode,
+    tagIds: string[],
+  ) => void
+
+  getTagsForWorkflow: (workflowId: string) => WorkflowTag[]
+  getTagsForModel: (
+    modelName: string,
+    mode: WorkflowTagMode,
+  ) => WorkflowTag[]
+
+  getMatchingWorkflows: (
+    modelName: string,
+    mode: WorkflowTagMode,
+  ) => WorkflowTemplate[]
+
+  getWorkflowForModel: (
+    modelName: string,
+    modelType: ModelType,
+  ) => WorkflowTemplate | null
+
   setCivitaiApiKey: (key: string) => void
   setCivitaiHost: (host: string) => void
 }
@@ -32,76 +110,327 @@ export const useWorkflowStore = create<WorkflowState>()(
       installedWorkflows: [],
       modelTypeAssignments: {},
       modelNameAssignments: {},
+
+      tags: [],
+      workflowTags: {},
+      modelTags: {},
+
       civitaiApiKey: '',
       civitaiHost: 'civitai.com',
 
-      installWorkflow: (wf) => set((s) => ({
-        installedWorkflows: [wf, ...s.installedWorkflows.filter(w => w.id !== wf.id)],
+      installWorkflow: (wf) => set((state) => ({
+        installedWorkflows: [
+          wf,
+          ...state.installedWorkflows.filter(
+            (installed) => installed.id !== wf.id,
+          ),
+        ],
       })),
 
-      removeWorkflow: (id) => set((s) => {
-        // Also clean up any assignments pointing to this workflow
-        const typeAssignments = { ...s.modelTypeAssignments }
-        const nameAssignments = { ...s.modelNameAssignments }
-        for (const [key, val] of Object.entries(typeAssignments)) {
-          if (val === id) delete typeAssignments[key]
+      removeWorkflow: (id) => set((state) => {
+        const typeAssignments = { ...state.modelTypeAssignments }
+        const nameAssignments = { ...state.modelNameAssignments }
+        const workflowTags = { ...state.workflowTags }
+
+        for (const [key, value] of Object.entries(typeAssignments)) {
+          if (value === id) {
+            delete typeAssignments[key]
+          }
         }
-        for (const [key, val] of Object.entries(nameAssignments)) {
-          if (val === id) delete nameAssignments[key]
+
+        for (const [key, value] of Object.entries(nameAssignments)) {
+          if (value === id) {
+            delete nameAssignments[key]
+          }
         }
+
+        delete workflowTags[id]
+
         return {
-          installedWorkflows: s.installedWorkflows.filter(w => w.id !== id),
+          installedWorkflows: state.installedWorkflows.filter(
+            (workflow) => workflow.id !== id,
+          ),
           modelTypeAssignments: typeAssignments,
           modelNameAssignments: nameAssignments,
+          workflowTags,
         }
       }),
 
-      assignToModelType: (modelType, workflowId) => set((s) => ({
-        modelTypeAssignments: { ...s.modelTypeAssignments, [modelType]: workflowId },
+      assignToModelType: (modelType, workflowId) => set((state) => ({
+        modelTypeAssignments: {
+          ...state.modelTypeAssignments,
+          [modelType]: workflowId,
+        },
       })),
 
-      assignToModelName: (modelName, workflowId) => set((s) => ({
-        modelNameAssignments: { ...s.modelNameAssignments, [modelName]: workflowId },
+      assignToModelName: (modelName, workflowId) => set((state) => ({
+        modelNameAssignments: {
+          ...state.modelNameAssignments,
+          [modelName]: workflowId,
+        },
       })),
 
-      unassignModelType: (modelType) => set((s) => {
-        const assignments = { ...s.modelTypeAssignments }
+      unassignModelType: (modelType) => set((state) => {
+        const assignments = { ...state.modelTypeAssignments }
         delete assignments[modelType]
-        return { modelTypeAssignments: assignments }
+
+        return {
+          modelTypeAssignments: assignments,
+        }
       }),
 
-      unassignModelName: (modelName) => set((s) => {
-        const assignments = { ...s.modelNameAssignments }
+      unassignModelName: (modelName) => set((state) => {
+        const assignments = { ...state.modelNameAssignments }
         delete assignments[modelName]
-        return { modelNameAssignments: assignments }
+
+        return {
+          modelNameAssignments: assignments,
+        }
       }),
 
-      setCivitaiApiKey: (key) => set({ civitaiApiKey: key }),
+      createTag: (name) => {
+        const normalisedName = normaliseTagName(name)
 
-      // Accept "civitai.red", "https://civitai.red/", etc. — store the bare
-      // host. Empty falls back to the canonical civitai.com (#53).
-      setCivitaiHost: (host) =>
-        set({ civitaiHost: (host || 'civitai.com').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '') || 'civitai.com' }),
+        if (!normalisedName) {
+          return null
+        }
 
-      getWorkflowForModel: (modelName, modelType) => {
+        const existing = get().tags.find(
+          (tag) => tag.name.toLowerCase() === normalisedName.toLowerCase(),
+        )
+
+        if (existing) {
+          return existing.id
+        }
+
+        const id = uuid()
+
+        set((state) => ({
+          tags: [
+            ...state.tags,
+            {
+              id,
+              name: normalisedName,
+              createdAt: Date.now(),
+            },
+          ],
+        }))
+
+        return id
+      },
+
+      renameTag: (id, name) => {
+        const normalisedName = normaliseTagName(name)
+
+        if (!normalisedName) {
+          return
+        }
+
+        set((state) => {
+          const duplicate = state.tags.some(
+            (tag) =>
+              tag.id !== id &&
+              tag.name.toLowerCase() === normalisedName.toLowerCase(),
+          )
+
+          if (duplicate) {
+            return state
+          }
+
+          return {
+            tags: state.tags.map((tag) =>
+              tag.id === id
+                ? { ...tag, name: normalisedName }
+                : tag,
+            ),
+          }
+        })
+      },
+
+      deleteTag: (id) => set((state) => ({
+        tags: state.tags.filter((tag) => tag.id !== id),
+        workflowTags: removeTagFromMap(state.workflowTags, id),
+        modelTags: removeTagFromMap(state.modelTags, id),
+      })),
+
+      setWorkflowTags: (workflowId, tagIds) => set((state) => {
+        const next = { ...state.workflowTags }
+        const cleanedIds = validTagIds(state.tags, tagIds)
+
+        if (cleanedIds.length > 0) {
+          next[workflowId] = cleanedIds
+        } else {
+          delete next[workflowId]
+        }
+
+        return {
+          workflowTags: next,
+        }
+      }),
+
+      setModelTags: (modelName, mode, tagIds) => set((state) => {
+        const next = { ...state.modelTags }
+        const key = workflowModelKey(modelName, mode)
+        const cleanedIds = validTagIds(state.tags, tagIds)
+
+        if (cleanedIds.length > 0) {
+          next[key] = cleanedIds
+        } else {
+          delete next[key]
+        }
+
+        return {
+          modelTags: next,
+        }
+      }),
+
+      getTagsForWorkflow: (workflowId) => {
         const state = get()
-        // Priority 1: specific model name assignment
-        const nameId = state.modelNameAssignments[modelName]
-        if (nameId) {
-          const wf = state.installedWorkflows.find(w => w.id === nameId)
-          if (wf) return wf
+        const assignedIds = new Set(
+          state.workflowTags[workflowId] ?? [],
+        )
+
+        return state.tags.filter((tag) => assignedIds.has(tag.id))
+      },
+
+      getTagsForModel: (modelName, mode) => {
+        const state = get()
+        const key = workflowModelKey(modelName, mode)
+        const assignedIds = new Set(state.modelTags[key] ?? [])
+
+        return state.tags.filter((tag) => assignedIds.has(tag.id))
+      },
+
+      getMatchingWorkflows: (modelName, mode) => {
+        const state = get()
+        const key = workflowModelKey(modelName, mode)
+        const modelTagIds = new Set(state.modelTags[key] ?? [])
+
+        if (modelTagIds.size === 0) {
+          return []
         }
-        // Priority 2: model type assignment
-        const typeId = state.modelTypeAssignments[modelType]
-        if (typeId) {
-          const wf = state.installedWorkflows.find(w => w.id === typeId)
-          if (wf) return wf
+
+        return state.installedWorkflows
+          .filter((workflow) => {
+            if (
+              workflow.mode !== 'both' &&
+              workflow.mode !== mode
+            ) {
+              return false
+            }
+
+            const requiredTags =
+              state.workflowTags[workflow.id] ?? []
+
+            if (requiredTags.length === 0) {
+              return false
+            }
+
+            // Every tag placed on a workflow is a compatibility requirement.
+            // Models may have additional tags without preventing a match.
+            return requiredTags.every((tagId) =>
+              modelTagIds.has(tagId),
+            )
+          })
+          .sort((left, right) => {
+            const leftSpecificity =
+              state.workflowTags[left.id]?.length ?? 0
+            const rightSpecificity =
+              state.workflowTags[right.id]?.length ?? 0
+
+            if (leftSpecificity !== rightSpecificity) {
+              return rightSpecificity - leftSpecificity
+            }
+
+            return right.installedAt - left.installedAt
+          })
+      },
+
+      setCivitaiApiKey: (key) => set({
+        civitaiApiKey: key,
+      }),
+
+      setCivitaiHost: (host) => set({
+        civitaiHost:
+          (host || 'civitai.com')
+            .trim()
+            .replace(/^https?:\/\//i, '')
+            .replace(/\/+$/, '') ||
+          'civitai.com',
+      }),
+
+           getWorkflowForModel: (modelName, modelType) => {
+        const state = get()
+
+        const mode: WorkflowTagMode =
+          isVideoModelType(modelType)
+            ? 'video'
+            : 'image'
+
+        const modelKey = workflowModelKey(
+          modelName,
+          mode,
+        )
+
+        const modelHasTags =
+          (state.modelTags[modelKey]?.length ?? 0) > 0
+
+        // Once a model has tags, only workflows satisfying all of their
+        // compatibility requirements may be used.
+        const compatibleWorkflowIds = modelHasTags
+          ? new Set(
+              state
+                .getMatchingWorkflows(
+                  modelName,
+                  mode,
+                )
+                .map((workflow) => workflow.id),
+            )
+          : null
+
+        const isAllowed = (workflowId: string) =>
+          compatibleWorkflowIds === null ||
+          compatibleWorkflowIds.has(workflowId)
+
+        // Priority 1: explicit selection for this model.
+        const nameId =
+          state.modelNameAssignments[modelName]
+
+        if (nameId && isAllowed(nameId)) {
+          const workflow =
+            state.installedWorkflows.find(
+              (candidate) =>
+                candidate.id === nameId,
+            )
+
+          if (workflow) {
+            return workflow
+          }
         }
+
+        // Priority 2: legacy model-type assignment. This is retained for
+        // existing installations, but it must also pass tag compatibility
+        // after the model receives tags.
+        const typeId =
+          state.modelTypeAssignments[modelType]
+
+        if (typeId && isAllowed(typeId)) {
+          const workflow =
+            state.installedWorkflows.find(
+              (candidate) =>
+                candidate.id === typeId,
+            )
+
+          if (workflow) {
+            return workflow
+          }
+        }
+
         return null
       },
     }),
     {
       name: 'workflow-store',
-    }
-  )
+    },
+  ),
 )

@@ -50,4 +50,3 @@ test('Max account: switch → login → cloud mode with the hosted catalog', asy
   await expect(cloudSwitch(page)).not.toBeChecked()
   await expect(page.getByRole('button', { name: /^Models$/ })).toBeVisible()
 })
-

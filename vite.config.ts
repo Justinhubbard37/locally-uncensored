@@ -2373,6 +2373,9 @@ export default defineConfig({
   // own dropConsole can't be used (all-or-nothing, no warn/error carve-out).
   plugins: [react(), tailwindcss(), stripConsolePlugin(), comfyLauncher()],
   server: {
+	watch: {
+    	ignored: ['**/src-tauri/target/**'],
+  	},
     port: 5173,
     cors: true,
     allowedHosts: true,

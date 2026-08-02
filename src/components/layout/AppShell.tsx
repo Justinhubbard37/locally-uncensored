@@ -34,9 +34,10 @@ import { CloudExampleModal } from '../cloud/CloudExampleModal'
 import { ShortcutsModal } from './ShortcutsModal'
 import { CreditsExhaustedModal } from './CreditsExhaustedModal'
 import { Titlebar } from './Titlebar'
+import { TagsAndWorkflowsPage } from '../workflows/TagsAndWorkflowsPage'
 
 // The backup triad must never write %APPDATA%/store_backup.json before the
-// restore decision — on a post-NSIS boot the first doBackup would otherwise
+// restore decision â€” on a post-NSIS boot the first doBackup would otherwise
 // snapshot the wiped localStorage over the only good backup. Resolved on every
 // exit path of the restore effect (intact-store fast path, restore-then-reload,
 // no-backup fallback, browser give-up); module-level so a reload starts fresh.
@@ -60,13 +61,13 @@ export function AppShell() {
   // the cloud Create axis and the lu-cloud chat provider in sync.
   useCloudAuth()
 
-  // ── Global Local/Cloud mode (2.5.7) — appMode drives everything ──
+  // â”€â”€ Global Local/Cloud mode (2.5.7) â€” appMode drives everything â”€â”€
   const appMode = settings.appMode
   const cloudAvailable = useCloudAuthStore(deriveCloudAvailable)
 
   // Boot-sync the configured ComfyUI host/port into the FE URL builder.
   // The backend loads them from config.json at startup, but the only FE
-  // mirror lived in SettingsPage's mount effect — so after an app restart
+  // mirror lived in SettingsPage's mount effect â€” so after an app restart
   // every comfyuiUrl() (gallery media, control plane) pointed at localhost
   // until the user happened to open Settings. On a remote-host setup (#82)
   // that made the app look dead after every launch. Found live 2026-07-17.
@@ -80,7 +81,7 @@ export function AppShell() {
         const s = await backendCall<{ port?: number; host?: string }>('comfyui_status')
         if (typeof s?.port === 'number' && s.port > 0) setComfyPort(s.port)
         if (typeof s?.host === 'string' && s.host.trim()) setComfyHost(s.host)
-      } catch { /* backend not up yet — Settings' own mirror still applies later */ }
+      } catch { /* backend not up yet â€” Settings' own mirror still applies later */ }
     })()
   }, [])
 
@@ -94,14 +95,14 @@ export function AppShell() {
   }, [appMode, cloudAvailable])
 
   // Never leave an out-of-mode model active: flipping the switch moves the
-  // chat selection onto the first model of the new mode (cloud ↔ local).
-  // Depends on the model list too — the hosted catalog arrives ASYNC after
+  // chat selection onto the first model of the new mode (cloud â†” local).
+  // Depends on the model list too â€” the hosted catalog arrives ASYNC after
   // the lu-cloud provider gets enabled, so the reselect must fire again the
   // moment those models land.
   const allModels = useModelStore((s) => s.models)
   useEffect(() => {
     const { activeModel, setActiveModel } = useModelStore.getState()
-    // Chat models only — ComfyUI image/video checkpoints share the list but
+    // Chat models only â€” ComfyUI image/video checkpoints share the list but
     // carry no provider field, so a bare provider check would pin a checkpoint
     // as the active CHAT model (mirrors the pull auto-activate guard in
     // useModels; an unprefixed checkpoint name routes to Ollama and fails).
@@ -120,7 +121,7 @@ export function AppShell() {
     if (fallback) setActiveModel(fallback.name)
   }, [appMode, allModels])
 
-  // Local-hardware views (Models/Benchmark) don't exist in cloud mode — the
+  // Local-hardware views (Models/Benchmark) don't exist in cloud mode â€” the
   // header hides them, this guard covers a view that was already open.
   useEffect(() => {
     const ui = useUIStore.getState()
@@ -129,12 +130,12 @@ export function AppShell() {
     }
   }, [appMode])
 
-  // ── Cloud = cloud-only: release every LOCAL model backend so nothing sits
+  // â”€â”€ Cloud = cloud-only: release every LOCAL model backend so nothing sits
   // in RAM/VRAM while inference runs in the cloud (David 2026-07-11). Whisper
   // STT, the bundled llama.cpp sidecar + embeddings, Ollama-loaded models and
   // ComfyUI VRAM are freed by offload_local_models; LM Studio via its own JIT
   // unload (`lms unload --all`). Local mode reloads LAZILY on first use
-  // (chat/voice/render) — nothing is pre-warmed. Fires on entering cloud
+  // (chat/voice/render) â€” nothing is pre-warmed. Fires on entering cloud
   // (switch OR launch-in-cloud); local mode is a no-op.
   useEffect(() => {
     if (!isTauri() || appMode !== 'cloud') return
@@ -145,13 +146,13 @@ export function AppShell() {
   // Push the persisted ComfyUI GPU override to the backend on boot + change
   // (rhodium92 AMD, 2026-07-01). The backend resets to "auto" each launch, so
   // without this a saved force-cpu / force-gpu wouldn't apply until the user
-  // re-opened Settings. Desktop-only — the web build has no local ComfyUI.
+  // re-opened Settings. Desktop-only â€” the web build has no local ComfyUI.
   useEffect(() => {
     if (!isTauri()) return
     backendCall('set_comfy_gpu_mode', { mode: settings.comfyGpuMode || 'auto' }).catch(() => {})
   }, [settings.comfyGpuMode])
 
-  // ── Store backup/restore: survive NSIS updates that wipe WebView2 data ──
+  // â”€â”€ Store backup/restore: survive NSIS updates that wipe WebView2 data â”€â”€
   const STORE_KEYS = [
     'chat-conversations', 'chat-settings', 'chat-models', 'lu-providers',
     'create-store', 'locally-uncensored-codex',
@@ -160,7 +161,7 @@ export function AppShell() {
     'locally-uncensored-agent-workflows', 'locally-uncensored-agent',
     'locally-uncensored-voice', 'lu-benchmark-store', 'lu-update-checker-v2',
     'rag-store', 'workflow-store', 'lu-cloud-catalog',
-    // One-shot notices — back these up so "seen it once" survives an NSIS
+    // One-shot notices â€” back these up so "seen it once" survives an NSIS
     // update that wipes WebView2 localStorage. `lu_cloud_notice` (the Create
     // retention line) claimed in its own comment that it survived an update
     // and did not, because it was never listed here.
@@ -169,7 +170,7 @@ export function AppShell() {
     'locally-uncensored-agent-goal',
   ]
   const STORE_KEYS_SET = new Set(STORE_KEYS)
-  // These two persist via idbStorage (IndexedDB) since v2.5.0 — the backup
+  // These two persist via idbStorage (IndexedDB) since v2.5.0 â€” the backup
   // snapshot must read them from there; their localStorage copy is deleted by
   // the one-time idb migration, so localStorage.getItem returns nothing.
   const IDB_STORE_KEYS = new Set(['chat-conversations', 'locally-uncensored-memory'])
@@ -194,11 +195,11 @@ export function AppShell() {
   }
 
   // On startup: if localStorage was wiped, restore from %APPDATA% backup.
-  // Tauri v2 sets the global asynchronously via `withGlobalTauri` — on slow
+  // Tauri v2 sets the global asynchronously via `withGlobalTauri` â€” on slow
   // cold-starts the first render beats it (commit 835ce86, same reason the
   // backup triad polls). A bare isTauri() bail here would skip the restore
   // permanently and let the triad's first doBackup clobber the backup file
-  // with the freshly-wiped state, so we poll with the same 100 ms × 50 pattern.
+  // with the freshly-wiped state, so we poll with the same 100 ms Ã— 50 pattern.
   useEffect(() => {
     const runRestore = () => {
       const hasStores = STORE_KEYS.some(k => localStorage.getItem(k))
@@ -220,7 +221,7 @@ export function AppShell() {
                 const parsed = await restoreMemoryVectorsFrom(rawParsed)
                 const { exportAllChunks, importAllChunks } = await import('../../lib/ragDB')
                 const live = await exportAllChunks()
-                // Only import entries the live store is missing — never clobber
+                // Only import entries the live store is missing â€” never clobber
                 // newer in-app activity with a stale backup.
                 const toImport: Record<string, any> = {}
                 for (const [docId, chunks] of Object.entries(parsed)) {
@@ -235,7 +236,7 @@ export function AppShell() {
             }
           } catch { /* best-effort */ }
           // Release the triad only after the quiet import read the backup
-          // file — doRagBackup would otherwise overwrite it first.
+          // file â€” doRagBackup would otherwise overwrite it first.
           resolveRestoreDecided()
         })()
         return
@@ -255,7 +256,7 @@ export function AppShell() {
               let restored = 0
               for (const [key, value] of Object.entries(parsed)) {
                 if (STORE_KEYS_SET.has(key) && typeof value === 'string' && value) {
-                  // IDB-backed keys go back to IndexedDB — the chat blob can
+                  // IDB-backed keys go back to IndexedDB â€” the chat blob can
                   // exceed the ~5 MB localStorage quota (that's why those
                   // stores moved to IDB), and hydration reads them from there.
                   // Per-key try/catch: one failing key must not abort the rest.
@@ -295,7 +296,7 @@ export function AppShell() {
           }
         } catch {}
 
-        // 3. No backup available — at least recover onboarding from marker file
+        // 3. No backup available â€” at least recover onboarding from marker file
         if (markerExists) {
           updateSettings({ onboardingDone: true })
         }
@@ -315,7 +316,7 @@ export function AppShell() {
         clearInterval(waitForTauri)
         runRestore()
       } else if (tries >= 50) {
-        // 5 s elapsed — probably browser dev session, nothing to restore.
+        // 5 s elapsed â€” probably browser dev session, nothing to restore.
         clearInterval(waitForTauri)
         resolveRestoreDecided()
       }
@@ -323,18 +324,18 @@ export function AppShell() {
     return () => clearInterval(waitForTauri)
   }, [])
 
-  // Backup stores to %APPDATA% — three-pronged so chat history survives
+  // Backup stores to %APPDATA% â€” three-pronged so chat history survives
   // NSIS updates + abrupt process kills:
-  //   1. 10 s safety-net interval (was 30 s — too slow, users lost chats if
+  //   1. 10 s safety-net interval (was 30 s â€” too slow, users lost chats if
   //      they sent a message shortly before an upgrade).
   //   2. Debounced event-driven backup: 1 s after every chat/codex/memory
   //      mutation. Catches "typed + restart within interval window" case.
   //   3. beforeunload sync flush on Tauri window close. Fires for graceful
   //      quits and "X" button; does NOT fire for taskkill / NSIS upgrade
   //      (why we need 1+2 as well).
-  // No dependency — we want this to run ONCE on mount and not rerun on
+  // No dependency â€” we want this to run ONCE on mount and not rerun on
   // every settings flip. Tauri v2 sets `window.__TAURI__` asynchronously
-  // via `withGlobalTauri` — on slower machines the first render fires
+  // via `withGlobalTauri` â€” on slower machines the first render fires
   // BEFORE the global exists, so we poll for up to 5 s, then arm the triad.
   useEffect(() => {
     let cleanup: (() => void) | null = null
@@ -342,7 +343,7 @@ export function AppShell() {
     let tries = 0
 
     const setupTriad = async () => {
-      // Never write the first backup before the restore effect decided — a
+      // Never write the first backup before the restore effect decided â€” a
       // post-NSIS boot with wiped storage would otherwise snapshot the empty
       // state over the only good store_backup.json.
       await restoreDecided
@@ -351,7 +352,7 @@ export function AppShell() {
       let backupInflight = false
       // In-memory mirror of the IDB-backed values, refreshed by every doBackup
       // run. beforeunload can't await IndexedDB (the page is tearing down), so
-      // the sync flush below reads from this cache instead — at most one
+      // the sync flush below reads from this cache instead â€” at most one
       // debounce-cycle stale, same freshness the old sync handler had.
       const idbCache: Record<string, string> = {}
       const doBackup = async () => {
@@ -370,7 +371,7 @@ export function AppShell() {
               if (IDB_STORE_KEYS.has(key)) idbCache[key] = val
             }
           }
-          // Always fire — we want backup even if snapshot is mostly empty, and the
+          // Always fire â€” we want backup even if snapshot is mostly empty, and the
           // sentinel tells the restore-flow this is a valid backup.
           localStorage.setItem('lu-restore-complete', '1')
           backendCall('backup_stores', { data: JSON.stringify(snapshot) }).catch(() => {})
@@ -381,7 +382,7 @@ export function AppShell() {
       // Separate, debounced backup for RAG IndexedDB chunks (Bug V, kj103x
       // 2026-05-23). These are heavy (768-float embedding vectors per chunk,
       // sometimes thousands per doc) so we don't bundle them into the chat
-      // snapshot — the chat-store backup must stay fast for the 1 s debounce
+      // snapshot â€” the chat-store backup must stay fast for the 1 s debounce
       // case. RAG backup runs at most once every 30 s and after IndexedDB
       // grows, which is the right cadence: chunks change on document upload
       // / delete, both rare events compared to chat messages.
@@ -412,7 +413,7 @@ export function AppShell() {
 
       // Migration: write onboarding marker if missing AND user has already
       // onboarded (keeps NSIS-update recovery working). Do NOT rewrite the
-      // marker for users who just hit Settings → "Re-run onboarding" — for
+      // marker for users who just hit Settings â†’ "Re-run onboarding" â€” for
       // them onboardingDone is false, and the missing marker is intentional.
       backendCall<boolean>('is_onboarding_done').catch(() => false).then((markerExists) => {
         if (!markerExists && useSettingsStore.getState().settings.onboardingDone) {
@@ -437,7 +438,7 @@ export function AppShell() {
       // Synchronous "last write" flush for beforeunload: doBackup awaits
       // IndexedDB reads, and an await during page teardown means the trailing
       // backup_stores invoke may never fire. Build the snapshot synchronously
-      // from localStorage + the idbCache mirror instead — no await before the
+      // from localStorage + the idbCache mirror instead â€” no await before the
       // invoke, restoring the pre-async guarantee.
       const flushSyncBackup = () => {
         try {
@@ -456,7 +457,7 @@ export function AppShell() {
       const onBeforeUnload = () => {
         // The 5 s / 30 s intervals cover the common case; this is the "last
         // write" insurance for changes since the previous interval. Must stay
-        // synchronous — see flushSyncBackup.
+        // synchronous â€” see flushSyncBackup.
         flushSyncBackup()
         void doRagBackup()
       }
@@ -477,7 +478,7 @@ export function AppShell() {
         clearInterval(waitForTauri)
         void setupTriad()
       } else if (tries >= 50) {
-        // 50 × 100 ms = 5 s. Give up silently — probably browser dev session.
+        // 50 Ã— 100 ms = 5 s. Give up silently â€” probably browser dev session.
         clearInterval(waitForTauri)
       }
     }, 100)
@@ -497,28 +498,28 @@ export function AppShell() {
   // into index.html so the very first paint (before any React renders)
   // is already dark even on cold-start.
   useLayoutEffect(() => {
-    const isDark = settings.theme !== 'light' // unset / undefined → dark
+    const isDark = settings.theme !== 'light' // unset / undefined â†’ dark
     document.documentElement.classList.toggle('dark', isDark)
     document.documentElement.classList.toggle('light', !isDark)
   }, [settings.theme])
 
-  // ── Issue #31: Ollama host sync (Rust ↔ frontend) ─────────────
+  // â”€â”€ Issue #31: Ollama host sync (Rust â†” frontend) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Two async prereqs to serialize against:
   //   (a) Tauri v2 `__TAURI_INTERNALS__` is set async via `withGlobalTauri`.
-  //   (b) Zustand `persist` middleware hydrates `lu-providers` async — if we
+  //   (b) Zustand `persist` middleware hydrates `lu-providers` async â€” if we
   //       push Rust's value into the store BEFORE hydration finishes,
   //       hydration replays the stale localStorage baseUrl and clobbers us.
   //
   // The deliberate order:
-  //   1. Wait for the Tauri global via the same 100ms × 50-tick poll the
+  //   1. Wait for the Tauri global via the same 100ms Ã— 50-tick poll the
   //      backup triad uses (v2.3.3 commit 835ce86).
   //   2. Use zustand's own `onFinishHydration` callback for ordering against
-  //      hydration — more reliable than polling `hasHydrated()` because it
+  //      hydration â€” more reliable than polling `hasHydrated()` because it
   //      fires deterministically AFTER the replay, not whenever we happen
   //      to check.
   //   3. Fetch Rust's resolved base (config.json > OLLAMA_HOST > default)
   //      and push it into both the providerStore and backend.ts, regardless
-  //      of what hydration just wrote — Rust wins at cold start.
+  //      of what hydration just wrote â€” Rust wins at cold start.
   //   4. Arm a zustand subscribe listener for future GUI edits so
   //      `set_ollama_host` keeps Rust's config.json authoritative.
   useEffect(() => {
@@ -560,7 +561,7 @@ export function AppShell() {
             useProviderStore.getState().setProviderConfig('ollama', { baseUrl: res.base })
           }
         }
-      } catch { /* Rust not ready — providerStore wins, subscription handles later edits */ }
+      } catch { /* Rust not ready â€” providerStore wins, subscription handles later edits */ }
 
       const current = useProviderStore.getState().providers.ollama?.baseUrl
       if (!cancelled && current) setOllamaBase(current)
@@ -584,7 +585,7 @@ export function AppShell() {
         clearInterval(waitForTauri)
         afterHydration()
       } else if (tries >= 50) {
-        // 5 s elapsed — probably browser dev session. Still wire the store
+        // 5 s elapsed â€” probably browser dev session. Still wire the store
         // subscription so user edits reach Rust if Tauri appears later.
         clearInterval(waitForTauri)
         armSubscription()
@@ -600,7 +601,7 @@ export function AppShell() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // ── Mirror remote mobile chat into the dispatched desktop conversation ──
+  // â”€â”€ Mirror remote mobile chat into the dispatched desktop conversation â”€â”€
   useEffect(() => {
     if (!isTauri()) return
     let unlisten: (() => void) | undefined
@@ -613,7 +614,7 @@ export function AppShell() {
           if (!role || !content) return
           const chat = useChatStore.getState()
 
-          // ── Codex route ──────────────────────────────────────────────
+          // â”€â”€ Codex route â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
           // Find or create a Codex desktop conversation keyed by the mobile
           // chat_id so successive messages from the same mobile Codex chat
           // land in the same desktop conversation. Marked with `mode: 'codex'`
@@ -646,7 +647,7 @@ export function AppShell() {
             return
           }
 
-          // ── Default LU route: dispatched conversation ────────────────
+          // â”€â”€ Default LU route: dispatched conversation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
           const { dispatchedConversationId } = useRemoteStore.getState()
           if (!dispatchedConversationId) return
           const conv = chat.conversations.find((c) => c.id === dispatchedConversationId)
@@ -687,10 +688,10 @@ export function AppShell() {
     }
   }, [])
 
-  // Ollama 0.20.7 stale-manifest scan — runs once per session shortly after
+  // Ollama 0.20.7 stale-manifest scan â€” runs once per session shortly after
   // startup. Flags installed models that the server now rejects with "does
   // not support chat/completion/generate" (pulled before the registry-side
-  // capabilities refresh). Populates useModelHealthStore → StaleModelsBanner
+  // capabilities refresh). Populates useModelHealthStore â†’ StaleModelsBanner
   // surfaces the result as a top-of-app notice with one-click Refresh All.
   useEffect(() => {
     if (!onboardingDone || !isTauri()) return
@@ -709,7 +710,7 @@ export function AppShell() {
         const stale = results.filter((r) => r.stale).map((r) => r.name)
         useModelHealthStore.getState().setStaleModels(stale)
       } catch {
-        // Scan is best-effort — silently fall back if Ollama is unreachable.
+        // Scan is best-effort â€” silently fall back if Ollama is unreachable.
       } finally {
         useModelHealthStore.getState().setScanning(false)
       }
@@ -727,7 +728,7 @@ export function AppShell() {
     detectLocalBackends().then((backends) => {
       if (backends.length === 0) return
 
-      // Auto-adopt the first non-Ollama openai-compat backend we find — but
+      // Auto-adopt the first non-Ollama openai-compat backend we find â€” but
       // NOT when the app-managed built-in engine owns the `openai` slot.
       // 2.5.7: that slot now holds the bundled llama-server (managed:true) by
       // default. Silently overwriting it here would leave `managed:true`
@@ -736,8 +737,8 @@ export function AppShell() {
       // auto-adopt an external backend when the user has already switched away
       // from the built-in engine (slot not managed). When the built-in engine
       // is the active default, detected externals stay opt-in via the selector
-      // modal below and Settings → Providers ("use another engine").
-      // (Pre-2.5.7 rationale — Discord #help-chat, djoks.exe 2026-04-21: without
+      // modal below and Settings â†’ Providers ("use another engine").
+      // (Pre-2.5.7 rationale â€” Discord #help-chat, djoks.exe 2026-04-21: without
       //  auto-enable, dismissing the selector left LM Studio disabled and its
       //  models never appeared. Still true for users who left the built-in slot.)
       const openaiSlot = useProviderStore.getState().providers.openai
@@ -755,7 +756,7 @@ export function AppShell() {
       // Also auto-(re)enable Ollama when it's detected. The provider defaults
       // to enabled=true, but a previous session may have disabled it; here we
       // pin the detected baseUrl and bring it back so models show up in the
-      // Settings → AI Backends list and the chat selector.
+      // Settings â†’ AI Backends list and the chat selector.
       const detectedOllama = backends.find((b) => b.id === 'ollama')
       if (detectedOllama) {
         useProviderStore.getState().setProviderConfig('ollama', {
@@ -765,16 +766,16 @@ export function AppShell() {
         })
       }
 
-      // Single backend → we're done (already enabled above, or was Ollama).
+      // Single backend â†’ we're done (already enabled above, or was Ollama).
       if (backends.length === 1) return
 
       // User previously opted out of the selector (tickbox "don't show again")
-      // → never re-show. They manage providers via Settings → Providers.
+      // â†’ never re-show. They manage providers via Settings â†’ Providers.
       // This is the persistent guard; the sessionStorage check above is just
       // the within-session guard.
       if (useProviderStore.getState().hideBackendSelector) return
 
-      // Multiple backends detected → show selection dialog so the user can
+      // Multiple backends detected â†’ show selection dialog so the user can
       // change which one is the primary openai-compat provider if they want.
       setDetectedBackends(backends)
       setShowSelector(true)
@@ -797,9 +798,16 @@ export function AppShell() {
         <StorageQuotaToast />
         <div className="flex-1 flex overflow-hidden gap-2 p-2">
           {!isComparing && <Sidebar />}
-          <main className="flex-1 overflow-hidden rounded-xl bg-white dark:bg-[#1e1e1e] ring-1 ring-black/[0.04] dark:ring-white/[0.05]">
+           <main
+            className={`overflow-hidden rounded-xl bg-white dark:bg-[#1e1e1e] ring-1 ring-black/[0.04] dark:ring-white/[0.05] ${
+              currentView === 'models' || currentView === 'workflows'
+                ? 'flex-none w-[85%] mx-auto'
+                : 'flex-1'
+            }`}
+          >
             {currentView === 'chat' && <ErrorBoundary><ChatView /></ErrorBoundary>}
             {currentView === 'models' && <ErrorBoundary><ModelManager /></ErrorBoundary>}
+	    {currentView === 'workflows' && <ErrorBoundary><TagsAndWorkflowsPage /></ErrorBoundary>}
             {currentView === 'benchmark' && <ErrorBoundary><BenchmarkView /></ErrorBoundary>}
             {currentView === 'settings' && <ErrorBoundary><SettingsPage /></ErrorBoundary>}
             {currentView === 'create' && <ErrorBoundary><CreateExperimental /></ErrorBoundary>}
@@ -813,7 +821,7 @@ export function AppShell() {
         backends={detectedBackends}
         onClose={() => setShowSelector(false)}
       />
-      {/* Cloud gate: login → plan → beta wall, opened by the header switch. */}
+      {/* Cloud gate: login â†’ plan â†’ beta wall, opened by the header switch. */}
       <CloudGateModal />
       {/* Cloud discovery sheet: opened by the Local-mode teaser surfaces
           (locked Create tabs, hosted model rows). */}
