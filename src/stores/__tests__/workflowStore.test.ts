@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { useWorkflowStore } from '../workflowStore'
+import { useWorkflowStore, shouldShowManagerNotice } from '../workflowStore'
 import type { WorkflowTemplate } from '../../types/workflows'
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -28,6 +28,7 @@ const INITIAL_STATE = {
   modelTags: {},
   civitaiApiKey: '',
   civitaiHost: 'civitai.com',
+  managerNoticeSeen: false,
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -678,6 +679,29 @@ describe('workflowStore', () => {
       useWorkflowStore.getState().removeWorkflow('wf-1')
       expect(useWorkflowStore.getState().getWorkflowForModel('special-sdxl.safetensors', 'sdxl')).toBeNull()
       expect(useWorkflowStore.getState().getWorkflowForModel('other-sdxl.safetensors', 'sdxl')).toBeNull()
+    })
+  })
+
+  // ── The one-time Create notice ─────────────────────────────
+
+  describe('manager notice', () => {
+    it('shows on the local backend until it is dismissed', () => {
+      expect(shouldShowManagerNotice('local', false)).toBe(true)
+      expect(shouldShowManagerNotice('local', true)).toBe(false)
+    })
+
+    it('never shows in cloud mode, where a local graph cannot run', () => {
+      expect(shouldShowManagerNotice('cloud', false)).toBe(false)
+      expect(shouldShowManagerNotice('cloud', true)).toBe(false)
+    })
+
+    it('starts undismissed and stays dismissed once set', () => {
+      expect(useWorkflowStore.getState().managerNoticeSeen).toBe(false)
+      useWorkflowStore.getState().setManagerNoticeSeen(true)
+      expect(useWorkflowStore.getState().managerNoticeSeen).toBe(true)
+      // Installing a workflow must not resurrect the notice.
+      useWorkflowStore.getState().installWorkflow(makeWorkflow('wf-9', 'Any'))
+      expect(useWorkflowStore.getState().managerNoticeSeen).toBe(true)
     })
   })
 })

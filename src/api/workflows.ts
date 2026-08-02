@@ -13,6 +13,18 @@ import type {
 
 // ─── Validation ───
 
+// A node of the API-format graph. The JSON arrives from a file the user picked
+// or a download, so no field is guaranteed; every walk over a graph narrows
+// through this guard before it reads one.
+interface WorkflowNode {
+  class_type?: string
+  inputs?: Record<string, any>
+}
+
+function isWorkflowNode(value: unknown): value is WorkflowNode {
+  return !!value && typeof value === 'object'
+}
+
 export function validateWorkflowJson(json: unknown): json is Record<string, any> {
   if (!json || typeof json !== 'object' || Array.isArray(json)) return false
   const obj = json as Record<string, any>
@@ -335,8 +347,7 @@ export async function injectParameters(
   if (!widthMapping || !heightMapping) {
     const resizeEntry = Object.entries(wf).find(
       ([, node]) =>
-        node &&
-        typeof node === 'object' &&
+        isWorkflowNode(node) &&
         node.class_type === 'ImageResizeKJv2' &&
         typeof node.inputs?.width === 'number' &&
         typeof node.inputs?.height === 'number',
@@ -379,10 +390,7 @@ export async function injectParameters(
     // so users do not have to remove and re-import those workflows.
     if (!inputImageMapping) {
       const loadImageEntry = Object.entries(wf).find(
-        ([, node]) =>
-          node &&
-          typeof node === 'object' &&
-          node.class_type === 'LoadImage',
+        ([, node]) => isWorkflowNode(node) && node.class_type === 'LoadImage',
       )
 
       if (loadImageEntry) {
@@ -397,24 +405,26 @@ export async function injectParameters(
   }
 
   if ('frames' in params) {
-  inject(paramMap.frames, (params as VideoParams).frames)
-  inject(paramMap.fps, (params as VideoParams).fps)
+    inject(paramMap.frames, (params as VideoParams).frames)
+    inject(paramMap.fps, (params as VideoParams).fps)
 
-  for (const node of Object.values(wf)) {
-    if (node?.class_type === 'VHS_VideoCombine' && node.inputs) {
-      node.inputs.save_output = true
+    // A VHS_VideoCombine left on save_output:false writes the clip to
+    // ComfyUI's temp folder, where the gallery cannot play it back.
+    for (const node of Object.values(wf)) {
+      if (isWorkflowNode(node) && node.class_type === 'VHS_VideoCombine' && node.inputs) {
+        node.inputs.save_output = true
+      }
     }
   }
-}
 
   log.info('[workflows] Injected workflow nodes', { nodes: Object.entries(wf).map(([id, n]: [string, any]) =>
     `${id}: ${n.class_type} (${Object.keys(n.inputs || {}).join(', ')})`
   ).join(' | ') })
 
   // Auto-resolve VAE and CLIP loaders with real model files
-  for (const [nodeId, node] of Object.entries(wf)) {
-    if (!node || typeof node !== 'object') continue
-    const ct = node.class_type as string
+  for (const node of Object.values(wf)) {
+    if (!isWorkflowNode(node)) continue
+    const ct = node.class_type
     try {
       if (ct === 'VAELoader' && node.inputs) {
         const vae = await findMatchingVAE(modelType)

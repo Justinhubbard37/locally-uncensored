@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Sparkles, X, History, SlidersHorizontal, Square } from 'lucide-react'
+import { Sparkles, X, History, SlidersHorizontal, Square, Workflow } from 'lucide-react'
 import { useCreateStore, MODEL_TYPE_DEFAULTS } from '../../../stores/createStore'
 import { classifyModel } from '../../../api/comfyui'
 import { useCreateExp } from './CreateContext'
@@ -28,9 +28,10 @@ import { useClickAway } from '../ui/useClickAway'
 
 interface Props {
   onOpenAdvanced: () => void
+  onOpenWorkflows: () => void
 }
 
-export function Composer({ onOpenAdvanced }: Props) {
+export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
   const intent = useCreateStore((s) => s.intent())
   const meta = INTENT_MAP[intent]
   const prompt = useCreateStore((s) => s.prompt)
@@ -221,6 +222,13 @@ export function Composer({ onOpenAdvanced }: Props) {
                     options={[{ value: '2k', label: '2K' }, { value: '4k', label: '4K' }, { value: '8k', label: '8K' }]}
                   />
                 </div>
+              </Tooltip>
+            )}
+            {/* Custom ComfyUI graphs only run on the local backend, so the
+                manager only shows where it can do something. */}
+            {backend === 'local' && (
+              <Tooltip content="Your own ComfyUI workflows, and the tags that pair them with models.">
+                <Button variant="ghost" size="sm" icon={Workflow} iconOnly onClick={onOpenWorkflows} title="Workflows and tags" />
               </Tooltip>
             )}
             {!isUtility && (
