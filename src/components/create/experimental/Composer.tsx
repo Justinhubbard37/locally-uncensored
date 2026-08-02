@@ -110,11 +110,18 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
         ? frames / fps
         : undefined
   const costFallback = quota?.costs[intentKind === 'audio' ? 'image' : intentKind] ?? 0
+  // Mirrors the CreditsMeter's 0029 gates exactly: a video run needs monthly
+  // video room + wallet (packs are exempt from the sub-budget), a training
+  // needs a training left. Absent fields (a pre-0029 server) never gate.
+  const runCost = runCredits(intentKind, intentOp, pickedModel, runSeconds, costFallback, targetResolution)
+  const isTrainingRun = intentOp === 'lora-train'
+  const drawsVideoBudget = intentKind === 'video' && !isTrainingRun
   const creditsOk =
     backend !== 'cloud' ||
     (quota != null &&
-      quota.remaining.credits >=
-        runCredits(intentKind, intentOp, pickedModel, runSeconds, costFallback, targetResolution))
+      quota.remaining.credits >= runCost &&
+      (!drawsVideoBudget || !quota.video || quota.video.remaining + (quota.topup?.credits ?? 0) >= runCost) &&
+      (!isTrainingRun || !quota.trainings || quota.trainings.remaining > 0))
   // Match useCloudCreate's submit-time edit fallback so the Neg gate reflects
   // the model the run actually uses, not a t2i model still in the picker.
   const runModel =

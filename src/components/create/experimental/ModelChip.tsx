@@ -1,5 +1,5 @@
 import { useCreateStore } from '../../../stores/createStore'
-import { useCloudCatalogStore, defaultCloudModel, opPickerModels } from '../../../stores/cloudCatalogStore'
+import { useCloudCatalogStore, defaultCloudModel, opPickerModels, modelCostHint } from '../../../stores/cloudCatalogStore'
 import { useSettingsStore } from '../../../stores/settingsStore'
 import { useUIStore } from '../../../stores/uiStore'
 import { Select, type SelectOption } from '../ui/Select'
@@ -62,9 +62,21 @@ function CloudModelChip() {
   // can't perform doesn't show as "selected".
   const value = list.some((m) => m.id === current) ? current : (list[0]?.id ?? current)
 
+  // The op this picker's models will run as, so the sublabel prices correctly
+  // (a trainer bills a training run, not an image).
+  const op =
+    intent === 'character' ? 'lora-train'
+    : intent === 'lipsync' ? 'lipsync'
+    : intent === 'music' ? 'music'
+    : intent === 'extend' ? 'extend'
+    : intent === 'motion' ? 'motion'
+    : intent === 'edit' ? 'edit'
+    : intent === 'animate' ? 'animate'
+    : 'generate'
   const options: SelectOption[] = list.map((m) => ({
     value: m.id,
     label: m.label,
+    sublabel: modelCostHint(m, op),
     badge: CLOUD_BADGE,
   }))
 
@@ -134,7 +146,12 @@ function LocalModelChip() {
   if (teasersEnabled && !laneList) {
     const kind = isVideo ? 'video' : 'image'
     for (const m of catalogModels.filter((c) => c.kind === kind && !c.ops).slice(0, TEASER_ROWS)) {
-      options.push({ value: `${TEASER_PREFIX}${m.id}`, label: m.label, badge: CLOUD_BADGE })
+      options.push({
+        value: `${TEASER_PREFIX}${m.id}`,
+        label: m.label,
+        sublabel: modelCostHint(m, 'generate'),
+        badge: CLOUD_BADGE,
+      })
     }
   }
 

@@ -22,6 +22,11 @@ export interface CloudQuota {
   costs: { image: number; video: number }
   used: { credits_used: number }
   remaining: { credits: number }
+  /** Top-up wallet balance, exempt from the video sub-budget. */
+  topup?: { credits: number }
+  /** 0029 caps. Absent on a pre-0029 server, and absence must never gate. */
+  video?: { limit: number; used: number; remaining: number }
+  trainings?: { limit: number; used: number; remaining: number }
 }
 
 /** Which queue kind + workflow op a Create intent renders as.

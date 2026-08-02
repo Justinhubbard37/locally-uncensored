@@ -195,6 +195,23 @@ export function runCredits(
     : credits.base
 }
 
+export function shortCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 10_000) return `${Math.round(n / 1000)}k`
+  return n.toLocaleString('en-US')
+}
+
+/** One run's wallet draw as a picker sublabel. The single biggest cost lever
+ *  (wan-2.2-720p costs 5x wan-2.2-fast) was invisible before picking. Music
+ *  quotes the 60 s default, video the short clip; the meter refines both to
+ *  the exact run. Undefined when the entry carries no price (seed/offline). */
+export function modelCostHint(m: CloudModel, op: RenderOp): string | undefined {
+  const c = m.credits
+  if (!c) return undefined
+  const cr = op === 'music' && c.per_s !== undefined ? Math.ceil(c.per_s * 60) : c.base
+  return `${shortCount(cr)} cr`
+}
+
 /** Media-live switch from the server (MEDIA_LIVE env). Unknown = live so the
  *  first-ever session doesn't false-block before the catalog arrives. */
 export function cloudMediaLive(): boolean {

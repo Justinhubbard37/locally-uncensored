@@ -94,6 +94,9 @@ export async function routeCloud(page: Page, scenario: CloudScenario): Promise<v
           costs: { image: 1200, video: 40000 },
           used: { credits_used: 12_345 },
           remaining: { credits: 2_537_655 },
+          topup: { credits: 0 },
+          video: { limit: 300_000, used: 0, remaining: 300_000 },
+          trainings: { limit: 2, used: 0, remaining: 2 },
         }),
       )
     }

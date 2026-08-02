@@ -53,23 +53,73 @@ export function CreditsMeter() {
   )
   const remaining = quota.remaining.credits
   const limit = quota.limits.credits
+  const topup = quota.topup?.credits ?? 0
+  // The 0029 caps. Video's monthly room is extended by the wallet (packs are
+  // exempt from the sub-budget); trainings are a hard count the wallet cannot
+  // buy past. Absent fields (a pre-0029 server) mean uncapped: never gate on
+  // data we do not have.
+  const isTraining = op === 'lora-train'
+  const isVideoBudget = kind === 'video' && !isTraining
+  const videoRoom = quota.video ? quota.video.remaining + topup : Infinity
+  const trainingsLeft = quota.trainings ? quota.trainings.remaining : Infinity
   const enough = remaining >= cost
+  const videoEnough = !isVideoBudget || videoRoom >= cost
+  const trainingsEnough = !isTraining || trainingsLeft > 0
   const pct = limit > 0 ? Math.max(0, Math.min(1, remaining / limit)) : 0
 
   if (!enough) {
     return (
       <button
+        onClick={() => void openExternal(`${CLOUD_BASE}/pricing?tab=credits`)}
+        className="t-control px-2 h-[var(--control-h-sm)] inline-flex items-center rounded-md bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 transition-colors"
+      >
+        {remaining <= 0 ? 'Out of credits, top up' : `Needs ${cost} credits (${remaining} left)`}
+      </button>
+    )
+  }
+  if (!trainingsEnough) {
+    return (
+      <button
         onClick={() => void openExternal(`${CLOUD_BASE}/pricing`)}
         className="t-control px-2 h-[var(--control-h-sm)] inline-flex items-center rounded-md bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 transition-colors"
       >
-        {remaining <= 0 ? 'Out of credits, upgrade' : `Needs ${cost} credits (${remaining} left)`}
+        No trainings left this month. Upgrade
+      </button>
+    )
+  }
+  if (!videoEnough) {
+    return (
+      <button
+        onClick={() => void openExternal(`${CLOUD_BASE}/pricing?tab=credits`)}
+        className="t-control px-2 h-[var(--control-h-sm)] inline-flex items-center rounded-md bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 transition-colors"
+      >
+        Video budget used up. Top up
       </button>
     )
   }
 
+  // "How many more like this one" is the number a person actually wants from
+  // a meter. Video counts against the smaller of the shared pool and its
+  // sub-budget; trainings show the monthly count directly.
+  const runsPool = isVideoBudget ? Math.min(remaining, videoRoom) : remaining
+  const runsLeft = isTraining
+    ? Math.min(trainingsLeft, Math.floor(runsPool / cost))
+    : Math.floor(runsPool / cost)
+  const unit = isTraining
+    ? runsLeft === 1 ? 'training' : 'trainings'
+    : kind === 'video'
+      ? runsLeft === 1 ? 'clip' : 'clips'
+      : kind === 'audio'
+        ? runsLeft === 1 ? 'track' : 'tracks'
+        : runsLeft === 1 ? 'image' : 'images'
+
   return (
     <Tooltip
-      content={`${remaining} of ${limit} credits left this billing period. This ${kind === 'video' ? 'clip' : 'image'} uses ${cost}.`}
+      content={`${remaining} of ${limit} credits left this billing period. This ${
+        isTraining ? 'training' : kind === 'video' ? 'clip' : kind === 'audio' ? 'track' : 'image'
+      } uses ${cost}, about ${runsLeft} more like it${
+        isVideoBudget && quota.video ? ` (monthly video budget: ${quota.video.remaining} of ${quota.video.limit} credits left)` : ''
+      }${isTraining && quota.trainings ? ` (${trainingsLeft} of ${quota.trainings.limit} trainings left)` : ''}.`}
     >
       <div className="flex items-center gap-1.5 px-2 h-[var(--control-h-sm)] rounded-md bg-white/[0.04] text-gray-400 t-control">
         <div className="w-12 h-1 rounded-full bg-white/10 overflow-hidden">
@@ -79,6 +129,8 @@ export function CreditsMeter() {
           />
         </div>
         <span className="tabular-nums">{remaining}</span>
+        <span className="text-gray-600">·</span>
+        <span className="tabular-nums whitespace-nowrap">≈{runsLeft} {unit}</span>
       </div>
     </Tooltip>
   )

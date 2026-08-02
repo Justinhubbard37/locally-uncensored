@@ -32,8 +32,10 @@ interface Props {
 interface MenuPosition {
   top?: number
   bottom?: number
-  left: number
+  left?: number
+  right?: number
   width: number
+  maxWidth: number
   maxHeight: number
   dropUp: boolean
 }
@@ -152,21 +154,31 @@ export function Select({
         dropUp ? spaceAbove : spaceBelow,
       )
 
+      // The trigger width is the menu's MINIMUM: options with sublabels
+      // (model prices) may need more room, so the menu grows with its
+      // content. Right-aligned menus anchor their right edge and grow
+      // leftward; both stay clamped inside the viewport via maxWidth.
       const width = rect.width
-      const preferredLeft =
+      const maxWidth =
+        window.innerWidth - viewportPadding * 2
+
+      const left =
         align === 'right'
-          ? rect.right - width
-          : rect.left
-
-      const maximumLeft = Math.max(
-        viewportPadding,
-        window.innerWidth - width - viewportPadding,
-      )
-
-      const left = Math.min(
-        Math.max(viewportPadding, preferredLeft),
-        maximumLeft,
-      )
+          ? undefined
+          : Math.min(
+              Math.max(viewportPadding, rect.left),
+              Math.max(
+                viewportPadding,
+                window.innerWidth - width - viewportPadding,
+              ),
+            )
+      const right =
+        align === 'right'
+          ? Math.max(
+              viewportPadding,
+              window.innerWidth - rect.right,
+            )
+          : undefined
 
       setMenuPosition({
         top: dropUp ? undefined : rect.bottom + gap,
@@ -174,7 +186,9 @@ export function Select({
           ? window.innerHeight - rect.top + gap
           : undefined,
         left,
+        right,
         width,
+        maxWidth,
         maxHeight: Math.min(desiredHeight, availableSpace),
         dropUp,
       })
@@ -279,8 +293,10 @@ export function Select({
                 style={{
                   top: menuPosition?.top,
                   bottom: menuPosition?.bottom,
-                  left: menuPosition?.left ?? 0,
-                  width: menuPosition?.width,
+                  left: menuPosition?.left,
+                  right: menuPosition?.right,
+                  minWidth: menuPosition?.width,
+                  maxWidth: menuPosition?.maxWidth,
                   maxHeight:
                     menuPosition?.maxHeight ?? maxHeight,
                   visibility: menuPosition

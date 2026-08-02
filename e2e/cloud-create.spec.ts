@@ -45,6 +45,28 @@ test('cloud render: submit → poll → gallery, meter + utility intents present
   await expect(page.locator('img[src*="/e2e/result.png"]').first()).toBeVisible({ timeout: 30_000 })
 })
 
+test('the cloud picker prices every model, the meter counts runs (2.6.3)', async ({ page }) => {
+  await bootIntoCloudCreate(page, { license: 'active', access: true, mediaLive: true })
+
+  // Image intent: the meter translates the balance into runs of the picked
+  // model (flux-schnell at 300 credits → 2,537,655 / 300).
+  await expect(page.getByText('≈8458 images')).toBeVisible({ timeout: 15_000 })
+
+  // Every cloud picker option carries its wallet draw as a sublabel.
+  await page.locator('button[aria-haspopup="listbox"]').last().click()
+  await expect(page.getByRole('option', { name: /Flux Schnell/ })).toContainText('300 cr')
+  await expect(page.getByRole('option', { name: /Flux Dev/ })).toContainText('1,200 cr')
+  await page.keyboard.press('Escape')
+
+  // Video intent: the mocked quota carries the 300k monthly video budget, so
+  // the meter counts against the sub-budget (300,000 / 40,000), not the pool.
+  await page.getByRole('radio', { name: /^Video$/ }).click()
+  await expect(page.getByText('≈7 clips')).toBeVisible({ timeout: 15_000 })
+  await page.locator('button[aria-haspopup="listbox"]').last().click()
+  await expect(page.getByRole('option', { name: /Wan 2\.2 720p/ })).toContainText('40k cr')
+  await page.keyboard.press('Escape')
+})
+
 test('ops start EMPTY and adopt a gallery image only on explicit pick', async ({ page }) => {
   await bootIntoCloudCreate(page, { license: 'active', access: true, mediaLive: true })
 
