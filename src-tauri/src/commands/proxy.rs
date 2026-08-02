@@ -381,6 +381,12 @@ fn apply_body_and_headers(
     body: Option<String>,
     headers: Option<std::collections::HashMap<String, String>>,
 ) -> reqwest::RequestBuilder {
+    // Headers the HTTP stack derives from the request itself. A caller that
+    // sends one too would put it on the wire twice, which is the same failure
+    // as the Content-Type one below: aiohttp treats all of these as singletons
+    // and rejects the whole request when it sees two.
+    const STACK_OWNED: [&str; 4] = ["content-length", "host", "transfer-encoding", "connection"];
+
     let caller_sets_content_type = headers
         .as_ref()
         .is_some_and(|h| h.keys().any(|k| k.eq_ignore_ascii_case("content-type")));
@@ -396,6 +402,9 @@ fn apply_body_and_headers(
     // every proxied request to an authed OpenAI-compat server 401.
     if let Some(hdrs) = headers {
         for (k, v) in hdrs {
+            if STACK_OWNED.iter().any(|s| k.eq_ignore_ascii_case(s)) {
+                continue;
+            }
             request = request.header(k.as_str(), v.as_str());
         }
     }
@@ -917,6 +926,106 @@ mod tests {
     fn a_get_without_body_carries_no_content_type() {
         let sent = built_headers(None, Some(caller("Authorization", "Bearer k")));
         assert!(sent.get(reqwest::header::CONTENT_TYPE).is_none());
+    }
+
+    /// Live proof over a real socket against the strict aiohttp parser, the
+    /// one that rejected every 2.6.0 Create submit. Start the stub first
+    /// (scratchpad/strict-comfy-stub.py, AIOHTTP_NO_EXTENSIONS=1), then:
+    ///   cargo test --bin locally-uncensored live_strict -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn live_strict_aiohttp_takes_the_fixed_request_and_refuses_the_old_one() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let url = "http://127.0.0.1:18899/prompt";
+            let client = reqwest::Client::builder()
+                .user_agent("LocallyUncensored/2.0")
+                .build()
+                .unwrap();
+
+            // Exactly what 2.6.0 put on the wire: our own Content-Type, then
+            // the caller's on top.
+            let old = client
+                .post(url)
+                .header("Content-Type", "application/json")
+                .body(r#"{"prompt":{}}"#)
+                .header("Content-Type", "application/json")
+                .send()
+                .await
+                .expect("stub not running?");
+            let old_status = old.status();
+            let old_text = old.text().await.unwrap();
+
+            let new = apply_body_and_headers(
+                client.post(url),
+                Some(r#"{"prompt":{}}"#.to_string()),
+                Some(caller("Content-Type", "application/json")),
+            )
+            .send()
+            .await
+            .unwrap();
+            let new_status = new.status();
+            let new_text = new.text().await.unwrap();
+
+            println!("2.6.0 path : {} {}", old_status, old_text.trim());
+            println!("fixed path : {} {}", new_status, new_text.trim());
+
+            assert_eq!(old_status, 400, "the old order should still be refused");
+            // 3.13.2 names the header canonically, 3.13.5 echoes the spelling
+            // off the wire (reqwest sends it lowercase). Both are this bug.
+            assert!(old_text.to_lowercase().contains("duplicate 'content-type' header found"));
+            assert!(new_status.is_success(), "the fixed request must be accepted");
+            assert!(new_text.contains("prompt_id"));
+        });
+    }
+
+    /// The same trap as Content-Type, one level down: these are derived from
+    /// the request itself, so a caller that also sends one would double it.
+    /// aiohttp counts every one of them as a singleton.
+    #[test]
+    fn stack_owned_headers_are_never_doubled() {
+        let mut h = std::collections::HashMap::new();
+        h.insert("Content-Length".to_string(), "999".to_string());
+        h.insert("Host".to_string(), "evil.example".to_string());
+        h.insert("Transfer-Encoding".to_string(), "chunked".to_string());
+        h.insert("Connection".to_string(), "close".to_string());
+        h.insert("User-Agent".to_string(), "caller/1.0".to_string());
+        h.insert("Content-Type".to_string(), "application/json".to_string());
+        h.insert("Authorization".to_string(), "Bearer k".to_string());
+
+        let req = apply_body_and_headers(
+            reqwest::Client::builder()
+                .user_agent("LocallyUncensored/2.0")
+                .build()
+                .unwrap()
+                .post("http://127.0.0.1:8188/prompt"),
+            Some(r#"{"prompt":{}}"#.to_string()),
+            Some(h),
+        )
+        .build()
+        .unwrap();
+
+        for name in [
+            "content-type",
+            "content-length",
+            "host",
+            "transfer-encoding",
+            "connection",
+            "user-agent",
+            "authorization",
+        ] {
+            assert!(
+                req.headers().get_all(name).iter().count() <= 1,
+                "{} went out more than once",
+                name
+            );
+        }
+        // The caller cannot talk us into a wrong Host or a bogus length.
+        assert!(req.headers().get("host").is_none());
+        assert!(req.headers().get(reqwest::header::CONTENT_LENGTH).is_none());
+        // What it is allowed to set still arrives.
+        assert_eq!(req.headers().get(reqwest::header::AUTHORIZATION).unwrap(), "Bearer k");
+        assert_eq!(req.headers().get(reqwest::header::USER_AGENT).unwrap(), "caller/1.0");
     }
 
     #[test]
