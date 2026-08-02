@@ -814,7 +814,7 @@ export function useCreate() {
                     found = true
                     addToGallery({
                       id: uuid(), type: galleryTypeForFile(file.filename, mode),
-                      filename: file.filename, subfolder: file.subfolder ?? '',
+                      filename: file.filename, subfolder: file.subfolder ?? '', comfyType: file.type ?? 'output',
                       prompt, negativePrompt, model: activeModel,
                       modelType: mode === 'image' ? imageModelType : (videoModelsList.find(m => m.name === activeModel)?.type ?? 'wan'),
                       seed: seed === -1 ? 0 : seed,
@@ -912,7 +912,7 @@ export function useCreate() {
                       found = true
                       addToGallery({
                         id: uuid(), type: galleryTypeForFile(file.filename, mode),
-                        filename: file.filename, subfolder: file.subfolder ?? '',
+                        filename: file.filename, subfolder: file.subfolder ?? '', comfyType: file.type ?? 'output',
                         prompt, negativePrompt, model: activeModel,
                         modelType: mode === 'image' ? imageModelType : (videoModelsList.find(m => m.name === activeModel)?.type ?? 'wan'),
                         seed: seed === -1 ? 0 : seed,
@@ -1017,7 +1017,7 @@ export function useCreate() {
                     found = true
                     addToGallery({
                       id: uuid(), type: galleryTypeForFile(file.filename, mode),
-                      filename: file.filename, subfolder: file.subfolder ?? '',
+                      filename: file.filename, subfolder: file.subfolder ?? '', comfyType: file.type ?? 'output',
                       prompt, negativePrompt, model: activeModel,
                       modelType: mode === 'image' ? imageModelType : (videoModelsList.find(m => m.name === activeModel)?.type ?? 'wan'),
                       seed: seed === -1 ? 0 : seed,

@@ -127,6 +127,7 @@ export interface GalleryItem {
   id: string
   type: 'image' | 'video' | 'audio'
   filename: string
+  comfyType?: string
   subfolder: string
   prompt: string
   negativePrompt: string

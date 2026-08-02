@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Check,
   FileJson,
@@ -55,6 +55,12 @@ export function TagsAndWorkflowsPage() {
     models,
     fetchModels,
   } = useModels()
+
+// Populate installed ComfyUI models when this page is opened instead of
+// relying on the separate Models page to perform the first refresh.
+useEffect(() => {
+  fetchModels().catch(() => {})
+}, [fetchModels])
 
   const [importName, setImportName] = useState('')
   const [importJson, setImportJson] = useState('')

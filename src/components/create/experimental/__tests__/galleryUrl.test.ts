@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { fetchGalleryItemBlob, galleryItemUrl, recoverGalleryUrl, } from '../galleryUrl'
+import { refreshResultUrl, resolveResultUrl } from '../../../../api/cloud/jobs'
+import { useCreateStore, type GalleryItem } from '../../../../stores/createStore'
 
 // zustand persist reads window.localStorage at store-module load (node env
 // has no DOM) — same hoisted Map shim as createStore.test.ts.
@@ -18,17 +21,17 @@ vi.hoisted(() => {
 })
 
 vi.mock('../../../../api/comfyui', () => ({
-  getImageUrl: vi.fn((filename: string, subfolder?: string) => `http://127.0.0.1:8188/view?filename=${filename}&subfolder=${subfolder ?? ''}`),
-  classifyModel: vi.fn(() => 'unknown'),
+  getImageUrl: vi.fn((
+  filename: string,
+  subfolder?: string,
+  type: string = 'output',
+) =>
+  `http://127.0.0.1:8188/view?filename=${filename}&subfolder=${subfolder ?? ''}&type=${type}`),
 }))
 vi.mock('../../../../api/cloud/jobs', () => ({
   refreshResultUrl: vi.fn(),
   resolveResultUrl: vi.fn(),
 }))
-
-import { fetchGalleryItemBlob, recoverGalleryUrl } from '../galleryUrl'
-import { refreshResultUrl, resolveResultUrl } from '../../../../api/cloud/jobs'
-import { useCreateStore, type GalleryItem } from '../../../../stores/createStore'
 
 const baseItem: GalleryItem = {
   id: 'g1', filename: 'out.png', subfolder: '', type: 'image', prompt: '',
@@ -36,6 +39,26 @@ const baseItem: GalleryItem = {
   cfgScale: 1, sampler: 's', scheduler: 's', width: 8, height: 8,
   batchSize: 1, createdAt: 1,
 } as GalleryItem
+
+describe('galleryItemUrl — ComfyUI file location', () => {
+  it('preserves temp outputs from VHS_VideoCombine', () => {
+    const url = galleryItemUrl({
+      ...baseItem,
+      type: 'video',
+      filename: 'AnimateDiff_00002.mp4',
+      comfyType: 'temp',
+    })
+
+    expect(url).toContain('filename=AnimateDiff_00002.mp4')
+    expect(url).toContain('type=temp')
+  })
+
+  it('defaults older gallery entries to output', () => {
+    const url = galleryItemUrl(baseItem)
+
+    expect(url).toContain('type=output')
+  })
+})
 
 describe('fetchGalleryItemBlob', () => {
   beforeEach(() => {
