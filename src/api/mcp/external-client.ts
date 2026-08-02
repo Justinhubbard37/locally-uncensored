@@ -24,11 +24,20 @@ interface JsonRpcResponse {
 }
 
 export class MCPExternalClient {
-  private process: any = null
+  /**
+   * The Child that spawn() hands back — owns stdin and kill(). The Command
+   * owns the stdout/stderr/close events instead; these live on two different
+   * objects in @tauri-apps/plugin-shell, and keeping only the Command meant
+   * `stdin.write` hit undefined on the very first request: every external
+   * server failed to connect with "Cannot read properties of undefined
+   * (reading 'write')".
+   */
+  private child: any = null
   private requestId = 0
   private pendingRequests = new Map<number, {
     resolve: (value: any) => void
     reject: (error: Error) => void
+    timer: ReturnType<typeof setTimeout>
   }>()
   private outputBuffer = ''
   private connected = false
@@ -37,38 +46,50 @@ export class MCPExternalClient {
 
   async connect(): Promise<MCPToolDefinition[]> {
     try {
-      // Dynamic import for Tauri shell plugin — only available in .exe builds
-      // @ts-ignore — module may not exist in dev mode
-      const shellModule = await import(/* @vite-ignore */ '@tauri-apps/plugin-shell')
+      // Lazy so the plugin only loads once a server connects, but vite must
+      // resolve and bundle it: with @vite-ignore the packaged WebView gets a
+      // bare specifier and every connect dies on the import itself (D#90).
+      const shellModule = await import('@tauri-apps/plugin-shell')
       const { Command } = shellModule
 
-      // Windows gotcha: Node-based MCP servers are invoked as `npx`, `npm`,
-      // `node` — but on Windows the resolvable PATH entries for those are
-      // `npx.cmd`, `npm.cmd`, etc. Command.create tries to spawn the bare
-      // name which fails with "program not found". Map known command names
-      // to their .cmd shim here.
-      const resolvedCommand = resolveCommandForPlatform(this.config.command)
+      // Windows gotcha: npm-family launchers exist only as `.cmd` shims
+      // (npx.cmd) while node/deno/bun ship a real .exe, and tools like pnpm
+      // exist as either depending on how they were installed. Rust's spawn
+      // finds .exe from the bare name but never resolves .cmd, so neither a
+      // blanket rewrite nor the bare name alone works for every install.
+      // Try the likelier candidate first and fall back to the other.
+      const candidates = commandCandidatesForPlatform(this.config.command)
+      let spawnError: unknown = null
+      for (const program of candidates) {
+        const command = Command.create(program, this.config.args, {
+          env: this.config.env,
+        })
 
-      this.process = Command.create(resolvedCommand, this.config.args, {
-        env: this.config.env,
-      })
+        // Handle stdout — parse JSON-RPC responses
+        command.stdout.on('data', (data: string) => {
+          this.outputBuffer += data
+          this.processBuffer()
+        })
 
-      // Handle stdout — parse JSON-RPC responses
-      this.process.stdout.on('data', (data: string) => {
-        this.outputBuffer += data
-        this.processBuffer()
-      })
+        command.stderr.on('data', (data: string) => {
+          log.warn(`[MCP:${this.config.name}] stderr`, { data })
+        })
 
-      this.process.stderr.on('data', (data: string) => {
-        log.warn(`[MCP:${this.config.name}] stderr`, { data })
-      })
+        command.on('close', () => {
+          this.connected = false
+          this.child = null
+          this.rejectAllPending('Server process exited')
+        })
 
-      this.process.on('close', () => {
-        this.connected = false
-        this.rejectAllPending('Server process exited')
-      })
-
-      await this.process.spawn()
+        try {
+          this.child = await command.spawn()
+          spawnError = null
+          break
+        } catch (err) {
+          spawnError = err
+        }
+      }
+      if (!this.child) throw spawnError
       this.connected = true
 
       // Initialize the MCP connection
@@ -92,6 +113,13 @@ export class MCPExternalClient {
       return tools
     } catch (err) {
       this.connected = false
+      // A failure after spawn (handshake refused, tools/list timed out) leaves
+      // the server process running with nobody holding a handle to it — the
+      // caller never gets a client it could disconnect. Take it down here.
+      if (this.child) {
+        try { await this.child.kill() } catch { /* already gone */ }
+        this.child = null
+      }
       throw new Error(`Failed to connect to MCP server "${this.config.name}": ${err instanceof Error ? err.message : String(err)}`)
     }
   }
@@ -117,13 +145,13 @@ export class MCPExternalClient {
   async disconnect() {
     this.connected = false
     this.rejectAllPending('Disconnecting')
-    if (this.process) {
+    if (this.child) {
       try {
-        await this.process.kill()
+        await this.child.kill()
       } catch {
         // Process may already be dead
       }
-      this.process = null
+      this.child = null
     }
   }
 
@@ -135,6 +163,10 @@ export class MCPExternalClient {
 
   private sendRequest(method: string, params?: any): Promise<any> {
     return new Promise((resolve, reject) => {
+      if (!this.child) {
+        reject(new Error('Not connected'))
+        return
+      }
       const id = ++this.requestId
       const request: JsonRpcRequest = {
         jsonrpc: '2.0',
@@ -143,18 +175,23 @@ export class MCPExternalClient {
         params,
       }
 
-      this.pendingRequests.set(id, { resolve, reject })
-
-      const msg = JSON.stringify(request) + '\n'
-      this.process.stdin.write(msg)
-
-      // Timeout after 30 seconds
-      setTimeout(() => {
-        if (this.pendingRequests.has(id)) {
-          this.pendingRequests.delete(id)
+      const timer = setTimeout(() => {
+        if (this.pendingRequests.delete(id)) {
           reject(new Error(`Request ${method} timed out`))
         }
       }, 30000)
+
+      this.pendingRequests.set(id, { resolve, reject, timer })
+
+      // Child.write is async: a failed write has to fail the request instead
+      // of becoming an unhandled rejection and letting it sit for 30 s.
+      const msg = JSON.stringify(request) + '\n'
+      Promise.resolve(this.child.write(msg)).catch((err: unknown) => {
+        if (this.pendingRequests.delete(id)) {
+          clearTimeout(timer)
+          reject(err instanceof Error ? err : new Error(String(err)))
+        }
+      })
     })
   }
 
@@ -170,6 +207,7 @@ export class MCPExternalClient {
         const pending = this.pendingRequests.get(response.id)
         if (pending) {
           this.pendingRequests.delete(response.id)
+          clearTimeout(pending.timer)
           if (response.error) {
             pending.reject(new Error(response.error.message))
           } else {
@@ -183,26 +221,30 @@ export class MCPExternalClient {
   }
 
   private rejectAllPending(reason: string) {
-    for (const [id, { reject }] of this.pendingRequests) {
+    const pending = [...this.pendingRequests.values()]
+    this.pendingRequests.clear()
+    for (const { reject, timer } of pending) {
+      clearTimeout(timer)
       reject(new Error(reason))
-      this.pendingRequests.delete(id)
     }
   }
 }
 
 /**
- * Map a bare command name to the Windows `.cmd` shim when running on
- * Windows. Commands with an extension or an absolute path are returned
- * unchanged.
+ * Spawn candidates for a configured command, in the order worth trying.
+ * On Windows a bare name can resolve to an .exe (node, deno, native bun)
+ * or exist only as a .cmd shim (npx, npm, or an npm-installed pnpm), so
+ * both spellings are returned with the likelier one first. Commands with
+ * an extension or a path separator are returned as-is.
  */
-export function resolveCommandForPlatform(
+export function commandCandidatesForPlatform(
   command: string,
   platform: string = typeof navigator !== 'undefined' ? navigator.platform : ''
-): string {
+): string[] {
   const isWindows = /Win/i.test(platform)
-  if (!isWindows) return command
-  if (/[\\/]|\.(cmd|bat|exe)$/i.test(command)) return command
-  const NEEDS_CMD = new Set(['npx', 'npm', 'pnpm', 'yarn', 'bun', 'node', 'deno'])
-  if (NEEDS_CMD.has(command)) return `${command}.cmd`
-  return command
+  if (!isWindows) return [command]
+  if (/[\\/]|\.(cmd|bat|exe)$/i.test(command)) return [command]
+  const CMD_SHIM_FIRST = new Set(['npx', 'npm', 'pnpm', 'yarn', 'corepack'])
+  if (CMD_SHIM_FIRST.has(command)) return [`${command}.cmd`, command]
+  return [command, `${command}.cmd`]
 }

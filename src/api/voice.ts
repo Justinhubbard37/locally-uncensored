@@ -241,26 +241,60 @@ export async function transcribeAudioCloud(audioBlob: Blob): Promise<string> {
 // boundaries (hard-splitting any single oversized run) so long messages read
 // aloud instead of 400ing and silently degrading to the local/browser voice.
 const TTS_MAX_CHARS = 1400;
+/** Last resort for a run with no sentence end in it: cut at `max`, but never
+ *  through a surrogate pair (a split emoji becomes two lone surrogates, which
+ *  is invalid in the JSON the cloud TTS request carries) and, where the text
+ *  has spaces, never through a word. */
+function hardSlice(s: string, max: number): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < s.length) {
+    let end = Math.min(i + max, s.length);
+    if (end < s.length) {
+      const lead = s.charCodeAt(end - 1);
+      if (lead >= 0xd800 && lead <= 0xdbff) end -= 1; // keep the pair together
+      const ws = s.lastIndexOf(" ", end - 1);
+      // Only back off to a space if it does not shrink the chunk drastically —
+      // CJK has none, and a 60% floor keeps the clip count sane.
+      if (ws > i + max * 0.6) end = ws + 1;
+    }
+    const piece = s.slice(i, end).trim();
+    if (piece) out.push(piece);
+    i = end;
+  }
+  return out;
+}
+
 export function chunkForTts(text: string, max = TTS_MAX_CHARS): string[] {
   const clean = text.trim();
   if (clean.length <= max) return clean ? [clean] : [];
-  const parts = clean.split(/(?<=[.!?。！？\n])\s+/);
+  // Split AFTER a sentence terminator. This used to require whitespace to
+  // FOLLOW it (`\s+`), which never fires for CJK — Chinese and Japanese put no
+  // space after 。！？, so a long answer stayed a single part and fell into the
+  // blind slicer below: measured, 200 Japanese sentences came out as one part
+  // and the cut landed inside a word.
+  // Parts stay VERBATIM — the separator (a space in Latin prose, nothing in
+  // CJK) rides along at the head of the next part, so concatenating restores
+  // the original exactly. Joining with a space instead would insert one into
+  // Japanese where none belongs.
+  const parts = clean.split(/(?<=[.!?。！？\n])/).filter(Boolean);
   const chunks: string[] = [];
   let cur = "";
+  const flush = () => {
+    const t = cur.trim();
+    if (t) chunks.push(t);
+    cur = "";
+  };
   for (const p of parts) {
     if (p.length > max) {
-      if (cur) { chunks.push(cur); cur = ""; }
-      for (let i = 0; i < p.length; i += max) chunks.push(p.slice(i, i + max));
+      flush();
+      for (const piece of hardSlice(p, max)) chunks.push(piece);
       continue;
     }
-    if ((cur ? cur.length + 1 + p.length : p.length) > max) {
-      if (cur) chunks.push(cur);
-      cur = p;
-    } else {
-      cur = cur ? `${cur} ${p}` : p;
-    }
+    if (cur.length + p.length > max) flush();
+    cur += p;
   }
-  if (cur) chunks.push(cur);
+  flush();
   return chunks;
 }
 
@@ -292,17 +326,29 @@ export async function synthesizeCloud(text: string, voice?: string, signal?: Abo
 
 let ttsChecked = false;
 let ttsAvailableFlag = false;
+let ttsCheckedVoice: string | undefined;
+/** The last full probe, not just its boolean. `tts_status` distinguishes "the
+ *  piper package is missing" from "no complete voice on disk"; collapsing that
+ *  to one flag is what made read-aloud tell a user with no Piper at all that
+ *  Piper "is installed but not responding". */
+let lastTtsStatus: { available: boolean; piper?: boolean; voice?: boolean } = { available: false };
 
-export async function checkTtsAvailable(): Promise<{ available: boolean; piper?: boolean; voice?: boolean }> {
+export function getLastTtsStatus(): { available: boolean; piper?: boolean; voice?: boolean } {
+  return lastTtsStatus;
+}
+
+/** Probe neural TTS. Pass the SELECTED voice — readiness is per voice: having
+ *  some other voice on disk says nothing about the one that is about to speak. */
+export async function checkTtsAvailable(voice?: string): Promise<{ available: boolean; piper?: boolean; voice?: boolean }> {
   try {
-    if (isTauri()) return await backendCall("tts_status");
+    if (isTauri()) return await backendCall("tts_status", { voice });
     return { available: false };
   } catch {
     return { available: false };
   }
 }
 
-export async function initTtsCheck(): Promise<boolean> {
+export async function initTtsCheck(voice?: string): Promise<boolean> {
   // Cache only a POSITIVE result. A negative probe at boot is frequently a
   // race — resolve_lu_python / the ComfyUI venv may not be ready when App.tsx
   // fires this — and caching `false` would stick for the whole session, so
@@ -310,21 +356,26 @@ export async function initTtsCheck(): Promise<boolean> {
   // never spoke at all (#77, ElBiggus). On a negative we leave ttsChecked
   // false so the next caller (the lazy re-probe in useVoice, or Settings)
   // gets a fresh probe instead of the stale miss.
-  if (ttsChecked && ttsAvailableFlag) return ttsAvailableFlag;
+  // The cache is per voice: a positive for the voice that was selected earlier
+  // must not vouch for the one the user switched to.
+  if (ttsChecked && ttsAvailableFlag && ttsCheckedVoice === voice) return ttsAvailableFlag;
   try {
-    ttsAvailableFlag = (await checkTtsAvailable()).available;
+    lastTtsStatus = await checkTtsAvailable(voice);
+    ttsAvailableFlag = lastTtsStatus.available;
   } catch {
+    lastTtsStatus = { available: false };
     ttsAvailableFlag = false;
   }
   ttsChecked = ttsAvailableFlag;
+  ttsCheckedVoice = voice;
   return ttsAvailableFlag;
 }
 
 // Force a fresh probe (after the in-app install, or when a Speaker button mounts
 // while neural TTS still shows unavailable).
-export async function recheckTtsAvailable(): Promise<boolean> {
+export async function recheckTtsAvailable(voice?: string): Promise<boolean> {
   ttsChecked = false;
-  return initTtsCheck();
+  return initTtsCheck(voice);
 }
 
 /** Synthesize text to a playable WAV data URL via a local Piper voice. */
@@ -446,6 +497,24 @@ function downsampleTo(input: Float32Array, inRate: number, outRate: number): Flo
   return out;
 }
 
+/** Downsample to 16 kHz when the source is higher, then encode.
+ *
+ *  The header carries the rate the samples are ACTUALLY at. It used to be
+ *  hard-coded to 16 kHz while downsampleTo returns its input untouched when the
+ *  source is already at or below the target — so a mic running below 16 kHz
+ *  produced a WAV whose header lied. A Bluetooth headset in HFP mode captures
+ *  at 8 kHz, which is the common case on Windows the moment the headset's
+ *  microphone is selected; whisper then read the take at double speed and the
+ *  transcript came back wrong or empty ("mic on but no text"). faster-whisper
+ *  resamples from whatever the header declares, so declaring it honestly is the
+ *  whole fix.
+ */
+export function pcmToWav(samples: Float32Array, inputRate: number): Blob {
+  const rate = Math.min(inputRate, STT_TARGET_RATE);
+  const ds = downsampleTo(samples, inputRate, STT_TARGET_RATE);
+  return encodeWav(floatTo16BitPCM(ds), rate);
+}
+
 function encodeWav(samples: Int16Array, sampleRate: number): Blob {
   const buffer = new ArrayBuffer(44 + samples.length * 2);
   const view = new DataView(buffer);
@@ -488,8 +557,7 @@ export function createAudioRecorder(): AudioRecorder {
     const merged = new Float32Array(total);
     let o = 0;
     for (const c of pcmChunks) { merged.set(c, o); o += c.length; }
-    const ds = downsampleTo(merged, inputRate, STT_TARGET_RATE);
-    return encodeWav(floatTo16BitPCM(ds), STT_TARGET_RATE);
+    return pcmToWav(merged, inputRate);
   };
 
   return {

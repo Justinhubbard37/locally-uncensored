@@ -2,6 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod install_state;
+mod os_paths;
+mod process_util;
 mod python;
 mod state;
 
@@ -68,6 +71,10 @@ fn init_tracing() {
 fn main() {
     #[cfg(target_os = "linux")]
     apply_linux_webkit_workarounds();
+    // Before anything can spawn a child: an AppImage exports PYTHONHOME and
+    // PYTHONPATH into its own mount, and every python3 we start inherits them
+    // and dies on "No module named 'encodings'".
+    python::sanitize_appimage_python_env();
 
     init_tracing();
     tracing::info!(
@@ -203,6 +210,31 @@ fn main() {
             commands::engine::start_bundled_embed,
             commands::engine::stop_bundled_embed,
             commands::engine::bundled_embed_status,
+            // In-process MLX media engine (macOS Apple-Silicon local image/video,
+            // spawned in-process — no separate bridge daemon). See media_cmds.rs.
+            commands::media_cmds::mlx_status,
+            commands::media_cmds::mlx_start,
+            commands::media_cmds::mlx_unload,
+            commands::media_cmds::mlx_generate,
+            commands::media_cmds::mlx_image_models,
+            commands::media_cmds::set_hf_token,
+            commands::media_cmds::hf_token_present,
+            commands::media_cmds::mlx_image_install_model,
+            commands::media_cmds::mlx_image_install_status,
+            commands::media_cmds::mlx_image_delete_model,
+            commands::media_cmds::install_mlx_diffusion,
+            commands::media_cmds::install_mlx_diffusion_status,
+            commands::media_cmds::video_status,
+            commands::media_cmds::video_list_models,
+            commands::media_cmds::video_install_mlx,
+            commands::media_cmds::video_install_mlx_status,
+            commands::media_cmds::video_install_model,
+            commands::media_cmds::video_install_model_status,
+            commands::media_cmds::video_delete_model,
+            commands::media_cmds::video_generate,
+            commands::media_cmds::video_progress,
+            commands::media_cmds::video_cancel,
+            commands::media_cmds::read_media_file,
             // Provider API-key keychain (H5)
             commands::secret::secret_set,
             commands::secret::secret_get,
@@ -214,12 +246,6 @@ fn main() {
             commands::search::install_searxng,
             commands::search::searxng_status,
             // Claude Code
-            commands::claude_code::detect_claude_code,
-            commands::claude_code::install_claude_code,
-            commands::claude_code::install_claude_code_status,
-            commands::claude_code::start_claude_code,
-            commands::claude_code::stop_claude_code,
-            commands::claude_code::send_claude_code_input,
             // Remote Access
             commands::remote::start_remote_server,
             commands::remote::stop_remote_server,
@@ -384,8 +410,23 @@ fn main() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            // Every quit path ends here, including the ones nothing else
+            // covered: Cmd+Q, the Apple menu, an `osascript quit`, a logout.
+            // Only the tray's Quit item and the `exit_app` command called
+            // shutdown_subprocesses; macOS quits fell through to `Drop for
+            // AppState`, which Tauri v2 does not reliably run — so a normal
+            // Cmd+Q left Ollama, ComfyUI, llama-server, the embeddings
+            // server, the trainer and the MLX sidecar all running. Proved
+            // live on 2026-07-28: app gone, the MLX Python still resident.
+            if let tauri::RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.shutdown_subprocesses();
+                }
+            }
+        });
 }
 
 #[cfg(test)]

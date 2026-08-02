@@ -12,7 +12,8 @@ import { Lightbox } from './Lightbox'
 import { AdvancedDrawer } from './AdvancedDrawer'
 import { MaskEditor } from './MaskEditor'
 import { VhsInstallModal } from './VhsInstallModal'
-import { INTENT_MAP } from './intents'
+import { INTENT_MAP, isIntentAvailable } from './intents'
+import { isMlxImageHost } from '../../../api/mlx-image'
 import { fetchGalleryItemBlob } from './galleryUrl'
 import { loadImageRef } from './loadImage'
 
@@ -83,6 +84,13 @@ function CreateExperimentalInner() {
 
   const displayed = shownId ? gallery.find((g) => g.id === shownId) : undefined
   const banner = error ?? modelLoadError
+
+  // "Edit with mask" on a finished image force-sets the 'edit' intent. On the
+  // MLX Mac that lane does not exist (no ComfyUI inpaint nodes, and MLX
+  // generate DROPS the source + mask — it silently produced an unrelated fresh
+  // text-to-image instead of an edit). Hide the action where the lane can't
+  // run, using the same rule the IntentBar renders from.
+  const editAvailable = isIntentAvailable('edit', backend, isMlxImageHost())
 
   // Pull a finished result back in as the working source (ImageRef). Needed
   // because a text-to-image run leaves `source` empty — without this, "Edit
@@ -218,7 +226,7 @@ function CreateExperimentalInner() {
         <Stage
           displayed={displayed}
           onOpenMaskEditor={() => setMaskOpen(true)}
-          onEditResult={(it) => { void editResultWithMask(it) }}
+          onEditResult={editAvailable ? (it) => { void editResultWithMask(it) } : undefined}
           onFullscreen={(it) => setLightbox(it)}
         />
         <CreatePanel open={panelOpen} onOpenChange={setPanelOpen} activeId={shownId} onSelect={openGalleryItem} />

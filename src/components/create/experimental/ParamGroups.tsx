@@ -3,6 +3,7 @@ import { useCreateStore } from '../../../stores/createStore'
 import { useCreateExp } from './CreateContext'
 import { cloudModelById, defaultCloudModel } from '../../../stores/cloudCatalogStore'
 import { classifyModel } from '../../../api/comfyui'
+import { isMlxImageHost } from '../../../api/mlx-image'
 import { INTENT_MAP } from './intents'
 import { SAMPLERS as SAMPLERS_FALLBACK, SCHEDULERS as SCHEDULERS_FALLBACK } from './badges'
 import { Section } from '../ui/Section'
@@ -30,6 +31,12 @@ export function ParamGroups() {
   const isVideo = meta.isVideo
   const isEdit = meta.id === 'edit'
   const isCloud = s.backend === 'cloud'
+  // The Mac's MLX pipeline only honours prompt/steps/seed/size/negative — every
+  // Expert knob (sampler, scheduler, VAE, clip-skip; LoRA has no list without
+  // ComfyUI, and denoise/mask belong to intents that aren't local there) is
+  // silently dropped, so the whole Expert section is dead on the local Mac.
+  // Keep it on Mac-cloud and on the ComfyUI hosts (Windows/Linux).
+  const isMlxLocal = !isCloud && isMlxImageHost()
   // LoRA is a local-only knob; for video it's offered only on families whose
   // builder actually applies it (see VIDEO_LORA_FAMILIES). Image always qualifies.
   const loraSupported = !isCloud && (!isVideo || VIDEO_LORA_FAMILIES.has(classifyModel(s.videoModel)))
@@ -75,7 +82,9 @@ export function ParamGroups() {
         )}
       </Section>
 
-      {/* EXPERT */}
+      {/* EXPERT — every control in here is dropped by the Mac MLX pipeline, so
+          the whole section is hidden on the local Mac (kept on cloud + ComfyUI). */}
+      {!isMlxLocal && (
       <Section title="Expert" icon={FlaskConical} defaultOpen={false}>
         {/* Sampler/Scheduler are ComfyUI-only knobs — the hosted WaveSpeed
             endpoints don't accept them, so hide them on the cloud backend
@@ -131,6 +140,7 @@ export function ParamGroups() {
           <Slider label="Skip CLIP layers" min={0} max={12} step={1} value={s.clipSkip} onChange={s.setClipSkip} />
         )}
       </Section>
+      )}
     </div>
   )
 }

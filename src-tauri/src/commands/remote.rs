@@ -528,13 +528,47 @@ pub(crate) fn resolve_remote_path(
     Ok(contained.to_string_lossy().to_string())
 }
 
+/// What a remote tool needs before it may run.
+#[derive(Debug, PartialEq)]
+enum ToolGate {
+    /// Harmless to a paired device: no toggle required.
+    Open,
+    /// Requires the named permission to be ON.
+    Needs(&'static str),
+    /// Not decided → refused. See `gate_for`.
+    Unknown,
+}
+
+/// Permission decision per tool. Fails CLOSED on purpose: the old mapping ended
+/// in `_ => None`, so anything not listed ran ungated — and `process_list` did
+/// exactly that. It hands a remote client the desktop's running processes,
+/// which is the same "look at what this person is doing" class as `screenshot`,
+/// and screenshot was gated. With the default flipped, a tool added to the
+/// dispatch without a decision here is refused instead of silently exposed.
+fn gate_for(tool: &str) -> ToolGate {
+    match tool {
+        // RCE-equivalent: gated behind the dedicated, default-OFF `shell`
+        // permission (NOT `filesystem`) so a remote client can't get arbitrary
+        // command/code execution just by having file access enabled.
+        "shell_execute" | "code_execute" => ToolGate::Needs("shell"),
+        "file_read" | "file_write" | "file_list" | "file_search" | "screenshot" => {
+            ToolGate::Needs("filesystem")
+        }
+        "image_generate" | "process_list" => ToolGate::Needs("process_control"),
+        // Read-only and not about this machine's contents.
+        "web_search" | "web_fetch" | "system_info" | "get_current_time" => ToolGate::Open,
+        _ => ToolGate::Unknown,
+    }
+}
+
 /// Run a single agent tool on behalf of an authenticated mobile client.
 /// Mirrors `executeTool` in `src/api/agents.ts`. Permission-gated so a
 /// remote client cannot reach into the desktop without explicit toggle:
 ///   - file_read / file_write   → requires `filesystem`
 ///   - shell_execute / code_execute → requires `shell` (default OFF, RCE-class)
-///   - image_generate           → requires `process_control`
-///   - web_search               → no permission required
+///   - image_generate / process_list → requires `process_control`
+///   - web_search / web_fetch / system_info / get_current_time → no permission
+///   - anything else            → refused (see `gate_for`)
 ///
 /// Bug fix (mobile agent HTTP 500): all tool failures (missing arg,
 /// permission denied, underlying tool error) are returned as HTTP 200
@@ -561,21 +595,25 @@ async fn handle_agent_tool(
 
     // Permission gate up-front. Returns a graceful 200 + {error,permission}
     // so the mobile UI can render a single-line hint instead of "HTTP 403".
-    let needs = match tool_name.as_str() {
-        // RCE-equivalent: gated behind the dedicated, default-OFF `shell`
-        // permission (NOT `filesystem`) so a remote client can't get arbitrary
-        // command/code execution just by having file access enabled.
-        "shell_execute" | "code_execute"
-            => Some(("shell", perms.shell)),
-        "file_read" | "file_write" | "file_list" | "file_search" | "screenshot"
-            => Some(("filesystem", perms.filesystem)),
-        "image_generate"
-            => Some(("process_control", perms.process_control)),
-        _ => None,
-    };
-    if let Some((perm, on)) = needs {
-        if !on {
-            return graceful_perm_error(&tool_name, perm);
+    match gate_for(&tool_name) {
+        ToolGate::Open => {}
+        ToolGate::Needs(perm) => {
+            let on = match perm {
+                "shell" => perms.shell,
+                "filesystem" => perms.filesystem,
+                "process_control" => perms.process_control,
+                _ => false,
+            };
+            if !on {
+                return graceful_perm_error(&tool_name, perm);
+            }
+        }
+        ToolGate::Unknown => {
+            eprintln!("[Remote agent] tool `{}` has no permission decision — refused", tool_name);
+            return graceful_error(&format!(
+                "`{}` is not available to remote clients.",
+                tool_name
+            ));
         }
     }
 
@@ -620,7 +658,7 @@ async fn handle_agent_tool(
             let code = body.args.get("code").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let timeout = body.args.get("timeout").and_then(|v| v.as_u64());
             if code.is_empty() { Err("code_execute needs a non-empty `code` argument.".into()) }
-            else { crate::commands::agent::execute_code(code, timeout, chat_id.clone(), None, app_state) }
+            else { crate::commands::agent::execute_code_blocking(code, timeout, chat_id.clone(), None, &app_state) }
         }
         "web_search" => {
             let query = body.args.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -704,7 +742,7 @@ async fn handle_agent_tool(
         }
         "system_info" => crate::commands::system::system_info(),
         "process_list" => crate::commands::system::process_list(),
-        "screenshot" => crate::commands::system::screenshot(),
+        "screenshot" => crate::commands::system::screenshot().await,
         "get_current_time" => crate::commands::system::get_current_time(),
         "image_generate" => {
             // Image generation requires the desktop Agent path — too much
@@ -807,6 +845,38 @@ async fn handle_chat_event(
 
 // ─── Proxy handlers ───
 
+/// The path as the TARGET's router will see it: percent-decoded and with dot
+/// segments removed.
+///
+/// axum hands us `uri().path()` exactly as it arrived and routes on those raw
+/// bytes, so our own routing and the auth middleware agree with each other. The
+/// proxy targets do not: gin (Ollama) and aiohttp (ComfyUI) both decode before
+/// dispatching, so `/%75pload/image` never started with "/upload" for us while
+/// ComfyUI resolved it to the upload handler all the same. Every permission
+/// check on a proxied path goes through here.
+///
+/// Decoded ONCE, matching the target's single decode, so a double-encoded
+/// `%2570` stays inert on both sides rather than being over-blocked here and
+/// harmlessly delivered there. Only the GATE uses this: what gets forwarded is
+/// still the raw path, so a legitimately encoded segment (ComfyUI addresses
+/// /userdata/<name> with the slashes inside the name escaped) survives intact.
+fn gate_path(raw: &str) -> String {
+    let decoded = urlencoding::decode(raw)
+        .map(|c| c.into_owned())
+        .unwrap_or_else(|_| raw.to_string());
+    let mut out: Vec<&str> = Vec::new();
+    for seg in decoded.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    format!("/{}", out.join("/"))
+}
+
 /// Paths on the Ollama proxy that require the `downloads` permission.
 /// These mutate on-disk model state and/or saturate bandwidth.
 fn ollama_requires_downloads(path: &str) -> bool {
@@ -854,7 +924,7 @@ async fn proxy_ollama(
     // Enforce the `downloads` permission for any endpoint that writes model
     // state. Read-only endpoints (/api/tags, /api/chat, /api/show, etc.)
     // always remain open so an authenticated mobile can actually chat.
-    if ollama_requires_downloads(&path) {
+    if ollama_requires_downloads(&gate_path(&path)) {
         let perms = state.permissions.lock().await;
         if !perms.downloads {
             println!("[Remote] BLOCKED (downloads disabled): {} {}", req.method(), path);
@@ -894,7 +964,7 @@ async fn proxy_comfyui(
             println!("[Remote] BLOCKED (process_control disabled): {} {}", req.method(), stripped_owned);
             return forbidden("ComfyUI remote access disabled (enable Process Control)");
         }
-        if let Some(extra) = comfy_extra_permission(&stripped_owned) {
+        if let Some(extra) = comfy_extra_permission(&gate_path(&stripped_owned)) {
             let allowed = match extra {
                 "filesystem" => perms.filesystem,
                 "downloads" => perms.downloads,
@@ -2105,7 +2175,7 @@ button{-webkit-appearance:none;appearance:none}
      parameters:[]},
     {name:'screenshot', description:'Capture the primary display as a base64 PNG. Zero arguments. USE for visual verification when the user asks "what\'s on my screen" or "look at X". Returns a short summary string (size + filename); the actual image is forwarded to the model via message content. NEVER call in a tight loop — screenshots are expensive and privacy-sensitive.',
      parameters:[]},
-    {name:'image_generate', description:'Generate an image from a text prompt via the local ComfyUI pipeline. Blocks up to 5 minutes. USE for "draw me", "make an image of", "generate a picture". Pass `inputImage` (a filename from an earlier image_generate result) for image-to-image — restyle / edit an existing image at the given `denoise` strength; omit it for text-to-image. First installed image model is auto-selected (or pass `model`). EXPECT A PAUSE: on a single-GPU machine LU may briefly unload the chat model from VRAM to fit the image model, then reload it after — typically a 30-90s swap (longer on a cold ComfyUI start). This avoids out-of-memory errors; your conversation is fully preserved across the swap. Rate-limit yourself to 1 call per turn — ComfyUI serializes generations internally so parallel calls will queue, not speed up. Fine-tune with the optional `settings` object (steps, cfg, sampler, scheduler, width/height, seed, lora, vae); set ONLY what the user asked for. A value beyond the installed model\'s real limit is REJECTED with the actual limit so you can retry lower — values are never silently changed.',
+    {name:'image_generate', description:'Generate an image from a text prompt via the local image pipeline (Apple MLX on macOS; ComfyUI elsewhere, auto-detected). Blocks up to 5 minutes. USE for "draw me", "make an image of", "generate a picture". Pass `inputImage` (a filename from an earlier image_generate result) for image-to-image — restyle / edit an existing image at the given `denoise` strength; omit it for text-to-image. First installed image model is auto-selected (or pass `model`). EXPECT A PAUSE on non-Mac (ComfyUI) single-GPU machines: LU may briefly unload the chat model from VRAM to fit the image model, then reload it after — typically a 30-90s swap. This avoids out-of-memory errors; your conversation is fully preserved across the swap. Rate-limit yourself to 1 call per turn — generations serialize internally so parallel calls will queue, not speed up. Fine-tune with the optional `settings` object (steps, cfg, sampler, scheduler, width/height, seed, lora, vae); set ONLY what the user asked for. A value beyond the installed model\'s real limit is REJECTED with the actual limit so you can retry lower — values are never silently changed.',
      parameters:[{name:'prompt',type:'string',description:'Positive text description of the desired image',required:true},
                  {name:'negativePrompt',type:'string',description:'Things to avoid (blurry, deformed, etc.)',required:false},
                  {name:'model',type:'string',description:'Optional image model filename to use. Omit to auto-select the first installed image model.',required:false},
@@ -4993,6 +5063,30 @@ pub async fn start_tunnel(
             return Err("cloudflared download failed integrity check (unexpected file header)".into());
         }
 
+        // macOS ships cloudflared as a gzip tarball (.tgz), not a raw binary —
+        // writing it straight to cf_path and exec'ing it is an ENOEXEC. Extract
+        // the `cloudflared` executable from the archive (system `tar` is always
+        // present on macOS). Windows/Linux download the raw binary.
+        #[cfg(target_os = "macos")]
+        {
+            let tgz = dir.join("cloudflared.tgz");
+            std::fs::write(&tgz, &bytes).map_err(|e| format!("write tgz: {}", e))?;
+            let status = std::process::Command::new("tar")
+                .arg("-xzf")
+                .arg(&tgz)
+                .arg("-C")
+                .arg(dir)
+                .status()
+                .map_err(|e| format!("tar spawn: {}", e))?;
+            let _ = std::fs::remove_file(&tgz);
+            if !status.success() {
+                return Err("Failed to extract cloudflared from its .tgz archive".into());
+            }
+            if !cf_path.exists() {
+                return Err("cloudflared binary missing after extracting the archive".into());
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
         std::fs::write(&cf_path, &bytes).map_err(|e| format!("write: {}", e))?;
 
         // Make executable on Unix
@@ -5303,6 +5397,63 @@ mod jwt_refresh_tests {
 }
 
 #[cfg(test)]
+mod proxy_gate_path_tests {
+    use super::{comfy_extra_permission, gate_path, ollama_requires_downloads};
+
+    /// Security review 2026-07-30. The gates matched `uri().path()`, which axum
+    /// hands over undecoded, and then forwarded that same raw path to a target
+    /// that decodes before dispatching. So `/api/%70ull` was not "/api/pull" for
+    /// us and was exactly that for Ollama, and `/%75pload/image` reached
+    /// ComfyUI's real upload handler with the filesystem permission switched off.
+    #[test]
+    fn a_percent_encoded_path_still_hits_its_permission_gate() {
+        for evil in [
+            "/api/%70ull",
+            "/api/pu%6Cl",
+            "/api/%64elete",
+            "/api/%70%75%6C%6C",
+            "/api/x/%2e%2e/pull",
+        ] {
+            assert!(
+                ollama_requires_downloads(&gate_path(evil)),
+                "downloads gate missed {evil:?} (gate saw {:?})",
+                gate_path(evil),
+            );
+        }
+        for (evil, want) in [
+            ("/%75pload/image", "filesystem"),
+            ("/upl%6Fad/mask", "filesystem"),
+            ("/%6Danager/queue", "downloads"),
+            ("/customnode%2Finstall", "downloads"),
+        ] {
+            assert_eq!(
+                comfy_extra_permission(&gate_path(evil)),
+                Some(want),
+                "comfy gate missed {evil:?}",
+            );
+        }
+    }
+
+    /// Only the gate decodes. Ordinary paths must not change meaning, and a
+    /// double-encoded escape has to stay inert on both sides: we decode once,
+    /// the target decodes once, so `%2570` is "%70" to them and never "/pull".
+    #[test]
+    fn decoding_is_single_pass_and_leaves_ordinary_paths_alone() {
+        assert_eq!(gate_path("/api/tags"), "/api/tags");
+        assert_eq!(gate_path("/api/chat"), "/api/chat");
+        assert_eq!(gate_path("/userdata/workflows%2Ffoo.json"), "/userdata/workflows/foo.json");
+        assert_eq!(gate_path("/api/%2570ull"), "/api/%70ull");
+        assert!(!ollama_requires_downloads(&gate_path("/api/%2570ull")));
+        // Read-only endpoints stay open, or an authenticated phone cannot chat.
+        for open in ["/api/tags", "/api/chat", "/api/show", "/api/embeddings"] {
+            assert!(!ollama_requires_downloads(&gate_path(open)), "{open} got gated");
+        }
+        assert_eq!(comfy_extra_permission(&gate_path("/prompt")), None);
+        assert_eq!(comfy_extra_permission(&gate_path("/history/abc-123")), None);
+    }
+}
+
+#[cfg(test)]
 mod remote_path_tests {
     use super::resolve_remote_path;
     use crate::state::AppState;
@@ -5366,6 +5517,43 @@ mod remote_path_tests {
 
         // `..` climbing out → rejected.
         assert!(resolve_remote_path("../../../../etc/passwd", Some("__remote__"), &state).is_err());
+    }
+
+    #[test]
+    fn every_dispatched_tool_has_a_permission_decision() {
+        use super::{gate_for, ToolGate};
+        // The list mirrors the match in handle_agent_tool's dispatch. If a tool
+        // is added there without a decision in gate_for, this fails instead of
+        // the tool quietly running ungated.
+        for tool in [
+            "file_read", "file_write", "file_list", "file_search", "screenshot",
+            "shell_execute", "code_execute", "image_generate", "process_list",
+            "web_search", "web_fetch", "system_info", "get_current_time",
+        ] {
+            assert_ne!(gate_for(tool), ToolGate::Unknown, "{} has no gate", tool);
+        }
+    }
+
+    #[test]
+    fn looking_at_the_desktop_needs_a_toggle() {
+        use super::{gate_for, ToolGate};
+        // Both show what the person is doing on their machine.
+        assert_eq!(gate_for("screenshot"), ToolGate::Needs("filesystem"));
+        assert_eq!(gate_for("process_list"), ToolGate::Needs("process_control"));
+    }
+
+    #[test]
+    fn code_execution_never_rides_on_file_access() {
+        use super::{gate_for, ToolGate};
+        assert_eq!(gate_for("shell_execute"), ToolGate::Needs("shell"));
+        assert_eq!(gate_for("code_execute"), ToolGate::Needs("shell"));
+    }
+
+    #[test]
+    fn an_unlisted_tool_is_refused() {
+        use super::{gate_for, ToolGate};
+        assert_eq!(gate_for("file_delete"), ToolGate::Unknown);
+        assert_eq!(gate_for(""), ToolGate::Unknown);
     }
 
     #[test]

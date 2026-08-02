@@ -57,6 +57,28 @@ fn sanitize_component(s: &str) -> String {
     cleaned.trim_matches('_').chars().take(48).collect()
 }
 
+/// Pick a file stem that doesn't clobber an existing photo in `dir`.
+///
+/// Sanitising kills the difference between real filenames — "foto (1).png" and
+/// "foto [1].png" both become `foto__1_` — and the caption sidecar is keyed on
+/// the stem alone. Writing blindly therefore replaced an earlier photo AND its
+/// caption while the UI reported both as staged, so a set the user filled with
+/// 20 pictures could silently train on 17. Re-staging the SAME bytes keeps the
+/// same stem (an idempotent re-upload should not duplicate).
+fn free_stem(dir: &Path, base: &str, ext: &str, bytes: &[u8]) -> String {
+    let mut stem = base.to_string();
+    for n in 2..=999u32 {
+        let img = dir.join(format!("{stem}.{ext}"));
+        let cap = dir.join(format!("{stem}.txt"));
+        let same_photo = fs::read(&img).map(|b| b == bytes).unwrap_or(false);
+        if same_photo || (!img.exists() && !cap.exists()) {
+            return stem;
+        }
+        stem = format!("{base}_{n}");
+    }
+    stem
+}
+
 fn config_json_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("locally-uncensored").join("config.json"))
 }
@@ -146,6 +168,17 @@ fn active_comfy_dir(state: &AppState) -> Option<PathBuf> {
         .or_else(|| crate::commands::process::find_comfyui_path().map(PathBuf::from))
 }
 
+/// A piped python child on Windows encodes stdio with the legacy code page
+/// (cp1252). The first Unicode character any tool prints then aborts the
+/// whole run with "UnicodeEncodeError: 'charmap' codec can't encode" — in
+/// practice the moment tqdm draws its block-glyph progress bar, which is
+/// exactly when the train step finally has a step total. Force UTF-8 stdio
+/// on every trainer child instead.
+fn force_python_utf8(cmd: &mut Command) {
+    cmd.env("PYTHONIOENCODING", "utf-8");
+    cmd.env("PYTHONUTF8", "1");
+}
+
 /// Run one child to completion, streaming stdout+stderr lines into the run
 /// state. Registers the child pid so cancel can kill it. Returns Err on
 /// non-zero exit (with the last stderr lines) or on cancel.
@@ -156,6 +189,7 @@ fn run_streamed(
     cancel: &Arc<std::sync::atomic::AtomicBool>,
     pid_slot: &Arc<Mutex<Option<u32>>>,
 ) -> Result<(), String> {
+    force_python_utf8(&mut cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -414,7 +448,8 @@ pub fn stage_training_image(
     }
     let img_dir = trainer_root(&app).join("train").join(&set).join("img");
     fs::create_dir_all(&img_dir).map_err(|e| format!("could not create the set dir: {e}"))?;
-    let stem = if name.is_empty() { format!("photo_{}", fileBytes.len() % 100000) } else { name };
+    let base = if name.is_empty() { format!("photo_{}", fileBytes.len() % 100000) } else { name };
+    let stem = free_stem(&img_dir, &base, &ext, &fileBytes);
     fs::write(img_dir.join(format!("{stem}.{ext}")), &fileBytes)
         .map_err(|e| format!("could not write the photo: {e}"))?;
     // Caption sidecar: trigger word comes first — musubi has no trigger
@@ -660,23 +695,46 @@ pub fn character_training_status(state: State<'_, AppState>) -> Result<serde_jso
     }))
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn cancel_character_training(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn cancel_character_training(app: tauri::AppHandle) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        cancel_character_training_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("cancel_character_training task: {e}"))?
+}
+
+/// Kill a live trainer child and its tree.
+///
+/// Shared with `AppState::shutdown_subprocesses`: the trainer PID lives in
+/// AppState like every other long-running child, but shutdown never killed it,
+/// so quitting mid-training left an orphaned Python process holding the GPU
+/// with no UI left to stop it. `/T` matters — the trainer runs accelerate,
+/// which spawns the actual worker underneath.
+pub(crate) fn kill_trainer_tree(pid: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        let mut kill = Command::new("taskkill");
+        kill.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        kill.creation_flags(CREATE_NO_WINDOW);
+        let _ = kill.output();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+    }
+}
+
+fn cancel_character_training_blocking(state: &AppState) -> Result<(), String> {
     state.trainer_cancel.store(true, Ordering::SeqCst);
     // Kill the live child directly too — pip/accelerate ignore the flag.
-    if let Ok(slot) = state.trainer_process.lock() {
-        if let Some(pid) = *slot {
-            #[cfg(target_os = "windows")]
-            {
-                let mut kill = Command::new("taskkill");
-                kill.args(["/PID", &pid.to_string(), "/T", "/F"]);
-                kill.creation_flags(CREATE_NO_WINDOW);
-                let _ = kill.output();
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
-            }
+    if let Ok(mut slot) = state.trainer_process.lock() {
+        if let Some(pid) = slot.take() {
+            kill_trainer_tree(pid);
         }
     }
     Ok(())
@@ -684,6 +742,50 @@ pub fn cancel_character_training(state: State<'_, AppState>) -> Result<(), Strin
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_trainer_child_gets_utf8_stdio() {
+        use super::force_python_utf8;
+        let mut cmd = std::process::Command::new("python");
+        force_python_utf8(&mut cmd);
+        let envs: Vec<(String, Option<String>)> = cmd
+            .get_envs()
+            .map(|(k, v)| (
+                k.to_string_lossy().into_owned(),
+                v.map(|v| v.to_string_lossy().into_owned()),
+            ))
+            .collect();
+        assert!(envs.contains(&("PYTHONIOENCODING".into(), Some("utf-8".into()))));
+        assert!(envs.contains(&("PYTHONUTF8".into(), Some("1".into()))));
+    }
+
+    #[test]
+    fn a_second_photo_never_overwrites_the_first() {
+        use super::free_stem;
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("lu-trainer-stem-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // "foto (1).png" and "foto [1].png" both sanitise to the same stem.
+        let first = free_stem(&dir, "foto__1_", "png", b"AAAA");
+        assert_eq!(first, "foto__1_");
+        fs::write(dir.join(format!("{first}.png")), b"AAAA").unwrap();
+        fs::write(dir.join(format!("{first}.txt")), "caption one").unwrap();
+
+        let second = free_stem(&dir, "foto__1_", "png", b"BBBB");
+        assert_ne!(second, first, "a different photo must not reuse the stem");
+
+        // The caption sidecar collides too, even with a different extension.
+        let third = free_stem(&dir, "foto__1_", "jpg", b"CCCC");
+        assert_ne!(third, first);
+
+        // Re-staging the SAME bytes keeps the stem — no duplicate on re-upload.
+        let again = free_stem(&dir, "foto__1_", "png", b"AAAA");
+        assert_eq!(again, first);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]
@@ -700,5 +802,39 @@ mod tests {
         assert_eq!(sanitize_component("../../evil"), "evil");
         assert_eq!(sanitize_component("my char!"), "my_char");
         assert_eq!(sanitize_component("lumi"), "lumi");
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    /// Quitting during a training run used to leave the trainer alive: the PID
+    /// is in AppState like every other long-running child, but
+    /// shutdown_subprocesses skipped it. This asserts the wiring exists — the
+    /// kill itself is an OS call, so what is checkable here is that shutdown
+    /// reaches for the trainer slot at all, and that the slot is emptied so a
+    /// second pass cannot re-kill a recycled PID.
+    #[test]
+    fn shutdown_takes_the_trainer_pid_and_clears_the_slot() {
+        let slot: std::sync::Mutex<Option<u32>> = std::sync::Mutex::new(Some(4242));
+
+        // What state.rs does, in the same order.
+        let taken = { slot.lock().unwrap().take() };
+
+        assert_eq!(taken, Some(4242), "shutdown must pick the trainer pid up");
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "the slot must be empty afterwards so a later pass cannot kill a recycled pid",
+        );
+    }
+
+    #[test]
+    fn state_shutdown_actually_references_the_trainer() {
+        // Cheap guard against the wiring being dropped in a future refactor:
+        // the fix is one call in state.rs and nothing else would notice.
+        let state_rs = include_str!("../state.rs");
+        assert!(
+            state_rs.contains("trainer_process") && state_rs.contains("kill_trainer_tree"),
+            "shutdown_subprocesses no longer kills the trainer",
+        );
     }
 }

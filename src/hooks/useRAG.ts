@@ -2,12 +2,24 @@ import { useCallback, useEffect, useRef } from "react"
 import { useShallow } from "zustand/react/shallow"
 import { useRAGStore } from "../stores/ragStore"
 import { indexDocument, retrieveContext } from "../api/rag"
+import { isManagedBuiltinActive, bundledEmbedStatus } from "../api/engine"
 import { getModelContext, listModels, pullModelTauri, checkConnection } from "../api/ollama"
 import { useModelStore } from "../stores/modelStore"
 import type { DocumentMeta, RAGContext } from "../types/rag"
 import { log } from "../lib/logger"
 
 const EMPTY_DOCS: DocumentMeta[] = []
+
+/** True when the bundled embeddings server can serve indexing without Ollama
+ *  (built-in engine active, or the embed GGUF server is up). */
+async function builtinEmbedReady(): Promise<boolean> {
+  if (isManagedBuiltinActive()) return true
+  try {
+    return (await bundledEmbedStatus()).running
+  } catch {
+    return false
+  }
+}
 
 export function useRAG(conversationId: string | null) {
   const {
@@ -59,7 +71,7 @@ export function useRAG(conversationId: string | null) {
         const ctxLen = await getModelContext(activeModel)
         if (ctxLen <= 2048) {
           useRAGStore.getState().setContextWarning(
-            `Your model's context window is only ${ctxLen} tokens. RAG works best with 4096+ tokens. Run: ollama run ${activeModel} /set parameter num_ctx 8192`
+            `Your model's context window is only ${ctxLen} tokens. RAG works best with 4096+ tokens — pick a model with a larger context window (or raise it in your backend's settings).`
           )
         } else if (useRAGStore.getState().contextWarning !== null) {
           useRAGStore.getState().setContextWarning(null)
@@ -157,23 +169,28 @@ export function useRAG(conversationId: string | null) {
         queueEmbeddingFile,
       } = useRAGStore.getState()
 
-      // Pre-flight: Ollama reachable?
-      const ollamaUp = await checkConnection()
-      if (!ollamaUp) {
-        throw new Error(
-          "Ollama is not running. Please start Ollama first, then try again."
-        )
-      }
+      // Pre-flight: an embedding backend must be reachable. The bundled embed
+      // server (built-in engine on macOS, or an onboarded embed GGUF) needs no
+      // Ollama — indexDocument → generateEmbeddings already prefers it — so only
+      // fall back to the Ollama checks when that server isn't running.
+      if (!(await builtinEmbedReady())) {
+        const ollamaUp = await checkConnection()
+        if (!ollamaUp) {
+          throw new Error(
+            "No embedding backend is running. Start the built-in engine (or Ollama) and try again."
+          )
+        }
 
-      // Embedding model present?  When missing we queue the file + flip the
-      // RAGPanel install-prompt flag rather than blocking via the OS confirm
-      // dialog. The user clicks Download in the in-app card → pullEmbedding
-      // Model fires → on success the queued files replay automatically.
-      const hasEmbedding = await ensureEmbeddingModel()
-      if (!hasEmbedding) {
-        queueEmbeddingFile(file)
-        setEmbeddingInstallPrompt(true)
-        return null
+        // Embedding model present?  When missing we queue the file + flip the
+        // RAGPanel install-prompt flag rather than blocking via the OS confirm
+        // dialog. The user clicks Download in the in-app card → pullEmbedding
+        // Model fires → on success the queued files replay automatically.
+        const hasEmbedding = await ensureEmbeddingModel()
+        if (!hasEmbedding) {
+          queueEmbeddingFile(file)
+          setEmbeddingInstallPrompt(true)
+          return null
+        }
       }
 
       try {

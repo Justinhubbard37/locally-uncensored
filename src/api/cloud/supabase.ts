@@ -38,8 +38,15 @@ function keychainAccount(key: string): string {
   return key.startsWith(LOCAL_KEY) ? SESSION_ACCOUNT + key.slice(LOCAL_KEY.length) : key
 }
 
-const keychainStorage = {
+// Written over a keychain entry whose delete failed: the entry survives
+// physically, but must never sign anyone back in. getItem reports it as absent.
+const TOMBSTONE = '__lu_signed_out__'
+
+/** Exported for its unit tests — this adapter holds the refresh token, and the
+ *  invariants in the comments above are worth asserting rather than trusting. */
+export const keychainStorage = {
   async getItem(key: string): Promise<string | null> {
+    let value: string | null = null
     if (!keychainBroken) {
       try {
         const fromKeychain = await secretGet(keychainAccount(key))
@@ -48,12 +55,15 @@ const keychainStorage = {
         // stores hold the key, localStorage is the newer one. A clean
         // keychain miss must also consult it, or a fallback-written session
         // is invisible on the next launch and the user is signed out.
-        return localStorage.getItem(key) ?? fromKeychain
+        value = localStorage.getItem(key) ?? fromKeychain
       } catch (err) {
         if (keychainMissing(err)) keychainBroken = true
+        value = localStorage.getItem(key)
       }
+    } else {
+      value = localStorage.getItem(key)
     }
-    return localStorage.getItem(key)
+    return value === TOMBSTONE ? null : value
   },
   async setItem(key: string, value: string): Promise<void> {
     if (!keychainBroken) {
@@ -70,16 +80,35 @@ const keychainStorage = {
     localStorage.setItem(key, value)
   },
   async removeItem(key: string): Promise<void> {
-    if (!keychainBroken) {
-      try {
-        await secretDelete(keychainAccount(key))
-      } catch (err) {
-        if (keychainMissing(err)) keychainBroken = true
-      }
-    }
     // Always clear the fallback copy too — sign-out must never leave a
     // resurrectable session (or plaintext refresh token) in localStorage.
     localStorage.removeItem(key)
+    if (keychainBroken) return
+
+    const account = keychainAccount(key)
+    try {
+      await secretDelete(account)
+      return
+    } catch (err) {
+      if (keychainMissing(err)) {
+        keychainBroken = true
+        return
+      }
+    }
+    // The keychain is THERE and the delete failed anyway (locked at wake, a
+    // dismissed unlock prompt, a Credential Manager hiccup) — so the refresh
+    // token is still in it and the next launch would sign the user back in
+    // after they explicitly signed out. This used to resolve silently, which
+    // reported a sign-out that had not happened.
+    //
+    // Neutralise the surviving entry (best effort: a write may succeed where
+    // the delete did not), then report the failure instead of swallowing it.
+    try {
+      await secretSet(account, TOMBSTONE)
+    } catch {
+      // Nothing left to try — the throw below is the only honest outcome.
+    }
+    throw new Error('Signed out, but the saved session could not be removed from the keychain.')
   },
 }
 

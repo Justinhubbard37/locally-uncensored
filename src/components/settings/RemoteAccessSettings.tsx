@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useRemoteStore } from '../../stores/remoteStore'
 import { backendCall } from '../../api/backend'
+import { isMlxImageHost } from '../../api/mlx-image'
 import { Shield, Smartphone, Trash2 } from 'lucide-react'
 
 export function RemoteAccessSettings() {
@@ -55,8 +56,11 @@ export function RemoteAccessSettings() {
         </div>
         {([
           { key: 'filesystem' as const, label: 'Filesystem Access', desc: 'Agent file read/write (sandboxed to the chat workspace)' },
-          { key: 'downloads' as const, label: 'Downloads & Installs', desc: 'Model downloads, ComfyUI/Ollama install' },
-          { key: 'process_control' as const, label: 'Process Control', desc: 'Start/stop ComfyUI, Ollama' },
+          // The two engine-named scopes read differently per platform: macOS
+          // has no ComfyUI to install or start, so naming it here would grant
+          // the phone a power this machine does not have.
+          { key: 'downloads' as const, label: 'Downloads & Installs', desc: isMlxImageHost() ? 'Model downloads, engine install' : 'Model downloads, ComfyUI/Ollama install' },
+          { key: 'process_control' as const, label: 'Process Control', desc: isMlxImageHost() ? 'Start/stop the local engines' : 'Start/stop ComfyUI, Ollama' },
           { key: 'shell' as const, label: 'Shell & Code Execution', desc: 'Run shell commands + code from your phone. Risky, leave OFF unless you trust the network.' },
         ]).map(({ key, label, desc }) => (
           <div key={key} className="flex items-center justify-between">

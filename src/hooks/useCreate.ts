@@ -19,9 +19,10 @@ import {
   isPromptQueued,
   buildTxt2ImgWorkflow,
   buildTxt2VidWorkflow,
+  canRunVideoIntent,
   classifyModel,
   isI2VModel,
-  isT2VCapable,
+  videoLaneModels,
   extractComfyOutputFiles,
   galleryTypeForFile,
   MODEL_TYPE_DEFAULTS as COMFY_MODEL_DEFAULTS,
@@ -47,7 +48,14 @@ import {
 import { useCreateStore } from '../stores/createStore'
 import { useWorkflowStore } from '../stores/workflowStore'
 import { injectParameters } from '../api/workflows'
-import { preflightCheck } from '../api/preflight'
+import {
+  generateMlxImageDataUrl, isMlxImageHost, isMlxImageModel,
+  mlxStatus, listMlxImageModels, buildMlxImageModels, mergeImageModels, mlxModelIdFor,
+} from '../api/mlx-image'
+import {
+  getVideoStatus, listVideoModels, generateVideo, getVideoProgress, cancelVideo,
+  buildMlxVideoModels, mlxVideoModelIdFor, readVideoAsBlobUrl,
+} from '../api/mlx-video'
 
 export function useCreate() {
   const [connected, setConnected] = useState<boolean | null>(null)
@@ -58,6 +66,12 @@ export function useCreate() {
   const [videoBackend, setVideoBackend] = useState<VideoBackend>('none')
   const [modelsLoaded, setModelsLoaded] = useState(false)
   const [modelLoadError, setModelLoadError] = useState<string | null>(null)
+  // macOS only: which local media lanes have no MLX model installed yet.
+  // `null` means "not probed" — Windows/Linux leave it there, and so does the
+  // Mac until the first fetch answers, so no setup card can flash at startup.
+  // `connected` cannot carry this: it tracks ComfyUI, which is not the local
+  // media backend on a Mac.
+  const [mlxMissing, setMlxMissing] = useState<{ image: boolean; video: boolean } | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   // A local character-training run is a Rust child process, not a ComfyUI
@@ -80,42 +94,81 @@ export function useCreate() {
     return ok
   }, [])
 
-  const runPreflight = useCallback(async () => {
-    const state = useCreateStore.getState()
-    const activeModel = state.mode === 'image' ? state.imageModel : state.videoModel
-    if (!activeModel) {
-      state.setPreflightStatus(null, [], [])
-      return
-    }
-    try {
-      const result = await preflightCheck(activeModel, state.mode, state.width, state.height)
-      state.setPreflightStatus(
-        result.ready,
-        result.errors,
-        result.warnings.map(w => w.message),
-      )
-    } catch {
-      state.setPreflightStatus(null, [], [])
-    }
-  }, [])
-
   const zeroModelRetries = useRef(0)
 
   const fetchModels = useCallback(async () => {
     setModelLoadError(null)
 
     try {
+      // Apple Silicon: MLX is a first-class local media backend (hard rule —
+      // Mac local image/video is the in-process MLX path, never ComfyUI). Load
+      // the installed MLX catalogs FIRST so Create works on the normal Mac,
+      // which has no ComfyUI at all.
+      const mlxHost = isMlxImageHost()
+      let mlxImageModels: ClassifiedModel[] = []
+      // Video has no ComfyUI counterpart on Mac (ComfyUI never even auto-starts
+      // there — see process.rs::auto_start_comfyui). The video list IS the MLX
+      // catalog.
+      let mlxVideoModels: ClassifiedModel[] = []
+      if (mlxHost) {
+        try {
+          const mlx = await mlxStatus()
+          if (mlx.installed) mlxImageModels = buildMlxImageModels(await listMlxImageModels())
+        } catch { /* MLX engine not set up yet — treat as no MLX models */ }
+        try {
+          mlxVideoModels = buildMlxVideoModels(await listVideoModels())
+        } catch { /* mlx-video status unavailable yet — treat as no MLX video models */ }
+        setMlxMissing({ image: mlxImageModels.length === 0, video: mlxVideoModels.length === 0 })
+      }
+
       // Check connection first — if ComfyUI is down, don't waste time on model queries.
       // Sync the connected state on EVERY fetch: the mount-time checkConnection can
       // race ComfyUI's autostart (exe boots faster than the engine), and nothing
       // else ever flipped `connected` back to true — the Stage then kept showing
       // the Download & install card while the model chip was happily populated
       // (live-caught on the 2.5.8 extend lane E2E).
-      const comfyOk = await checkComfyConnection()
-      setConnected(comfyOk)
-      useCreateStore.getState().setComfyRunning(comfyOk)
+      // NOT on Mac: there is no ComfyUI to be connected to, and pinning
+      // `connected` to false is exactly what makes the Stage cover a working
+      // MLX catalog with the ComfyUI "Download & install" card. Left at null
+      // ("not applicable"), which every ComfyUI-gated surface treats as neutral.
+      // On the Mac the answer is decided, not probed. ComfyUI is never started
+      // there and never renders there, so asking port 8188 can only produce a
+      // wrong answer: anything that happens to reply — a manual install, another
+      // app — used to drag the whole tab into the ComfyUI path, where the model
+      // queries then failed and left the store's list EMPTY while the picker
+      // still displayed the MLX catalog. Pressing Create in that state said
+      // "No image model selected. Add checkpoints or FLUX models to ComfyUI."
+      // (caught by the MLX e2e, MAC-5.)
+      const comfyOk = mlxHost ? false : await checkComfyConnection()
+      if (!mlxHost) {
+        setConnected(comfyOk)
+        useCreateStore.getState().setComfyRunning(comfyOk)
+      }
       if (!comfyOk) {
-        setModelLoadError('ComfyUI is not running. Start it from Settings or wait for auto-start.')
+        // On Apple Silicon MLX alone is a valid image/video backend — don't bail.
+        if (mlxImageModels.length > 0 || mlxVideoModels.length > 0) {
+          const st = useCreateStore.getState()
+          setImageModels(mlxImageModels)
+          st.setImageModelList(mlxImageModels)
+          if (mlxImageModels.length > 0 && !mlxImageModels.find(m => m.name === st.imageModel)) {
+            st.setImageModel(mlxImageModels[0].name, mlxImageModels[0].type)
+          }
+          setVideoModelsList(mlxVideoModels)
+          st.setVideoModelList(mlxVideoModels)
+          if (mlxVideoModels.length > 0 && !mlxVideoModels.find(m => m.name === st.videoModel)) {
+            st.setVideoModel(mlxVideoModels[0].name)
+          }
+          zeroModelRetries.current = 0
+          setModelsLoaded(true)
+          return
+        }
+        // Honest copy: there is no "Model Manager → Mac Image/Video" surface to
+        // point at, and naming the raw install command leaks an internal path.
+        setModelLoadError(
+          mlxHost
+            ? 'The local image engine is not set up on this Mac yet — a one-time setup is needed before local generation works.'
+            : 'ComfyUI is not running. Start it from Settings or wait for auto-start.'
+        )
         return
       }
 
@@ -124,7 +177,7 @@ export function useCreate() {
       // and its internal cache hasn't updated yet.
       await refreshComfyModels()
 
-      const [comfyImgModels, vidModels, samplers, schedulers, vBackend, _nodeInfo, audModels, lipModels, motModels] = await Promise.all([
+      const [comfyImgModels, comfyVidModels, samplers, schedulers, vBackend, _nodeInfo, audModels, lipModels, motModels] = await Promise.all([
         getImageModels(),
         getVideoModels(),
         getSamplers(),
@@ -137,7 +190,14 @@ export function useCreate() {
         getLipsyncModels().catch(() => [] as ClassifiedModel[]),
         getMotionModels().catch(() => [] as ClassifiedModel[]),
       ])
-      const imgModels = comfyImgModels
+      // MLX entries go first so one is the default on a fresh Apple-Silicon box.
+      const imgModels = mlxImageModels.length
+        ? mergeImageModels(comfyImgModels, mlxImageModels)
+        : comfyImgModels
+      // Mac video is MLX-only — never surface ComfyUI video checkpoints there,
+      // even in the rare case ComfyUI happens to be reachable (a manual install
+      // the user started outside LU).
+      const vidModels = mlxHost ? mlxVideoModels : comfyVidModels
       setImageModels(imgModels)
       setVideoModelsList(vidModels)
       setSamplerList(samplers)
@@ -222,13 +282,11 @@ export function useCreate() {
           state.setImageModel(imgModels[0].name, imgModels[0].type)
         }
       }
-      // Run preflight check after models are loaded
-      setTimeout(() => runPreflight(), 100)
     } catch (err) {
       console.error('[useCreate] Failed to fetch models:', err)
       setModelLoadError(`Failed to load models: ${err instanceof Error ? err.message : 'ComfyUI API error'}`)
     }
-  }, [runPreflight])
+  }, [])
 
   // Auto-refresh models when a ComfyUI model download completes.
   // Schedules three fetches because real-world ComfyUI scans take longer than
@@ -261,6 +319,12 @@ export function useCreate() {
     if (!modelLoadError) return  // No error — nothing to retry
     if (modelsLoaded) return     // modelsLoaded + error = gave up after max retries, don't loop
     const retryInterval = setInterval(async () => {
+      // No ComfyUI to wait for on Mac (hard rule: MLX-only) — retry the MLX
+      // catalog directly instead of gating on a connection that never comes.
+      if (isMlxImageHost()) {
+        fetchModels()
+        return
+      }
       const ok = await checkComfyConnection()
       if (ok) {
         console.log('[useCreate] Retrying model fetch...')
@@ -346,9 +410,14 @@ export function useCreate() {
 
   const generateInner = useCallback(async () => {
     const state = useCreateStore.getState()
-    // AI-CSAM gate — applies before any backend is touched.
+    // AI-CSAM gate — applies before any backend is touched. On this path there
+    // is no server gate behind it: a local render goes straight to ComfyUI/MLX
+    // on the user's own machine. triggerWord is in here because local character
+    // training runs through this same function a few lines down, and the cloud
+    // gate already treats that field as prompt-bearing (useCloudCreate.ts).
+    // musicLyrics is not: music is a hosted-only op and cannot reach this path.
     {
-      const verdict = checkPromptSafety(`${state.prompt} ${state.negativePrompt}`)
+      const verdict = checkPromptSafety(`${state.prompt} ${state.negativePrompt} ${state.triggerWord}`)
       if (verdict.blocked) {
         state.setError(SAFETY_BLOCK_MESSAGE)
         return
@@ -395,23 +464,206 @@ export function useCreate() {
       : []
     const localOpModel = localOp ? resolveLocalOpPick(state.localOpModel, localOpList) : ''
 
-    // Desktop port: the MLX video/image pipelines (Apple Silicon) are not
-    // part of this build — ComfyUI is the only local backend.
+    // Chip↔run agreement for IMAGE, the same rule the video path already
+    // applies further down. ModelChip shows `list[0]` whenever the stored pick
+    // isn't in the current list — which includes the empty pick a fresh
+    // profile has. Reading the raw store here meant a first-run Mac saw
+    // "MLX SD Turbo" in the picker, pressed Create, and got
+    // "No image model selected. Add checkpoints or FLUX models to ComfyUI."
+    // — a ComfyUI message on the one platform that never runs ComfyUI.
+    const effImageModel =
+      state.imageModelList.some((m) => m.name === imageModel)
+        ? imageModel
+        : (state.imageModelList[0]?.name ?? imageModel)
+
+    // ── MLX image pipeline (Apple Silicon) — hard rule: Mac local image is the
+    // in-process MLX path, never ComfyUI. Gated on the derived `image` intent
+    // (which already means: no cloudOp, no utilityOp, no removebg, text2img)
+    // AND on the SELECTED model being a synthetic MLX entry, so a real ComfyUI
+    // checkpoint from a manual install is never hijacked. Generation returns a
+    // base64 PNG stored as a data URL on the gallery item, so display +
+    // download work with no ComfyUI /view route. ──
+    if (intent === 'image' && isMlxImageHost() && isMlxImageModel(effImageModel)) {
+      setError(null)
+      if (!prompt.trim()) { setError('Please enter a prompt.'); return }
+      setIsGenerating(true)
+      state.setProgressPhase('loading-model')
+      setProgress(10, 'Starting MLX image generation...')
+      addToPromptHistory(prompt)
+      const startTime = Date.now()
+      try {
+        state.setProgressPhase('sampling')
+        setProgress(40, 'Generating with MLX...')
+        const { dataUrl, width: outW, height: outH, localPath } = await generateMlxImageDataUrl({
+          prompt, steps, seed, width, height,
+          model: mlxModelIdFor(effImageModel),
+          negativePrompt: negativePrompt || undefined,
+        })
+        const elapsed = Math.round((Date.now() - startTime) / 1000)
+        state.setProgressPhase('complete')
+        setProgress(100, 'Complete!')
+        state.setLastGenTime(`${elapsed}s`)
+        addToGallery({
+          id: uuid(), type: 'image', filename: `mlx-${Date.now()}.png`, subfolder: '',
+          // localPath is what survives the restart: partialize strips dataUrl,
+          // and there is no ComfyUI /view to fall back to on a Mac.
+          dataUrl, localPath, prompt, negativePrompt, model: imageModel, modelType: 'unknown',
+          seed: seed === -1 ? 0 : seed, steps, cfgScale, sampler, scheduler,
+          width: outW || width, height: outH || height, batchSize: 1,
+          createdAt: Date.now(), builderUsed: 'dynamic', intent,
+        })
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        useCreateStore.getState().setError(`Generation failed: ${msg}`)
+      } finally {
+        useCreateStore.getState().setIsGenerating(false)
+        useCreateStore.getState().setProgress(0)
+      }
+      return
+    }
+
+    // ── MLX video pipeline (Apple Silicon) — hard rule: Mac local video is the
+    // in-process mlx-video path, never ComfyUI. Unlike the image branch this
+    // needs no model-name marker: on Mac the video picker IS the MLX catalog
+    // (fetchModels above), so every local video generation routes here. Gated
+    // on the derived `video` intent, which is text-to-video by definition —
+    // animate/extend/motion have no local lane on this host (the IntentBar
+    // shows them hidden / as cloud teasers), and their source images are staged
+    // through a ComfyUI upload that doesn't exist here. Generation is a
+    // subprocess polled via video_progress every 2s (no WebSocket/node graph). ──
+    if (intent === 'video' && isMlxImageHost()) {
+      setError(null)
+      if (!prompt.trim()) { setError('Please enter a prompt.'); return }
+      if (!videoModel) { setError('No local video model selected — pick one from the model picker.'); return }
+      const catalogId = mlxVideoModelIdFor(videoModel)
+      if (!catalogId) { setError(`Unknown MLX video model "${videoModel}" — re-select it from the picker.`); return }
+      try {
+        const status = await getVideoStatus()
+        if (!status.available) { setError('Local video generation is Apple Silicon only.'); return }
+        if (!status.mlxInstalled) { setError('The local video engine is not set up on this Mac yet (a one-time setup is needed before local video works).'); return }
+        if (!status.installedModels.includes(catalogId)) { setError(`The local video model "${videoModel}" isn't downloaded yet.`); return }
+      } catch (e) {
+        setError(`Local video status check failed: ${e instanceof Error ? e.message : String(e)}`)
+        return
+      }
+
+      setIsGenerating(true)
+      state.setProgressPhase('loading-model')
+      setProgress(0, 'Starting MLX video generation...')
+      addToPromptHistory(prompt)
+      const startTime = Date.now()
+      abortRef.current = new AbortController()
+      let result: Awaited<ReturnType<typeof generateVideo>>
+      try {
+        result = await generateVideo({
+          id: catalogId,
+          prompt,
+          seconds: Math.max(0.5, frames / Math.max(1, fps)),
+          fps,
+          seed: seed === -1 ? undefined : seed,
+        })
+      } catch (e) {
+        useCreateStore.getState().setError(`Failed to start: ${e instanceof Error ? e.message : String(e)}`)
+        useCreateStore.getState().setIsGenerating(false)
+        abortRef.current = null
+        return
+      }
+      try {
+        state.setProgressPhase('sampling')
+        await new Promise<void>((resolve, reject) => {
+          const tick = async () => {
+            if (abortRef.current?.signal.aborted) {
+              try { await cancelVideo() } catch { /* already finished/gone */ }
+              reject(new Error('Cancelled'))
+              return
+            }
+            // Safety net (David: the machine glowed for hours). Local MLX video
+            // is slow — tens of minutes — so give it a full hour, but never
+            // poll forever. On the cap, KILL the mlx-video subprocess so it
+            // stops pinning the machine; before this it kept running after the
+            // UI had given up.
+            if (Date.now() - startTime > 60 * 60 * 1000) {
+              try { await cancelVideo() } catch { /* already finished/gone */ }
+              reject(new Error('Generation timed out after 60 minutes'))
+              return
+            }
+            try {
+              const prog = await getVideoProgress()
+              const elapsed = Math.round((Date.now() - startTime) / 1000)
+              setProgress(Math.min(95, elapsed * 2), `Generating with MLX... ${elapsed}s`)
+              if (prog.status === 'complete') {
+                setProgress(100, 'Complete!')
+                useCreateStore.getState().setLastGenTime(`${elapsed}s`)
+                // The mp4 lives on disk only (no ComfyUI /view route here) —
+                // read it via the guarded `read_media_file` Rust command and
+                // hand the frontend a `blob:` URL, which the CSP's media-src
+                // allows (unlike `data:`). Reuse `dataUrl`: galleryItemUrl() /
+                // OutputView / Lightbox / download already prefer it over the
+                // ComfyUI /view path, and a blob: URL is just a string src as
+                // far as <video>/fetch are concerned.
+                let dataUrl: string | undefined
+                try {
+                  dataUrl = await readVideoAsBlobUrl(result.output)
+                } catch (e) {
+                  console.error('read_media_file failed for MLX video output', e)
+                }
+                addToGallery({
+                  id: uuid(), type: 'video', filename: '', subfolder: '',
+                  dataUrl,
+                  // Keep the real on-disk path too, for a future
+                  // download-to-disk path that wants to reference it directly.
+                  localPath: result.output,
+                  prompt, negativePrompt, model: videoModel, modelType: 'wan',
+                  seed: seed === -1 ? 0 : seed, steps, cfgScale, sampler, scheduler,
+                  width, height, batchSize: 1,
+                  createdAt: Date.now(), builderUsed: 'dynamic', intent,
+                })
+                resolve()
+                return
+              }
+              if (prog.status === 'error') {
+                reject(new Error(prog.error || 'local video generation failed'))
+                return
+              }
+              setTimeout(tick, 2000)
+            } catch (e) {
+              reject(e instanceof Error ? e : new Error(String(e)))
+            }
+          }
+          tick()
+        })
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (msg !== 'Cancelled') useCreateStore.getState().setError(`Generation failed: ${msg}`)
+      } finally {
+        useCreateStore.getState().setIsGenerating(false)
+        useCreateStore.getState().setProgress(0)
+        abortRef.current = null
+      }
+      return
+    }
 
     setError(null)
-    let activeModel = localOp ? localOpModel : (mode === 'image' ? imageModel : videoModel)
+    let activeModel = localOp ? localOpModel : (mode === 'image' ? effImageModel : videoModel)
     // Chip↔run agreement (live-caught on the extend E2E): the picker DISPLAYS
     // the first capable model when the stored pick can't run the current
     // intent, but submit read the raw store — the run then used a model the
     // user never saw. Apply the picker's coercion here too (same one-rule
     // philosophy as the cloud op resolver after take-01).
     if (!localOp && mode === 'video' && state.videoModelList.length > 0) {
-      const capable = intent === 'animate' || intent === 'extend'
-        ? state.videoModelList.filter((m) => isI2VModel(m.name))
-        : state.videoModelList.filter((m) => isT2VCapable(m.name))
+      const capable = videoLaneModels(state.videoModelList, intent)
       if (capable.length > 0 && !capable.some((m) => m.name === activeModel)) {
         activeModel = capable[0].name
       }
+    } else if (!localOp && mode === 'video' && !canRunVideoIntent(activeModel, intent)) {
+      // The list has not arrived yet (fresh boot, ComfyUI still waking). The
+      // coercion above cannot run, and a persisted pick the lane cannot use
+      // must not reach the builder: that is how a T2V run right after app
+      // start went out as SVD's LoadImage graph and ComfyUI answered
+      // "Node 2 (LoadImage): Custom validation failed" while the chip already
+      // showed a capable model (David 2026-08-02).
+      setError('Video models are still loading. Give it a few seconds and hit Create again.')
+      return
     }
     // Always re-classify from model name to avoid stale type
     const imageModelType = classifyModel(activeModel)
@@ -752,8 +1004,27 @@ export function useCreate() {
         await new Promise<void>((resolve, reject) => {
           const startTime = Date.now()
           const store = useCreateStore.getState()
+          // The bar and its seconds used to repaint only when ComfyUI sent an
+          // event. Long silent stretches are normal here (a 14B sampling step
+          // or a VAE decode on a full card emits nothing for minutes), so the
+          // label froze mid-run: David watched "Decoding... 266s" stand still
+          // for 10+ minutes while the GPU sat at 100% (2026-08-02). Events now
+          // only change phase and percent; a ticker repaints the elapsed time
+          // every second so a working render never looks hung.
+          let phasePct = 10
+          let phaseLabel = 'Queued...'
+          const paint = () => {
+            const elapsed = Math.round((Date.now() - startTime) / 1000)
+            setProgress(phasePct, `${phaseLabel} ${elapsed}s`)
+          }
+          const setPhase = (pct: number, label: string) => {
+            phasePct = pct
+            phaseLabel = label
+            paint()
+          }
           store.setProgressPhase('queued')
-          setProgress(10, 'Queued...')
+          setPhase(10, 'Queued...')
+          const ticker = setInterval(paint, 1000)
 
           // Activity watchdog (2.5.8): the old hard wall-clock cap killed a
           // REAL render at exactly 60 minutes while ComfyUI was still
@@ -840,6 +1111,7 @@ export function useCreate() {
           let abortCheck: ReturnType<typeof setInterval> | null = null
 
           const cleanup = () => {
+            clearInterval(ticker)
             clearInterval(timeoutTimer)
             clearInterval(heartbeat)
             if (abortCheck) clearInterval(abortCheck)
@@ -851,7 +1123,6 @@ export function useCreate() {
             if ('prompt_id' in event.data && event.data.prompt_id !== promptId) return
             lastActivity = Date.now()
 
-            const elapsed = Math.round((Date.now() - startTime) / 1000)
             const st = useCreateStore.getState()
 
             switch (event.type) {
@@ -864,19 +1135,19 @@ export function useCreate() {
                 const classType = nodeClassMap.get(nodeId) || ''
                 if (LOADER_NODES.has(classType)) {
                   st.setProgressPhase('loading-model')
-                  setProgress(15, `Loading model... ${elapsed}s`)
+                  setPhase(15, 'Loading model...')
                 } else if (CLIP_LOADER_NODES.has(classType)) {
                   st.setProgressPhase('loading-clip')
-                  setProgress(25, `Loading text encoder... ${elapsed}s`)
+                  setPhase(25, 'Loading text encoder...')
                 } else if (VAE_LOADER_NODES.has(classType)) {
                   st.setProgressPhase('loading-vae')
-                  setProgress(30, `Loading VAE... ${elapsed}s`)
+                  setPhase(30, 'Loading VAE...')
                 } else if (SAMPLER_NODES.has(classType)) {
                   st.setProgressPhase('sampling')
-                  setProgress(35, `Sampling... ${elapsed}s`)
+                  setPhase(35, 'Sampling...')
                 } else if (DECODE_NODES.has(classType)) {
                   st.setProgressPhase('decoding')
-                  setProgress(90, `Decoding... ${elapsed}s`)
+                  setPhase(90, 'Decoding frames, the last long stretch...')
                 }
                 break
               }
@@ -884,7 +1155,7 @@ export function useCreate() {
                 const { value, max } = event.data
                 const stepPct = 35 + (value / max) * 55 // 35% to 90%
                 st.setProgressPhase('sampling')
-                setProgress(Math.round(stepPct), `Sampling step ${value}/${max}... ${elapsed}s`)
+                setPhase(Math.round(stepPct), `Sampling step ${value}/${max}...`)
                 break
               }
               case 'execution_complete': {
@@ -1099,9 +1370,9 @@ export function useCreate() {
     videoBackend,
     modelsLoaded,
     modelLoadError,
+    mlxMissing,
     checkConnection,
     fetchModels,
-    runPreflight,
     generate,
     cancel,
   }

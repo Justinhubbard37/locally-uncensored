@@ -10,7 +10,9 @@ import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { X, Cloud, Sparkles, Volume2, VolumeX, MonitorDown } from 'lucide-react'
 import { useUIStore, type CloudTeaserTarget } from '../../stores/uiStore'
-import { useCreateStore, LOCAL_LANE_OPS, type CloudOp } from '../../stores/createStore'
+import { useCreateStore, type CreateIntent } from '../../stores/createStore'
+import { isIntentAvailable } from '../create/experimental/intents'
+import { isMlxImageHost } from '../../api/mlx-image'
 
 type ExampleIntent = Extract<CloudTeaserTarget, { surface: 'intent' }>['intent']
 
@@ -31,7 +33,12 @@ export function CloudExampleModal() {
   const setIntent = useCreateStore((s) => s.setIntent)
   // Lanes that also run locally (2.5.8): the clip stays REAL CLOUD FOOTAGE
   // (David's call — the example always shows cloud), but the CTAs fork.
-  const localLane = target && LOCAL_LANE_OPS.has(target.intent as CloudOp) ? target.intent : null
+  // Same rule the IntentBar renders from, not a static op list — on the Mac
+  // only MLX image/video run locally (MAC-2).
+  const localLane =
+    target && isIntentAvailable(target.intent as CreateIntent, 'local', isMlxImageHost())
+      ? target.intent
+      : null
   // The music clip carries the generated track; it still starts muted
   // (autoplay policy + not startling anyone) with a tap-to-listen toggle.
   const [muted, setMuted] = useState(true)

@@ -53,10 +53,26 @@ describe('modelStore.setActiveModel — built-in engine VRAM exclusion (2.5.7)',
     expect(backendCall).toHaveBeenCalledWith('stop_bundled_engine')
   })
 
-  it('does NOT stop the engine on built-in → built-in (that is an in-place swap)', () => {
+  it('built-in → built-in swaps the engine to the picked gguf instead of stopping it', async () => {
+    // llama-server serves exactly ONE gguf and ignores the request's model
+    // field, and the send-path self-heal only revives a DEAD server — so the
+    // store itself must dispatch the swap, or a pick on the Models page keeps
+    // every chat silently answering from the OLD model.
+    backendCall.mockImplementation(async (...a: unknown[]) => {
+      if (a[0] === 'list_bundled_models') {
+        return { dir: '/m', models: [{ name: 'qwenB', path: '/m/qwenB.gguf', size: 1, loaded: false }] }
+      }
+      return {}
+    })
     useModelStore.getState().setActiveModel('openai::qwenA')
     useModelStore.getState().setActiveModel('openai::qwenB')
     expect(backendCall).not.toHaveBeenCalledWith('stop_bundled_engine')
+    await vi.waitFor(() => {
+      expect(backendCall).toHaveBeenCalledWith(
+        'swap_bundled_model',
+        expect.objectContaining({ modelPath: '/m/qwenB.gguf' }),
+      )
+    })
   })
 
   it('still unloads the previous Ollama model on Ollama → built-in (no regression)', () => {

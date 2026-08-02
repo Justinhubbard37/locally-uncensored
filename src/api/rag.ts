@@ -1,7 +1,7 @@
 import { v4 as uuid } from "uuid"
 import type { DocumentMeta, TextChunk, RAGContext, VectorSearchResult } from "../types/rag"
 import { ollamaUrl, localFetch } from "./backend"
-import { isManagedBuiltinActive, embedBaseUrl, bundledEmbedStatus } from "./engine"
+import { isManagedBuiltinActive, embedBaseUrl, bundledEmbedStatus, ensureBundledEmbedAlive } from "./engine"
 
 export async function extractText(file: File): Promise<string> {
   const ext = file.name.split(".").pop()?.toLowerCase()
@@ -38,13 +38,46 @@ async function extractTextFromDOCX(file: File): Promise<string> {
   return result.value
 }
 
+/**
+ * Hard ceiling per chunk, in characters. The embedding server processes one
+ * chunk in a single batch, and llama-server's default physical batch is 512
+ * tokens, so an oversized chunk comes back as
+ * "input (658 tokens) is too large to process" and the whole document fails
+ * to index (ChrisMcSheehy, D#91, 2026-07-27). ~4 chars per token puts 1200
+ * characters near 300 tokens, comfortably inside 512 even for token-dense
+ * text like code or CJK.
+ */
+const MAX_CHUNK_CHARS = 1200
+
+/** Split a run of text that carries no sentence break into pieces that fit,
+ *  preferring word boundaries. A PDF table, a bullet list, OCR output or a
+ *  code block is one "sentence" to the splitter below, and before this it
+ *  went to the embedder whole. */
+function splitOversized(text: string, limit: number): string[] {
+  if (text.length <= limit) return [text]
+  const out: string[] = []
+  let rest = text
+  while (rest.length > limit) {
+    const window = rest.slice(0, limit)
+    const cut = window.lastIndexOf(" ")
+    // No space in a whole window (CJK, a long URL, minified text) — cut hard.
+    const at = cut > limit * 0.5 ? cut : limit
+    out.push(rest.slice(0, at).trim())
+    rest = rest.slice(at).trim()
+  }
+  if (rest) out.push(rest)
+  return out.filter(Boolean)
+}
+
 export function chunkText(
   text: string,
   chunkSize = 500,
   overlap = 50
 ): string[] {
   const chunks: string[] = []
-  const sentences = text.split(/(?<=[.!?])\s+/)
+  const sentences = text
+    .split(/(?<=[.!?])\s+/)
+    .flatMap((s) => splitOversized(s, MAX_CHUNK_CHARS))
   let current = ""
 
   for (const sentence of sentences) {
@@ -58,7 +91,11 @@ export function chunkText(
     }
   }
   if (current.trim()) chunks.push(current.trim())
-  return chunks.filter((c) => c.length > 20)
+  // Final guarantee: the overlap prefix can push a chunk back over the ceiling,
+  // and one oversized chunk fails the whole document at the embedder.
+  return chunks
+    .flatMap((c) => splitOversized(c, MAX_CHUNK_CHARS))
+    .filter((c) => c.length > 20)
 }
 
 export async function generateEmbeddings(
@@ -72,6 +109,9 @@ export async function generateEmbeddings(
   // onboarding — use it whenever it is running. Otherwise fall back to the
   // Ollama `/api/embed` path (still supported as an "Advanced" backend).
   if (isManagedBuiltinActive()) {
+    // A Create/Music render may have offloaded the embed sidecar — revive it
+    // before the request instead of failing with "cannot reach :8128".
+    await ensureBundledEmbedAlive()
     return embedViaBuiltin(texts, model)
   }
   try {
@@ -157,6 +197,15 @@ async function embedViaOllama(texts: string[], model: string): Promise<number[][
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {
+  // Vectors of different length are not comparable — that happens for real:
+  // chunks embedded with one model and a query embedded with another (switching
+  // the embedding model, or the move from Ollama embeddings to the built-in
+  // engine) have different dimensions, and a chunk whose embedding call failed
+  // can be stored empty. The old loop read past the shorter vector, multiplied
+  // by `undefined` and returned NaN — and a single NaN then poisoned the whole
+  // ranking (see hybridSearch), so retrieval silently returned the first chunks
+  // of the document instead of the relevant ones.
+  if (!a.length || a.length !== b.length) return 0
   let dot = 0,
     magA = 0,
     magB = 0
@@ -165,7 +214,8 @@ export function cosineSimilarity(a: number[], b: number[]): number {
     magA += a[i] * a[i]
     magB += b[i] * b[i]
   }
-  return dot / (Math.sqrt(magA) * Math.sqrt(magB) || 1)
+  const score = dot / (Math.sqrt(magA) * Math.sqrt(magB) || 1)
+  return Number.isFinite(score) ? score : 0
 }
 
 export function bm25Score(query: string, document: string, allDocs: string[]): number {
@@ -206,16 +256,21 @@ function hybridSearch(
     bm25Score: bm25Score(query, chunk.content, allDocTexts),
   }))
 
-  // Normalize both score sets to 0-1
-  const maxVector = Math.max(...vectorResults.map((r) => r.vectorScore), 0.001)
-  const maxBm25 = Math.max(...bm25Results.map((r) => r.bm25Score), 0.001)
+  // Normalize both score sets to 0-1. Non-finite scores are dropped from the
+  // max: Math.max with a single NaN returns NaN, which would turn EVERY
+  // normalized score into NaN and leave the sort comparing NaNs — i.e. no
+  // ranking at all.
+  const finite = (xs: number[]) => xs.filter((x) => Number.isFinite(x))
+  const maxVector = Math.max(...finite(vectorResults.map((r) => r.vectorScore)), 0.001)
+  const maxBm25 = Math.max(...finite(bm25Results.map((r) => r.bm25Score)), 0.001)
 
   // Combine with 0.7 vector + 0.3 BM25 weighting
+  const safe = (x: number) => (Number.isFinite(x) ? x : 0)
   const combined = chunks.map((chunk, i) => ({
     chunk,
     score:
-      0.7 * (vectorResults[i].vectorScore / maxVector) +
-      0.3 * (bm25Results[i].bm25Score / maxBm25),
+      0.7 * (safe(vectorResults[i].vectorScore) / maxVector) +
+      0.3 * (safe(bm25Results[i].bm25Score) / maxBm25),
   }))
 
   return combined.sort((a, b) => b.score - a.score).slice(0, topK)

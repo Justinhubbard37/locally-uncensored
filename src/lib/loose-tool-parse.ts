@@ -19,6 +19,7 @@
  * it from the visible answer (we don't want the raw `foo(...)` echoed as prose).
  */
 
+import { findBalancedObjects, balancedObjectAt } from './json-scan'
 import { repairJson } from './tool-call-repair'
 import { parseHermesToolCalls } from '../api/hermes-tool-calling'
 
@@ -77,25 +78,13 @@ function parseCallArgs(inner: string): Record<string, unknown> {
 /** Find bare/fenced JSON objects that name a known tool: {"name":"X","arguments":{…}}. */
 function parseJsonObjectCalls(text: string, known: Set<string>): { call: LooseToolCall; snippet: string }[] {
   const calls: { call: LooseToolCall; snippet: string }[] = []
-  // Scan every top-level-ish {...} candidate. Cheap brace-scan; repairJson
-  // tolerates trailing commas / single quotes / unquoted keys.
-  const candidates: string[] = []
-  let depth = 0
-  let start = -1
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]
-    if (c === '{') {
-      if (depth === 0) start = i
-      depth++
-    } else if (c === '}') {
-      depth--
-      if (depth === 0 && start >= 0) {
-        candidates.push(text.slice(start, i + 1))
-        start = -1
-      }
-      if (depth < 0) depth = 0
-    }
-  }
+  // Every top-level {...} candidate; repairJson tolerates trailing commas /
+  // single quotes / unquoted keys. The scan is string-aware (json-scan.ts):
+  // the old depth counter treated braces INSIDE a JSON string as structure, so
+  // a file_write whose content held a regex or a half-open block either lost
+  // its closing brace (candidate never emitted, call silently dropped) or
+  // closed one brace early (wrong arguments).
+  const candidates: string[] = findBalancedObjects(text)
   for (const cand of candidates) {
     if (!/["']?(?:name|tool|tool_name|tool_call|function)["']?\s*[:=]/.test(cand)) continue
     const parsed = repairJson(cand) as Record<string, any> | null
@@ -177,16 +166,25 @@ export function parseLooseToolCalls(text: string, known: string[]): LooseParseRe
   //    `[file_read {"path": "/package.json"}]`. Require a non-empty object so a
   //    stray `tool {}` or prose brace isn't misread as a call.
   for (const name of knownSet) {
-    const re = new RegExp(`\\[?\\s*\\b${escapeRe(name)}\\b\\s*(\\{(?:[^{}]|\\{[^{}]*\\})*\\})\\s*\\]?`, 'g')
+    // Locate the bare name, then take the BALANCED object after it. The old
+    // regex could only express one level of nesting, so `{"a":{"b":{"c":1}}}`
+    // and any content string with braces fell outside it.
+    const nameRe = new RegExp(`\\[?\\s*\\b${escapeRe(name)}\\b\\s*(?=\\{)`, 'g')
     let m: RegExpExecArray | null
-    while ((m = re.exec(text)) !== null) {
-      const parsed = repairJson(m[1]) as Record<string, any> | null
+    while ((m = nameRe.exec(text)) !== null) {
+      const obj = balancedObjectAt(text, m.index + m[0].length)
+      if (!obj) continue
+      nameRe.lastIndex = obj.end // never rescan inside the object we just took
+      const parsed = repairJson(obj.text) as Record<string, any> | null
       if (!parsed || typeof parsed !== 'object') continue
       // The brace may BE the args, or wrap them under arguments/parameters.
       const inner = parsed.arguments ?? parsed.parameters ?? parsed.args ?? parsed.params
       const args = inner && typeof inner === 'object' ? inner : parsed
       if (args && typeof args === 'object' && Object.keys(args).length > 0) {
-        push({ name, arguments: args as Record<string, unknown> }, m[0])
+        let end = obj.end
+        const closer = text.slice(end).match(/^\s*\]/)
+        if (closer) end += closer[0].length
+        push({ name, arguments: args as Record<string, unknown> }, text.slice(m.index, end))
       }
     }
   }

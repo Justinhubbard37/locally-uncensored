@@ -19,6 +19,12 @@ import type { ChatMessage, ToolDefinition } from '../api/providers/types'
 
 export const MAX_LOOP_ITERATIONS = 100
 export const MAX_WORKFLOW_DEPTH = 5
+/**
+ * Total steps one run may execute. A condition can branch backwards, which is
+ * how a workflow expresses "not done yet, try again" — without a budget that
+ * is an unbounded loop, and run_workflow gives the agent no way to cancel it.
+ */
+export const MAX_STEPS_EXECUTED = 500
 
 // ── Variable Interpolation ────────────────────────────────────
 
@@ -85,10 +91,15 @@ export class WorkflowEngine {
 
     const results: StepResult[] = []
     let stepIndex = 0
+    let executed = 0
 
     try {
       while (stepIndex < this.workflow.steps.length) {
         if (this.abortController.signal.aborted) break
+        if (++executed > MAX_STEPS_EXECUTED) {
+          this.callbacks.onError(`Workflow exceeded ${MAX_STEPS_EXECUTED} steps — check for a condition that branches back on itself`)
+          break
+        }
 
         const step = this.workflow.steps[stepIndex]
         this.callbacks.onStepStart(stepIndex, step)
@@ -103,20 +114,22 @@ export class WorkflowEngine {
 
         this.callbacks.onStepComplete(stepIndex, result)
 
-        // Set last_output for next step
-        if (result.output) {
+        // Set last_output for next step. A condition's "true"/"false" is a
+        // branch marker, not data: letting it through replaced the previous
+        // step's real output, so the next step's {{last_output}} interpolated
+        // to the literal "true".
+        if (result.output && step.type !== 'condition') {
           this.variables['last_output'] = result.output
         }
 
-        // Handle branching (condition step changes stepIndex)
+        // Handle branching — on the decision the step already made. Evaluating
+        // the condition a second time here used to happen AFTER last_output had
+        // been overwritten with that marker, so a condition reading last_output
+        // (the default, and the only source the builder writes) compared
+        // "true"/"false" against the user's value and always fell to the else
+        // branch.
         if (step.type === 'condition' && step.condition) {
-          const matches = evaluateCondition(
-            step.condition.source,
-            step.condition.operator,
-            interpolate(step.condition.value, this.variables),
-            this.variables
-          )
-          const targetId = matches ? step.condition.thenStepId : step.condition.elseStepId
+          const targetId = result.output === 'true' ? step.condition.thenStepId : step.condition.elseStepId
           const targetIndex = this.workflow.steps.findIndex(s => s.id === targetId)
           stepIndex = targetIndex >= 0 ? targetIndex : stepIndex + 1
         } else {

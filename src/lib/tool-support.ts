@@ -7,9 +7,11 @@
  *
  *   1. the reactive cache (api/tool-capability) — a run PROVED the model
  *      rejects a `tools` payload (cloud 405, ollama "does not support tools")
- *   2. the server's own answer — LU Cloud `/models` returns `supports_tools`,
- *      false for the roleplay and story models it hosts (Hermes 3, Euryale,
- *      MythoMax, Llama 4 Maverick, …)
+ *   2. the server's own answer — LU Cloud `/models` returns `supports_tools`.
+ *      Since 2026-07-29 that is true for the whole catalogue: the proxy serves
+ *      the models DeepInfra refuses a `tools` payload for (Hermes 3, Euryale,
+ *      MythoMax, Llama 4 Maverick) through a prompt translation instead, so
+ *      they run Agent and Code like anything else.
  *   3. the family-name heuristic in model-compatibility
  *
  * AgentModeToggle already layered 1 > 2 > 3 correctly. The chat dropdown used
@@ -51,9 +53,10 @@ export function resolveToolSupport({ name, supportsTools }: ToolSupportInput): T
   // do not put `tools` in the request. For a LOCAL model that is not the end of
   // it — the XML path is pure prompting and often still works, which is how
   // small Ollama models have driven the agent since 2.5.3. For a HOSTED model
-  // it is the end of it: LU Cloud sets the flag on its story/roleplay models,
-  // which will happily narrate a tool call instead of emitting one, and the
-  // user pays per token to find that out.
+  // it still is: LU Cloud now does its own prompt translation server-side and
+  // reports `supports_tools: true` for everything it can serve that way, so a
+  // `false` from LU Cloud means the model genuinely cannot be driven, and
+  // retrying it client-side would only burn the user's tokens.
   if (proven === 'unsupported' || supportsTools === false) {
     return provider === 'lu-cloud' ? 'none' : 'hermes'
   }

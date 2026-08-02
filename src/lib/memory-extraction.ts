@@ -11,6 +11,7 @@
  * - reference: Pointers to external resources, tools, URLs
  */
 
+import { extractJsonObject } from './json-scan'
 import type { MemoryType } from '../types/agent-mode'
 
 export interface ExtractedMemory {
@@ -89,10 +90,8 @@ export function parseExtractionResponse(response: string): ExtractionResult {
     }
 
     // Try to find JSON object in the response
-    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) return fallback
-
-    const data = JSON.parse(jsonMatch[0])
+    const data = extractJsonObject(jsonStr)
+    if (!data || typeof data !== 'object') return fallback
 
     if (typeof data.shouldSave !== 'boolean') return fallback
     if (!data.shouldSave) return { shouldSave: false, memories: [] }
@@ -212,10 +211,8 @@ export function parseResolutionResponse(
     const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/)
     if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim()
 
-    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) return fallback
-
-    const data = JSON.parse(jsonMatch[0])
+    const data = extractJsonObject(jsonStr)
+    if (!data || typeof data !== 'object') return fallback
     const action = typeof data.action === 'string' ? data.action.toUpperCase() : ''
 
     if (action === 'NOOP') return { action: 'NOOP' }

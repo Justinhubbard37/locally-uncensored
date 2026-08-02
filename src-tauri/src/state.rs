@@ -19,6 +19,13 @@ pub struct DownloadProgress {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Absolute path of the file this transfer is writing. The map is keyed by
+    /// bare filename, which two different models can share, so this is what
+    /// tells a restart of the SAME download apart from a name collision — and
+    /// it is how cancel finds the right `.download` temp file instead of
+    /// guessing a handful of subfolders.
+    #[serde(default)]
+    pub dest: String,
 }
 
 /// Handle to a running bundled `llama-server`. One model per process, so
@@ -33,6 +40,14 @@ pub struct BundledEngine {
     pub child: Child,
     pub model_path: String,
     pub port: u16,
+    /// Context size the CHAT engine was started with (`None` for the embed
+    /// server, which never sets `--ctx-size`). Surfaced by the status command
+    /// so the UI shows the true token-counter denominator.
+    pub ctx: Option<u32>,
+    /// Full argv the process was spawned with — the idempotence key: a start
+    /// request resolving to the same argv reuses the running process, any
+    /// difference (model, ctx, tuning, port) triggers a stop→start.
+    pub args: Vec<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -219,9 +234,6 @@ pub struct AppState {
     /// finishes installing — without that, the user would have to restart
     /// LU to pick up the freshly installed Python.
     pub python_bin: Arc<Mutex<String>>,
-    // Claude Code
-    pub claude_code_process: Mutex<Option<Child>>,
-    pub claude_code_install: Arc<Mutex<InstallState>>,
     // Remote Access
     pub remote: Mutex<RemoteServer>,
     /// Per-chat workspace overrides — when present, agent file ops with
@@ -256,6 +268,27 @@ pub struct AppState {
     /// ran on the CPU). None = LU hasn't started ComfyUI this session.
     /// Surfaced to the Create tab via `get_comfy_gpu_status`.
     pub comfy_started_cpu: Mutex<Option<bool>>,
+    // ── In-process MLX media engine (macOS Apple-Silicon local image/video) ──
+    // Ported from uselu/apps/bridge's `commands::mlx` / `commands::video`. The
+    // app spawns its OWN Python MLX sidecar (server.py on 127.0.0.1:47712) —
+    // no separate daemon. Hard rule: Mac local image/video is MLX only, never
+    // ComfyUI.
+    /// Install progress for the MLX-Stable-Diffusion engine (venv + torch +
+    /// diffusers). `commands::mlx::install_mlx_diffusion`.
+    pub install_mlx_diffusion: crate::install_state::InstallSlot,
+    /// Install progress for a single MLX image-catalog model download.
+    pub install_mlx_image_model: crate::install_state::InstallSlot,
+    /// Install progress for the `mlx-video` pip package.
+    pub install_mlx_video: crate::install_state::InstallSlot,
+    /// Install progress for a single MLX video-catalog model download/convert.
+    pub install_video_model: crate::install_state::InstallSlot,
+    /// Live progress/log of the currently running (or last) video generation.
+    pub video_progress: crate::install_state::InstallSlot,
+    /// Handle to the running `mlx_video.*.generate` subprocess, if any. `Arc`-
+    /// wrapped (unlike the other `Mutex<Option<Child>>` handles above) so the
+    /// video-generation reaper thread can hold its own clone of the same
+    /// mutex instead of needing a clone of the whole (non-`Clone`) `AppState`.
+    pub video_process: Arc<Mutex<Option<Child>>>,
 }
 
 impl AppState {
@@ -317,8 +350,6 @@ impl AppState {
             searxng_available: AtomicBool::new(false),
             python_bin: Arc::new(Mutex::new(python_bin)),
             // Claude Code
-            claude_code_process: Mutex::new(None),
-            claude_code_install: Arc::new(Mutex::new(InstallState::default())),
             // Remote Access
             remote: Mutex::new(RemoteServer::new()),
             chat_workspace_overrides: Arc::new(Mutex::new(HashMap::new())),
@@ -329,7 +360,48 @@ impl AppState {
             comfy_gpu_cache: Mutex::new(HashMap::new()),
             comfy_gpu_mode: Mutex::new("auto".to_string()),
             comfy_started_cpu: Mutex::new(None),
+            install_mlx_diffusion: crate::install_state::InstallSlot::default(),
+            install_mlx_image_model: crate::install_state::InstallSlot::default(),
+            install_mlx_video: crate::install_state::InstallSlot::default(),
+            install_video_model: crate::install_state::InstallSlot::default(),
+            video_progress: crate::install_state::InstallSlot::default(),
+            video_process: Arc::new(Mutex::new(None)),
         }
+    }
+}
+
+impl AppState {
+    /// Install-progress accessors for the in-process MLX media engine — each
+    /// returns a cloned handle (`InstallSlot` is a cheap `Arc`-backed clone),
+    /// matching the accessor-method convention the ported `commands::mlx` /
+    /// `commands::video` code expects (`state.install_mlx_diffusion()` etc.).
+    pub fn install_mlx_diffusion(&self) -> crate::install_state::InstallSlot {
+        self.install_mlx_diffusion.clone()
+    }
+    pub fn install_mlx_image_model(&self) -> crate::install_state::InstallSlot {
+        self.install_mlx_image_model.clone()
+    }
+    pub fn install_mlx_video(&self) -> crate::install_state::InstallSlot {
+        self.install_mlx_video.clone()
+    }
+    pub fn install_video_model(&self) -> crate::install_state::InstallSlot {
+        self.install_video_model.clone()
+    }
+    pub fn video_progress(&self) -> crate::install_state::InstallSlot {
+        self.video_progress.clone()
+    }
+    /// Cloned `Arc` handle to the video-subprocess mutex — cheap, and lets a
+    /// spawned reaper thread hold its own reference without needing the
+    /// (non-`Clone`) `AppState` itself. See the `video_process` field doc.
+    pub fn video_process(&self) -> Arc<Mutex<Option<Child>>> {
+        self.video_process.clone()
+    }
+    /// Resolved Python binary path, or `None` when no real Python was found
+    /// on this box (`python_bin` stores `""` as that sentinel — see the field
+    /// doc comment above).
+    pub fn python_bin(&self) -> Option<String> {
+        let bin = self.python_bin.lock().unwrap().clone();
+        if bin.is_empty() { None } else { Some(bin) }
     }
 }
 
@@ -354,7 +426,9 @@ impl AppState {
     /// when Tauri's destructor chain skips us.
     pub fn shutdown_subprocesses(&self) {
         if let Ok(mut proc) = self.ollama_process.lock() {
-            if let Some(ref mut child) = *proc {
+            // take(), not a borrow: leaving the pid in the slot let the Drop
+            // pass below fire a second taskkill at it.
+            if let Some(child) = proc.take() {
                 let pid = child.id();
                 #[cfg(windows)]
                 {
@@ -362,9 +436,11 @@ impl AppState {
                         .args(["/pid", &pid.to_string(), "/T", "/F"])
                         .creation_flags(CREATE_NO_WINDOW)
                         .output();
+                    drop(child);
                 }
                 #[cfg(not(windows))]
                 {
+                    let mut child = child;
                     let _ = child.kill();
                     let _ = pid;
                 }
@@ -393,7 +469,9 @@ impl AppState {
         }
 
         if let Ok(mut proc) = self.comfy_process.lock() {
-            if let Some(ref mut child) = *proc {
+            // take(), not a borrow: leaving the pid in the slot let the Drop
+            // pass below fire a second taskkill at it.
+            if let Some(child) = proc.take() {
                 let pid = child.id();
                 #[cfg(windows)]
                 {
@@ -401,9 +479,11 @@ impl AppState {
                         .args(["/pid", &pid.to_string(), "/T", "/F"])
                         .creation_flags(CREATE_NO_WINDOW)
                         .output();
+                    drop(child);
                 }
                 #[cfg(not(windows))]
                 {
+                    let mut child = child;
                     let _ = child.kill();
                     let _ = pid;
                 }
@@ -411,22 +491,36 @@ impl AppState {
             }
         }
 
-        if let Ok(mut proc) = self.claude_code_process.lock() {
+        // In-process MLX video subprocess (`mlx_video.*.generate`). Plain kill —
+        // it's a single Python process, no child tree to walk.
+        if let Ok(mut proc) = self.video_process.lock() {
             if let Some(ref mut child) = *proc {
-                let pid = child.id();
-                #[cfg(windows)]
-                {
-                    let _ = std::process::Command::new("taskkill")
-                        .args(["/pid", &pid.to_string(), "/T", "/F"])
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .output();
-                }
-                #[cfg(not(windows))]
-                {
-                    let _ = child.kill();
-                    let _ = pid;
-                }
-                println!("[ClaudeCode] Stopped (explicit shutdown)");
+                let _ = child.kill();
+                println!("[MLX] video subprocess stopped (explicit shutdown)");
+            }
+            *proc = None;
+        }
+
+        // MLX image sidecar (server.py on MLX_PORT). `mlx_start` deliberately
+        // drops the Child handle — the sidecar outlives individual renders and
+        // is addressed over loopback — so quitting used to orphan the venv
+        // Python forever (observed live: LU gone, server.py still resident).
+        // Kill it by its listening port, same mechanism as the Stop button.
+        #[cfg(target_os = "macos")]
+        {
+            crate::process_util::kill_listeners_on_port(crate::commands::mlx::MLX_PORT);
+            println!("[MLX] image sidecar stopped (explicit shutdown)");
+        }
+
+        // Character-LoRA training. The PID sits in AppState like every other
+        // long-running child, but shutdown skipped it — so quitting during a
+        // training run left an orphaned Python process holding the GPU, and
+        // the UI that could have cancelled it was gone. Training is the
+        // longest-lived and most VRAM-hungry child the app spawns.
+        if let Ok(mut slot) = self.trainer_process.lock() {
+            if let Some(pid) = slot.take() {
+                crate::commands::trainer::kill_trainer_tree(pid);
+                println!("[Trainer] Training stopped (explicit shutdown)");
             }
         }
 
@@ -443,7 +537,87 @@ impl Drop for AppState {
         // calls `shutdown_subprocesses` itself (see `commands::system::exit_app`
         // and the tray "quit" handler in `main.rs`). This Drop covers the
         // remaining "Tauri-managed shutdown DID happen to run our Drop" case
-        // — idempotent re-kill on already-dead PIDs is a harmless taskkill.
+        // — and every branch now take()s its slot, so a second pass has
+        // nothing left to kill. It used to leave the pids in place and call
+        // the re-kill harmless; `taskkill /T /F` on a pid Windows has since
+        // recycled is not harmless, it takes out a stranger's process tree.
         self.shutdown_subprocesses();
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    /// A live child that outlives the test unless something kills it.
+    fn sleeper() -> std::process::Child {
+        std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleeper")
+    }
+
+    /// A killed-but-unreaped child is a ZOMBIE — `ps -p` still lists it, so the
+    /// process STATE has to be read. Z means the kill landed and only the exit
+    /// status is still pending; at quit the parent dies and init reaps it.
+    fn alive(pid: u32) -> bool {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "state=", "-p", &pid.to_string()])
+            .output();
+        match out {
+            Ok(o) => {
+                let st = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                !st.is_empty() && !st.starts_with('Z')
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// The quit path is normally only reachable through the Tauri exit (tray
+    /// Quit / exit_app), which cannot be triggered from a test or from a shell.
+    /// It is a plain method though, so it CAN be exercised with real children —
+    /// which is the only runtime proof available for it on this machine.
+    #[test]
+    #[cfg_attr(target_os = "windows", ignore = "uses sleep/ps")]
+    fn shutdown_kills_the_tracked_children_and_empties_the_slots() {
+        let state = AppState::new();
+
+        let ollama = sleeper();
+        let comfy = sleeper();
+        let ollama_pid = ollama.id();
+        let comfy_pid = comfy.id();
+        *state.ollama_process.lock().unwrap() = Some(ollama);
+        *state.comfy_process.lock().unwrap() = Some(comfy);
+
+        // The trainer is tracked as a bare pid, which is exactly why the
+        // shutdown used to skip it (d038209).
+        let trainer = sleeper();
+        let trainer_pid = trainer.id();
+        std::mem::forget(trainer); // only the pid is tracked, as in the real flow
+        *state.trainer_process.lock().unwrap() = Some(trainer_pid);
+
+        state.shutdown_subprocesses();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+
+        assert!(!alive(ollama_pid), "ollama child survived the shutdown");
+        assert!(!alive(comfy_pid), "comfyui child survived the shutdown");
+        assert!(!alive(trainer_pid), "TRAINER survived the shutdown (d038209)");
+
+        // Slots emptied, so the Drop pass has nothing left to fire at — a pid
+        // Windows may have recycled by then (3f3427c).
+        assert!(state.ollama_process.lock().unwrap().is_none());
+        assert!(state.comfy_process.lock().unwrap().is_none());
+        assert!(state.trainer_process.lock().unwrap().is_none());
+    }
+
+    /// Quitting with nothing running must not panic or block.
+    #[test]
+    fn shutdown_on_an_idle_state_is_a_no_op() {
+        let state = AppState::new();
+        state.shutdown_subprocesses();
+        state.shutdown_subprocesses();
     }
 }

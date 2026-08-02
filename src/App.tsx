@@ -10,6 +10,18 @@ function App() {
       import('@tauri-apps/api/core').then(({ invoke }) => {
         invoke('show_window').catch(() => {})
       })
+
+      // The keychain is the store of record for the HuggingFace token; Rust
+      // holds it in memory only, so every boot pushes it down again. Without
+      // this, only opening Settings would arm the token, and a model download
+      // started from Create or the Model Manager would still go out anonymous
+      // and throttled.
+      import('./api/mlx-image').then(async ({ isMlxImageHost, applyHfToken, HF_TOKEN_ACCOUNT }) => {
+        if (!isMlxImageHost()) return
+        const { secretGet } = await import('./api/backend')
+        const stored = await secretGet(HF_TOKEN_ACCOUNT).catch(() => null)
+        if (stored) await applyHfToken(stored).catch(() => {})
+      })
     }
 
     // Probe local Whisper (STT) once at boot and push the result into the voice

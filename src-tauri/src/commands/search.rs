@@ -226,7 +226,13 @@ async fn try_wikipedia(query: &str, count: usize) -> Result<Vec<SearchResult>, S
         urlencoding::encode(query), count
     );
 
-    let resp = reqwest::get(&url)
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .get(&url)
+        .send()
         .await
         .map_err(|e| format!("Wikipedia: {}", e))?;
 
@@ -555,17 +561,33 @@ fn strip_tags(s: &str) -> String {
     out
 }
 
+/// Case-insensitive search for an ASCII needle, returning a byte index that is
+/// valid in `haystack` itself. `to_lowercase()` changes byte length for some
+/// characters (ẞ is 3 bytes and lowercases to 2, İ is 2 and lowercases to 3),
+/// so an index taken from a lowercased copy cuts the original in the wrong
+/// place — or panics when it lands inside a character.
+fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let n = needle.as_bytes();
+    if n.is_empty() {
+        return Some(0);
+    }
+    haystack
+        .as_bytes()
+        .windows(n.len())
+        .position(|w| w.eq_ignore_ascii_case(n))
+}
+
 fn strip_block_tag(s: &str, tag: &str) -> String {
     let open = format!("<{}", tag);
     let close = format!("</{}>", tag);
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     loop {
-        match rest.to_lowercase().find(&open) {
+        match find_ascii_ci(rest, &open) {
             Some(start_idx) => {
                 out.push_str(&rest[..start_idx]);
                 let after = &rest[start_idx..];
-                match after.to_lowercase().find(&close) {
+                match find_ascii_ci(after, &close) {
                     Some(end_rel) => {
                         rest = &after[end_rel + close.len()..];
                     }
@@ -581,13 +603,12 @@ fn strip_block_tag(s: &str, tag: &str) -> String {
     out
 }
 
-fn capture_first<'a>(s: &'a str, open: &str, close: &str) -> Option<String> {
-    let lower = s.to_lowercase();
-    let start = lower.find(&open.to_lowercase())?;
+fn capture_first(s: &str, open: &str, close: &str) -> Option<String> {
+    let start = find_ascii_ci(s, open)?;
     let rest = &s[start..];
     let open_end = rest.find('>')? + 1;
     let inner = &rest[open_end..];
-    let end = inner.to_lowercase().find(&close.to_lowercase())?;
+    let end = find_ascii_ci(inner, close)?;
     Some(inner[..end].to_string())
 }
 
@@ -677,5 +698,39 @@ mod tests {
             .collect();
         let json = serde_json::json!({ "results": arr });
         assert_eq!(parse_tavily_results(&json, 3).len(), 3);
+    }
+
+    #[test]
+    fn strip_block_tag_matches_case_insensitively() {
+        assert_eq!(strip_block_tag("a<SCRIPT>x</Script>b", "script"), "ab");
+    }
+
+    #[test]
+    fn strip_block_tag_survives_length_changing_uppercase() {
+        // ẞ lowercases to a shorter ß, İ to a longer i̇ — both used to shift the
+        // cut into the wrong place, and ẞ right before a tag panicked outright.
+        assert_eq!(strip_block_tag("ẞ<script>x</script>t", "script"), "ẞt");
+        assert_eq!(strip_block_tag("STRAẞE<script>x</script>t", "script"), "STRAẞEt");
+        assert_eq!(strip_block_tag("İstanbul<script>x</script>t", "script"), "İstanbult");
+    }
+
+    #[test]
+    fn capture_first_survives_length_changing_uppercase() {
+        assert_eq!(capture_first("ẞ<title>Hallo</title>", "<title", "</title>").as_deref(), Some("Hallo"));
+        assert_eq!(
+            capture_first("<h1>STRAẞE</h1><TITLE>Hallo</TITLE>", "<title", "</title>").as_deref(),
+            Some("Hallo")
+        );
+    }
+
+    #[test]
+    fn readable_text_of_a_german_caps_page_keeps_the_body() {
+        let (title, text) = extract_readable_text(
+            "<html><head><title>STRAẞE</title><script>evil()</script></head><body><p>Inhalt</p></body></html>",
+            "text/html",
+        );
+        assert_eq!(title, "STRAẞE");
+        assert!(text.contains("Inhalt"), "body text lost: {:?}", text);
+        assert!(!text.contains("evil"), "script survived: {:?}", text);
     }
 }

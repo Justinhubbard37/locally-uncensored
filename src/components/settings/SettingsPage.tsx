@@ -48,12 +48,16 @@ import { RemoteAccessDocs } from './RemoteAccessDocs'
 import { HardwareSettings } from './HardwareSettings'
 import { ChatbotImporter } from '../import/ChatbotImporter'
 import { ProviderSettings } from './ProviderConfig'
+import { BuiltinEngineSettings } from './BuiltinEngineSettings'
+import { MlxMediaSettings } from './MlxMediaSettings'
+import { useProviderStore } from '../../stores/providerStore'
 import { PermissionSettings } from './PermissionSettings'
 import { MCPServerSettings } from './MCPServerSettings'
 import { WorkflowList } from '../agents/WorkflowList'
 import { WorkflowBuilder } from '../agents/WorkflowBuilder'
 import { useUpdateStore, isNewerVersion } from '../../stores/updateStore'
 import { backendCall } from '../../api/backend'
+import { isMlxImageHost } from '../../api/mlx-image'
 import { ArrowUpCircle } from 'lucide-react'
 
 // ── User profile picture (Appearance) ───────────────────────────
@@ -587,7 +591,7 @@ function ComfyUISettings() {
           <button
             onClick={async () => {
               setInstallPhase('comfyui')
-              setInstallErr(null)
+              setInstallErr('')
               setInstallLogs(['Updating ComfyUI…'])
               try {
                 await backendCall('update_comfyui')
@@ -868,6 +872,9 @@ function ResetSection({ tab }: { tab: SettingsTab }) {
 
 export function SettingsPage() {
   const { settings, updateSettings } = useSettingsStore()
+  // ENG-2 — the expert panel only exists when the openai slot IS the
+  // app-managed built-in engine (same gate as the send-path self-heal).
+  const builtinManaged = useProviderStore((s) => !!s.providers.openai?.enabled && s.providers.openai?.managed === true)
   const { setView } = useUIStore()
   const voiceSettings = useVoiceStore()
   const [whisperStatus, setWhisperStatus] = useState<{ available: boolean; backend: string | null; error?: string } | null>(null)
@@ -913,7 +920,7 @@ export function SettingsPage() {
 
   const refreshTts = () => {
     setTtsLoading(true)
-    return checkTtsAvailable()
+    return checkTtsAvailable(voiceSettings.piperVoice)
       .then((s) => {
         setTtsStatus(s)
         // Same as STT: drive the read-aloud button availability from this probe
@@ -1121,7 +1128,7 @@ export function SettingsPage() {
               <input
                 type="number"
                 value={settings.maxTokens}
-                onChange={(e) => updateSettings({ maxTokens: parseInt(e.target.value) || 0 })}
+                onChange={(e) => updateSettings({ maxTokens: Math.max(0, parseInt(e.target.value) || 0) })}
                 min={0}
                 placeholder="0"
                 className="w-20 px-1.5 py-0.5 rounded bg-transparent border border-white/8 text-[0.65rem] text-right text-gray-300 font-mono focus:outline-none focus:border-white/20"
@@ -1150,9 +1157,16 @@ export function SettingsPage() {
           {/* Bug BB v2.5.0 — BobbyT GPU picker. Lazy-loads the GPU list when
               the section opens via detect_gpus probe (nvidia-smi + rocm-smi +
               lspci/wmic). */}
-          <Section title="Hardware (GPU picker)">
-            <HardwareSettings />
-          </Section>
+          {/* Not on macOS: every knob in there is a no-op on Apple Silicon.
+              The vendor picker forwards CUDA_VISIBLE_DEVICES / HIP_* /
+              ONEAPI_* to Ollama and ComfyUI — none of which exist here (Metal,
+              unified memory, and ComfyUI never launches). Showing a dead
+              NVIDIA/AMD/Intel selector is worse than showing nothing. */}
+          {!isMlxImageHost() && (
+            <Section title="Hardware (GPU picker)">
+              <HardwareSettings />
+            </Section>
+          )}
 
           {/* Feature CC v2.5.0 — MikeS++ chatbot export importer. Parses
               ChatGPT / Claude / Gemini export JSON (or .zip), pre-selects
@@ -1166,8 +1180,9 @@ export function SettingsPage() {
             <ChatBackupSettings />
           </Section>
 
-          {/* ComfyUI-only knobs — cloud renders use server-side limits. */}
-          {settings.appMode !== 'cloud' && (
+          {/* ComfyUI-only knobs — cloud renders use server-side limits, and the
+              Mac's MLX pipeline has its own fixed timeout, so hide there too. */}
+          {settings.appMode !== 'cloud' && !isMlxImageHost() && (
           <Section title="Image / Video Generation Timeouts">
             <div className="text-[0.6rem] text-gray-500 dark:text-gray-500 leading-relaxed pb-1.5">
               Maximum minutes a ComfyUI generation can run before LU aborts it. Bump these up if you run on iGPU or CPU only, because a 1024px image on integrated graphics can take 30+ min.
@@ -1277,14 +1292,35 @@ export function SettingsPage() {
             <HfDownloadPathSetting />
           </Section>
 
-          <Section title="ComfyUI (Image & Video)">
-            {settings.appMode === 'cloud' && (
-              <p className="text-[0.55rem] text-gray-500 leading-snug pb-1">
-                Local mode only. Cloud renders run on lu-labs.ai and never use ComfyUI.
-              </p>
-            )}
-            <ComfyUISettings />
-          </Section>
+          {builtinManaged && (
+            <Section title="Built-in Engine (expert)">
+              <BuiltinEngineSettings />
+            </Section>
+          )}
+
+          {/* ComfyUI never runs on the Mac (MLX-only local media) — hide the whole
+              panel there so it isn't a dead Install/Start surface. The Mac gets
+              the MLX installer in its place; without it a fresh Mac has no way
+              to set up local image/video at all (MAC-3). */}
+          {!isMlxImageHost() ? (
+            <Section title="ComfyUI (Image & Video)">
+              {settings.appMode === 'cloud' && (
+                <p className="text-[0.55rem] text-gray-500 leading-snug pb-1">
+                  Local mode only. Cloud renders run on lu-labs.ai and never use ComfyUI.
+                </p>
+              )}
+              <ComfyUISettings />
+            </Section>
+          ) : (
+            <Section title="Local Media (Apple MLX)">
+              {settings.appMode === 'cloud' && (
+                <p className="text-[0.55rem] text-gray-500 leading-snug pb-1">
+                  Local mode only. Cloud renders run on lu-labs.ai and never touch these models.
+                </p>
+              )}
+              <MlxMediaSettings />
+            </Section>
+          )}
         </>)}
 
         {/* ── Agent tab ─────────────────────────────────── */}
@@ -1462,6 +1498,13 @@ export function SettingsPage() {
             {ttsInstallError && (
               <p className="text-[0.55rem] text-red-400/90 leading-snug">{ttsInstallError}</p>
             )}
+            {/* #77: read-aloud silently fell back to the system voice while this
+                row showed a healthy green check — surface the recorded reason. */}
+            {voiceSettings.ttsMode === 'piper' && voiceSettings.ttsFallbackReason && (
+              <p className="text-[0.55rem] text-amber-400/90 leading-snug">
+                {voiceSettings.ttsFallbackReason} If an antivirus quarantined Piper, whitelist it or reinstall the voice below.
+              </p>
+            )}
             {!ttsLoading && ttsStatus && !ttsStatus.available && !ttsInstalling && !ttsInstallError && (
               <p className="text-[0.55rem] text-gray-500 leading-snug">
                 Required for read-aloud. Installs Piper + a neural voice locally (~63 MB).
@@ -1630,7 +1673,7 @@ function UpdateSection() {
 
         {/* Manual check */}
         <button
-          onClick={() => { useUpdateStore.setState({ lastChecked: null }); checkForUpdate() }}
+          onClick={() => { void checkForUpdate(true) }}
           disabled={isChecking}
           className="text-[0.6rem] text-gray-500 hover:text-gray-300 transition-colors disabled:opacity-40"
         >
@@ -1718,8 +1761,7 @@ function TroubleshootSection() {
     <div className="space-y-3 py-2">
       <p className="text-[0.6rem] text-gray-500 leading-relaxed">
         One-shot probe of the local backends and host facts. Use this when
-        the app behaves oddly. Most "model not found" / "ComfyUI doesn't
-        respond" issues become obvious here.
+        the app behaves oddly. Most "model not found" / {isMlxImageHost() ? '"backend doesn\'t respond"' : '"ComfyUI doesn\'t respond"'} issues become obvious here.
       </p>
 
       {error && (
@@ -1737,10 +1779,12 @@ function TroubleshootSection() {
               <span className="text-[0.65rem] text-gray-300">Ollama</span>
               <ProbeBadge probe={report.ollama} />
             </div>
-            <div className="flex items-center justify-between">
-              <span className="text-[0.65rem] text-gray-300">ComfyUI</span>
-              <ProbeBadge probe={report.comfyui} />
-            </div>
+            {!isMlxImageHost() && (
+              <div className="flex items-center justify-between">
+                <span className="text-[0.65rem] text-gray-300">ComfyUI</span>
+                <ProbeBadge probe={report.comfyui} />
+              </div>
+            )}
             <div className="flex items-center justify-between">
               <span className="text-[0.65rem] text-gray-300">LM Studio</span>
               <ProbeBadge probe={report.lm_studio} />
@@ -1779,7 +1823,7 @@ function TroubleshootSection() {
                   ? (report.host.vram_free_gb != null
                       ? `${report.host.vram_free_gb} / ${report.host.vram_total_gb} GB free`
                       : `${report.host.vram_total_gb} GB`)
-                  : ','}
+                  : 'not detected'}
               </span>
             </div>
           </div>

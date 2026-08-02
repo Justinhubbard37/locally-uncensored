@@ -93,7 +93,7 @@ export class AnthropicProvider implements ProviderClient {
     const body: Record<string, any> = {
       model,
       messages: anthropicMessages,
-      max_tokens: options?.maxTokens || 4096,
+      max_tokens: options?.maxTokens && options.maxTokens > 0 ? options.maxTokens : 4096,
       stream: true,
     }
 
@@ -107,6 +107,17 @@ export class AnthropicProvider implements ProviderClient {
     // the model may produce less, but won't exceed it.
     if (options?.thinking === true) {
       body.thinking = { type: 'enabled', budget_tokens: 5000 }
+    }
+
+    // Streaming tool turn (same conversion as chatWithTools below). The
+    // stream parser already accumulates tool_use blocks via input_json_delta
+    // and flushes them into the done-chunk's toolCalls.
+    if (options?.tools?.length) {
+      body.tools = options.tools.map(t => ({
+        name: t.function.name,
+        description: t.function.description,
+        input_schema: t.function.parameters,
+      }))
     }
 
     let res = await fetch(this.messagesUrl(), {
@@ -226,7 +237,7 @@ export class AnthropicProvider implements ProviderClient {
     const body: Record<string, any> = {
       model,
       messages: anthropicMessages,
-      max_tokens: options?.maxTokens || 4096,
+      max_tokens: options?.maxTokens && options.maxTokens > 0 ? options.maxTokens : 4096,
     }
 
     if (system) body.system = system

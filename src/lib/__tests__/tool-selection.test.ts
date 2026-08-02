@@ -315,3 +315,36 @@ describe('tool-selection', () => {
     })
   })
 })
+
+describe('external (MCP) tools are always offered', () => {
+  const external = (name: string): MCPToolDefinition => ({
+    ...makeTool(name, 'workflow'),
+    source: 'external' as const,
+    serverId: 'srv1',
+  })
+
+  it('includes external tools even when no keyword matches them', () => {
+    const tools = [...ALL_TOOLS, external('list_directory'), external('read_media_file')]
+    const out = selectRelevantTools('write a poem about rain', tools, ALL_ALLOWED)
+    const names = toolNames(out)
+    expect(names).toContain('list_directory')
+    expect(names).toContain('read_media_file')
+  })
+
+  it('still excludes external tools when their category is blocked', () => {
+    const tools = [...ALL_TOOLS, external('list_directory')]
+    const out = selectRelevantTools('write a poem', tools, { ...ALL_ALLOWED, workflow: 'blocked' })
+    expect(toolNames(out)).not.toContain('list_directory')
+  })
+
+  it('a verbatim-named tool survives the small-model cap', () => {
+    const tools = [...ALL_TOOLS, external('list_directory')]
+    const out = selectRelevantTools(
+      'use list_directory on my project folder',
+      tools,
+      ALL_ALLOWED,
+      4
+    )
+    expect(toolNames(out)).toContain('list_directory')
+  })
+})

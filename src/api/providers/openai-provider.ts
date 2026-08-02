@@ -17,15 +17,15 @@ import { ProviderError } from './types'
 import { parseSSEStream } from '../sse'
 import { repairJson } from '../../lib/tool-call-repair'
 import { signalCreditsExhausted } from '../../lib/credits-exhausted'
-import { localFetch, localFetchStream, isPrivateOrLanHost, hostnameOf, ensureProxyAllowsHost } from '../backend'
+import { localFetch, localFetchStream, isPrivateOrLanHost, isDirectFetchAllowed, hostnameOf, ensureProxyAllowsHost } from '../backend'
+import { ensureBuiltinEngineAlive, explainDeadEngine } from '../builtin-ensure'
 
-// Local/LAN vs cloud routing now lives in the `useLocalProxy` getter (below)
-// plus the shared host helpers in backend.ts (isPrivateOrLanHost/hostnameOf).
-// A local OR LAN OpenAI-compat backend (LM Studio/vLLM bound to 0.0.0.0,
-// reached over the network) is hit through the Rust proxy to bypass CORS + the
-// webview CSP; cloud endpoints use a direct fetch. Fixes GH #49 (LAN endpoint
-// "Test" failed because a 192.168.x.x host fell back to a CSP/CORS-blocked
-// direct fetch).
+// Transport routing lives in the `useLocalProxy` getter (below) plus the shared
+// host helpers in backend.ts. A direct webview fetch only works for hosts the
+// pinned CSP lists; everything else — LAN backends (also CORS-blocked, GH #49)
+// and any cloud endpoint LU ships no preset for — goes through the Rust proxy.
+// `isLanBackend` stays separate: it decides local-only BEHAVIOUR (context
+// probing), which must not follow the transport decision.
 
 // ── OpenAI API Types ───────────────────────────────────────────
 
@@ -151,6 +151,25 @@ function guessContextFromName(model: string): number {
 // applyMaxTokens and getContextLength read it through another.
 const catalogContext = new Map<string, number>()
 
+/**
+ * Which accumulator slot a tool-call delta without an `index` belongs to. The
+ * field is required by the OpenAI spec but several compatible servers omit it.
+ * A delta carrying a fresh id opens the next slot; anything else continues the
+ * call currently being filled.
+ */
+function keyForUnindexedDelta(
+  accum: Map<number, { id: string; name: string; args: string }>,
+  id?: string,
+): number {
+  if (id) {
+    for (const [key, call] of accum) {
+      if (call.id === id) return key
+    }
+    return accum.size
+  }
+  return Math.max(0, accum.size - 1)
+}
+
 /** Test-only: reset the endpoint catalogue between test cases. */
 export function __clearContextCatalogForTests(): void {
   catalogContext.clear()
@@ -172,15 +191,42 @@ export class OpenAIProvider implements ProviderClient {
   }
 
   /**
-   * Whether requests must go through the Rust proxy instead of a direct webview
-   * fetch. True for any local/LAN endpoint — declared by the preset
+   * A backend on this machine or the LAN — declared by the preset
    * (`config.isLocal`) OR detected from the host (localhost, RFC1918, CGNAT,
-   * IPv6 ULA/link-local, .local, bare machine name). Cloud endpoints (public
-   * hostnames, isLocal=false) use a direct fetch. Fixes GH #49 where a LAN LM
-   * Studio (e.g. 192.168.1.50) used a direct fetch and was CSP/CORS-blocked.
+   * IPv6 ULA/link-local, .local, bare machine name). Drives behaviour that only
+   * makes sense locally: per-model context probing and the LM Studio enhanced
+   * API. Cloud endpoints must not do those (N+1 requests → rate limits).
+   */
+  private get isLanBackend(): boolean {
+    return this.config.isLocal === true || isPrivateOrLanHost(hostnameOf(this.baseUrl))
+  }
+
+  /**
+   * Whether requests must go through the Rust proxy instead of a direct webview
+   * fetch. Two reasons: a LAN endpoint has no CORS headers for the
+   * tauri.localhost origin (GH #49), and a public host outside the pinned CSP
+   * allow-list gets killed inside the webview before it hits the network — that
+   * is every custom OpenAI-compatible provider a user configures themselves
+   * (their own domain, or a vendor LU ships no preset for).
    */
   private get useLocalProxy(): boolean {
-    return this.config.isLocal === true || isPrivateOrLanHost(hostnameOf(this.baseUrl))
+    return this.isLanBackend || !isDirectFetchAllowed(hostnameOf(this.baseUrl))
+  }
+
+  /**
+   * Run a send and, when this slot is the app's own engine, translate a
+   * transport failure into a sentence about the engine. A refused connection
+   * to 127.0.0.1:8127 used to surface as the raw proxy error, which is how a
+   * fresh Windows install introduced itself to applejames on 2026-08-01 before
+   * they moved to Ollama. Anything that reached an HTTP response is untouched.
+   */
+  private async sendOrExplain(send: () => Promise<Response>): Promise<Response> {
+    try {
+      return await send()
+    } catch (err) {
+      if (this.config.managed === true) throw explainDeadEngine(err, this.baseUrl)
+      throw err
+    }
   }
 
   private get headers(): Record<string, string> {
@@ -242,6 +288,12 @@ export class OpenAIProvider implements ProviderClient {
 
     if (options?.temperature !== undefined) body.temperature = options.temperature
     if (options?.topP !== undefined) body.top_p = options.topP
+    // Streaming tool turn: same wire shape as chatWithTools, but the calls
+    // come back as deltas which the accumulator below already merges.
+    if (options?.tools?.length) {
+      body.tools = options.tools
+      body.tool_choice = 'auto'
+    }
     await this.applyMaxTokens(model, body, options)
     // Reasoning-model knob (o1, o3, gpt-5-thinking, etc.). Toggle OFF →
     // "minimal" (least reasoning the API allows). Toggle ON → "high".
@@ -256,14 +308,20 @@ export class OpenAIProvider implements ProviderClient {
     // the TokenCounter honest — a char/4 estimate can't see the system prompt.
     body.stream_options = { include_usage: true }
 
+    // Managed built-in engine: Create/Music renders stop the llama-server
+    // child to free VRAM ("reloads lazily on the next message") — this is that
+    // lazy reload. Restart-before-send instead of letting the fetch hit a dead
+    // 127.0.0.1:8127 and look like a crashed backend.
+    if (this.config.managed === true) await ensureBuiltinEngineAlive(model)
+
     if (this.useLocalProxy) await ensureProxyAllowsHost(this.baseUrl)
     const fetcher = this.useLocalProxy ? localFetchStream : fetch
-    let res = await fetcher(`${this.baseUrl}/chat/completions`, {
+    let res = await this.sendOrExplain(() => fetcher(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.headers,
       body: JSON.stringify(body),
       signal: options?.signal,
-    } as any)
+    } as any))
 
     // Retry without reasoning_effort if the model/endpoint rejects it. The LU
     // Cloud proxy deliberately passes upstream 400 AND 422 (DeepInfra's
@@ -357,11 +415,21 @@ export class OpenAIProvider implements ProviderClient {
       // Accumulate streamed tool calls
       if (choice.delta?.tool_calls) {
         for (const tc of choice.delta.tool_calls) {
-          const existing = toolCallAccum.get(tc.index)
+          const key = tc.index ?? keyForUnindexedDelta(toolCallAccum, tc.id)
+          const existing = toolCallAccum.get(key)
           if (existing) {
+            // id and name do NOT always arrive in the first delta — several
+            // OpenAI-compat servers send the id one chunk later, or open with a
+            // bare index. Ignoring them left a call with an empty name (dispatch
+            // fails on "") or an empty tool_call_id, which 422s the follow-up
+            // turn — the exact break the server-side normalizer had to heal.
+            // Set-if-empty, not append: servers that repeat the full name in
+            // every delta are far more common than ones that stream it in parts.
+            if (tc.id && !existing.id) existing.id = tc.id
+            if (tc.function?.name && !existing.name) existing.name = tc.function.name
             if (tc.function?.arguments) existing.args += tc.function.arguments
           } else {
-            toolCallAccum.set(tc.index, {
+            toolCallAccum.set(key, {
               id: tc.id || '',
               name: tc.function?.name || '',
               args: tc.function?.arguments || '',
@@ -414,14 +482,18 @@ export class OpenAIProvider implements ProviderClient {
     if (options?.thinking === true) body.reasoning_effort = 'high'
     else if (options?.thinking === false) body.reasoning_effort = 'minimal'
 
+    // Same self-heal as chatStream: agent/tool turns after a Create render
+    // must revive the offloaded built-in engine before hitting its port.
+    if (this.config.managed === true) await ensureBuiltinEngineAlive(model)
+
     if (this.useLocalProxy) await ensureProxyAllowsHost(this.baseUrl)
     const fetcher = this.useLocalProxy ? localFetch : fetch
-    let res = await fetcher(`${this.baseUrl}/chat/completions`, {
+    let res = await this.sendOrExplain(() => fetcher(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.headers,
       body: JSON.stringify(body),
       signal: options?.signal,
-    } as any)
+    } as any))
 
     if (!res.ok && (res.status === 400 || res.status === 422) && ('reasoning_effort' in body || 'stream_options' in body)) {
       delete body.reasoning_effort
@@ -478,7 +550,7 @@ export class OpenAIProvider implements ProviderClient {
     // Context-Limit vom Server. Sonst zeigen wir 8K obwohl das Modell 32K+
     // kann. Probes laufen parallel; bei Cloud-Providers (OpenAI/OpenRouter)
     // wuerde N+1 zu Rate-Limits fuehren, deshalb nur KNOWN_CONTEXT/Heuristik.
-    if (this.useLocalProxy) {
+    if (this.isLanBackend) {
       return Promise.all(models.map(async m => ({
         id: m.id,
         name: m.id,
@@ -545,7 +617,7 @@ export class OpenAIProvider implements ProviderClient {
    * Returnt `null` wenn nichts gefunden, damit Callers cascaden koennen.
    */
   private async probeContextFromServer(model: string): Promise<number | null> {
-    if (!this.useLocalProxy) return null
+    if (!this.isLanBackend) return null
 
     // 1. LM Studio Enhanced API: /api/v0/models/<id>
     //    Base-URL ist typischerweise http://localhost:1234/v1 — wir tauschen
@@ -640,9 +712,11 @@ export class OpenAIProvider implements ProviderClient {
     if (accum.size === 0) return []
 
     const calls: ToolCall[] = []
-    for (const [, tc] of accum) {
+    for (const [index, tc] of accum) {
       calls.push({
-        id: tc.id,
+        // A server that never sent an id would otherwise put an empty
+        // tool_call_id in the follow-up message and 422 the next turn.
+        id: tc.id || `call_${index}`,
         function: {
           name: tc.name,
           arguments: this.safeParseArgs(tc.args),

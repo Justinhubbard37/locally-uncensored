@@ -21,6 +21,27 @@ export interface TauriMockOptions {
   assistantReply: string
   /** Picker id of the bundled starter model the engine reports as loaded. */
   modelName: string
+  /** Shape of the MLX media stack this machine reports. Omit for "set up". */
+  mlx?: {
+    engineInstalled?: boolean
+    videoEngineInstalled?: boolean
+    installedImages?: string[]
+    installedVideos?: string[]
+  }
+  /**
+   * Which OS the app should believe it is on. `isMacOS()` reads
+   * navigator.platform/userAgent, so without this every spec silently inherits
+   * the DEV MACHINE's platform — and Mac and Windows disagree about the whole
+   * local Create surface (MLX vs ComfyUI). Specs that assert platform
+   * behaviour must pin it; the default matches the historical CI target.
+   */
+  platform?: 'mac' | 'windows'
+  /**
+   * Canned HuggingFace file tree served to `fetch_external` for exactly one
+   * repo (the URL resolveHfGgufFiles queries). Lets the sharded-download flow
+   * run against a byte-accurate snapshot of the real API with no network.
+   */
+  hfTree?: { repo: string; entries: Array<{ type: string; path: string; size: number }> }
 }
 
 export const DEFAULT_ASSISTANT_REPLY = 'PONG_BUILTIN_OK the built-in engine answered.'
@@ -33,6 +54,24 @@ export const DEFAULT_MODEL_NAME = 'qwen2.5-0.5b-instruct-q4_k_m'
  */
 export function tauriMockInit(opts: TauriMockOptions) {
   const w = window as any
+
+  // Pin the platform BEFORE the app reads it. isMacOS() (api/backend.ts) tests
+  // navigator.platform then userAgent; leaving them alone makes every spec's
+  // verdict depend on whose laptop ran it.
+  {
+    const mac = opts.platform === 'mac'
+    const platform = mac ? 'MacIntel' : 'Win32'
+    const ua = mac
+      ? 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15'
+      : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    try {
+      Object.defineProperty(navigator, 'platform', { get: () => platform, configurable: true })
+      Object.defineProperty(navigator, 'userAgent', { get: () => ua, configurable: true })
+    } catch {
+      /* a locked-down navigator just means the host platform wins */
+    }
+  }
+
   const MODELS_DIR = '/tmp/lu-e2e/models'
   const modelFile = `${opts.modelName}.gguf`
   const modelPath = `${MODELS_DIR}/${modelFile}`
@@ -40,6 +79,80 @@ export function tauriMockInit(opts: TauriMockOptions) {
   // Filenames whose download the app kicked off — reported "complete" on the
   // very next `download_progress` poll so `awaitDownloadComplete` resolves fast.
   const startedDownloads = new Set<string>()
+
+  // ENG-1 mirror: the ctx the "engine" is currently running with. Every
+  // start/swap derives it from the injected tuning (0 = Rust default 8192),
+  // and `bundled_engine_status` reports it back — exactly the loop the token
+  // counter and the expert panel rely on.
+  let engineCtx = 8192
+
+  // ── MLX media surface (macOS local Create) ──────────────────────
+  // Mirrors commands/mlx.rs + video.rs closely enough that specs can drive the
+  // real install/generate flows. `opts.mlx` decides what the machine looks
+  // like before the spec touches anything: a fresh Mac (nothing installed) or
+  // a set-up one. Every install completes after MLX_INSTALL_POLLS polls, so a
+  // spec can watch the panel go busy → done without arbitrary waits.
+  const MLX_INSTALL_POLLS = 2
+  const mlxImageCatalog = [
+    { id: 'sd-turbo', name: 'SD Turbo', repo: 'stabilityai/sd-turbo', sizeGB: 2.6, minRamGB: 8, steps: 4, guidance: 0, defaultSize: 512, unfiltered: false, description: 'Fast 512px baseline.' },
+    { id: 'realistic-vision-v51', name: 'Realistic Vision V5.1', repo: 'SG161222/Realistic_Vision_V5.1_noVAE', sizeGB: 4.4, minRamGB: 8, steps: 25, guidance: 7, defaultSize: 512, unfiltered: true, description: 'Photoreal, unfiltered.' },
+  ]
+  const mlxVideoCatalog = [
+    { id: 'wan21-t2v-1.3b', name: 'Wan 2.1 T2V 1.3B', family: 'wan_2', repo: 'Wan-AI/Wan2.1-T2V-1.3B', sizeGB: 18, minRamGB: 16, defaultFrames: 33, needsConvert: true, unfiltered: true, description: 'Smallest local video model.' },
+  ]
+  const mlx = {
+    engineInstalled: opts.mlx?.engineInstalled ?? true,
+    videoEngineInstalled: opts.mlx?.videoEngineInstalled ?? true,
+    images: new Set<string>(opts.mlx?.installedImages ?? ['sd-turbo']),
+    videos: new Set<string>(opts.mlx?.installedVideos ?? ['wan21-t2v-1.3b']),
+  }
+  // One install slot per kind, exactly like the Rust side: null means idle
+  // (nothing was ever started), a number counts polls since the install began.
+  const slot: Record<'image' | 'imageEngine' | 'video' | 'videoEngine', number | null> = {
+    image: null,
+    imageEngine: null,
+    video: null,
+    videoEngine: null,
+  }
+  let pendingImageId: string | null = null
+  let pendingVideoId: string | null = null
+  // 1x1 transparent PNG — enough for the gallery to render something real.
+  const TINY_PNG =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+
+  function record(bucket: string, entry: any) {
+    ;(w[bucket] = w[bucket] || []).push(entry)
+  }
+  /** Advance an install slot; report 'complete' once it has been polled enough. */
+  function installStatus(key: keyof typeof slot, extra?: Record<string, unknown>) {
+    const n = slot[key]
+    // Rust semantics: a slot nobody started reads 'idle', and polling it does
+    // not advance anything. The download tray probes all four slots at boot
+    // (adopt), so a mock that advances on read would install engines by
+    // merely being looked at.
+    if (n === null) {
+      return {
+        status: 'idle',
+        logs: [] as string[],
+        error: null,
+        download_progress: 0,
+        download_total: 0,
+        download_speed: 0,
+        ...extra,
+      }
+    }
+    slot[key] = n + 1
+    const done = n + 1 >= MLX_INSTALL_POLLS
+    return {
+      status: done ? 'complete' : 'installing',
+      logs: done ? ['download complete', 'ready'] : ['starting…', 'downloading…'],
+      error: null,
+      download_progress: done ? 100 : 40,
+      download_total: 100,
+      download_speed: 1024 * 1024,
+      ...extra,
+    }
+  }
 
   const enc = (s: string) => Array.from(new TextEncoder().encode(s))
 
@@ -61,6 +174,10 @@ export function tauriMockInit(opts: TauriMockOptions) {
   }
 
   function router(cmd: string, args: any): Promise<any> {
+    // The MLX wrappers (api/mlx-image.ts invokeMedia) nest their payload under
+    // an `args` key to match the Rust `args: Value` signature — unwrap once so
+    // the cases below read the fields the caller actually sent.
+    const m = args?.args ?? args ?? {}
     switch (cmd) {
       // ── onboarding / lifecycle markers ────────────────────────────
       case 'is_onboarding_done':
@@ -74,6 +191,14 @@ export function tauriMockInit(opts: TauriMockOptions) {
       case 'download_model_to_path': {
         const fn = args?.filename
         if (fn) startedDownloads.add(fn)
+        // Recorded so specs can assert the exact URLs, target dir and byte
+        // sizes a download kicked off with (sharded sets: one call per part).
+        record('__E2E_DL_CALLS__', {
+          url: args?.url,
+          destDir: args?.destDir,
+          filename: fn,
+          expectedBytes: args?.expectedBytes,
+        })
         return Promise.resolve({ status: 'started', id: `dl-${fn}` })
       }
       case 'download_progress': {
@@ -90,16 +215,28 @@ export function tauriMockInit(opts: TauriMockOptions) {
 
       // ── built-in engine lifecycle (engine.rs surface) ─────────────
       case 'start_bundled_engine':
-      case 'swap_bundled_model':
+      case 'swap_bundled_model': {
+        // Record every launch so specs can assert the settings-injected tuning
+        // (api/engine.ts merges settings.builtinEngine into each call).
+        ;(w.__E2E_ENGINE_CALLS__ = w.__E2E_ENGINE_CALLS__ || []).push({
+          cmd,
+          modelPath: args?.modelPath,
+          tuning: args?.tuning,
+        })
+        const t = args?.tuning
+        engineCtx = t && typeof t.ctx === 'number' && t.ctx > 0 ? t.ctx : 8192
         return Promise.resolve(8127)
+      }
       case 'stop_bundled_engine':
         return Promise.resolve(null)
       case 'bundled_engine_status':
-        return Promise.resolve({ running: true, healthy: true, port: 8127, model_path: modelPath })
+        return Promise.resolve({ running: true, healthy: true, port: 8127, model_path: modelPath, ctx: engineCtx })
       case 'list_bundled_models':
         return Promise.resolve({
           dir: MODELS_DIR,
-          models: [{ name: opts.modelName, path: modelPath, size: 400 * 1024 * 1024, loaded: true }],
+          // ctx_train mirrors the GGUF-header read (ENG-6c) — 32k, like the
+          // real Qwen2.5 starter — so specs can assert the preset cap.
+          models: [{ name: opts.modelName, path: modelPath, size: 400 * 1024 * 1024, loaded: true, ctx_train: 32768 }],
         })
 
       // ── built-in EMBEDDINGS server lifecycle (P5) ─────────────────
@@ -117,13 +254,137 @@ export function tauriMockInit(opts: TauriMockOptions) {
         // Real Rust returns a shaped object; a null default here trips
         // useActiveContextWindow (`info.loaded`). Return the "unknown" shape.
         return Promise.resolve({ loaded: null, max: null, state: null })
+      case 'comfyui_status':
+        // Recorded, not just refused: a Mac spec asserts this stays at zero.
+        record('__E2E_COMFY_CALLS__', { cmd })
+        return Promise.reject('not running (e2e)')
       case 'start_ollama':
       case 'lmstudio_server_status':
-      case 'comfyui_status':
       case 'whisper_status':
       case 'install_tts_status':
       case 'search_status':
         return Promise.reject('not running (e2e)')
+
+      // ── MLX image (commands/mlx.rs) ───────────────────────────────
+      case 'mlx_status':
+        return Promise.resolve({
+          installed: mlx.engineInstalled,
+          running: mlx.engineInstalled,
+          port: 47712,
+          modelLoaded: false,
+          modelRepo: null,
+          idleSeconds: null,
+        })
+      case 'mlx_start':
+        return Promise.resolve({ ok: true, port: 47712 })
+      case 'mlx_unload':
+        return Promise.resolve({ ok: true, was_loaded: false, running: true })
+      case 'mlx_image_models':
+        return Promise.resolve(mlxImageCatalog.map((m) => ({ ...m, installed: mlx.images.has(m.id) })))
+      // Rust holds the HF token in memory only, so a spec has to be able to
+      // see that the frontend pushed it down, not just that it was stored.
+      case 'set_hf_token': {
+        const token = String(m?.token ?? '').trim()
+        w.__E2E_HF_TOKEN__ = token || null
+        record('__E2E_MLX_CALLS__', { cmd, present: !!token })
+        return Promise.resolve({ ok: true, present: !!token })
+      }
+      case 'hf_token_present':
+        return Promise.resolve({ present: !!w.__E2E_HF_TOKEN__ })
+      case 'install_mlx_diffusion':
+        slot.imageEngine = 0
+        record('__E2E_MLX_CALLS__', { cmd })
+        return Promise.resolve({ ok: true, status: 'installing' })
+      case 'install_mlx_diffusion_status': {
+        const s = installStatus('imageEngine')
+        if (s.status === 'complete') mlx.engineInstalled = true
+        return Promise.resolve(s)
+      }
+      case 'mlx_image_install_model':
+        slot.image = 0
+        pendingImageId = m?.id ?? null
+        record('__E2E_MLX_CALLS__', { cmd, id: m?.id })
+        return Promise.resolve({ ok: true, status: 'installing', id: m?.id })
+      case 'mlx_image_install_status': {
+        const s = installStatus('image')
+        if (s.status === 'complete' && pendingImageId) {
+          mlx.images.add(pendingImageId)
+          pendingImageId = null
+        }
+        return Promise.resolve(s)
+      }
+      case 'mlx_image_delete_model':
+        mlx.images.delete(m?.id)
+        record('__E2E_MLX_CALLS__', { cmd, id: m?.id })
+        return Promise.resolve({ ok: true, id: m?.id })
+      case 'mlx_generate':
+        // The whole point of the Mac Create path: image renders come from
+        // here, never from a ComfyUI workflow submit.
+        record('__E2E_MLX_CALLS__', {
+          cmd,
+          prompt: m?.prompt,
+          model: m?.model,
+          steps: m?.steps,
+          seed: m?.seed,
+          width: m?.width,
+          height: m?.height,
+        })
+        return Promise.resolve({ image_base64: TINY_PNG, width: m?.width ?? 512, height: m?.height ?? 512 })
+
+      // ── MLX video (commands/video.rs) ─────────────────────────────
+      case 'video_status':
+        return Promise.resolve({
+          available: mlx.videoEngineInstalled,
+          appleSilicon: true,
+          mlxInstalled: mlx.videoEngineInstalled,
+          mlxVersion: mlx.videoEngineInstalled ? '0.4.0' : null,
+          pythonBin: '/tmp/lu-e2e/venv/bin/python',
+          modelsRoot: '/tmp/lu-e2e/mlx-video',
+          outputsRoot: '/tmp/lu-e2e/videos',
+          installedModels: [...mlx.videos],
+          running: false,
+        })
+      case 'video_list_models':
+        return Promise.resolve(mlxVideoCatalog.map((m) => ({ ...m, installed: mlx.videos.has(m.id) })))
+      case 'video_install_mlx':
+        slot.videoEngine = 0
+        record('__E2E_MLX_CALLS__', { cmd })
+        return Promise.resolve({ ok: true, status: 'installing' })
+      case 'video_install_mlx_status': {
+        const s = installStatus('videoEngine')
+        if (s.status === 'complete') mlx.videoEngineInstalled = true
+        return Promise.resolve(s)
+      }
+      case 'video_install_model':
+        slot.video = 0
+        pendingVideoId = m?.id ?? null
+        // The payload is nested under `args` (invokeMedia) — reading args.id
+        // here recorded undefined and let an id assertion pass on nothing.
+        record('__E2E_MLX_CALLS__', { cmd, id: m?.id })
+        return Promise.resolve({ ok: true, status: 'installing', id: m?.id })
+      case 'video_install_model_status': {
+        const s = installStatus('video')
+        if (s.status === 'complete' && pendingVideoId) {
+          mlx.videos.add(pendingVideoId)
+          pendingVideoId = null
+        }
+        return Promise.resolve(s)
+      }
+      case 'video_delete_model':
+        mlx.videos.delete(m?.id)
+        record('__E2E_MLX_CALLS__', { cmd, id: m?.id })
+        return Promise.resolve({ ok: true, id: m?.id })
+      case 'video_generate':
+        record('__E2E_MLX_CALLS__', { cmd, id: m?.id, prompt: m?.prompt, seconds: m?.seconds })
+        return Promise.resolve({ ok: true, jobId: 'e2e-vid', pid: 4242, output: '/tmp/lu-e2e/videos/e2e-vid.mp4' })
+      case 'video_progress':
+        // Completes on the first poll — specs assert the wiring, not patience.
+        return Promise.resolve({ running: false, status: 'complete', logs: ['done'], error: null })
+      case 'video_cancel':
+        record('__E2E_MLX_CALLS__', { cmd })
+        return Promise.resolve({ ok: true })
+      case 'read_media_file':
+        return Promise.resolve(`data:video/mp4;base64,${TINY_PNG}`)
 
       // ── chat streaming: drive the onChunk Channel ─────────────────
       case 'proxy_localhost_stream_chunked': {
@@ -179,6 +440,19 @@ export function tauriMockInit(opts: TauriMockOptions) {
           return Promise.resolve(JSON.stringify({ models: [] }))
         }
         return Promise.reject('error sending request: connection refused (e2e)')
+      }
+
+      // ── external fetch (HF tree resolve etc.) ────────────────────
+      // Serves the canned tree for the one configured repo; every other URL
+      // gets JSON null, which callers treat as "API unreachable" and fall
+      // back gracefully (resolveHfGgufFiles returns null → guessed file).
+      case 'fetch_external': {
+        const url: string = args?.url || ''
+        const t = opts.hfTree
+        if (t && url.includes(`/api/models/${t.repo}/tree/main`)) {
+          return Promise.resolve(JSON.stringify(t.entries))
+        }
+        return Promise.resolve('null')
       }
 
       // ── LU Cloud keychain session (secret_* → in-memory map) ─────

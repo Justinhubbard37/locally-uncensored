@@ -11,6 +11,19 @@ use std::os::windows::process::CommandExt;
 
 use crate::state::AppState;
 
+/// What every ComfyUI entry point answers on macOS. Local media there is Apple
+/// MLX and nothing else, so the honest answer names the surface that does work
+/// instead of failing with a bare error.
+pub const MACOS_COMFY_REFUSAL: &str =
+    "ComfyUI is not used on macOS. Local image and video run on Apple MLX — set it up in Settings → AI Backends → Local Media (Apple MLX).";
+
+/// One definition of "may this machine run a local ComfyUI at all". Every entry
+/// point asks this rather than testing the target itself, so the rule has a
+/// single place to be read, tested, and changed.
+pub fn comfy_supported_here() -> bool {
+    !cfg!(target_os = "macos")
+}
+
 /// Windows: hide console windows for spawned processes
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -407,13 +420,6 @@ pub fn find_comfyui_path() -> Option<String> {
         }
     }
 
-    // 2b. Deep scan user home directory (finds ComfyUI in non-standard paths like Desktop/bs/IMage Gen/ComfyUI)
-    let home2 = dirs::home_dir().unwrap_or_default();
-    if let Some(found) = scan_for_comfyui(&home2, 7) {
-        println!("[ComfyUI] Found via deep home scan: {}", found.display());
-        return Some(found.to_string_lossy().to_string());
-    }
-
     let home = dirs::home_dir().unwrap_or_default();
 
     // 3. Check common fixed locations (including Stability Matrix, portable installs)
@@ -446,6 +452,18 @@ pub fn find_comfyui_path() -> Option<String> {
         if p.join("main.py").exists() {
             return Some(p.to_string_lossy().to_string());
         }
+    }
+
+    // 3b. Deep scan of the user home (finds ComfyUI in non-standard paths like
+    // Desktop/bs/IMage Gen/ComfyUI). Runs AFTER config + fixed locations: as a
+    // FIRST candidate its directory-walk order could pick a stale second copy
+    // over the standard install — LU then downloads/checks models in a folder
+    // the running ComfyUI never scans ("installed but not recognized",
+    // pnwpdr4519 Discord 2026-07-27). Same lesson as d9146e3 ("deep home scan
+    // last").
+    if let Some(found) = scan_for_comfyui(&home, 7) {
+        println!("[ComfyUI] Found via deep home scan: {}", found.display());
+        return Some(found.to_string_lossy().to_string());
     }
 
     // 4. Recursive scan of Desktop, Documents, Downloads, and drive roots
@@ -757,8 +775,20 @@ fn kill_port_owner(port: u16) {
 /// ComfyUI always carries `--enable-cors-header`, so direct media loads and
 /// the native progress feed work again. Requires a known install path; on a
 /// remote host LU can't manage the process at all.
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn fix_comfyui_cors(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn fix_comfyui_cors(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        fix_comfyui_cors_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("fix_comfyui_cors task: {e}"))?
+}
+
+fn fix_comfyui_cors_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     let host = state.comfy_host.lock().unwrap().clone();
     if !is_local_host(&host) {
         return Err(
@@ -808,24 +838,69 @@ pub fn fix_comfyui_cors(state: State<'_, AppState>) -> Result<serde_json::Value,
         std::thread::sleep(std::time::Duration::from_millis(400));
     }
 
-    start_comfyui(state)
+    start_comfyui_blocking(state)
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn start_ollama(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    // Check if already running
-    {
-        let mut cmd = Command::new("tasklist");
-        cmd.args(["/FI", "IMAGENAME eq ollama.exe"]);
-        #[cfg(target_os = "windows")]
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        if let Ok(output) = cmd.output() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.contains("ollama.exe") {
-                println!("[Ollama] Already running");
-                return Ok(serde_json::json!({"status": "already_running"}));
-            }
-        }
+pub async fn start_ollama(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        start_ollama_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("start_ollama task: {e}"))?
+}
+
+/// Serialise a "check that nothing runs, then spawn it" path.
+///
+/// These used to be serialised BY ACCIDENT: a synchronous `#[tauri::command]`
+/// runs on the Tauri main thread, so two invocations could never overlap. Now
+/// that the bodies run on the blocking pool, two triggers close together (a
+/// mount effect alongside a click, a double click, onboarding's retry loop) can
+/// BOTH pass the "nothing is running" check — the window between that check and
+/// storing the child is long, it contains a filesystem search — and both spawn a
+/// server. Only the second child gets stored, so the first is an orphan holding
+/// VRAM that no stop_* will ever kill. That orphan is exactly the zombie
+/// `start_comfyui` warns about a few lines below.
+///
+/// The second caller waits instead of being turned away, so once it proceeds the
+/// normal "already running" check answers it — no new status value, no change
+/// for the frontend.
+pub(crate) fn start_gate(lock: &'static Mutex<()>) -> std::sync::MutexGuard<'static, ()> {
+    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub(crate) static COMFY_START: Mutex<()> = Mutex::new(());
+pub(crate) static OLLAMA_START: Mutex<()> = Mutex::new(());
+pub(crate) static ENGINE_START: Mutex<()> = Mutex::new(());
+pub(crate) static EMBED_START: Mutex<()> = Mutex::new(());
+
+/// Is an Ollama server already listening?
+///
+/// This used to shell out to `tasklist /FI "IMAGENAME eq ollama.exe"` — a
+/// WINDOWS-only command, run unconditionally on every platform. Observed live
+/// on macOS 2026-07-28: the spawn fails, `if let Ok(output)` is false, the
+/// check is skipped entirely, and the app starts a SECOND `ollama serve` that
+/// cannot bind 11434 and dies within milliseconds. The dead child is then
+/// stored in AppState as the tracked server, and the log claims "Started".
+///
+/// The port is what actually matters — an Ollama started by launchd, a service
+/// or Docker counts just as much as one whose process happens to be named
+/// ollama.exe — so probe that instead. Same shape as lmstudio_port_open.
+fn ollama_port_open() -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    let addr: SocketAddr = ([127, 0, 0, 1], 11434).into();
+    TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok()
+}
+
+fn start_ollama_blocking(state: &AppState) -> Result<serde_json::Value, String> {
+    let _gate = start_gate(&OLLAMA_START);
+    if ollama_port_open() {
+        println!("[Ollama] Already running");
+        return Ok(serde_json::json!({"status": "already_running"}));
     }
 
     println!("[Ollama] Starting...");
@@ -1014,8 +1089,21 @@ pub(crate) fn probe_comfy_gpu(python: &str) -> Option<bool> {
 // (module `flash_attn_3`) is a different API ComfyUI does not consume, so the
 // FA2 import probe is the correct signal.
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn start_comfyui(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn start_comfyui(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        start_comfyui_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("start_comfyui task: {e}"))?
+}
+
+fn start_comfyui_blocking(state: &AppState) -> Result<serde_json::Value, String> {
+    let _gate = start_gate(&COMFY_START);
     // If user pointed LU at a remote ComfyUI, we have no local process to spawn.
     // Just report status — the remote side is responsible for running ComfyUI.
     {
@@ -1027,6 +1115,17 @@ pub fn start_comfyui(state: State<'_, AppState>) -> Result<serde_json::Value, St
                 "message": "Remote ComfyUI — manage the Python process on the server itself"
             }));
         }
+    }
+
+    // macOS is MLX-only for local media — a hard product rule, not a preference.
+    // The frontend hides every ComfyUI surface there, but the frontend is not
+    // the only caller: the remote/mobile control surface reaches these commands
+    // directly, and any future caller would too. Refusing here is what actually
+    // makes the rule true. The remote-host branch above still answers, so a Mac
+    // pointed at someone else's ComfyUI keeps working — only spawning a local
+    // one is refused.
+    if !comfy_supported_here() {
+        return Err(MACOS_COMFY_REFUSAL.to_string());
     }
 
     let port = *state.comfy_port.lock().unwrap();
@@ -1228,8 +1327,20 @@ pub fn start_comfyui(state: State<'_, AppState>) -> Result<serde_json::Value, St
     Ok(serde_json::json!({"status": "started", "path": comfy_path}))
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn stop_comfyui(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn stop_comfyui(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        stop_comfyui_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("stop_comfyui task: {e}"))?
+}
+
+fn stop_comfyui_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     let mut proc = state.comfy_process.lock().unwrap();
     if let Some(ref mut child) = *proc {
         let pid = child.id();
@@ -1457,6 +1568,28 @@ pub fn set_comfyui_path(path: String, state: State<'_, AppState>) -> Result<serd
     Ok(serde_json::json!({"status": "saved", "path": path}))
 }
 
+/// Split a trailing `:port` off a host the user typed. The neighbouring Ollama
+/// field accepts `host:port`, so people type it here too — and it broke
+/// everything downstream without saying so: the proxy allow-list compares
+/// against the PARSED host (no port) and refused the request, while the progress
+/// socket built `ws://host:port:port`. The user then read "host not allowed,
+/// configure it in Settings" about the field they had just filled in.
+/// IPv6 literals (more than one colon) are left alone.
+fn split_host_port(input: &str) -> (String, Option<u16>) {
+    if input.matches(':').count() == 1 {
+        if let Some((h, p)) = input.rsplit_once(':') {
+            if !h.is_empty() && !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) {
+                if let Ok(port) = p.parse::<u16>() {
+                    if port > 0 {
+                        return (h.to_string(), Some(port));
+                    }
+                }
+            }
+        }
+    }
+    (input.to_string(), None)
+}
+
 #[tauri::command]
 pub fn set_comfyui_host(host: String, state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let trimmed = host.trim();
@@ -1467,11 +1600,15 @@ pub fn set_comfyui_host(host: String, state: State<'_, AppState>) -> Result<serd
     if trimmed.contains('/') || trimmed.contains(' ') || trimmed.contains('?') {
         return Err("Host must be a plain hostname or IP, no slashes/spaces".to_string());
     }
-    let final_host = trimmed.to_string();
+    let (final_host, typed_port) = split_host_port(trimmed);
 
     {
         let mut h = state.comfy_host.lock().unwrap();
         *h = final_host.clone();
+    }
+    if let Some(port) = typed_port {
+        let mut p = state.comfy_port.lock().unwrap();
+        *p = port;
     }
 
     // Persist to config file
@@ -1490,6 +1627,9 @@ pub fn set_comfyui_host(host: String, state: State<'_, AppState>) -> Result<serd
         };
 
         config["comfyui_host"] = serde_json::json!(final_host);
+        if let Some(port) = typed_port {
+            config["comfyui_port"] = serde_json::json!(port);
+        }
         let _ = fs::write(&config_file, serde_json::to_string_pretty(&config).unwrap());
     }
 
@@ -1595,8 +1735,20 @@ pub fn set_ollama_host(host: String, state: State<'_, AppState>) -> Result<serde
     Ok(serde_json::json!({"status": "saved", "base": final_base, "isLocal": is_local}))
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn get_ollama_host(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn get_ollama_host(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_ollama_host_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("get_ollama_host task: {e}"))?
+}
+
+fn get_ollama_host_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     let base = state.ollama_base.lock().unwrap().clone();
     let is_local = url::Url::parse(&base)
         .ok()
@@ -1608,19 +1760,9 @@ pub fn get_ollama_host(state: State<'_, AppState>) -> Result<serde_json::Value, 
 
 /// Auto-start Ollama on app launch (called from setup)
 pub fn auto_start_ollama(state: &AppState) {
-    // Check if already running
-    {
-        let mut cmd = Command::new("tasklist");
-        cmd.args(["/FI", "IMAGENAME eq ollama.exe"]);
-        #[cfg(target_os = "windows")]
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        if let Ok(output) = cmd.output() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.contains("ollama.exe") {
-                println!("[Ollama] Already running");
-                return;
-            }
-        }
+    if ollama_port_open() {
+        println!("[Ollama] Already running");
+        return;
     }
 
     println!("[Ollama] Starting...");
@@ -1643,6 +1785,15 @@ pub fn auto_start_ollama(state: &AppState) {
 
 /// Auto-start ComfyUI on app launch (called from setup)
 pub fn auto_start_comfyui(state: &AppState) {
+    // Hard rule: macOS local media is MLX only, NEVER ComfyUI (see
+    // commands::mlx / commands::video). Auto-starting ComfyUI on Mac violated
+    // that rule (2026-07-23 log: "[ComfyUI] Already running on port 8188").
+    // ComfyUI itself stays fully intact for Windows/Linux and for a user who
+    // manually invokes `start_comfyui` — only the unattended boot path skips it.
+    if cfg!(target_os = "macos") {
+        println!("[ComfyUI] Auto-start skipped on macOS — local media is MLX-only");
+        return;
+    }
     // If user configured a remote host, don't try to auto-start anything locally.
     {
         let host = state.comfy_host.lock().unwrap().clone();
@@ -1791,7 +1942,42 @@ pub fn auto_start_comfyui(state: &AppState) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_host_typed_with_its_port_keeps_both() {
+        assert_eq!(split_host_port("192.168.1.50:8188"), ("192.168.1.50".into(), Some(8188)));
+        assert_eq!(split_host_port("comfy.local:7860"), ("comfy.local".into(), Some(7860)));
+    }
+
+    #[test]
+    fn a_plain_host_is_left_alone() {
+        assert_eq!(split_host_port("192.168.1.50"), ("192.168.1.50".into(), None));
+        assert_eq!(split_host_port("localhost"), ("localhost".into(), None));
+        // Not a port: no digits, empty, or out of range.
+        assert_eq!(split_host_port("host:abc"), ("host:abc".into(), None));
+        assert_eq!(split_host_port("host:"), ("host:".into(), None));
+        assert_eq!(split_host_port("host:0"), ("host:0".into(), None));
+        assert_eq!(split_host_port("host:99999"), ("host:99999".into(), None));
+        // IPv6 literals must survive untouched.
+        assert_eq!(split_host_port("fd00::1"), ("fd00::1".into(), None));
+    }
+
     // ── Bug J: needs_cpu_fallback platform short-circuit ─────────────────
+
+    #[test]
+    fn comfy_is_refused_on_macos_and_allowed_elsewhere() {
+        // "Mac local media is MLX, never ComfyUI" is a product rule, and the
+        // UI-side hiding of the buttons is not where a rule is kept — the
+        // remote/mobile control surface calls these commands directly.
+        if cfg!(target_os = "macos") {
+            assert!(!comfy_supported_here(), "macOS must refuse a local ComfyUI");
+            // The refusal has to say where the working surface is; a bare
+            // "unsupported" leaves the user with nothing to do next.
+            assert!(MACOS_COMFY_REFUSAL.contains("MLX"));
+            assert!(MACOS_COMFY_REFUSAL.contains("Settings"));
+        } else {
+            assert!(comfy_supported_here(), "Windows/Linux keep ComfyUI");
+        }
+    }
 
     #[test]
     fn needs_cpu_fallback_is_false_on_macos() {
@@ -1893,11 +2079,20 @@ mod tests {
 /// it wants the chat LLMs out of VRAM to make room, but ComfyUI keeps its own
 /// checkpoint cached across consecutive Create runs (freeing it here would force
 /// a slow reload between every generate).
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn offload_local_models(
-    state: State<'_, AppState>,
-    include_comfyui: Option<bool>,
-) -> Result<serde_json::Value, String> {
+pub async fn offload_local_models(app: tauri::AppHandle, include_comfyui: Option<bool>) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        offload_local_models_blocking(&state, include_comfyui)
+    })
+    .await
+    .map_err(|e| format!("offload_local_models task: {e}"))?
+}
+
+fn offload_local_models_blocking(state: &AppState, include_comfyui: Option<bool>) -> Result<serde_json::Value, String> {
     let free_comfy = include_comfyui.unwrap_or(true);
     let mut freed: Vec<&str> = Vec::new();
 
@@ -1912,10 +2107,12 @@ pub fn offload_local_models(
 
     // 2) Bundled llama.cpp chat + embeddings sidecars (managed GGUF in RAM).
     //    Both are graceful no-ops when not running, and lazy-start on next use.
-    if crate::commands::engine::stop_bundled_engine(state.clone()).is_ok() {
+    // Call the lifecycle helpers directly — the #[command] wrappers are async
+    // now (they moved off the Tauri main thread) and this caller is sync.
+    if crate::commands::engine::stop_engine_locked(&state) {
         freed.push("bundled-engine");
     }
-    if crate::commands::engine::stop_bundled_embed(state.clone()).is_ok() {
+    if crate::commands::engine::stop_embed_locked(&state) {
         freed.push("bundled-embed");
     }
 
@@ -1937,7 +2134,7 @@ pub fn offload_local_models(
 
 /// Evict every model Ollama currently holds in memory via `keep_alive: 0`,
 /// leaving `ollama serve` running (idle serve is cheap). Best-effort.
-fn offload_ollama_loaded_models() -> bool {
+pub(crate) fn offload_ollama_loaded_models() -> bool {
     let client = match reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
@@ -1993,4 +2190,84 @@ pub(crate) fn free_comfyui_memory() -> bool {
         .send()
         .map(|r| r.status().is_success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod start_gate_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_GATE: Mutex<()> = Mutex::new(());
+
+    /// The window that matters: two threads both pass a "nothing is running"
+    /// check and both spawn. With the gate, the second one cannot enter until
+    /// the first has finished storing its child.
+    #[test]
+    fn two_concurrent_starts_never_overlap() {
+        static INSIDE: AtomicUsize = AtomicUsize::new(0);
+        static MAX_SEEN: AtomicUsize = AtomicUsize::new(0);
+
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let _gate = start_gate(&TEST_GATE);
+                    let now = INSIDE.fetch_add(1, Ordering::AcqRel) + 1;
+                    MAX_SEEN.fetch_max(now, Ordering::AcqRel);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    INSIDE.fetch_sub(1, Ordering::AcqRel);
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(MAX_SEEN.load(Ordering::Acquire), 1, "two starts ran at once");
+    }
+
+    /// A panic inside a start must not wedge every later start.
+    #[test]
+    fn a_poisoned_gate_still_opens() {
+        static POISON_ME: Mutex<()> = Mutex::new(());
+        let _ = std::thread::spawn(|| {
+            let _gate = start_gate(&POISON_ME);
+            panic!("start blew up");
+        })
+        .join();
+        let _gate = start_gate(&POISON_ME); // would panic on a plain .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod ollama_probe_tests {
+    use super::*;
+
+    /// Observed on macOS 2026-07-28: the "is Ollama already running?" check
+    /// shelled out to `tasklist`, which does not exist outside Windows, so the
+    /// check was skipped and a second server was spawned on every launch. The
+    /// probe must answer on THIS platform, not just on Windows.
+    #[test]
+    fn the_probe_answers_without_shelling_out() {
+        let started = std::time::Instant::now();
+        let _ = ollama_port_open();
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "probe took {:?} — is it spawning a process again?",
+            started.elapsed()
+        );
+    }
+
+    /// A listener on the port must be seen as "already running" on every
+    /// platform. Binds a throwaway listener to prove the probe mechanism
+    /// itself works here, without touching the real Ollama port.
+    #[test]
+    fn a_listening_socket_is_detected() {
+        use std::net::{SocketAddr, TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        assert!(
+            TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok(),
+            "the probe cannot see a socket that is demonstrably listening",
+        );
+        drop(listener);
+    }
 }

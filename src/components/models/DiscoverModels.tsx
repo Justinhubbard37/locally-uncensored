@@ -21,6 +21,8 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { useModelStore } from '../../stores/modelStore'
 import { useWorkflowStore } from '../../stores/workflowStore'
 import { getProviderIdFromModel } from '../../api/providers'
+import { startBundledEngine } from '../../api/engine'
+import { BUILTIN_BACKEND_ID } from '../../lib/onboarding-backend'
 import { matchesLmStudioInstalled, type InstalledModelLike } from '../../lib/lmstudio-match'
 import { hfUrlToOllamaRef, hfUrlToLmStudioSubdir, parseHfUrl, extractGgufQuant, isShardedOrIncompatibleGguf } from '../../lib/hf-to-provider'
 import { GlassCard } from '../ui/GlassCard'
@@ -457,7 +459,11 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
     // model*. If no active model yet (first run, brand new install), fall
     // back to the previous enabled-wins logic so the download still works.
     const activeProviderId = activeChatModel ? getProviderIdFromModel(activeChatModel) : null
-    const isActiveLmStudio = activeProviderId === 'openai' && (providers.openai?.name || '').toLowerCase().includes('lm studio')
+    // Built-in engine lives in the managed `openai` slot. A second chat model
+    // downloaded here goes flat into the app-owned models dir and boots
+    // llama-server, mirroring onboarding — never nested like LM Studio.
+    const isActiveBuiltin = activeProviderId === 'openai' && !!providers.openai?.managed
+    const isActiveLmStudio = activeProviderId === 'openai' && !providers.openai?.managed && (providers.openai?.name || '').toLowerCase().includes('lm studio')
     const isActiveOllama = activeProviderId === 'ollama'
 
     // Ollama-native models: only meaningful with Ollama present. If the user
@@ -501,6 +507,12 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
     // LM Studio scans <models>/<user>/<repo>/<file>.gguf and llama.cpp
     // auto-merges every `-NNNNN-of-NNNNN` part it finds in one folder.
     const ensureDirectDir = async (): Promise<string | null> => {
+      // Built-in engine: flat, app-owned dir — list_bundled_models scans it
+      // directly, so no <user>/<repo> nesting and no hfModelPath override
+      // (that path belongs to the LM Studio flow).
+      if (isActiveBuiltin) {
+        return await detectProviderModelPath(BUILTIN_BACKEND_ID)
+      }
       const base = hfModelPath || (await detectProviderModelPath(providers.openai?.name || 'LM Studio'))
       if (!base) return null
       setHfModelPath(base)
@@ -545,7 +557,7 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
     // (first launch), fall back to the old enabled-wins logic.
     let useOllamaPath: boolean
     if (isActiveOllama) useOllamaPath = true
-    else if (isActiveLmStudio) useOllamaPath = false
+    else if (isActiveBuiltin || isActiveLmStudio) useOllamaPath = false
     else useOllamaPath = !lmStudioEnabled && ollamaEnabledNow // legacy fallback
 
     if (useOllamaPath) {
@@ -572,6 +584,23 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
       dlStore.getState().setMeta(realName, realUrl, 'gguf', targetDir)
       await startModelDownloadToPath(realUrl, targetDir, realName, realBytes)
       dlStore.getState().startPolling()
+      if (isActiveBuiltin) {
+        // Built-in engine: await the flat GGUF, then (re)boot llama-server on
+        // it so the freshly-added model is chat-ready without a manual switch.
+        await new Promise<void>((resolve, reject) => {
+          const poll = setInterval(() => {
+            const d = dlStore.getState().downloads[realName]
+            if (d?.status === 'complete') { clearInterval(poll); resolve() }
+            else if (d?.status === 'error') { clearInterval(poll); reject(new Error(d.error || 'Download failed')) }
+          }, 500)
+        })
+        try {
+          await startBundledEngine(`${targetDir}/${realName}`)
+        } catch (e) {
+          setInstallError(`Model downloaded, but the built-in engine failed to start: ${e instanceof Error ? e.message : String(e)}`)
+        }
+        window.dispatchEvent(new CustomEvent('lu-models-refresh'))
+      }
     } catch (e) {
       log.error('GGUF download failed', { err: e })
       setInstallError(`Download failed: ${e instanceof Error ? e.message : String(e)}`)

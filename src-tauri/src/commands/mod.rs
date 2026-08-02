@@ -1,14 +1,16 @@
 pub mod agent;
 pub mod bg_tasks;
 pub mod repo_map;
-pub mod claude_code;
 pub mod comfy_ws;
 pub mod download;
 pub mod engine;
 pub mod filesystem;
+pub mod gguf;
 pub mod gpu;
 pub mod health;
 pub mod install;
+pub mod media_cmds;
+pub mod mlx;
 pub mod oauth;
 pub mod process;
 pub mod proxy;
@@ -19,6 +21,7 @@ pub mod shell;
 pub mod system;
 pub mod trainer;
 pub mod tts;
+pub mod video;
 pub mod waitlist;
 pub mod whisper;
 

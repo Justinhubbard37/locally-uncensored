@@ -16,7 +16,13 @@
  * outcomes, never a synthetic call.
  */
 
-const STORAGE_KEY = 'lu-tool-capability-v1'
+// v2 (2026-07-29): LU Cloud used to 405 on a `tools` payload for the
+// unrestricted models, so installs in the wild carry cached negatives for
+// Hermes, Euryale, MythoMax and friends. The server now serves those models
+// through its prompt transport, making every one of those entries a lie that
+// would keep Agent and Code greyed out until the 24h TTL expired. Bumping the
+// key retires them the moment the user updates.
+const STORAGE_KEY = 'lu-tool-capability-v2'
 /** How long a cached negative result is trusted before we re-try the model. */
 const NEGATIVE_TTL_MS = 24 * 60 * 60 * 1000
 

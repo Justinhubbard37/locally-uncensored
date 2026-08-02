@@ -9,6 +9,8 @@ import { WorkflowEngine } from '../../lib/workflow-engine'
 import type { StepResult } from '../../types/agent-workflows'
 import { DELEGATE_TASK_TOOL_DEF, buildDelegateExecutor } from '../agents/sub-agent'
 import { applyUniqueEdit } from '../../lib/surgical-edit'
+import { isMlxImageHost, generateMlxImageDataUrl, listMlxImageModels, type MlxImageModel } from '../mlx-image'
+import { getVideoStatus, listVideoModels, generateVideo as generateMlxVideo, getVideoProgress, cancelVideo, readVideoAsBlobUrl, type VideoModel } from '../mlx-video'
 
 /**
  * Helper: current chat id (+ folder workspace) as a fragment to spread into
@@ -497,12 +499,12 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
   {
     name: 'image_generate',
     description:
-      'Generate an image from a text prompt via the local ComfyUI pipeline. Blocks up to 5 minutes. '
+      'Generate an image from a text prompt via the local image pipeline (Apple MLX on macOS; ComfyUI elsewhere, auto-detected). Blocks up to 5 minutes. '
       + 'USE for "draw me", "make an image of", "generate a picture". '
       + 'Pass `inputImage` (a filename from an earlier image_generate result) for image-to-image — restyle / edit an existing image at the given `denoise` strength; omit it for text-to-image. '
       + 'First installed image model is auto-selected (or pass `model`). '
-      + 'EXPECT A PAUSE: on a single-GPU machine LU may briefly unload the chat model from VRAM to fit the image model, then reload it after — typically a 30-90s swap (longer on a cold ComfyUI start). This avoids out-of-memory errors; your conversation is fully preserved across the swap. '
-      + 'Rate-limit yourself to 1 call per turn — ComfyUI serializes generations internally so parallel calls will queue, not speed up. '
+      + 'EXPECT A PAUSE on non-Mac (ComfyUI) single-GPU machines: LU may briefly unload the chat model from VRAM to fit the image model, then reload it after — typically a 30-90s swap. This avoids out-of-memory errors; your conversation is fully preserved across the swap. '
+      + 'Rate-limit yourself to 1 call per turn — generations serialize internally so parallel calls will queue, not speed up. '
       + 'Fine-tune with the optional `settings` object (steps, cfg, sampler, scheduler, width/height, seed, lora, vae); set ONLY what the user asked for. A value beyond the installed model\'s real limit is REJECTED with the actual limit so you can retry lower — values are never silently changed.',
     inputSchema: {
       type: 'object',
@@ -540,7 +542,7 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
   {
     name: 'video_generate',
     description:
-      'Generate a short video clip from a text prompt via the local ComfyUI pipeline (Wan / Hunyuan / AnimateDiff backend, auto-detected). Blocks up to 10 minutes. '
+      'Generate a short video clip from a text prompt via the local video pipeline (Apple MLX on macOS; Wan / Hunyuan / AnimateDiff via ComfyUI elsewhere, auto-detected). Local video is slow — this can block up to 60 minutes. '
       + 'USE for "make a video of", "animate", "generate a clip". '
       + 'For a specific length pass `seconds` (e.g. seconds=4 for a 4-second clip) — prefer this over raw frames. Image-to-video (SVD) effectively tops out around 3-4 seconds; text-to-video can run longer. '
       + 'Pass `inputImage` (a filename from an earlier image_generate result) to animate a still image — image-to-video, which auto-selects an installed I2V model such as SVD; omit it for text-to-video. First installed video model is auto-selected (or pass `model`). '
@@ -695,14 +697,14 @@ async function executeWebFetch(args: Record<string, any>): Promise<string> {
 
 async function executeFileRead(args: Record<string, any>): Promise<string> {
   const data = await backendCall('fs_read', { path: args.path, ...chatCtx() })
-  // Binary files come back base64-encoded (encoding: 'base64'). Returning that
-  // raw base64 as if it were the file's text is a corruption trap: the model
-  // treats it as content and a later file_write persists the base64 STRING,
-  // silently mangling the binary. Surface a clear marker instead so the model
-  // knows it is binary and leaves it alone.
-  if (data.encoding === 'base64') {
-    const approxBytes = Math.floor((String(data.content || '').length * 3) / 4)
-    return `[binary file — ${formatBytes(approxBytes)}, not shown. This tool reads text only; do not write binary content back through file_write.]`
+  // A binary file comes back as a marker with its size, never as content.
+  // Handing the model raw bytes-as-text is a corruption trap: it treats them as
+  // content and a later file_write persists that string, mangling the file.
+  if (data.encoding === 'binary' || data.encoding === 'base64') {
+    const bytes = typeof data.bytes === 'number'
+      ? data.bytes
+      : Math.floor((String(data.content || '').length * 3) / 4)
+    return `[binary file — ${formatBytes(bytes)}, not shown. This tool reads text only; do not write binary content back through file_write.]`
   }
   return data.content || ''
 }
@@ -771,7 +773,7 @@ async function executeFileEdit(args: Record<string, any>): Promise<string> {
   } catch (e) {
     return `Error: file_edit could not read ${path}: ${e instanceof Error ? e.message : String(e)}. To create a new file use file_write.`
   }
-  if (data.encoding === 'base64') return `Error: file_edit cannot edit a binary file (${path}).`
+  if (data.encoding === 'binary' || data.encoding === 'base64') return `Error: file_edit cannot edit a binary file (${path}).`
   const content = typeof data.content === 'string' ? data.content : ''
 
   const res = applyUniqueEdit(content, oldString, newString)
@@ -874,7 +876,9 @@ async function runShell(command: string, cwd: string | undefined, timeout = 6000
 
 async function executeShellExecuteBg(args: Record<string, any>): Promise<string> {
   const { bgStart } = await import('../agents/bg-tasks')
-  const { id } = await bgStart({ command: args.command, cwd: args.cwd })
+  // Thread the chat context through, or the task starts in LU's own directory
+  // instead of the workspace the foreground shell tool uses.
+  const { id } = await bgStart({ command: args.command, cwd: args.cwd, ...chatCtx() })
   return `Task started: ${id}. Use shell_task_status to poll, shell_task_kill to cancel.`
 }
 
@@ -1133,6 +1137,13 @@ async function executeImageGenerate(args: Record<string, any>): Promise<string> 
   const flat: Record<string, any> = {}
   for (const [k, v] of Object.entries(args)) if (k !== 'settings' && v !== undefined) flat[k] = v
   const merged: Record<string, any> = { ...settings, ...flat }   // explicit flat args win; undefined never clobbers settings
+
+  // Hard rule: on macOS, local image generation is Apple MLX only — ComfyUI
+  // never runs there (see isMlxImageHost() / useCreate.ts's MLX image
+  // branch, the reference this mirrors). Route around the ComfyUI-only
+  // vram-handoff orchestrator + model-pick gate entirely.
+  if (isMlxImageHost()) return executeImageGenerateMlx(prompt, merged)
+
   // Model-Picker gate (v2.5.3): BEFORE the VRAM swap, let the user pick the
   // ComfyUI model in the tool call (or silently use the saved preference).
   // Returns null when an explicit model arg exists / nothing is installed /
@@ -1160,6 +1171,16 @@ async function executeVideoGenerate(args: Record<string, any>): Promise<string> 
   const flat: Record<string, any> = {}
   for (const [k, v] of Object.entries(args)) if (k !== 'settings' && v !== undefined) flat[k] = v
   const merged: Record<string, any> = { ...settings, ...flat }   // explicit flat args win; undefined never clobbers settings
+
+  // Hard rule: on macOS, local video generation is Apple MLX only — ComfyUI
+  // never runs there. Route around vram-handoff entirely (no VRAM juggling —
+  // there is no local text-model/ComfyUI VRAM contention to manage: MLX runs
+  // its own subprocess).
+  if (isMlxImageHost()) {
+    const prompt = String(args.prompt ?? args.description ?? '').trim() || 'gentle, subtle natural motion'
+    return executeVideoGenerateMlx(prompt, merged)
+  }
+
   // Model-Picker gate (v2.5.3) — see executeImageGenerate. T2V and I2V keep
   // separate saved preferences (disjoint capability sets).
   const { pickModelForGeneration } = await import('../model-pick')
@@ -1167,6 +1188,188 @@ async function executeVideoGenerate(args: Record<string, any>): Promise<string> 
   if (picked) merged.model = picked
   const { vramHandoffGenerate } = await import('../vram-handoff')
   return vramHandoffGenerate('video', merged)
+}
+
+// ── macOS MLX generation (hard rule: local image/video on Mac is MLX only,
+// never ComfyUI — see api/mlx-image.ts / api/mlx-video.ts module docs) ────
+
+/** Fuzzy-resolve a chat-typed model name against an installed MLX catalog by
+ *  id or display name. Same tolerant-matching shape as resolveModelName in
+ *  vram-handoff.ts, kept as a separate small helper so this Mac-only path
+ *  doesn't pull in the ComfyUI-flavoured module. */
+function resolveMlxModel<T extends { id: string; name: string }>(
+  requested: string | undefined,
+  installed: T[],
+): T | null {
+  if (installed.length === 0 || !requested) return null
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '')
+  const r = norm(requested)
+  if (!r) return null
+  return (
+    installed.find((m) => norm(m.id) === r || norm(m.name) === r) ??
+    installed.find((m) => norm(m.id).includes(r) || norm(m.name).includes(r)) ??
+    installed.find((m) => r.includes(norm(m.id)) || r.includes(norm(m.name))) ??
+    null
+  )
+}
+
+/** Decode a `data:image/png;base64,...` result into a compact `blob:` URL —
+ *  same b64 → Blob → createObjectURL pattern as readVideoAsBlobUrl
+ *  (mlx-video.ts). Keeps the multi-hundred-KB PNG OUT of the tool-result
+ *  string that gets fed back into the model's context; only the short
+ *  blob: URL (which the CSP's img-src already allows) goes there. */
+function pngDataUrlToObjectUrl(dataUrl: string): string {
+  const comma = dataUrl.indexOf(',')
+  const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
+  const bin = atob(b64)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return URL.createObjectURL(new Blob([bytes], { type: 'image/png' }))
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+/**
+ * macOS image_generate — hard rule: local image on Mac is MLX only, never
+ * ComfyUI (ComfyUI is never even started on this platform). Mirrors the MLX
+ * image branch in useCreate.ts (generateMlxImageDataUrl → base64 PNG), then
+ * returns the SAME result shape pollAndExtract uses for the ComfyUI path —
+ * `${kind} generated: <file> (prompt: "...")\n<url>` — so ToolCallBlock
+ * renders it inline; only the url is a local blob: URL instead of a ComfyUI
+ * /view URL.
+ */
+async function executeImageGenerateMlx(prompt: string, merged: Record<string, any>): Promise<string> {
+  let installed: MlxImageModel[]
+  try {
+    installed = (await listMlxImageModels()).filter((m) => m.installed)
+  } catch (e) {
+    return `Error: Could not query MLX image models — ${e instanceof Error ? e.message : String(e)}.`
+  }
+  if (installed.length === 0) {
+    return 'Error: No local image model is installed yet. The on-device image engine needs a one-time setup before local generation works.'
+  }
+  const requested = typeof merged.model === 'string' && merged.model ? merged.model : undefined
+  let model: MlxImageModel
+  if (requested) {
+    const resolved = resolveMlxModel(requested, installed)
+    if (!resolved) {
+      return `Error: No installed MLX image model matches "${requested}". Installed: ${installed.map((m) => m.name).join(', ')}.`
+    }
+    model = resolved
+  } else {
+    model = installed.find((m) => m.id === 'sd-turbo') ?? installed[0]
+  }
+
+  try {
+    const { dataUrl } = await generateMlxImageDataUrl({
+      prompt,
+      model: model.id,
+      steps: typeof merged.steps === 'number' ? merged.steps : undefined,
+      seed: typeof merged.seed === 'number' ? merged.seed : undefined,
+      width: typeof merged.width === 'number' ? merged.width : undefined,
+      height: typeof merged.height === 'number' ? merged.height : undefined,
+      negativePrompt: typeof merged.negativePrompt === 'string' ? merged.negativePrompt : undefined,
+    })
+    const filename = `mlx-${Date.now()}.png`
+    const url = pngDataUrlToObjectUrl(dataUrl)
+    return `Image generated: ${filename} (prompt: "${prompt}")\n${url}`
+  } catch (e) {
+    return `Image generation failed: ${e instanceof Error ? e.message : String(e)}`
+  }
+}
+
+/**
+ * macOS video_generate — hard rule: local video on Mac is MLX only, never
+ * ComfyUI. Text-to-video is the primary path. `inputImage` (image-to-video)
+ * passes through to mlx-video's `initImage`, which the Rust side validates
+ * as an absolute file path on disk — a chat-generated MLX image (data-URL
+ * only, never written to disk, per media_cmds.rs) cleanly fails there with
+ * "init_image not found: ...", the same honest-rejection shape this codebase
+ * uses for every other unsupported value, rather than silently ignoring it.
+ */
+async function executeVideoGenerateMlx(prompt: string, merged: Record<string, any>): Promise<string> {
+  let status: Awaited<ReturnType<typeof getVideoStatus>>
+  try {
+    status = await getVideoStatus()
+  } catch (e) {
+    return `Error: Could not query MLX video status — ${e instanceof Error ? e.message : String(e)}.`
+  }
+  if (!status.available) return 'Error: MLX video is Apple Silicon only.'
+  if (!status.mlxInstalled) return 'Error: the local video engine is not set up on this Mac yet (a one-time setup is needed before local video works).'
+
+  let catalog: VideoModel[]
+  try {
+    catalog = (await listVideoModels()).filter((m) => m.installed)
+  } catch (e) {
+    return `Error: Could not query MLX video models — ${e instanceof Error ? e.message : String(e)}.`
+  }
+  if (catalog.length === 0) {
+    return 'Error: No local video model is installed yet. The on-device video engine needs a one-time setup before local generation works.'
+  }
+  const requested = typeof merged.model === 'string' && merged.model ? merged.model : undefined
+  let model: VideoModel
+  if (requested) {
+    const resolved = resolveMlxModel(requested, catalog)
+    if (!resolved) {
+      return `Error: No installed MLX video model matches "${requested}". Installed: ${catalog.map((m) => m.name).join(', ')}.`
+    }
+    model = resolved
+  } else {
+    model = catalog[0]
+  }
+
+  const fps = typeof merged.fps === 'number' ? merged.fps : undefined
+  let seconds: number | undefined = typeof merged.seconds === 'number' ? merged.seconds : undefined
+  if (seconds == null && typeof merged.frames === 'number' && merged.frames > 0) {
+    seconds = merged.frames / (fps ?? 24)
+  }
+  const inputImage = typeof merged.inputImage === 'string' && merged.inputImage ? merged.inputImage : undefined
+
+  let job: Awaited<ReturnType<typeof generateMlxVideo>>
+  try {
+    job = await generateMlxVideo({
+      id: model.id,
+      prompt,
+      seconds,
+      fps,
+      seed: typeof merged.seed === 'number' ? merged.seed : undefined,
+      initImage: inputImage,
+    })
+  } catch (e) {
+    return `Video generation failed: ${e instanceof Error ? e.message : String(e)}`
+  }
+
+  // Local video on Apple Silicon is genuinely slow — a few seconds of footage
+  // can take 30-50 min on wan_2. Give it a full hour before giving up, and on
+  // timeout actually KILL the mlx-video subprocess (video_cancel → kill_tree),
+  // otherwise it keeps churning in the background and pins the machine long
+  // after the tool has already reported failure.
+  const deadline = Date.now() + 60 * 60 * 1000
+  while (Date.now() < deadline) {
+    await sleep(2000)
+    let prog: Awaited<ReturnType<typeof getVideoProgress>>
+    try {
+      prog = await getVideoProgress()
+    } catch (e) {
+      return `Video generation failed: ${e instanceof Error ? e.message : String(e)}`
+    }
+    if (prog.status === 'complete') {
+      try {
+        const blobUrl = await readVideoAsBlobUrl(job.output)
+        const filename = job.output.split(/[\\/]/).pop() || `mlx-${Date.now()}.mp4`
+        return `Video generated: ${filename} (prompt: "${prompt}")\n${blobUrl}`
+      } catch (e) {
+        return `Video generation failed: could not read output — ${e instanceof Error ? e.message : String(e)}`
+      }
+    }
+    if (prog.status === 'error') {
+      return `Video generation failed: ${prog.error || 'mlx-video failed'}`
+    }
+  }
+  try { await cancelVideo() } catch { /* already finished/gone */ }
+  return 'Video generation timed out after 60 minutes; the generation was stopped.'
 }
 
 async function executeGetCurrentTime(_args: Record<string, any>): Promise<string> {

@@ -7,7 +7,8 @@ import { useProviderStore } from '../../stores/providerStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useUIStore } from '../../stores/uiStore'
 import { unloadAllModels, loadModel, unloadModel, listRunningModels } from '../../api/ollama'
-import { displayModelName } from '../../api/providers'
+import { displayModelName, getProviderIdFromModel } from '../../api/providers'
+import { activateBuiltinModel, isManagedBuiltinActive } from '../../api/engine'
 import { getToolCapability } from '../../api/tool-capability'
 import { canUseTools } from '../../lib/tool-support'
 import { backendCall } from '../../api/backend'
@@ -365,6 +366,22 @@ export function shouldAutoLoadForSelect(
  */
 export const LMS_AUTOLOAD_CONTEXT = 16384
 
+// A full agent tool set is about 5k tokens of definitions before the
+// conversation starts, so a 4k model calls tools in Chat but cannot carry
+// Agent or Code (MythoMax holds 4k and the upstream refuses the request
+// outright, reproduced against production 2026-07-29). Saying that on the row
+// beats letting the user find out from an error after the first message.
+const TIGHT_CONTEXT = 8192
+
+export function toolBadgeTitle(model: AIModel): string {
+  const ctx =
+    'contextLength' in model && typeof model.contextLength === 'number' ? model.contextLength : 0
+  if (ctx > 0 && ctx < TIGHT_CONTEXT) {
+    return `Supports tool calling, but its ${Math.round(ctx / 1024)}k context window is too small for a full Agent or Code tool set`
+  }
+  return 'Supports tool calling (Agent, Code, and tools in Chat)'
+}
+
 export function lmsAutoLoadContext(model: AIModel): number {
   const max =
     'contextLength' in model && typeof model.contextLength === 'number' && model.contextLength > 0
@@ -593,6 +610,33 @@ export function ModelSelector({ openUpward = false, surface = 'chat' }: ModelSel
       return
     }
 
+    // Built-in engine rows (ENG-4): swap the GGUF (await) BEFORE activating —
+    // same contract as the LM Studio path above. A failed llama-server start
+    // keeps the dropdown open and shows the real reason (Rust appends the
+    // stderr tail) instead of activating a model that can't answer. Idempotent
+    // when the model is already loaded (the Rust side compares argv + health).
+    if (isManagedBuiltinActive() && getProviderIdFromModel(model.name) === 'openai') {
+      if (selectingLms || togglingLms) return
+      setSelectError(null)
+      setSelectingLms(id)
+      try {
+        const swapped = await activateBuiltinModel(model.name)
+        if (swapped) {
+          // Raw store set — the useModels wrapper would fire a second
+          // (idempotent but pointless) activate.
+          useModelStore.getState().setActiveModel(model.name)
+        } else {
+          setActiveModel(model.name) // not a bundled GGUF — plain activate
+        }
+        setOpen(false)
+      } catch (e) {
+        setSelectError(`Couldn't start the built-in engine with "${displayModelName(model.name)}": ${e instanceof Error ? e.message : String(e)}`)
+      } finally {
+        setSelectingLms(null)
+      }
+      return
+    }
+
     // Non-LM-Studio, or an already-loaded LM Studio model: activate now.
     setActiveModel(model.name)
     setOpen(false)
@@ -797,12 +841,14 @@ export function ModelSelector({ openUpward = false, surface = 'chat' }: ModelSel
                           )}
                           {/* 2.5.8 — tool-calling capability at a glance. Ban =
                               no function calling, so Agent/Code can't use it:
-                              either the server declared it (LU Cloud
-                              supports_tools === false — Hermes 3, Euryale,
-                              MythoMax, Llama-4-Maverick, …) or we've SEEN it
-                              reject tools at runtime (cloud 405 / ollama "does
-                              not support tools"). Wrench = tool-capable. Text
-                              models only. */}
+                              either the server declared it (supports_tools ===
+                              false) or we've SEEN it reject tools at runtime
+                              (cloud 405 / ollama "does not support tools").
+                              Wrench = tool-capable. Text models only.
+                              Since 2026-07-29 the LU Cloud catalogue is
+                              wrench across the board: the unrestricted models
+                              are served through the proxy's prompt transport
+                              rather than being flagged unsupported. */}
                           {model.type === 'text' && (
                             (getToolCapability(model.name) === 'unsupported' || model.supportsTools === false) ? (
                               <span
@@ -814,7 +860,7 @@ export function ModelSelector({ openUpward = false, surface = 'chat' }: ModelSel
                             ) : model.supportsTools !== false ? (
                               <span
                                 className="inline-flex items-center shrink-0 text-emerald-500/90"
-                                title="Supports tool calling (Agent, Code, and tools in Chat)"
+                                title={toolBadgeTitle(model)}
                               >
                                 <Wrench size={9} />
                               </span>

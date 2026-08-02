@@ -19,6 +19,7 @@ import {
   createAudioRecorder,
   transcribeAudio,
   transcribeAudioCloud,
+  getLastTtsStatus,
   type AudioRecorder,
 } from "../api/voice";
 import { CloudJobError } from "../api/cloud/client";
@@ -36,6 +37,12 @@ function sttErrorMessage(err: unknown): string {
     if (err.status >= 500) return "Cloud transcription is unavailable right now, try again";
     return err.message;
   }
+  // Local Whisper rejects with the Rust error STRING, and those are written for
+  // the user ("Speech-to-text needs faster-whisper, which is not installed…").
+  // Swallowing them behind the microphone hint sent people looking in entirely
+  // the wrong place. A real JS Error keeps the generic line — its message is
+  // for us, not for them.
+  if (typeof err === "string" && err.trim()) return err.trim();
   return "Transcription failed, check the microphone and try again";
 }
 
@@ -170,7 +177,7 @@ export function useVoice() {
 
   // Re-probe neural TTS on demand (after install) and sync the store.
   const recheckTts = useCallback(async (): Promise<boolean> => {
-    const ok = await recheckTtsAvailable();
+    const ok = await recheckTtsAvailable(store.piperVoice);
     store.setTtsAvailable(ok);
     return ok;
   }, [store]);
@@ -342,7 +349,7 @@ export function useVoice() {
           let piperReady = store.ttsAvailable;
           if (!piperReady && lazyTtsReprobes < MAX_LAZY_TTS_REPROBES && store.ttsMode !== "external") {
             lazyTtsReprobes++;
-            piperReady = await recheckTtsAvailable();
+            piperReady = await recheckTtsAvailable(store.piperVoice);
             if (stopped()) return;
             if (piperReady) store.setTtsAvailable(true);
           }
@@ -351,11 +358,31 @@ export function useVoice() {
               const url = await synthesizeNeural(text, store.piperVoice);
               if (stopped()) return;
               await playNeuralAudio(url);
+              store.setTtsFallbackReason(null);
               return;
             } catch (err) {
               if (stopped()) return;
               log.error("Neural TTS failed, falling back to browser voices", { err });
+              // #77 (ElBiggus): this fallback was invisible — Piper installed
+              // AND selected, yet every read-aloud spoke the system voice and
+              // nothing in the app said why. Record the reason for Settings.
+              store.setTtsFallbackReason(
+                `Piper failed to speak (${err instanceof Error ? err.message : String(err)}). Read-aloud used the system voice instead.`,
+              );
             }
+          } else if (store.ttsMode !== "external") {
+            // Say which of the three things is actually missing. The old text
+            // asserted "installed but not responding" for all of them, so a
+            // user who had never set Piper up was sent looking for a fault
+            // that did not exist.
+            const st = getLastTtsStatus();
+            store.setTtsFallbackReason(
+              st.piper === false
+                ? "Neural TTS (Piper) is not set up yet, so read-aloud used the system voice. Install it in Settings → Voice."
+                : st.voice === false
+                  ? "No Piper voice is fully downloaded yet, so read-aloud used the system voice. Pick one in Settings → Voice."
+                  : "Piper is installed but not responding, so read-aloud used the system voice instead.",
+            );
           }
         }
         if (!ttsSupported || stopped()) return;

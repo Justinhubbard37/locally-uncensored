@@ -4,6 +4,18 @@ use sysinfo::System;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
+/// Disk-space preflight shim for `commands::video::video_install_model`
+/// (originally the bridge's statvfs-based free/total/used probe). Not wired up
+/// to a real disk-usage check here — returning `None` makes the preflight a
+/// no-op (video installs proceed without a disk-space guard, same as every
+/// other model-download path in this codebase, none of which check free space
+/// today). Signature (`Option<(free, total, used)>` in bytes) matches the call
+/// site's `if let Some((free, _, _)) = ...` destructure.
+#[allow(dead_code)]
+pub fn volume_space_for(_path: &std::path::Path) -> Option<(u64, u64, u64)> {
+    None
+}
+
 #[tauri::command]
 pub fn system_info() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
@@ -52,48 +64,101 @@ pub fn process_list() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({ "processes": processes, "count": processes.len() }))
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread,
+// so every millisecond spent here is a frozen window. Same treatment
+// `lmstudio_server_status` already got — this one was simply missed.
 #[tauri::command]
-pub fn screenshot() -> Result<serde_json::Value, String> {
-    // Use PowerShell to capture screen on Windows
-    #[cfg(target_os = "windows")]
-    {
-        let tmp = std::env::temp_dir().join("lu-screenshot.png");
-        let ps_script = format!(
-            r#"
-            Add-Type -AssemblyName System.Windows.Forms
-            Add-Type -AssemblyName System.Drawing
-            $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-            $bitmap = New-Object System.Drawing.Bitmap($screen.Width, $screen.Height)
-            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-            $graphics.CopyFromScreen($screen.Location, [System.Drawing.Point]::Empty, $screen.Size)
-            $bitmap.Save('{}')
-            $graphics.Dispose()
-            $bitmap.Dispose()
-            "#,
-            tmp.to_string_lossy().replace('\\', "\\\\")
-        );
+pub async fn screenshot() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(screenshot_blocking)
+        .await
+        .map_err(|e| format!("screenshot task: {e}"))?
+}
 
-        let output = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-            .output()
-            .map_err(|e| format!("Screenshot failed: {}", e))?;
+fn screenshot_blocking() -> Result<serde_json::Value, String> {
+    // Unique per call. The capture used to land on a fixed `lu-screenshot.png`,
+    // and TWO callers reach this: the agent's screenshot tool and the phone
+    // bridge (remote.rs). Overlapping calls read each other's half-written PNG,
+    // or one deleted the file the other was about to read ("Read screenshot: no
+    // such file"), or a caller simply got the other one's screen.
+    let tmp = std::env::temp_dir().join(format!("lu-screenshot-{}.png", uuid::Uuid::new_v4()));
+    let captured = capture_screen_to(&tmp)
+        .and_then(|()| std::fs::read(&tmp).map_err(|e| format!("Read screenshot: {}", e)));
+    // Always — the old code returned early on a read error and left a full
+    // picture of the user's screen sitting in the temp directory.
+    let _ = std::fs::remove_file(&tmp);
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Screenshot failed: {}", stderr));
-        }
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&captured?);
+    Ok(serde_json::json!({ "image": b64, "format": "png", "encoding": "base64" }))
+}
 
-        let bytes = std::fs::read(&tmp).map_err(|e| format!("Read screenshot: {}", e))?;
-        let _ = std::fs::remove_file(&tmp);
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        Ok(serde_json::json!({ "image": b64, "format": "png", "encoding": "base64" }))
+/// Quote a path for a PowerShell SINGLE-quoted string literal: only `'` is
+/// special there, and it escapes by doubling.
+///
+/// The old code doubled BACKSLASHES instead, which is C/JSON escaping, not
+/// PowerShell — inside single quotes that produced a literal `C:\\Users\\…`
+/// and only worked because Windows collapses repeated separators. It also left
+/// `'` untouched, so any user whose profile contains an apostrophe
+/// (C:\Users\O'Brien\AppData\Local\Temp) ended the string early and the script
+/// died with a parse error.
+// Only the Windows capture path calls this; its tests run on every platform.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn ps_single_quoted(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+#[cfg(target_os = "windows")]
+fn capture_screen_to(tmp: &std::path::Path) -> Result<(), String> {
+    let ps_script = format!(
+        r#"
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Drawing
+        $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+        $bitmap = New-Object System.Drawing.Bitmap($screen.Width, $screen.Height)
+        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+        $graphics.CopyFromScreen($screen.Location, [System.Drawing.Point]::Empty, $screen.Size)
+        $bitmap.Save('{}')
+        $graphics.Dispose()
+        $bitmap.Dispose()
+        "#,
+        ps_single_quoted(&tmp.to_string_lossy())
+    );
+
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .output()
+        .map_err(|e| format!("Screenshot failed: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Screenshot failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
+    Ok(())
+}
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        Err("Screenshot not implemented for this platform yet".to_string())
+// macOS: the native `screencapture` CLI. `-x` = silent (no shutter sound),
+// `-t png` = PNG. Needs the app to hold Screen Recording permission (TCC);
+// without it screencapture exits non-zero ("could not create image from
+// display") and writes nothing, so give an actionable hint instead of a
+// generic failure.
+#[cfg(target_os = "macos")]
+fn capture_screen_to(tmp: &std::path::Path) -> Result<(), String> {
+    let status = std::process::Command::new("/usr/sbin/screencapture")
+        .args(["-x", "-t", "png"])
+        .arg(tmp)
+        .status()
+        .map_err(|e| format!("Screenshot failed: {}", e))?;
+    if !status.success() || !tmp.exists() {
+        return Err("Screenshot failed — grant LU the Screen Recording permission in System Settings ▸ Privacy & Security ▸ Screen Recording, then try again.".to_string());
     }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn capture_screen_to(_tmp: &std::path::Path) -> Result<(), String> {
+    Err("Screenshot not implemented for this platform yet".to_string())
 }
 
 #[tauri::command]
@@ -125,10 +190,21 @@ pub fn exit_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
-/// Get the persistent settings dir (%APPDATA%/Locally Uncensored/) — outside NSIS install dir
+/// Get the persistent settings dir — outside the (NSIS) install dir so it
+/// survives updates. On Windows this stays `%APPDATA%/Locally Uncensored` (the
+/// path existing installs already back up to). `APPDATA` is Windows-only, so on
+/// macOS/Linux the whole backup/restore + onboarding-marker cluster used to
+/// hard-error; there we use the shared app data dir instead.
 fn persistent_dir() -> Result<std::path::PathBuf, String> {
-    let appdata = std::env::var("APPDATA").map_err(|_| "APPDATA not set".to_string())?;
-    Ok(std::path::PathBuf::from(appdata).join("Locally Uncensored"))
+    #[cfg(target_os = "windows")]
+    {
+        let appdata = std::env::var("APPDATA").map_err(|_| "APPDATA not set".to_string())?;
+        Ok(std::path::PathBuf::from(appdata).join("Locally Uncensored"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(crate::os_paths::data_dir().join("stores"))
+    }
 }
 
 /// Backup all localStorage stores to %APPDATA% (survives NSIS updates)
@@ -227,129 +303,123 @@ pub fn set_onboarding_done(done: Option<bool>) -> Result<(), String> {
 
 /// Return the current local date/time/timezone. Agents should call this
 /// instead of googling "what day is it" — the info is free and exact.
+///
+/// This used to shell out (`powershell (Get-Date).ToString('zzz')` on Windows,
+/// `date +%z` elsewhere) purely to learn the UTC offset, on the main thread,
+/// on EVERY call — and the tool sits in ALWAYS_INCLUDE, so the model may call
+/// it any turn. A PowerShell cold start is 300-900 ms, more with an AV hooked
+/// into process creation, and the window is frozen for all of it. Worse, when
+/// the spawn failed the offset silently fell back to 0, so the agent reported
+/// UTC as the user's local time.
+///
+/// chrono was already in the dependency tree (via jsonwebtoken, with the
+/// `clock` feature and iana-time-zone resolved), so reading the real offset
+/// in-process costs no new crate and no process at all.
 #[tauri::command]
 pub fn get_current_time() -> Result<serde_json::Value, String> {
-    use std::time::SystemTime;
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?;
-    let unix = now.as_secs();
+    use chrono::{Offset, Utc};
 
-    // Format via chrono if available (transitive dep via jsonwebtoken); else
-    // do a hand-rolled ISO-8601 fallback. Both produce stable output.
-    let (iso_local, iso_utc, tz_name, tz_offset_minutes) = format_datetime(unix);
+    let local = chrono::Local::now();
+    let utc = local.with_timezone(&Utc);
+    let offset_minutes = local.offset().fix().local_minus_utc() / 60;
 
     Ok(serde_json::json!({
-        "unix":              unix,
-        "iso_local":         iso_local,      // e.g. "2026-04-15 01:23:45"
-        "iso_utc":           iso_utc,        // e.g. "2026-04-14T23:23:45Z"
-        "timezone":          tz_name,        // e.g. "CEST" or "+0200"
-        "timezone_offset":   tz_offset_minutes,
+        "unix":            utc.timestamp(),
+        "iso_local":       local.format("%Y-%m-%d %H:%M:%S").to_string(),
+        "iso_utc":         utc.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        "timezone":        local.format("%z").to_string(),
+        "timezone_offset": offset_minutes,
     }))
 }
 
-fn format_datetime(unix_secs: u64) -> (String, String, String, i32) {
-    // Derive local offset from system. `time` crate would be cleaner but
-    // isn't in our dep tree; use std + sysinfo hints. On both supported
-    // platforms std::time::SystemTime is unaware of timezones, so we read
-    // the offset from a known local -> utc conversion.
-    use std::time::{Duration, UNIX_EPOCH};
-    let t = UNIX_EPOCH + Duration::from_secs(unix_secs);
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    // UTC parts (manual, no chrono dep pulled in just for this)
-    let (y, mo, d, h, mi, s) = unix_to_utc_parts(unix_secs);
-    let iso_utc = format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, mi, s);
+    /// The old implementation spawned a process for the UTC offset and fell
+    /// back to 0 when that failed, so it could report UTC as local time. These
+    /// assert the three values stay consistent with each other.
+    /// Two callers reach the screenshot tool (agent + phone bridge). A fixed
+    /// temp name meant they clobbered each other; the name must differ per call
+    /// and the file must be gone afterwards.
+    #[test]
+    fn every_screenshot_gets_its_own_temp_file() {
+        let seen: std::collections::HashSet<String> = (0..50)
+            .map(|_| format!("lu-screenshot-{}.png", uuid::Uuid::new_v4()))
+            .collect();
+        assert_eq!(seen.len(), 50);
 
-    // Local parts — use SystemTime relative to a known local calendar date.
-    // The simplest portable trick: format via C lib through `humantime` isn't
-    // installed either. We use a small offset probe.
-    let offset_minutes = local_offset_minutes();
-    let local_unix = (unix_secs as i64) + (offset_minutes as i64) * 60;
-    let (ly, lmo, ld, lh, lmi, ls) = unix_to_utc_parts(local_unix.max(0) as u64);
-    let iso_local = format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", ly, lmo, ld, lh, lmi, ls);
+        // The capture fails on this platform, but the temp file must still be
+        // cleaned up rather than left behind on the early return.
+        let before = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("lu-screenshot-"))
+            .count();
+        let _ = screenshot_blocking();
+        let after = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("lu-screenshot-"))
+            .count();
+        assert_eq!(before, after, "screenshot left a temp file behind");
+    }
 
-    let sign = if offset_minutes >= 0 { '+' } else { '-' };
-    let abs = offset_minutes.unsigned_abs();
-    let tz_name = format!("{}{:02}{:02}", sign, abs / 60, abs % 60);
+    /// PowerShell single-quoted strings escape `'` by doubling it, and treat a
+    /// backslash as an ordinary character. C:\Users\O'Brien used to end the
+    /// string early and kill the script.
+    #[test]
+    fn powershell_paths_survive_an_apostrophe() {
+        assert_eq!(
+            ps_single_quoted(r"C:\Users\O'Brien\AppData\Local\Temp\a.png"),
+            r"C:\Users\O''Brien\AppData\Local\Temp\a.png"
+        );
+        // A plain path is passed through untouched — no backslash doubling.
+        assert_eq!(ps_single_quoted(r"C:\Users\dave\a.png"), r"C:\Users\dave\a.png");
+    }
 
-    let _ = t;
-    (iso_local, iso_utc, tz_name, offset_minutes)
-}
+    #[test]
+    fn current_time_is_internally_consistent() {
+        let v = get_current_time().expect("get_current_time");
+        let unix = v["unix"].as_i64().unwrap();
+        let offset_min = v["timezone_offset"].as_i64().unwrap();
 
-fn local_offset_minutes() -> i32 {
-    // Spawn `date +%z` on Unix, `Get-Date` on Windows — very cheap, no deps.
-    #[cfg(target_os = "windows")]
-    {
-        use std::process::Command;
-        let out = Command::new("powershell")
-            .args(["-NoProfile", "-Command", "(Get-Date).ToString('zzz')"])
-            .creation_flags(0x0800_0000)
-            .output();
-        if let Ok(o) = out {
-            if let Ok(s) = String::from_utf8(o.stdout) {
-                let s = s.trim();
-                return parse_offset_to_minutes(s).unwrap_or(0);
-            }
+        // Local wall clock must be exactly `offset` minutes ahead of UTC.
+        let utc = chrono::DateTime::parse_from_rfc3339(v["iso_utc"].as_str().unwrap())
+            .expect("iso_utc parses as RFC3339");
+        let local = chrono::NaiveDateTime::parse_from_str(
+            v["iso_local"].as_str().unwrap(),
+            "%Y-%m-%d %H:%M:%S",
+        )
+        .expect("iso_local parses");
+        let delta_min = (local - utc.naive_utc()).num_minutes();
+        assert_eq!(delta_min, offset_min, "local clock must be utc + offset");
+
+        assert_eq!(utc.timestamp(), unix, "iso_utc must match the unix field");
+
+        // "+0200" / "-0500" — the shape the agent prompt documents.
+        let tz = v["timezone"].as_str().unwrap();
+        assert!(
+            tz.len() == 5 && (tz.starts_with('+') || tz.starts_with('-'))
+                && tz[1..].chars().all(|c| c.is_ascii_digit()),
+            "unexpected timezone format: {tz}"
+        );
+    }
+
+    #[test]
+    fn current_time_costs_no_process_spawn() {
+        // Measured: the old `date +%z` path cost 36.8 ms for 20 calls on this
+        // Mac, and a PowerShell cold start on Windows is 300-900 ms EACH. In
+        // process it is microseconds, so 20 ms fails either spawn path while
+        // leaving plenty of room on a loaded box.
+        let started = std::time::Instant::now();
+        for _ in 0..20 {
+            let _ = get_current_time().unwrap();
         }
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(20),
+            "20 calls took {:?} — is something spawning a process again?",
+            started.elapsed()
+        );
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        use std::process::Command;
-        let out = Command::new("date").arg("+%z").output();
-        if let Ok(o) = out {
-            if let Ok(s) = String::from_utf8(o.stdout) {
-                return parse_offset_to_minutes(s.trim()).unwrap_or(0);
-            }
-        }
-    }
-    0
-}
-
-fn parse_offset_to_minutes(s: &str) -> Option<i32> {
-    // Accepts +HH:MM, +HHMM, -HH:MM, -HHMM
-    let bytes = s.as_bytes();
-    if bytes.is_empty() { return None; }
-    let sign = match bytes[0] {
-        b'+' => 1,
-        b'-' => -1,
-        _ => return None,
-    };
-    let digits: String = s[1..].chars().filter(|c| c.is_ascii_digit()).collect();
-    if digits.len() < 3 { return None; }
-    let hh: i32 = digits[..2].parse().ok()?;
-    let mm: i32 = digits[2..4.min(digits.len())].parse().ok().unwrap_or(0);
-    Some(sign * (hh * 60 + mm))
-}
-
-/// Minimal date math — good enough for display without pulling chrono in
-/// just for this tool. Valid for dates after 1970.
-fn unix_to_utc_parts(mut unix: u64) -> (i32, u32, u32, u32, u32, u32) {
-    let secs_of_day = (unix % 86_400) as u32;
-    unix /= 86_400; // days since epoch
-    let h = secs_of_day / 3600;
-    let mi = (secs_of_day / 60) % 60;
-    let s = secs_of_day % 60;
-
-    // Zeller-ish: walk forward year by year
-    let mut year: i32 = 1970;
-    loop {
-        let days_in_year = if is_leap(year) { 366 } else { 365 };
-        if unix < days_in_year as u64 { break; }
-        unix -= days_in_year as u64;
-        year += 1;
-    }
-    let leap = is_leap(year);
-    let days_per_month = [31u64, if leap {29} else {28}, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let mut month: u32 = 1;
-    for dm in &days_per_month {
-        if unix < *dm { break; }
-        unix -= dm;
-        month += 1;
-    }
-    let day = unix as u32 + 1;
-    (year, month, day, h, mi, s)
-}
-
-fn is_leap(y: i32) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
 }

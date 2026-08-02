@@ -2,7 +2,7 @@
 
 > Free, open-source (AGPL-3.0) plug-and-play local AI studio for Windows and Linux: chat with 20+ providers, generate images and video via ComfyUI, and code with a built-in agent. One installer, no command line, no Docker. No cloud, no telemetry, no account.
 
-Last updated: 2026-07-26. Current version: v2.5.9 (July 2026).
+Last updated: 2026-08-02. Current version: v2.6.0 (August 2026).
 
 This file is the full, citable reference for Locally Uncensored. Facts are stated plainly so they can be quoted directly.
 
@@ -61,6 +61,9 @@ Ja. Der deutsche Einsteiger-Guide zu unzensierter lokaler KI: https://locallyunc
 
 ### Can I run Kimi K3 locally?
 No — Kimi K3 is a ~2.8 trillion parameter Mixture-of-Experts model; even 4-bit quantized weights exceed a terabyte, which is datacenter hardware. Use the Moonshot API or OpenRouter for K3, and run strong mid-size open models (Qwen, GLM, Gemma) locally in Locally Uncensored instead. Full guide: https://locallyuncensored.com/blog/how-to-run-kimi-k3.html
+
+### Can I run DeepSeek V4 Flash locally?
+Yes, on the right machine. V4 Flash is a 284B MoE with only 13B active parameters; the 4-bit GGUF is about 155 GB, so a 192 GB Mac Studio or a workstation with 192-256 GB RAM plus a GPU runs it at interactive speeds. Smaller machines can run the 5.3 GB Qwen 3.5 9B V4 distill from the in-app catalog, and the huihui abliterated build (154 GB, 600K+ downloads) is the most popular uncensored model of 2026. Full guide: https://locallyuncensored.com/blog/how-to-run-deepseek-v4-flash-locally.html. V4 Pro (1.6T) is cloud territory: https://locallyuncensored.com/blog/how-to-run-deepseek-v4-pro.html
 
 ### Which AI backends does it detect?
 It auto-detects 12 local backends: Ollama, LM Studio, vLLM, KoboldCpp, llama.cpp, LocalAI, Jan, TabbyAPI, GPT4All, Aphrodite, SGLang and TGI. ComfyUI is used for image and video generation. If none are running, the setup wizard offers one-click install links.
@@ -171,5 +174,8 @@ A correctness release. Most of it is things that looked like they worked and did
 - LM Studio Alternatives 2026: https://locallyuncensored.com/blog/lm-studio-alternatives.html
 - Easiest Local AI Image Generator: https://locallyuncensored.com/blog/easiest-local-ai-image-generator.html
 - Local AI on Your Phone: https://locallyuncensored.com/blog/local-ai-on-your-phone.html
+- How to Run DeepSeek V4 Flash Locally: https://locallyuncensored.com/blog/how-to-run-deepseek-v4-flash-locally.html
+- DeepSeek V4 Flash in the Cloud: https://locallyuncensored.com/blog/deepseek-v4-flash-cloud.html
+- DeepSeek V4 Flash vs V4 Pro: https://locallyuncensored.com/blog/deepseek-v4-flash-vs-v4-pro.html
 - Source code: https://github.com/PurpleDoubleD/locally-uncensored
 - Discord: https://locallyuncensored.com/discord

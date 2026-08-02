@@ -48,10 +48,10 @@ fn run_cmd(program: &str, args: &[&str]) -> Option<String> {
     cmd.args(args);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
-    match cmd.output() {
-        Ok(out) if out.status.success() => Some(String::from_utf8_lossy(&out.stdout).to_string()),
-        _ => None,
-    }
+    // Bounded — nvidia-smi on a wedged driver, wmic on a busy WMI service and
+    // lspci on a slow bus scan all block indefinitely, and Command::output()
+    // would wait for all of it while the hardware picker shows a spinner.
+    crate::commands::shell::output_bounded(cmd, std::time::Duration::from_secs(5))
 }
 
 fn detect_nvidia() -> Vec<DetectedGpu> {
@@ -200,6 +200,9 @@ fn detect_other_via_wmic() -> Vec<DetectedGpu> {
         Some(s) => s,
         None => return vec![],
     };
+    // AdapterRAM below is a uint32 and lies about anything past 4 GiB, so the
+    // driver's registry entry is the source of truth for size when it answers.
+    let registry_vram = vram_mib_by_adapter_name();
     let mut gpus = Vec::new();
     let mut idx: u32 = 0;
     // wmic `/format:csv` emits a LEADING blank line before the header row
@@ -221,12 +224,26 @@ fn detect_other_via_wmic() -> Vec<DetectedGpu> {
                      else { "unknown" };
         // Skip NVIDIA / AMD here — nvidia-smi / rocm-smi produce better entries with memory.total
         if vendor == "nvidia" || vendor == "amd" { continue }
+        let from_registry = registry_vram
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(&name))
+            .map(|(_, mib)| *mib);
+        let (memory_mib, source) = match from_registry {
+            Some(mib) => (Some(mib), "registry"),
+            // No registry match. A capped AdapterRAM is worse than no number at
+            // all, because the app sizes models against it, so only pass a
+            // value through when it is safely inside what uint32 can hold.
+            None => match ram_bytes {
+                Some(b) if b < 4 * 1024 * 1024 * 1024 - 64 * 1024 * 1024 => (Some(b / 1024 / 1024), "wmic"),
+                _ => (None, "wmic"),
+            },
+        };
         gpus.push(DetectedGpu {
             index: idx,
             vendor: vendor.into(),
             name,
-            memory_mib: ram_bytes.map(|b| b / 1024 / 1024),
-            source: "wmic".into(),
+            memory_mib,
+            source: source.into(),
         });
         idx += 1;
     }
@@ -235,6 +252,107 @@ fn detect_other_via_wmic() -> Vec<DetectedGpu> {
 
 #[cfg(not(target_os = "windows"))]
 fn detect_other_via_wmic() -> Vec<DetectedGpu> { vec![] }
+
+/// Class GUID of the display-adapter registry branch. Every installed GPU
+/// driver gets a numbered subkey (0000, 0001, …) under it.
+#[allow(dead_code)]
+const DISPLAY_CLASS_KEY: &str =
+    r"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}";
+
+/// Pull `<subkey> → <value>` pairs out of `reg query … /s /v <name>` output.
+///
+/// The layout is a key line at column 0 followed by indented value lines:
+///
+/// ```text
+/// HKEY_LOCAL_MACHINE\SYSTEM\…\Class\{4d36e968-…}\0000
+///     DriverDesc    REG_SZ    Intel(R) Arc(TM) Pro B60 Graphics
+/// ```
+///
+/// Keeping this a pure function over the text means the join below is testable
+/// on any platform, which matters because the machine that reproduces the bug
+/// is not the machine the tests run on. Value data may contain spaces, so only
+/// the name and type columns are split off.
+fn parse_reg_query(raw: &str, value_name: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut current: Option<String> = None;
+    for line in raw.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !trimmed.starts_with(char::is_whitespace) {
+            // Key line. Remember the leaf ("0000"), which is what the two
+            // queries have in common.
+            if trimmed.starts_with("HKEY_") {
+                current = trimmed.rsplit('\\').next().map(|s| s.to_string());
+            } else {
+                // "End of search: N match(es) found." and its localized twins.
+                current = None;
+            }
+            continue;
+        }
+        let Some(key) = current.as_ref() else { continue };
+        let mut parts = trimmed.split_whitespace();
+        let Some(name) = parts.next() else { continue };
+        if !name.eq_ignore_ascii_case(value_name) {
+            continue;
+        }
+        let Some(_reg_type) = parts.next() else { continue };
+        // Rejoin: the value itself can hold spaces ("Intel(R) Arc(TM) Pro B60").
+        let rest = parts.collect::<Vec<_>>().join(" ");
+        if rest.is_empty() {
+            continue;
+        }
+        out.push((key.clone(), rest));
+    }
+    out
+}
+
+/// Parse a REG_QWORD / REG_DWORD payload ("0x600000000") into bytes.
+fn parse_reg_hex(value: &str) -> Option<u64> {
+    let v = value.trim();
+    let hex = v.strip_prefix("0x").or_else(|| v.strip_prefix("0X"))?;
+    u64::from_str_radix(hex, 16).ok()
+}
+
+/// Adapter name → VRAM in MiB, read from the driver's own registry entry.
+///
+/// WMI's `AdapterRAM` is a uint32, so it cannot express more than 4 GiB and
+/// reports nonsense above it: bobbyt5667's Arc Pro B60 with 24 GB showed up as
+/// 2 GB, which is also the card this whole module was written for. The driver
+/// writes the true size next to itself as a 64-bit qword, so that is the
+/// number we believe whenever it answers.
+#[allow(dead_code)]
+fn vram_mib_by_adapter_name() -> Vec<(String, u64)> {
+    let names = match run_cmd("reg", &["query", DISPLAY_CLASS_KEY, "/s", "/v", "DriverDesc"]) {
+        Some(s) => parse_reg_query(&s, "DriverDesc"),
+        None => return vec![],
+    };
+    let sizes = match run_cmd(
+        "reg",
+        &["query", DISPLAY_CLASS_KEY, "/s", "/v", "HardwareInformation.qwMemorySize"],
+    ) {
+        Some(s) => parse_reg_query(&s, "HardwareInformation.qwMemorySize"),
+        None => return vec![],
+    };
+    join_name_and_size(&names, &sizes)
+}
+
+/// Join the two registry queries on their shared subkey. Split out so the
+/// join itself is testable without a registry.
+fn join_name_and_size(names: &[(String, String)], sizes: &[(String, String)]) -> Vec<(String, u64)> {
+    names
+        .iter()
+        .filter_map(|(key, name)| {
+            let raw = sizes.iter().find(|(k, _)| k == key).map(|(_, v)| v)?;
+            let bytes = parse_reg_hex(raw)?;
+            if bytes == 0 {
+                return None;
+            }
+            Some((name.trim().to_string(), bytes / 1024 / 1024))
+        })
+        .collect()
+}
 
 #[tauri::command]
 pub fn detect_gpus() -> Result<Vec<DetectedGpu>, String> {
@@ -305,6 +423,92 @@ impl Default for GpuSelection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Real `reg query … /s /v DriverDesc` shape from a two-GPU box: an Arc Pro
+    /// alongside a Radeon (bobbyt5667's machine, Discord 2026-07-28).
+    const DRIVER_DESC_OUT: &str = r"
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000
+    DriverDesc    REG_SZ    Intel(R) Arc(TM) Pro B60 Graphics
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0001
+    DriverDesc    REG_SZ    AMD Radeon RX 6800 XT
+
+End of search: 2 match(es) found.
+";
+
+    /// 0x600000000 = 24 GiB, 0x400000000 = 16 GiB.
+    const QW_MEMORY_OUT: &str = r"
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000
+    HardwareInformation.qwMemorySize    REG_QWORD    0x600000000
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0001
+    HardwareInformation.qwMemorySize    REG_QWORD    0x400000000
+
+End of search: 2 match(es) found.
+";
+
+    #[test]
+    fn parse_reg_query_pairs_each_subkey_with_its_value() {
+        let got = parse_reg_query(DRIVER_DESC_OUT, "DriverDesc");
+        assert_eq!(
+            got,
+            vec![
+                ("0000".to_string(), "Intel(R) Arc(TM) Pro B60 Graphics".to_string()),
+                ("0001".to_string(), "AMD Radeon RX 6800 XT".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_reg_query_ignores_the_trailing_summary_line() {
+        // "End of search: …" sits at column 0 but is not a key, so it must not
+        // become one and swallow the next value.
+        let got = parse_reg_query(DRIVER_DESC_OUT, "DriverDesc");
+        assert!(got.iter().all(|(k, _)| k == "0000" || k == "0001"));
+    }
+
+    #[test]
+    fn parse_reg_query_skips_other_value_names() {
+        assert!(parse_reg_query(DRIVER_DESC_OUT, "HardwareInformation.qwMemorySize").is_empty());
+    }
+
+    #[test]
+    fn parse_reg_hex_reads_qword_payloads() {
+        assert_eq!(parse_reg_hex("0x600000000"), Some(25_769_803_776));
+        assert_eq!(parse_reg_hex("  0x400000000 "), Some(17_179_869_184));
+        assert_eq!(parse_reg_hex("24 GB"), None);
+    }
+
+    /// The bug: WMI's uint32 AdapterRAM reported 2 GB for a 24 GB Arc Pro B60.
+    /// The registry qword has the real number, and that is what we join on.
+    #[test]
+    fn join_recovers_the_true_size_of_a_card_larger_than_uint32() {
+        let names = parse_reg_query(DRIVER_DESC_OUT, "DriverDesc");
+        let sizes = parse_reg_query(QW_MEMORY_OUT, "HardwareInformation.qwMemorySize");
+        let joined = join_name_and_size(&names, &sizes);
+        assert_eq!(
+            joined,
+            vec![
+                ("Intel(R) Arc(TM) Pro B60 Graphics".to_string(), 24576),
+                ("AMD Radeon RX 6800 XT".to_string(), 16384),
+            ]
+        );
+    }
+
+    #[test]
+    fn join_drops_adapters_without_a_size_and_zero_sized_ones() {
+        let names = vec![
+            ("0000".to_string(), "Intel(R) Arc(TM) Pro B60 Graphics".to_string()),
+            ("0001".to_string(), "Microsoft Basic Display Adapter".to_string()),
+            ("0002".to_string(), "Some Virtual Adapter".to_string()),
+        ];
+        let sizes = vec![
+            ("0000".to_string(), "0x600000000".to_string()),
+            ("0002".to_string(), "0x0".to_string()),
+        ];
+        let joined = join_name_and_size(&names, &sizes);
+        assert_eq!(joined, vec![("Intel(R) Arc(TM) Pro B60 Graphics".to_string(), 24576)]);
+    }
 
     #[test]
     fn apply_gpu_env_sets_cuda_for_nvidia() {

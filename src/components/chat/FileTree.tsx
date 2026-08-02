@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { FolderOpen, Folder, FileText, ArrowLeft, RefreshCw } from 'lucide-react'
 import { useCodexStore } from '../../stores/codexStore'
-import { isTauri, backendCall } from '../../api/backend'
+import { isTauri, isMacOS, backendCall } from '../../api/backend'
 import type { FileTreeNode } from '../../types/codex'
 
 export function FileTree() {
@@ -69,11 +69,11 @@ export function FileTree() {
         if (selected) loadDirectory(selected)
       } catch {
         // Fallback if invoke fails
-        const dir = window.prompt('Enter folder path:', workingDirectory || 'C:\\Users')
+        const dir = window.prompt('Enter folder path:', workingDirectory || (isMacOS() ? '/Users/' : 'C:\\Users'))
         if (dir) loadDirectory(dir)
       }
     } else {
-      const dir = window.prompt('Enter folder path:', workingDirectory || 'C:\\Users')
+      const dir = window.prompt('Enter folder path:', workingDirectory || (isMacOS() ? '/Users/' : 'C:\\Users'))
       if (dir) loadDirectory(dir)
     }
   }

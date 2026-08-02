@@ -98,7 +98,7 @@ export class OllamaProvider implements ProviderClient {
     if (options?.temperature !== undefined) ollamaOptions.temperature = options.temperature
     if (options?.topP !== undefined) ollamaOptions.top_p = options.topP
     if (options?.topK !== undefined) ollamaOptions.top_k = options.topK
-    if (options?.maxTokens) ollamaOptions.num_predict = options.maxTokens
+    if (options?.maxTokens && options.maxTokens > 0) ollamaOptions.num_predict = options.maxTokens
     // Bug AA v2.5.0 — forward user's context-window override. Without this
     // Ollama silently uses num_ctx=2048 (its default), which RAG payloads
     // and long-turn chats blow through immediately. Kj103x Discord
@@ -198,7 +198,7 @@ export class OllamaProvider implements ProviderClient {
     if (options?.temperature !== undefined) ollamaOptions.temperature = options.temperature
     if (options?.topP !== undefined) ollamaOptions.top_p = options.topP
     if (options?.topK !== undefined) ollamaOptions.top_k = options.topK
-    if (options?.maxTokens) ollamaOptions.num_predict = options.maxTokens
+    if (options?.maxTokens && options.maxTokens > 0) ollamaOptions.num_predict = options.maxTokens
     // Bug AA v2.5.0 — see chatStream() for the why.
     // num_ctx comes from the caller (hook): the user override OR the model's
     // real context length (capped for VRAM safety). 0/undefined → Ollama keeps

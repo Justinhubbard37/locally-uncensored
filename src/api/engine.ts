@@ -14,7 +14,17 @@
 import { backendCall } from './backend'
 import { prefixModelName } from './providers'
 import { useProviderStore } from '../stores/providerStore'
+import { useSettingsStore } from '../stores/settingsStore'
 import type { CloudModel } from '../types/models'
+import type { BuiltinEngineTuning } from '../types/settings'
+
+/** The user's Built-in Engine expert tuning (settings-backed). Injected into
+ * every start/swap below, so Onboarding, Discover, the model picker and the
+ * post-offload self-heal all honor it without threading it through callsites.
+ * Undefined (pre-migration blob) is fine — Rust falls back to its defaults. */
+function tuningFromSettings(): BuiltinEngineTuning | undefined {
+  return useSettingsStore.getState().settings.builtinEngine
+}
 
 export interface BundledModel {
   /** File name without the `.gguf` extension. The id shown in the picker. */
@@ -25,6 +35,10 @@ export interface BundledModel {
   size: number
   /** Whether this model is the one currently loaded by the engine. */
   loaded: boolean
+  /** Context length the model was TRAINED with, read from the GGUF header
+   * (ENG-6c). null/absent when the header doesn't carry it — presets then
+   * stay uncapped, exactly the pre-2.6.0 behavior. */
+  ctx_train?: number | null
 }
 
 export interface EngineStatus {
@@ -32,6 +46,9 @@ export interface EngineStatus {
   healthy: boolean
   port: number
   model_path: string | null
+  /** Context size the chat engine was started with (null when not running or
+   * for the embed server). The TRUE token-counter denominator. */
+  ctx?: number | null
 }
 
 /** Loopback base URL of the managed embeddings server (P5). Mirrors the Rust
@@ -46,6 +63,16 @@ export function embedBaseUrl(): string {
 // activate a model by its picker id (which is what the model store carries)
 // without threading the path through AIModel, which has no path field.
 const pathByName = new Map<string, string>()
+// name → trained context limit (GGUF header). Feeds the Context dropdown's
+// preset cap via useActiveContextWindow.modelMax.
+const ctxTrainByName = new Map<string, number>()
+
+/** Trained context limit of a bundled model by picker id (`openai::<name>`
+ * or bare), or 0 when unknown / listing not fetched yet (= uncapped). */
+export function bundledCtxTrain(nameOrPrefixed: string): number {
+  const name = nameOrPrefixed.includes('::') ? nameOrPrefixed.split('::')[1] : nameOrPrefixed
+  return ctxTrainByName.get(name) ?? 0
+}
 
 /**
  * True when the active OpenAI-compat backend is the app-managed built-in engine
@@ -57,9 +84,10 @@ export function isManagedBuiltinActive(): boolean {
   return cfg.enabled && cfg.managed === true
 }
 
-/** Start the built-in engine with a specific GGUF. Idempotent for the same model. */
-export function startBundledEngine(modelPath: string, ctx?: number) {
-  return backendCall('start_bundled_engine', { modelPath, ctx })
+/** Start the built-in engine with a specific GGUF. Idempotent for the same
+ * model + tuning (the Rust side compares the resulting argv). */
+export function startBundledEngine(modelPath: string, tuning?: BuiltinEngineTuning) {
+  return backendCall('start_bundled_engine', { modelPath, tuning: tuning ?? tuningFromSettings() })
 }
 
 /** Stop the managed engine child if one is running. */
@@ -73,8 +101,8 @@ export function bundledEngineStatus() {
 }
 
 /** Swap the loaded model (stop → start on the same port). */
-export function swapBundledModel(modelPath: string, ctx?: number) {
-  return backendCall('swap_bundled_model', { modelPath, ctx })
+export function swapBundledModel(modelPath: string, tuning?: BuiltinEngineTuning) {
+  return backendCall('swap_bundled_model', { modelPath, tuning: tuning ?? tuningFromSettings() })
 }
 
 /** Start the built-in embeddings server (P5) with a specific embedding GGUF.
@@ -93,12 +121,54 @@ export function bundledEmbedStatus() {
   return backendCall<EngineStatus>('bundled_embed_status')
 }
 
+// Embedding-model GGUFs: never offered in the chat dropdown, and the
+// candidates for the bundled embeddings server. Single source of truth —
+// useModels and the RAG self-heal below share it.
+const EMBEDDING_GGUF_PATTERNS = [/embed/, /nomic-embed/, /bge-/, /e5-/, /gte-/, /sentence-/]
+export function isEmbeddingGgufName(name: string): boolean {
+  const lower = name.toLowerCase()
+  return EMBEDDING_GGUF_PATTERNS.some((p) => p.test(lower))
+}
+
+// Coalesce concurrent RAG calls into one status-probe/restart.
+let embedEnsureInflight: Promise<void> | null = null
+
+/**
+ * Revive the bundled embeddings server after a VRAM offload stopped it —
+ * Create/Music renders call `offload_local_models`, which kills BOTH managed
+ * sidecars with the promise of a lazy reload. This is the embed half of that
+ * reload (the chat half lives in `builtin-ensure.ts`); RAG awaits it before
+ * hitting :8128. Best-effort: a real start failure surfaces on the embeddings
+ * request itself with the server's honest error.
+ */
+export async function ensureBundledEmbedAlive(): Promise<void> {
+  if (embedEnsureInflight) return embedEnsureInflight
+  embedEnsureInflight = (async () => {
+    try {
+      const status = await bundledEmbedStatus()
+      if (status?.healthy) return
+      const models = await listBundledModels()
+      const embed = models.find((m) => isEmbeddingGgufName(m.name))
+      if (embed) await startBundledEmbed(embed.path)
+    } catch {
+      /* best-effort — embedViaBuiltin reports the real error */
+    } finally {
+      embedEnsureInflight = null
+    }
+  })()
+  return embedEnsureInflight
+}
+
 /** List downloaded GGUFs in the app models dir. Refreshes the name→path map. */
 export async function listBundledModels(): Promise<BundledModel[]> {
   const res = await backendCall<{ dir: string; models: BundledModel[] }>('list_bundled_models')
   const models = res?.models ?? []
   pathByName.clear()
-  for (const m of models) pathByName.set(m.name, m.path)
+  ctxTrainByName.clear()
+  for (const m of models) {
+    pathByName.set(m.name, m.path)
+    if (typeof m.ctx_train === 'number' && m.ctx_train > 0) ctxTrainByName.set(m.name, m.ctx_train)
+  }
   return models
 }
 
@@ -122,10 +192,16 @@ export function bundledToAIModels(models: BundledModel[]): CloudModel[] {
  * Resolves the GGUF path from the last listBundledModels() and swaps the engine.
  * No-op if the path is unknown (list not yet fetched).
  */
-export async function activateBuiltinModel(nameOrPrefixed: string, ctx?: number): Promise<boolean> {
+export async function activateBuiltinModel(nameOrPrefixed: string, tuning?: BuiltinEngineTuning): Promise<boolean> {
   const name = nameOrPrefixed.includes('::') ? nameOrPrefixed.split('::')[1] : nameOrPrefixed
-  const path = pathByName.get(name)
+  let path = pathByName.get(name)
+  if (!path) {
+    // Callers outside the picker (Models page via the store chokepoint) can
+    // run before any listBundledModels() populated the map — refresh once.
+    await listBundledModels().catch(() => undefined)
+    path = pathByName.get(name)
+  }
   if (!path) return false
-  await swapBundledModel(path, ctx)
+  await swapBundledModel(path, tuning)
   return true
 }

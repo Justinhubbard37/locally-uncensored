@@ -175,13 +175,19 @@ pub fn fs_read(path: String, chatId: Option<String>, workingDirectory: Option<St
         return Err(format!("File not found: {}", full.display()));
     }
 
-    // Try text first, fall back to base64 for binary
+    // Text, or a binary MARKER — never the binary payload.
+    //
+    // This used to base64-encode the whole file and ship it over IPC. Every
+    // consumer discards it: the model-facing file_read turns it into a "binary,
+    // not shown" line, and both file_edit paths refuse outright. So a 500 MB
+    // model file cost ~667 MB of base64 in Rust plus the JSON and JS copies of
+    // it, all to be thrown away — the desktop half of a guard the phone relay
+    // already had (f3542ff).
     match fs::read_to_string(&full) {
         Ok(content) => Ok(serde_json::json!({ "content": content, "encoding": "utf8" })),
         Err(_) => {
-            let bytes = fs::read(&full).map_err(|e| format!("Read error: {}", e))?;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            Ok(serde_json::json!({ "content": b64, "encoding": "base64" }))
+            let bytes = fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
+            Ok(serde_json::json!({ "encoding": "binary", "bytes": bytes }))
         }
     }
 }
@@ -191,7 +197,7 @@ pub fn fs_read(path: String, chatId: Option<String>, workingDirectory: Option<St
 /// models emit `\n`; on a Windows repo whose files are CRLF, writing that raw
 /// turned every edit into a whole-file whitespace diff. For a NEW file we honor
 /// exactly what the caller sent — there is no convention to match.
-fn normalize_to_existing_style(existing: Option<&[u8]>, new: &str) -> Vec<u8> {
+pub(crate) fn normalize_to_existing_style(existing: Option<&[u8]>, new: &str) -> Vec<u8> {
     const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
     let existing = match existing {
         Some(e) => e,
@@ -215,7 +221,7 @@ fn normalize_to_existing_style(existing: Option<&[u8]>, new: &str) -> Vec<u8> {
 /// rename over the target. A crash or interrupt can never leave a half-written
 /// (truncated) file where the original was — std::fs::rename replaces the
 /// destination on both Unix and Windows.
-fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let parent = target.parent().ok_or_else(|| "No parent directory".to_string())?;
@@ -295,12 +301,34 @@ pub fn fs_list(
     let max_entries = 500;
 
     if let Some(ref pat) = pattern {
-        // Glob pattern relative to dir
+        // The pattern is a second path channel and gets the same jail as `path`.
+        // Without this, `pattern: "../../.ssh/*"` listed the keys that
+        // `path: "../../.ssh"` refuses — and an ABSOLUTE pattern skipped the
+        // guessing entirely, because Path::join throws the base away when the
+        // joined component is absolute. glob 0.3 also follows `..` literally and
+        // matches dotfiles, so both had to be shut: reject the escape up front
+        // for a clear error, and re-check every match, since a glob result is a
+        // real path we never authorised.
+        // Prefix / RootDir / ParentDir are exactly the components that make
+        // `join` discard or climb out of the base — including the Windows-only
+        // shapes ("\.ssh\*" keeps only the drive, "C:foo\*" replaces the lot).
+        {
+            use std::path::Component;
+            let escapes = Path::new(pat.as_str()).components().any(|c| {
+                matches!(c, Component::Prefix(_) | Component::RootDir | Component::ParentDir)
+            });
+            if escapes {
+                return Err("Pattern escapes the allowed workspace".to_string());
+            }
+        }
         let glob_pattern = dir.join(pat).to_string_lossy().to_string();
         if let Ok(paths) = glob_match(&glob_pattern) {
             for entry in paths.flatten() {
                 if entries.len() >= max_entries {
                     break;
+                }
+                if contain_within(&dir, &entry).is_err() {
+                    continue;
                 }
                 entries.push(file_meta(&entry));
             }
@@ -514,6 +542,30 @@ mod tests {
     }
 
     #[test]
+    fn write_atomic_replaces_and_leaves_no_debris() {
+        use super::write_atomic;
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("lu-atomic-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let target = dir.join("notes.txt");
+        fs::write(&target, b"old").unwrap();
+
+        write_atomic(&target, b"new content").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"new content");
+
+        // The temp twin must be gone — a leftover .notes.txt.tmpNNN would show
+        // up in the user's repo and in file_list.
+        let leftovers: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n != "notes.txt")
+            .collect();
+        assert!(leftovers.is_empty(), "left behind: {:?}", leftovers);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn crlf_file_gets_lf_content_converted() {
         let existing = b"old\r\nlines\r\n";
         assert_eq!(
@@ -662,5 +714,173 @@ mod tests {
         // Normalizing the prefix must not weaken the jail.
         assert!(resolve_path(r"..\..\secret.txt", Some("c"), Some(r"\\?\D:\Projects\site")).is_err());
         assert!(resolve_path(r"C:\Windows\System32\x.txt", Some("c"), Some(r"\\?\D:\Projects\site")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod jail_adversarial_tests {
+    use super::*;
+
+    /// The jail is the ONLY boundary between a prompt-injected model and the
+    /// user's home. These are the shapes an attacker actually sends, run
+    /// against the real function rather than reasoned about.
+    #[test]
+    fn traversal_out_of_the_workspace_is_refused() {
+        let root = Path::new("/Users/dave/project");
+        for evil in [
+            "../secrets.txt",
+            "../../.ssh/id_rsa",
+            "../../../../../../etc/passwd",
+            "sub/../../outside.txt",
+            "./../../outside.txt",
+            "/etc/passwd",
+            "/Users/dave/.ssh/id_rsa",
+            // sibling directory whose name merely STARTS with the root's name
+            "/Users/dave/project-evil/x.txt",
+            "/Users/dave/projectevil",
+        ] {
+            let cand = if Path::new(evil).is_absolute() {
+                PathBuf::from(evil)
+            } else {
+                root.join(evil)
+            };
+            assert!(
+                contain_within(root, &cand).is_err(),
+                "jail let {evil:?} through",
+            );
+        }
+    }
+
+    /// Enough `..` pops the root component itself, turning an absolute path
+    /// into a relative one. That must still not compare as "inside".
+    #[test]
+    fn popping_past_the_filesystem_root_does_not_land_inside() {
+        let root = Path::new("/Users/dave/project");
+        let cand = root.join("../../../../../../../../etc/passwd");
+        let out = contain_within(root, &cand);
+        assert!(out.is_err(), "escaped to {:?}", out);
+    }
+
+    /// The legitimate cases must keep working, or the coding agent breaks.
+    #[test]
+    fn ordinary_paths_inside_the_workspace_still_resolve() {
+        let root = Path::new("/Users/dave/project");
+        for good in ["src/main.rs", "./src/main.rs", "a/b/../c.txt", "."] {
+            assert!(
+                contain_within(root, &root.join(good)).is_ok(),
+                "jail refused a legitimate path: {good:?}",
+            );
+        }
+        // An absolute path inside the workspace is allowed on purpose (#62).
+        assert!(contain_within(root, Path::new("/Users/dave/project/src/x.rs")).is_ok());
+        // The root itself.
+        assert!(contain_within(root, root).is_ok());
+    }
+
+    /// Security review 2026-07-30. Every payload above was only ever sent
+    /// through `path`. `pattern` is a SECOND path channel and had no jail at
+    /// all: fs_list refused `path: "../../.ssh"` and then globbed
+    /// `pattern: "../../.ssh/*"` for the same directory, handing back names,
+    /// sizes and absolute paths. Run against the real fs_list on a real
+    /// directory, because the bug lived in the wiring, not in contain_within.
+    #[test]
+    fn a_glob_pattern_cannot_walk_out_of_the_workspace() {
+        use std::fs;
+        let base = std::env::temp_dir().join(format!("lu-globjail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let ws = base.join("workspace");
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(base.join("secret.txt"), b"private").unwrap();
+        fs::write(ws.join("inside.txt"), b"ok").unwrap();
+        let wd = Some(ws.to_string_lossy().to_string());
+
+        // `*` matches dotfiles too (require_literal_leading_dot is false), so
+        // "../*" was enough to enumerate a sibling .ssh by name.
+        for evil in ["../*", "../secret.txt", "../../*", "sub/../../*"] {
+            let out = fs_list(".".into(), None, Some(evil.to_string()), None, wd.clone());
+            let listed = out.map(|v| v.to_string()).unwrap_or_default();
+            assert!(!listed.contains("secret.txt"), "pattern {evil:?} leaked: {listed}");
+        }
+
+        // An absolute pattern needed no depth guessing at all: Path::join
+        // discards the base when the joined component is absolute.
+        let abs = base.join("*").to_string_lossy().to_string();
+        assert!(
+            fs_list(".".into(), None, Some(abs), None, wd.clone()).is_err(),
+            "absolute pattern accepted",
+        );
+
+        // The legitimate case must keep working.
+        let ok = fs_list(".".into(), None, Some("*.txt".into()), None, wd).expect("glob");
+        assert_eq!(ok["count"], 1);
+        assert!(ok.to_string().contains("inside.txt"));
+        let _ = fs::remove_dir_all(&base);
+    }
+}
+
+#[cfg(test)]
+mod binary_read_tests {
+    use super::*;
+    use std::fs;
+
+    fn ws(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("lu-fsread-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A binary must come back as a MARKER, not as a payload. Every consumer
+    /// discards the bytes, so encoding them only bought a memory spike
+    /// proportional to the file — the phone relay already refused to do it.
+    #[test]
+    fn a_binary_file_reports_its_size_and_no_content() {
+        let dir = ws("bin");
+        // Invalid UTF-8 — what read_to_string rejects.
+        fs::write(dir.join("model.gguf"), [0xff, 0xfe, 0x00, 0x01, 0x80]).unwrap();
+
+        let v = fs_read(
+            "model.gguf".into(),
+            None,
+            Some(dir.to_string_lossy().to_string()),
+        )
+        .expect("read");
+
+        assert_eq!(v["encoding"], "binary");
+        assert_eq!(v["bytes"], 5);
+        assert!(v.get("content").is_none(), "the payload must not be shipped");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_text_file_still_comes_back_verbatim() {
+        let dir = ws("txt");
+        fs::write(dir.join("a.txt"), "hallo\nwelt\n").unwrap();
+
+        let v = fs_read("a.txt".into(), None, Some(dir.to_string_lossy().to_string()))
+            .expect("read");
+
+        assert_eq!(v["encoding"], "utf8");
+        assert_eq!(v["content"], "hallo\nwelt\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The whole point: cost must not scale with the file any more.
+    #[test]
+    fn a_large_binary_is_cheap_to_read() {
+        let dir = ws("big");
+        let mut big = vec![0x80u8; 8 * 1024 * 1024]; // 8 MiB, invalid UTF-8
+        big[0] = 0xff;
+        fs::write(dir.join("big.bin"), &big).unwrap();
+
+        let started = std::time::Instant::now();
+        let v = fs_read("big.bin".into(), None, Some(dir.to_string_lossy().to_string()))
+            .expect("read");
+        let took = started.elapsed();
+
+        assert_eq!(v["bytes"], 8 * 1024 * 1024_u64);
+        assert!(v.get("content").is_none());
+        assert!(took < std::time::Duration::from_millis(200), "took {took:?}");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

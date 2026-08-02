@@ -33,8 +33,9 @@ import { DEFAULT_SETTINGS, BUILT_IN_PERSONAS } from '../lib/constants'
 // v12 (2.5.7): added settings.comfyGpuMode ('auto'|'cpu'|'gpu', default
 // 'auto') for the AMD ComfyUI GPU path (rhodium92). Additive — the merge
 // fills the default while preserving every existing value; NVIDIA unaffected.
-// v13 (2.5.7): added settings.cloudOnboardingSeen (one-time Cloud onboarding
-// on the first successful switch flip, default false). Additive merge.
+// v13 (2.5.7): added settings.cloudOnboardingSeen — REMOVED in 2.6.0: the
+// one-time onboarding moved into the web checkout (#91); stale persisted
+// values are ignored by the merge.
 // v14 (2.5.8): added settings.cloudTeasersEnabled (Cloud discovery in Local
 // mode: locked Create tabs + hosted-model picker rows, default true). Additive.
 // v15 (2.5.9): added settings.codexCloudConfirmShell (default true). The cloud
@@ -49,7 +50,16 @@ import { DEFAULT_SETTINGS, BUILT_IN_PERSONAS } from '../lib/constants'
 // v17 (2.5.10): added settings.codexAutoApply (default false) — auto-apply
 // staged changes when the run finishes. Additive merge backfills the default;
 // stage-mode behaviour is unchanged until the user turns the new switch on.
-const STORE_VERSION = 17
+// v18 (2.6.0): added settings.builtinEngine (expert tuning for the bundled
+// llama-server: ctx, flash attention, KV-cache quant, threads, GPU layers,
+// mlock/mmap; defaults = the exact pre-2.6.0 argv). Additive merge backfills
+// the default object; engine behaviour is unchanged until the user edits it.
+// v19 (2.6.0): the macOS Cloud-only wall is lifted — the Mac app is a full
+// local+cloud app again. Existing Mac installs were force-pinned to appMode
+// 'cloud' with no real choice, so reset them to the local default ONCE so they
+// land in the now-built local mode; the visible switch flips back anytime.
+// Windows/Linux appMode reflects a real user choice and is never touched.
+const STORE_VERSION = 19
 
 interface SettingsState {
   settings: Settings
@@ -129,6 +139,13 @@ export const useSettingsStore = create<SettingsState>()(
             mergedSettings.preferredImageModel = ''
             mergedSettings.preferredVideoT2VModel = ''
             mergedSettings.preferredVideoI2VModel = ''
+          }
+          // v19: release the Mac cloud lock (see the version log above).
+          if (version < 19) {
+            const isMac = typeof navigator !== 'undefined' &&
+              (/Mac|iPhone|iPad|iPod/.test(navigator.platform || '') ||
+               /Mac OS X|Macintosh/.test(navigator.userAgent || ''))
+            if (isMac) mergedSettings.appMode = 'local'
           }
           return {
             ...persisted,

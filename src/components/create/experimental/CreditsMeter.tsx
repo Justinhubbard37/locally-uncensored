@@ -69,7 +69,7 @@ export function CreditsMeter() {
 
   return (
     <Tooltip
-      content={`${remaining} of ${limit} credits left this month. This ${kind === 'video' ? 'clip' : 'image'} uses ${cost}.`}
+      content={`${remaining} of ${limit} credits left this billing period. This ${kind === 'video' ? 'clip' : 'image'} uses ${cost}.`}
     >
       <div className="flex items-center gap-1.5 px-2 h-[var(--control-h-sm)] rounded-md bg-white/[0.04] text-gray-400 t-control">
         <div className="w-12 h-1 rounded-full bg-white/10 overflow-hidden">

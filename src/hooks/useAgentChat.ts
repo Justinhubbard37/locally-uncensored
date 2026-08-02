@@ -1,6 +1,7 @@
 import { useRef, useState, useCallback } from 'react'
 import { v4 as uuid } from 'uuid'
-import { chatNonStreaming } from '../api/agents'
+import { streamProviderTurn } from '../lib/provider-stream'
+import { createHermesDisplayFilter } from '../lib/hermes-stream'
 import { setActiveChatId, clearActiveChatId, chatWorkspaceSlug, setActiveWorkspace, setActiveAgentModel, renderWorkspaceSection, setChatArtifactMode, takeChatArtifacts } from '../api/agent-context'
 import { isOllamaLocal } from '../api/backend'
 import { requestGenerationCancel } from '../api/vram-handoff'
@@ -818,23 +819,47 @@ export function useAgentChat() {
             }
             dropThinkingBlock()
           } else {
-            // Connection-failure retry for openai-compat providers — parity with
-            // the Ollama branch above. A LOCAL LM Studio model gets unloaded +
-            // JIT-reloaded around an image/video VRAM hand-off (detectLmsTextModel
-            // juggling, v2.5.3); a request that races that reload window dies as
-            // "LM Studio: Request failed". Without a retry that surfaced as a bare
-            // "Agent error" on the very next tool turn (ship-gate find 2026-06-11,
-            // chat-tools image on LM Studio). Retry transient failures a couple of
-            // times; a 4xx is deterministic and still surfaces immediately.
+            // ── Streaming path for openai-compat / Anthropic / LU Cloud ──
+            // Parity with the Ollama branch above: chatStream carries the
+            // tool defs (ChatOptions.tools), tool-call deltas accumulate in
+            // the provider and arrive on the done chunk. Until 2.6.0 this
+            // branch waited on chatWithTools and painted the whole turn at
+            // once (David 2026-07-31).
+            //
+            // Connection-failure retry kept from the non-streaming days: a
+            // LOCAL LM Studio model gets unloaded + JIT-reloaded around an
+            // image/video VRAM hand-off (detectLmsTextModel juggling,
+            // v2.5.3); a request that races that reload window dies as
+            // "LM Studio: Request failed". Retry transient failures a couple
+            // of times; a 4xx is deterministic and still surfaces.
+            let thinkingBlockRemoved = false
+            const dropThinkingBlock = () => {
+              if (!thinkingBlockRemoved) {
+                thinkingBlockRemoved = true
+                removeBlock(convId!, assistantMessage.id, thinkingBlockId)
+              }
+            }
+            const onLiveContent = (c: string) => {
+              dropThinkingBlock()
+              contentRef.current = c
+              scheduleUIUpdate()
+            }
+            const onLiveThinking = (t: string) => {
+              dropThinkingBlock()
+              if (settings.thinkingEnabled === true) {
+                thinkingRef.current = t
+                scheduleUIUpdate()
+              }
+            }
+            const streamOpts = { ...chatOptions, tools }
             let connRetries = 0
             for (;;) {
               try {
-                turn = await provider.chatWithTools(modelToUse, agentMessages, tools, chatOptions)
+                turn = await streamProviderTurn(provider, modelToUse, agentMessages, streamOpts, onLiveContent, onLiveThinking)
                 break
               } catch (thinkErr: any) {
                 if (thinkErr?.message?.includes('does not support thinking') || thinkErr?.statusCode === 400) {
-                  const retryOptions = { ...chatOptions, thinking: undefined as unknown as boolean }
-                  turn = await provider.chatWithTools(modelToUse, agentMessages, tools, retryOptions)
+                  turn = await streamProviderTurn(provider, modelToUse, agentMessages, { ...streamOpts, thinking: undefined as unknown as boolean }, onLiveContent, () => {})
                   break
                 }
                 const sc = typeof thinkErr?.statusCode === 'number' ? thinkErr.statusCode : 0
@@ -848,7 +873,7 @@ export function useAgentChat() {
                 throw thinkErr
               }
             }
-            removeBlock(convId!, assistantMessage.id, thinkingBlockId)
+            dropThinkingBlock()
           }
 
           toolCalls = turn.toolCalls
@@ -870,12 +895,33 @@ export function useAgentChat() {
           if (turn.thinking) turnThinking = turn.thinking
 
         } else {
-          // ── Hermes XML prompt-based tool calling (Ollama fallback) ──
-          const rawContent = await chatNonStreaming(
+          // ── Hermes XML prompt-based tool calling ──
+          // Streamed like every other transport now (David 2026-07-31): the
+          // display filter keeps <tool_call> XML from ever flashing into the
+          // bubble while prose lands token by token. The parse below still
+          // runs on the FULL raw text, so extraction cannot differ from the
+          // old non-streaming path. This also retires chatNonStreaming here,
+          // which spoke Ollama's /api/chat and quietly mis-routed hermes
+          // turns on every other provider.
+          const display = createHermesDisplayFilter()
+          let shown = ''
+          const hermesTurn = await streamProviderTurn(
+            provider,
             modelToUse,
             agentMessages.map(m => ({ role: m.role, content: m.content })),
-            abort.signal,
+            { ...chatOptions, thinking: undefined as unknown as boolean },
+            (_full, delta) => {
+              shown += display.feed(delta)
+              contentRef.current = shown
+              scheduleUIUpdate()
+            },
           )
+          shown += display.flush()
+          if (shown) {
+            contentRef.current = shown
+            scheduleUIUpdate()
+          }
+          const rawContent = hermesTurn.content
 
           if (hasToolCallTags(rawContent)) {
             toolCalls = parseHermesToolCalls(rawContent).map(tc => ({

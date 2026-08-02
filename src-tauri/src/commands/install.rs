@@ -62,8 +62,20 @@ fn check_install_disk_pressure(target_dir: &Path) -> Option<String> {
     None
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn cancel_comfyui_install(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn cancel_comfyui_install(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        cancel_comfyui_install_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("cancel_comfyui_install task: {e}"))?
+}
+
+fn cancel_comfyui_install_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     state.comfyui_install_cancel.store(true, Ordering::SeqCst);
     if let Ok(mut s) = state.install_status.lock() {
         // Mark as cancelling immediately so the UI can switch to a
@@ -255,7 +267,56 @@ fn is_transient_pip_error(stderr: &str) -> bool {
 /// Turn raw pip stderr into a user-friendly hint with troubleshooting
 /// guidance. The first line of the returned string is a short diagnosis;
 /// the rest is the truncated original error for context.
+/// "Python 3.8.10 at C:\Python38\python.exe", or just the path when the
+/// interpreter will not say. Costs one process launch, which is fine on an
+/// error path and is the single fact that turns "no matching wheel" from a
+/// riddle into an instruction: willes0504 (Discord 2026-07-28) had a stray
+/// 3.8 first in PATH and needed a volunteer plus a day to find that out.
+fn interpreter_description(python_bin: &str) -> String {
+    let mut cmd = Command::new(python_bin);
+    cmd.arg("--version");
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    match cmd.output() {
+        Ok(out) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let version = text.trim().lines().next().unwrap_or("").trim().to_string();
+            if version.is_empty() {
+                python_bin.to_string()
+            } else {
+                format!("{version} at {python_bin}")
+            }
+        }
+        Err(_) => python_bin.to_string(),
+    }
+}
+
 fn diagnose_pip_error(stderr: &str) -> String {
+    diagnose_pip_error_for(stderr, None)
+}
+
+/// Same diagnosis, plus which interpreter produced it when the caller knows.
+/// Version-shaped failures are unanswerable without that line.
+fn diagnose_pip_error_for(stderr: &str, python_bin: Option<&str>) -> String {
+    let base = diagnose_pip_error_inner(stderr);
+    let needs_interpreter = {
+        let lower = stderr.to_lowercase();
+        lower.contains("could not find a version")
+            || lower.contains("no matching distribution")
+            || lower.contains("no module named")
+            || lower.contains("modulenotfounderror")
+    };
+    match (needs_interpreter, python_bin) {
+        (true, Some(bin)) => format!("{base}\n\nLU used {}.", interpreter_description(bin)),
+        _ => base,
+    }
+}
+
+fn diagnose_pip_error_inner(stderr: &str) -> String {
     let lower = stderr.to_lowercase();
     let snippet: String = stderr.chars().take(400).collect();
 
@@ -437,14 +498,14 @@ pub fn pip_install_streaming_with_retry_cancellable(
             .unwrap_or_default();
 
         if !is_transient_pip_error(&last_stderr) {
-            return Err(diagnose_pip_error(&last_stderr));
+            return Err(diagnose_pip_error_for(&last_stderr, Some(python_bin)));
         }
     }
 
     Err(format!(
         "Exhausted {} retry attempts for transient network errors.\n\n{}",
         max_attempts,
-        diagnose_pip_error(&last_stderr)
+        diagnose_pip_error_for(&last_stderr, Some(python_bin))
     ))
 }
 
@@ -453,6 +514,14 @@ pub fn install_comfyui(
     install_path: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
+    // Never on macOS: local media there is MLX. Refusing before we touch the
+    // install slot means a stray call cannot even leave the status machine in
+    // "installing" — see start_comfyui for why the guard lives in Rust and not
+    // only in the UI that hides these buttons.
+    if !crate::commands::process::comfy_supported_here() {
+        return Err(crate::commands::process::MACOS_COMFY_REFUSAL.to_string());
+    }
+
     let mut install = state.install_status.lock().unwrap();
     if install.status == "installing" {
         return Ok(serde_json::json!({"status": "already_installing"}));
@@ -974,6 +1043,11 @@ fn download_file_blocking(
     let client = reqwest::blocking::Client::builder()
         .user_agent("LocallyUncensored/2.3")
         .redirect(reqwest::redirect::Policy::limited(10))
+        // This path pulls installers and archives (hundreds of MB), so the
+        // whole-request deadline still fits. The blocking client has no
+        // read_timeout; the model downloader, which handles the 40 GB+ files,
+        // uses the async client and bounds the stall instead of the size.
+        .connect_timeout(std::time::Duration::from_secs(30))
         .timeout(std::time::Duration::from_secs(7200))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
@@ -1250,8 +1324,23 @@ fn git_download_url() -> &'static str {
 }
 
 /// Cross-platform git availability check for the Codex view's install banner.
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread,
+// so every millisecond spent here is a frozen window. Same treatment
+// `lmstudio_server_status` already got — this one was simply missed.
 #[tauri::command]
-pub fn check_git_installed() -> GitStatus {
+pub async fn check_git_installed() -> GitStatus {
+    tokio::task::spawn_blocking(check_git_installed_blocking)
+        .await
+        .unwrap_or_else(|e| GitStatus {
+            installed: false,
+            native: false,
+            version: None,
+            hint: Some(format!("git probe task failed: {e}")),
+            download_url: git_download_url().to_string(),
+        })
+}
+
+fn check_git_installed_blocking() -> GitStatus {
     let download_url = git_download_url().to_string();
     let version = git_version_string();
 
@@ -1469,8 +1558,20 @@ fn install_ollama_macos_impl<F: Fn(&str, &str)>(
     );
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
+// The State borrow cannot cross into the blocking pool, so the handle is
+// re-resolved there from the AppHandle (same pattern as engine.rs/whisper.rs).
 #[tauri::command]
-pub fn install_ollama_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn install_ollama_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        install_ollama_status_blocking(&state)
+    })
+    .await
+    .map_err(|e| format!("install_ollama_status task: {e}"))?
+}
+
+fn install_ollama_status_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     let install = state.ollama_install.lock().unwrap();
     Ok(serde_json::json!({
         "status": install.status,
@@ -1507,8 +1608,18 @@ const LMSTUDIO_INSTALLER_URL: &str =
 const LMSTUDIO_DEFAULT_PORT: u16 = 1234;
 
 fn lmstudio_lms_path() -> Option<PathBuf> {
+    // Every branch below is a Windows-ism (`lms.exe`, LOCALAPPDATA/PROGRAMFILES,
+    // the registry, `where`), so on macOS/Linux this returned None even with LM
+    // Studio installed — breaking lmstudio_load/unload/server there. The
+    // cross-platform helper already handles the Unix layout (`lms` with no
+    // extension at ~/.lmstudio/bin, plus Spotlight), so delegate to it.
+    #[cfg(not(target_os = "windows"))]
+    {
+        return crate::os_paths::find_lms_cli();
+    }
     // Post-bootstrap: `lms bootstrap` materialises the launcher here and adds
     // the same path to PATH. Cheapest check first.
+    #[allow(unreachable_code)]
     let direct = dirs::home_dir().map(|h| h.join(".lmstudio").join("bin").join("lms.exe"));
     if let Some(ref p) = direct {
         if p.exists() {
@@ -1985,8 +2096,17 @@ pub fn install_lmstudio_status(state: State<'_, AppState>) -> Result<serde_json:
 /// Best-effort: spawn `lms server start` so we don't make the user open the
 /// LM Studio GUI just to flip the Server toggle. Idempotent — quick early-exit
 /// if the server is already responding.
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread,
+// so every millisecond spent here is a frozen window. Same treatment
+// `lmstudio_server_status` already got — this one was simply missed.
 #[tauri::command]
-pub fn start_lmstudio_server() -> Result<serde_json::Value, String> {
+pub async fn start_lmstudio_server() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(start_lmstudio_server_blocking)
+        .await
+        .map_err(|e| format!("start_lmstudio_server task: {e}"))?
+}
+
+fn start_lmstudio_server_blocking() -> Result<serde_json::Value, String> {
     if lmstudio_server_running() {
         return Ok(serde_json::json!({"status": "already_running"}));
     }
@@ -2091,9 +2211,19 @@ pub async fn lmstudio_list_loaded() -> Result<serde_json::Value, String> {
     .map_err(|e| format!("lmstudio_list_loaded task: {e}"))?
 }
 
-#[allow(non_snake_case)]
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread,
+// so every millisecond spent here is a frozen window. Same treatment
+// `lmstudio_server_status` already got — this one was simply missed.
 #[tauri::command]
-pub fn lmstudio_load_model(model: String, contextLength: Option<u32>) -> Result<serde_json::Value, String> {
+#[allow(non_snake_case)]
+pub async fn lmstudio_load_model(model: String, contextLength: Option<u32>) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || lmstudio_load_model_blocking(model, contextLength))
+        .await
+        .map_err(|e| format!("lmstudio_load_model task: {e}"))?
+}
+
+#[allow(non_snake_case)]
+fn lmstudio_load_model_blocking(model: String, contextLength: Option<u32>) -> Result<serde_json::Value, String> {
     let lms = lmstudio_lms_path()
         .ok_or_else(|| "lms CLI not found — install LM Studio first".to_string())?;
     // `lms load` blocks until the model is in memory. The caller is expected
@@ -2215,8 +2345,17 @@ pub async fn lmstudio_model_context(model: String) -> Result<serde_json::Value, 
     .map_err(|e| format!("lmstudio_model_context task: {e}"))?
 }
 
+// ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread,
+// so every millisecond spent here is a frozen window. Same treatment
+// `lmstudio_server_status` already got — this one was simply missed.
 #[tauri::command]
-pub fn lmstudio_unload_model(model: String) -> Result<serde_json::Value, String> {
+pub async fn lmstudio_unload_model(model: String) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || lmstudio_unload_model_blocking(model))
+        .await
+        .map_err(|e| format!("lmstudio_unload_model task: {e}"))?
+}
+
+fn lmstudio_unload_model_blocking(model: String) -> Result<serde_json::Value, String> {
     let lms = lmstudio_lms_path()
         .ok_or_else(|| "lms CLI not found".to_string())?;
     let mut cmd = Command::new(&lms);
@@ -2604,7 +2743,7 @@ pub fn install_whisper(
                 {
                     let already_running = whisper.lock().map(|w| w.ready).unwrap_or(false);
                     if !already_running {
-                        crate::commands::whisper::auto_start_whisper_sync(&app, &target_python, &whisper);
+                        let _ = crate::commands::whisper::auto_start_whisper_sync(&app, &target_python, &whisper);
                     }
                 }
                 let started = whisper.lock().map(|w| w.ready).unwrap_or(false);
@@ -2637,6 +2776,9 @@ pub fn install_whisper_status(state: State<'_, AppState>) -> Result<serde_json::
     Ok(serde_json::json!({
         "status": install.status,
         "logs": install.logs,
+        // The frontend shows `error` verbatim; without it every failure read
+        // as a bare "Install failed." while the diagnosis sat in `logs`.
+        "error": if install.status == "error" { install.logs.last().cloned() } else { None },
         "download_progress": install.download_progress,
         "download_total": install.download_total,
         "download_speed": install.download_speed,
@@ -2737,19 +2879,41 @@ pub fn install_tts(
             }
         };
 
-        update(
-            "installing",
-            &format!("Installing piper-tts via {} (this can take a few minutes)…", target_python),
-        );
+        // When `piper.download_voices` already imports (package AND its deps),
+        // pip would only re-resolve pins — and that upgrade can collide with a
+        // python process using the same site-packages: live repro 2026-07-31
+        // (Windows), the app's own running ComfyUI held onnxruntime's DLL and
+        // pip died on WinError 5, so read-aloud never got its voice. All that
+        // is actually missing then is the voice file — go straight to it.
+        let piper_ready = {
+            let mut probe = Command::new(&target_python);
+            probe
+                .args(["-c", "import piper.download_voices"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            #[cfg(target_os = "windows")]
+            probe.creation_flags(CREATE_NO_WINDOW);
+            probe.status().map(|s| s.success()).unwrap_or(false)
+        };
 
-        let mut args = build_tts_pip_args();
-        // PEP 668 escape hatch (Arch / Debian 12+ / Fedora 38+) — see
-        // install_whisper. No-op on Windows/macOS/venv Pythons.
-        if is_pep668_protected(&target_python) {
-            args.push("--break-system-packages");
-            args.push("--user");
-        }
-        match pip_install_streaming_with_retry_cancellable(&args, &target_python, 3, &install_state, None) {
+        let pip_result = if piper_ready {
+            update("installing", "piper-tts is already installed — skipping pip.");
+            Ok(())
+        } else {
+            update(
+                "installing",
+                &format!("Installing piper-tts via {} (this can take a few minutes)…", target_python),
+            );
+            let mut args = build_tts_pip_args();
+            // PEP 668 escape hatch (Arch / Debian 12+ / Fedora 38+) — see
+            // install_whisper. No-op on Windows/macOS/venv Pythons.
+            if is_pep668_protected(&target_python) {
+                args.push("--break-system-packages");
+                args.push("--user");
+            }
+            pip_install_streaming_with_retry_cancellable(&args, &target_python, 3, &install_state, None)
+        };
+        match pip_result {
             Ok(()) => {
                 update(
                     "installing",
@@ -2804,6 +2968,8 @@ pub fn install_tts_status(state: State<'_, AppState>) -> Result<serde_json::Valu
     Ok(serde_json::json!({
         "status": install.status,
         "logs": install.logs,
+        // Same contract as install_whisper_status: the frontend reads `error`.
+        "error": if install.status == "error" { install.logs.last().cloned() } else { None },
     }))
 }
 
@@ -3355,6 +3521,44 @@ mod tests {
         let msg = diagnose_pip_error("ERROR: Could not find a version that satisfies the requirement torch");
         let lower = msg.to_lowercase();
         assert!(lower.contains("python") || lower.contains("version") || lower.contains("3.10"));
+    }
+
+    /// willes0504 (Discord 2026-07-28) read "ComfyUI needs Python 3.10, 3.11
+    /// or 3.12" while a stray 3.8 sat first in PATH. Naming the interpreter we
+    /// actually used is the difference between a riddle and an instruction.
+    #[test]
+    fn a_version_failure_names_the_interpreter_lu_used() {
+        let msg = diagnose_pip_error_for(
+            "ERROR: Could not find a version that satisfies the requirement torch (from versions: none)",
+            Some("/definitely/not/a/real/python-zzz"),
+        );
+        assert!(msg.contains("LU used"), "got: {msg}");
+        assert!(msg.contains("/definitely/not/a/real/python-zzz"), "got: {msg}");
+    }
+
+    #[test]
+    fn a_missing_module_failure_also_names_the_interpreter() {
+        let msg = diagnose_pip_error_for(
+            "ModuleNotFoundError: No module named 'encodings'",
+            Some("/definitely/not/a/real/python-zzz"),
+        );
+        assert!(msg.contains("LU used"), "got: {msg}");
+    }
+
+    #[test]
+    fn unrelated_failures_do_not_get_an_interpreter_line() {
+        // A disk-full or permission problem says nothing about the version.
+        let msg = diagnose_pip_error_for(
+            "OSError: [Errno 28] No space left on device",
+            Some("/definitely/not/a/real/python-zzz"),
+        );
+        assert!(!msg.contains("LU used"), "got: {msg}");
+    }
+
+    #[test]
+    fn without_an_interpreter_the_diagnosis_is_unchanged() {
+        let stderr = "ERROR: Could not find a version that satisfies the requirement torch";
+        assert_eq!(diagnose_pip_error(stderr), diagnose_pip_error_for(stderr, None));
     }
 
     #[test]

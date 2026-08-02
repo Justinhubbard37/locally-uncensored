@@ -8,57 +8,186 @@
  * - Unquoted property names
  * - Extra text before/after JSON
  * - Escaped quotes inside strings
+ *
+ * Every repair below is STRING-AWARE and applied one at a time, retrying the
+ * parse after each. The earlier version rewrote the whole text blindly and
+ * therefore destroyed the payloads it was meant to rescue (measured
+ * 2026-07-28): `'` → `"` turned `print('hello')` and the apostrophe in
+ * "doesn't" into stray delimiters, the bare-key regex rewrote `a { color: red`
+ * inside a CSS string, and brace COUNTING (rather than depth) both miscounted
+ * braces inside strings and appended `}` before `]`, so `{"a": [1, 2` closed as
+ * `{"a": [1, 2}]`. A file_write whose content is code hit at least one of these
+ * almost every time.
  */
+
+import { balancedObjectAt, findBalancedObjects } from './json-scan'
 
 /**
  * Attempt to repair broken JSON from a tool call.
  * Returns parsed object or null if unfixable.
  */
 export function repairJson(raw: string): any | null {
-  // 1. Try direct parse first
-  try { return JSON.parse(raw) } catch {}
+  const trimmed = raw.trim()
+  if (!trimmed) return null
 
-  let fixed = raw.trim()
+  // The text as-is first (covers arrays and whole single-quoted objects), then
+  // each balanced {...} inside it (covers a model wrapping its call in prose),
+  // then the tail from the first opener (covers a call that was never closed).
+  const candidates = [trimmed, ...findBalancedObjects(trimmed)]
+  const firstBrace = trimmed.indexOf('{')
+  if (firstBrace > 0) candidates.push(trimmed.slice(firstBrace))
+  const firstBracket = trimmed.indexOf('[')
+  if (firstBracket > 0) candidates.push(trimmed.slice(firstBracket))
 
-  // 2. Extract JSON from surrounding text (model might wrap it)
-  const jsonMatch = fixed.match(/\{[\s\S]*\}/)
-  if (jsonMatch) fixed = jsonMatch[0]
+  for (const candidate of candidates) {
+    const parsed = tryRepair(candidate)
+    if (parsed !== undefined) return parsed
+  }
 
-  // 3. Fix single quotes → double quotes (but not inside strings)
-  fixed = fixed.replace(/'/g, '"')
-
-  // 4. Fix trailing commas
-  fixed = fixed.replace(/,\s*([}\]])/g, '$1')
-
-  // 5. Fix unquoted keys: { key: "value" } → { "key": "value" }
-  fixed = fixed.replace(/(\{|,)\s*([a-zA-Z_]\w*)\s*:/g, '$1"$2":')
-
-  // 6. Fix missing closing braces
-  const openBraces = (fixed.match(/\{/g) || []).length
-  const closeBraces = (fixed.match(/\}/g) || []).length
-  for (let i = 0; i < openBraces - closeBraces; i++) fixed += '}'
-
-  const openBrackets = (fixed.match(/\[/g) || []).length
-  const closeBrackets = (fixed.match(/\]/g) || []).length
-  for (let i = 0; i < openBrackets - closeBrackets; i++) fixed += ']'
-
-  // 7. Try parse again
-  try { return JSON.parse(fixed) } catch {}
-
-  // 8. Last resort: try to extract key-value pairs with regex
-  try {
-    const nameMatch = raw.match(/["']?name["']?\s*[:=]\s*["']([^"']+)["']/i)
-    const argsMatch = raw.match(/["']?arguments["']?\s*[:=]\s*(\{[^}]*\})/i)
-    if (nameMatch) {
-      let args = {}
-      if (argsMatch) {
-        try { args = JSON.parse(argsMatch[1].replace(/'/g, '"')) } catch {}
-      }
-      return { name: nameMatch[1], arguments: args }
+  // Last resort: pull the name out with a regex and balance the args object.
+  const nameMatch = raw.match(/["']?name["']?\s*[:=]\s*["']([^"']+)["']/i)
+  if (nameMatch) {
+    let args: Record<string, any> = {}
+    const argsKey = /["']?(?:arguments|args|parameters|input)["']?\s*[:=]\s*(?=\{)/i.exec(raw)
+    if (argsKey) {
+      const obj = balancedObjectAt(raw, argsKey.index + argsKey[0].length)
+      const parsed = obj ? tryRepair(obj.text) : undefined
+      if (parsed && typeof parsed === 'object') args = parsed
     }
-  } catch {}
+    return { name: nameMatch[1], arguments: args }
+  }
 
   return null
+}
+
+/** Parse `src`, applying one repair at a time and retrying after each. */
+function tryRepair(src: string): any | undefined {
+  let s = src.trim()
+  if (!s) return undefined
+
+  const attempt = (t: string): any | undefined => {
+    try { return JSON.parse(t) } catch { return undefined }
+  }
+
+  let parsed = attempt(s)
+  if (parsed !== undefined) return parsed
+
+  for (const repair of [requoteSingleQuoted, dropTrailingCommas, quoteBareKeys, closeOpenContainers]) {
+    const next = repair(s)
+    if (next === s) continue
+    parsed = attempt(next)
+    if (parsed !== undefined) return parsed
+    s = next
+  }
+
+  return undefined
+}
+
+/** Apply `[start, end) → text` edits back-to-front so earlier indices hold. */
+function applyEdits(src: string, edits: Array<{ start: number; end: number; text: string }>): string {
+  if (edits.length === 0) return src
+  let out = src
+  for (const edit of [...edits].sort((a, b) => b.start - a.start)) {
+    out = out.slice(0, edit.start) + edit.text + out.slice(edit.end)
+  }
+  return out
+}
+
+/**
+ * Visit every character that sits OUTSIDE a double-quoted string. This is the
+ * whole point of the rewrite: braces, commas and colons inside a string value
+ * are the model's payload, not JSON structure.
+ */
+function eachStructuralChar(src: string, visit: (i: number, ch: string) => void): void {
+  let inString = false
+  let escaped = false
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i]
+    if (escaped) { escaped = false; continue }
+    if (ch === '\\') { escaped = inString; continue }
+    if (ch === '"') { inString = !inString; continue }
+    if (inString) continue
+    visit(i, ch)
+  }
+}
+
+function skipSpace(src: string, i: number): number {
+  while (i < src.length && /\s/.test(src[i])) i++
+  return i
+}
+
+/**
+ * Turn single-quoted STRING LITERALS into double-quoted ones. An apostrophe
+ * inside an already double-quoted string is left alone — that was the bug.
+ */
+function requoteSingleQuoted(src: string): string {
+  const edits: Array<{ start: number; end: number; text: string }> = []
+  let i = 0
+  while (i < src.length) {
+    const ch = src[i]
+    if (ch === '"') { // a real string — skip it whole, apostrophes and all
+      i++
+      while (i < src.length && src[i] !== '"') i += src[i] === '\\' ? 2 : 1
+      i++
+      continue
+    }
+    if (ch === "'") {
+      let j = i + 1
+      let body = ''
+      while (j < src.length && src[j] !== "'") {
+        if (src[j] === '\\') { body += src[j] + (src[j + 1] ?? ''); j += 2; continue }
+        body += src[j]
+        j++
+      }
+      if (j >= src.length) break // unterminated — leave it for another pass
+      edits.push({ start: i, end: j + 1, text: `"${body.replace(/"/g, '\\"')}"` })
+      i = j + 1
+      continue
+    }
+    i++
+  }
+  return applyEdits(src, edits)
+}
+
+/** Drop a `,` that is followed by `}` or `]`, outside strings. */
+function dropTrailingCommas(src: string): string {
+  const edits: Array<{ start: number; end: number; text: string }> = []
+  eachStructuralChar(src, (i, ch) => {
+    if (ch !== ',') return
+    const next = skipSpace(src, i + 1)
+    if (src[next] === '}' || src[next] === ']') edits.push({ start: i, end: i + 1, text: '' })
+  })
+  return applyEdits(src, edits)
+}
+
+/** Quote bare property names: `{ key: 1 }` → `{ "key": 1 }`, outside strings. */
+function quoteBareKeys(src: string): string {
+  const edits: Array<{ start: number; end: number; text: string }> = []
+  eachStructuralChar(src, (i, ch) => {
+    if (ch !== '{' && ch !== ',') return
+    const start = skipSpace(src, i + 1)
+    if (!/[A-Za-z_$]/.test(src[start] ?? '')) return
+    let end = start
+    while (end < src.length && /[\w$]/.test(src[end])) end++
+    if (src[skipSpace(src, end)] !== ':') return
+    edits.push({ start, end, text: `"${src.slice(start, end)}"` })
+  })
+  return applyEdits(src, edits)
+}
+
+/**
+ * Close containers the model left open, innermost first. Counting openers and
+ * closers separately (the old approach) appended `}` before `]`, so a truncated
+ * `{"a": [1, 2` was "repaired" into `{"a": [1, 2}]`.
+ */
+function closeOpenContainers(src: string): string {
+  const stack: string[] = []
+  eachStructuralChar(src, (_i, ch) => {
+    if (ch === '{' || ch === '[') stack.push(ch === '{' ? '}' : ']')
+    else if ((ch === '}' || ch === ']') && stack[stack.length - 1] === ch) stack.pop()
+  })
+  if (stack.length === 0) return src
+  return src + stack.reverse().join('')
 }
 
 /**
@@ -223,25 +352,6 @@ export function stripRanges(content: string, ranges: Array<[number, number]>): s
  */
 function findBalancedBraceEnd(src: string, start: number): number {
   if (src[start] !== '{') return -1
-  let depth = 0
-  let i = start
-  let inString = false
-  let escape = false
-  while (i < src.length) {
-    const c = src[i]
-    if (inString) {
-      if (escape) { escape = false }
-      else if (c === '\\') { escape = true }
-      else if (c === '"') { inString = false }
-    } else {
-      if (c === '"') inString = true
-      else if (c === '{') depth++
-      else if (c === '}') {
-        depth--
-        if (depth === 0) return i
-      }
-    }
-    i++
-  }
-  return -1
+  const obj = balancedObjectAt(src, start)
+  return obj ? obj.end - 1 : -1
 }

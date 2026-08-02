@@ -14,6 +14,8 @@ import { Modal } from '../ui/Modal'
 import { GlowButton } from '../ui/GlowButton'
 import { showModel } from '../../api/ollama'
 import { checkComfyConnection, refreshComfyModels } from '../../api/comfyui'
+import { isMlxImageHost } from '../../api/mlx-image'
+import { MlxMediaSettings } from '../settings/MlxMediaSettings'
 import { backendCall } from '../../api/backend'
 import type { ModelCategory, AIModel } from '../../types/models'
 
@@ -55,9 +57,21 @@ export function ModelManager() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const mode: Mode = (categoryFilter === 'text' || categoryFilter === 'image' || categoryFilter === 'video')
-    ? categoryFilter
-    : 'text'
+  // On the Mac, image/video models are ComfyUI-only here (MLX has no manager
+  // surface yet), so the whole media lane is dead — Discover → Install rejects
+  // with "ComfyUI path not set" and Installed shows a "Start ComfyUI" state that
+  // can never resolve. Pin the mode to text so a persisted image/video filter
+  // never lands on it, and drop the two rail items below.
+  // macOS: the ComfyUI-backed media grid below is dead there (Discover → Install
+  // rejects with "ComfyUI path not set"). It used to be hidden outright, which
+  // left a Mac user with no model surface for media at all. The rails are back —
+  // they render the MLX catalogue instead, the same one Settings drives.
+  const macMlxMedia = isMlxImageHost()
+  const mode: Mode =
+    (categoryFilter === 'text' || categoryFilter === 'image' || categoryFilter === 'video')
+      ? categoryFilter
+      : 'text'
+  const showMlxPanel = macMlxMedia && (mode === 'image' || mode === 'video')
 
   useEffect(() => {
     fetchModels()
@@ -172,8 +186,9 @@ export function ModelManager() {
             </button>
             <h1 className="text-[0.85rem] font-semibold text-gray-900 dark:text-white">Models</h1>
 
-            {/* Discover / Installed segment */}
-            <div className="ml-2 flex items-center p-0.5 rounded-lg bg-gray-100 dark:bg-white/[0.04] border border-gray-200 dark:border-white/[0.06]">
+            {/* Discover / Installed segment — the MLX panel is one list with
+                per-model Install/Remove, so the split would switch nothing. */}
+            <div className={`ml-2 flex items-center p-0.5 rounded-lg bg-gray-100 dark:bg-white/[0.04] border border-gray-200 dark:border-white/[0.06] ${showMlxPanel ? 'hidden' : ''}`}>
               <button
                 onClick={() => setTab('discover')}
                 aria-pressed={tab === 'discover'}
@@ -242,7 +257,13 @@ export function ModelManager() {
           </div>
 
           {/* Views */}
-          {tab === 'installed' && (
+          {showMlxPanel && (
+            <div className="pt-1">
+              <MlxMediaSettings only={mode === 'image' ? 'image' : 'video'} />
+            </div>
+          )}
+
+          {!showMlxPanel && tab === 'installed' && (
             <>
               {imageOrVideo && filteredModels.length === 0 && comfyReachable !== true ? (
                 // comfyReachable: null = still probing, false = confirmed down.
@@ -312,7 +333,7 @@ export function ModelManager() {
                   return (
                     <section className="space-y-1.5">
                       <div className="flex items-center gap-2 px-1">
-                        <SectionIcon size={11} className={modeMeta.accent} />
+                        <SectionIcon size={11} />
                         <h2 className="text-[0.62rem] font-semibold uppercase tracking-[0.12em] text-gray-700 dark:text-gray-300">
                           {modeMeta.label}
                         </h2>
@@ -353,7 +374,7 @@ export function ModelManager() {
             </>
           )}
 
-          {tab === 'discover' && (
+          {!showMlxPanel && tab === 'discover' && (
             <DiscoverModels
               category={mode}
               search={searchQuery}

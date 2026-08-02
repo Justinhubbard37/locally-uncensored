@@ -1,7 +1,8 @@
 import { Cloud } from 'lucide-react'
 import { useCreateStore } from '../../../stores/createStore'
 import { useUIStore, type CloudTeaserTarget } from '../../../stores/uiStore'
-import { INTENTS } from './intents'
+import { isIntentLocked, visibleIntents } from './intents'
+import { isMlxImageHost } from '../../../api/mlx-image'
 import { cn } from '../ui/cn'
 
 // Pure-CSS expand: no Framer layout projection anywhere, so nothing can snap or
@@ -24,7 +25,12 @@ export function IntentBar() {
   // cloud badge for the genuinely hosted-only tools). Only upscale, eraser and
   // character training (cloudOnly, no local backend) render as locked,
   // cloud-tagged pills in local mode; a tap opens the teaser sheet / plans gate.
-  const intents = INTENTS
+  //
+  // On an MLX Mac (no ComfyUI at all) those lanes have no local implementation
+  // either, so they lock there too. Both rules live in intents.ts so they stay
+  // pure + unit tested; this component only renders the verdict.
+  const mlxHost = isMlxImageHost()
+  const intents = visibleIntents(backend, mlxHost)
 
   return (
     <div
@@ -36,7 +42,7 @@ export function IntentBar() {
       style={{ transform: 'scale(0.763)', transformOrigin: 'center' }}
     >
       {intents.map((meta) => {
-        const locked = meta.cloudOnly === true && !meta.hasLocalLane && backend !== 'cloud'
+        const locked = isIntentLocked(meta, backend, mlxHost)
         const selected = !locked && intent === meta.id
         const Icon = meta.icon
         return (

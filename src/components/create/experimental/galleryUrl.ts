@@ -1,6 +1,6 @@
 import { getImageUrl } from '../../../api/comfyui'
 import { refreshResultUrl, resolveResultUrl } from '../../../api/cloud/jobs'
-import { fetchLocalhostBytes, isTauri } from '../../../api/backend'
+import { backendCall, fetchLocalhostBytes, isTauri } from '../../../api/backend'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
 
 /** Resolve a gallery item's display URL. Priority mirrors MediaViewer/Gallery:
@@ -31,6 +31,16 @@ const recovered = new Map<string, number>()
 
 export function recoverGalleryUrl(item: GalleryItem): void {
   if (!item.jobId) {
+    // A local MLX render keeps its bytes on disk (Mac image + video lanes).
+    // partialize strips `dataUrl` on persist, so after a restart the only
+    // thing left was a filename — and galleryItemUrl turned that into a
+    // ComfyUI /view URL, which on a Mac can never resolve. Every locally
+    // generated image therefore died on the next launch. Re-read the file
+    // instead of declaring the tile dead.
+    if (item.localPath) {
+      void restoreFromDisk(item)
+      return
+    }
     // Local ComfyUI item whose /view fetch failed (engine not running /
     // output pruned) — nothing to re-sign. Flag it so the tiles can render
     // an honest "engine offline" state instead of a silently dead <img>.
@@ -57,6 +67,32 @@ export function recoverGalleryUrl(item: GalleryItem): void {
     // Could not ask. Release the guard so the next remount tries again.
     recovered.delete(item.id)
   })
+}
+
+/**
+ * Re-read a local render from disk and hand the tile a fresh blob: URL.
+ *
+ * Shares the `recovered` guard with the cloud re-sign path so a file that is
+ * genuinely gone (user emptied the folder) is tried once per item and then
+ * marked unavailable, instead of re-reading on every remount.
+ */
+async function restoreFromDisk(item: GalleryItem): Promise<void> {
+  if (recovered.has(item.id)) return
+  recovered.set(item.id, 0)
+  try {
+    const b64 = await backendCall<string>('read_media_file', { path: item.localPath })
+    const binary = atob(b64)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    const url = URL.createObjectURL(new Blob([bytes], { type: guessMime(item.filename) }))
+    recovered.set(item.id, Date.now())
+    useCreateStore.getState().updateGalleryItem(item.id, { dataUrl: url, unavailable: undefined })
+  } catch {
+    // The file is gone (or unreadable). Same honest dead-tile state the
+    // ComfyUI path uses; do NOT release the guard, there is nothing to retry.
+    recovered.set(item.id, Date.now())
+    useCreateStore.getState().updateGalleryItem(item.id, { unavailable: true })
+  }
 }
 
 /** Clear a tile's offline flag once its media actually loads (onLoad). */
@@ -89,7 +125,11 @@ function guessMime(filename: string): string {
  * use whenever ComfyUI allows the origin.
  */
 export async function proxiedComfyBlobUrl(item: GalleryItem): Promise<string | null> {
-  if (!isTauri() || item.jobId || item.remoteUrl || item.dataUrl) return null
+  // `localPath` marks an item whose bytes we own on disk (the MLX lanes). It is
+  // not a ComfyUI output, so asking ComfyUI for its filename can only waste a
+  // round trip — and on a Mac that happens to run ComfyUI for something else,
+  // ask the wrong server about a file it never made.
+  if (!isTauri() || item.jobId || item.remoteUrl || item.dataUrl || item.localPath) return null
   try {
     const bytes = await fetchLocalhostBytes(
     getImageUrl(

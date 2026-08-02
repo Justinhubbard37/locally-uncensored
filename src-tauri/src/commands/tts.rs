@@ -54,10 +54,33 @@ pub fn piper_voice_paths(app: &tauri::AppHandle, voice: &str) -> Result<(PathBuf
     ))
 }
 
+/// A voice is only usable when BOTH halves are on disk and non-empty. Piper
+/// needs the config next to the model, and `synthesize` refuses without it —
+/// but the badge, the picker and the download check all used to look at the
+/// `.onnx` alone. A voice whose config never landed therefore read as installed
+/// everywhere while every read-aloud failed with `no_voice` and fell back to the
+/// system voice: green check, chosen voice, still Microsoft George (#77).
+pub(crate) fn voice_is_complete(app: &tauri::AppHandle, voice: &str) -> bool {
+    match piper_voices_dir(app) {
+        Ok(dir) => voice_is_complete_in(&dir, voice),
+        Err(_) => false,
+    }
+}
+
+/// The AppHandle-free half, so the rule behind #77 can actually be tested.
+pub(crate) fn voice_is_complete_in(dir: &std::path::Path, voice: &str) -> bool {
+    let nonempty = |p: PathBuf| std::fs::metadata(&p).map(|m| m.len() > 0).unwrap_or(false);
+    nonempty(dir.join(format!("{}.onnx", voice))) && nonempty(dir.join(format!("{}.onnx.json", voice)))
+}
+
 /// Whether neural TTS is usable: the `piper` package is installed AND a voice
 /// model is present. The Settings badge + the chat SpeakerButton gate on this.
 #[tauri::command]
-pub fn tts_status(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+pub fn tts_status(
+    voice: Option<String>,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
     let python = crate::commands::install::resolve_lu_python(state.inner());
 
     let mut piper_importable = false;
@@ -77,19 +100,15 @@ pub fn tts_status(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<s
         piper_importable = cmd.output().map(|o| o.status.success()).unwrap_or(false);
     }
 
-    // Ready if ANY voice model is present, not just the hardcoded default
-    // (#77, ElBiggus): a user who downloaded a different voice than
-    // en_US-lessac-medium had the badge read "not installed" and every read
-    // fell back to the Windows SAPI voice.
-    let voice_ready = piper_voices_dir(&app)
-        .ok()
-        .and_then(|dir| std::fs::read_dir(&dir).ok())
-        .map(|entries| {
-            entries
-                .flatten()
-                .any(|e| e.file_name().to_string_lossy().ends_with(".onnx"))
-        })
-        .unwrap_or(false);
+    // Ready if the SELECTED voice is complete — or, when the caller names none,
+    // if any complete voice exists. Checking "any .onnx anywhere" (#77, first
+    // pass) still lied twice over: a half-downloaded voice counted, and a user
+    // who picked voice B while only voice A was on disk got a green badge for a
+    // voice that could never speak.
+    let voice_ready = match voice.as_deref().filter(|v| is_valid_voice(v)) {
+        Some(v) => voice_is_complete(&app, v),
+        None => installed_voice_ids(&app).iter().any(|v| voice_is_complete(&app, v)),
+    };
 
     Ok(serde_json::json!({
         "available": piper_importable && voice_ready,
@@ -102,12 +121,25 @@ pub fn tts_status(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<s
 /// `*.onnx` models). The Settings picker marks these as installed.
 #[tauri::command]
 pub fn installed_piper_voices(app: tauri::AppHandle) -> Result<Vec<String>, String> {
-    let dir = match piper_voices_dir(&app) {
-        Ok(d) => d,
-        Err(_) => return Ok(vec![]),
-    };
+    // Only voices that can actually speak — a model without its config would
+    // otherwise show up as installed and then fail at synthesis time.
+    Ok(installed_voice_ids(&app)
+        .into_iter()
+        .filter(|v| voice_is_complete(&app, v))
+        .collect())
+}
+
+/// Every voice id that has a `.onnx` in the voices dir, complete or not.
+fn installed_voice_ids(app: &tauri::AppHandle) -> Vec<String> {
+    match piper_voices_dir(app) {
+        Ok(dir) => installed_voice_ids_in(&dir),
+        Err(_) => vec![],
+    }
+}
+
+fn installed_voice_ids_in(dir: &std::path::Path) -> Vec<String> {
     let mut out = vec![];
-    if let Ok(entries) = std::fs::read_dir(&dir) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             if let Some(stem) = name.strip_suffix(".onnx") {
@@ -115,14 +147,14 @@ pub fn installed_piper_voices(app: tauri::AppHandle) -> Result<Vec<String>, Stri
             }
         }
     }
-    Ok(out)
+    out
 }
 
 /// Download a specific Piper voice model into the piper_voices dir. Blocking —
 /// the frontend awaits it with a spinner (no separate progress channel; a voice
 /// is ~63 MB). Idempotent: re-downloading an existing voice just no-ops fast.
 #[tauri::command]
-pub fn download_voice(
+pub async fn download_voice(
     voice: String,
     state: State<'_, AppState>,
     app: tauri::AppHandle,
@@ -130,10 +162,24 @@ pub fn download_voice(
     if !is_valid_voice(&voice) {
         return Err(format!("invalid voice id: {}", voice));
     }
+    // Resolve the interpreter while we still hold the State borrow, then hand
+    // owned values to the blocking pool: the download itself is tens of MB over
+    // the network and used to run on the Tauri MAIN thread, so the window was
+    // frozen for the whole transfer.
     let python = crate::commands::install::resolve_lu_python(state.inner());
     if python.is_empty() || !crate::python::is_real_python(&python) {
         return Err("no_python: install Python first.".to_string());
     }
+    tokio::task::spawn_blocking(move || download_voice_blocking(voice, python, app))
+        .await
+        .map_err(|e| format!("download_voice task: {e}"))?
+}
+
+fn download_voice_blocking(
+    voice: String,
+    python: String,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
     let dir = piper_voices_dir(&app)?;
     let _ = std::fs::create_dir_all(&dir);
 
@@ -154,9 +200,19 @@ pub fn download_voice(
     if !output.status.success() {
         return Err(format!("voice download failed: {}", String::from_utf8_lossy(&output.stderr)));
     }
-    let (onnx, _) = piper_voice_paths(&app, &voice)?;
+    // Verify BOTH halves. The downloader exiting 0 with only the model on disk
+    // is the state that made the badge green while synthesis kept failing (#77).
+    let (onnx, config) = piper_voice_paths(&app, &voice)?;
     if !onnx.exists() {
         return Err("voice download reported success but the model is missing".to_string());
+    }
+    if !voice_is_complete(&app, &voice) {
+        let _ = std::fs::remove_file(&onnx);
+        let _ = std::fs::remove_file(&config);
+        return Err(format!(
+            "the '{}' voice downloaded incomplete (its config file is missing) — try again",
+            voice
+        ));
     }
     Ok(serde_json::json!({ "ok": true, "voice": voice }))
 }
@@ -165,11 +221,29 @@ pub fn download_voice(
 /// play. `voice` is an optional Piper voice id (defaults to PIPER_VOICE). Runs
 /// the Piper CLI one-shot.
 #[tauri::command]
-pub fn synthesize(
+pub async fn synthesize(
     text: String,
     voice: Option<String>,
-    state: State<'_, AppState>,
     app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    // Piper is a cold-started Python process: importing onnxruntime and loading
+    // the voice takes seconds, and read-aloud calls this once per chunk. As a
+    // sync #[command] every one of those seconds was spent on the Tauri main
+    // thread with the window frozen — the same class fixed for the engine and
+    // the agent tools.
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        synthesize_blocking(text, voice, &state, &app)
+    })
+    .await
+    .map_err(|e| format!("Speech task failed to run: {e}"))?
+}
+
+fn synthesize_blocking(
+    text: String,
+    voice: Option<String>,
+    state: &State<'_, AppState>,
+    app: &tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let text = text.trim().to_string();
     if text.is_empty() {
@@ -186,7 +260,7 @@ pub fn synthesize(
         return Err("no_python: install Python first.".to_string());
     }
 
-    let (onnx, config) = piper_voice_paths(&app, &voice)?;
+    let (onnx, config) = piper_voice_paths(app, &voice)?;
     if !onnx.exists() || !config.exists() {
         return Err(format!(
             "no_voice: the '{}' voice isn't downloaded — pick/install it in Settings → Voice & Remote.",
@@ -218,9 +292,14 @@ pub fn synthesize(
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     let mut child = cmd.spawn().map_err(|e| format!("Failed to start piper: {}", e))?;
+    // Feed stdin from its own thread. Writing the whole text inline and only
+    // then draining piper's pipes deadlocks once the text outgrows the pipe
+    // buffer: piper blocks writing its log while we block writing the text.
+    // The thread ends by dropping stdin, which is what tells piper to start.
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(text.as_bytes());
-        // dropped at end of block → stdin closed so piper proceeds
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(text.as_bytes());
+        });
     }
     let output = child
         .wait_with_output()
@@ -327,4 +406,84 @@ pub async fn synthesize_external(
 
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Ok(serde_json::json!({ "audio_base64": b64, "mime": mime }))
+}
+
+#[cfg(test)]
+mod voice_completeness_tests {
+    use super::*;
+    use std::fs;
+
+    fn voices_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lu-tts-test-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    /// #77 in one assertion: the badge, the picker and the download check all
+    /// looked at the `.onnx` alone, so a voice whose config never landed read as
+    /// installed everywhere while every read-aloud fell back to the system voice.
+    #[test]
+    fn a_voice_without_its_config_is_not_complete() {
+        let dir = voices_dir("noconfig");
+        fs::write(dir.join("en_US-lessac-medium.onnx"), b"model bytes").unwrap();
+
+        assert!(
+            !voice_is_complete_in(&dir, "en_US-lessac-medium"),
+            "a model without its .onnx.json must never read as usable",
+        );
+        // It IS still listed by the raw scan — that is the contract; both
+        // callers filter it out afterwards.
+        assert_eq!(installed_voice_ids_in(&dir), vec!["en_US-lessac-medium"]);
+
+        fs::write(dir.join("en_US-lessac-medium.onnx.json"), b"{}").unwrap();
+        assert!(voice_is_complete_in(&dir, "en_US-lessac-medium"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A torn download leaves a 0-byte file. Present-but-empty must not count,
+    /// or the same green-check-that-cannot-speak comes back.
+    #[test]
+    fn an_empty_half_does_not_count() {
+        let dir = voices_dir("empty");
+        fs::write(dir.join("v.onnx"), b"model").unwrap();
+        fs::write(dir.join("v.onnx.json"), b"").unwrap();
+        assert!(!voice_is_complete_in(&dir, "v"), "0-byte config counted as usable");
+
+        fs::write(dir.join("w.onnx"), b"").unwrap();
+        fs::write(dir.join("w.onnx.json"), b"{}").unwrap();
+        assert!(!voice_is_complete_in(&dir, "w"), "0-byte model counted as usable");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_voice_and_a_missing_dir_are_both_incomplete() {
+        let dir = voices_dir("missing");
+        assert!(!voice_is_complete_in(&dir, "not-downloaded"));
+        assert!(installed_voice_ids_in(&dir).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+        assert!(!voice_is_complete_in(&dir, "anything"), "gone dir must not be complete");
+        assert!(installed_voice_ids_in(&dir).is_empty());
+    }
+
+    /// The scan keys on `.onnx`; a stray config without its model is not a voice.
+    #[test]
+    fn a_config_alone_is_not_listed_as_a_voice() {
+        let dir = voices_dir("orphan");
+        fs::write(dir.join("orphan.onnx.json"), b"{}").unwrap();
+        assert!(installed_voice_ids_in(&dir).is_empty(), "listed a config as a voice");
+        assert!(!voice_is_complete_in(&dir, "orphan"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The id is interpolated into a download URL and a file path.
+    #[test]
+    fn voice_ids_that_are_not_plain_piper_ids_are_refused() {
+        for bad in ["", "../../etc/passwd", "a/b", "a b", "a;rm -rf /", &"x".repeat(64)] {
+            assert!(!is_valid_voice(bad), "accepted {bad:?}");
+        }
+        for good in ["en_US-lessac-medium", "en_GB-alba-medium", "de_DE-thorsten-high"] {
+            assert!(is_valid_voice(good), "refused {good:?}");
+        }
+    }
 }

@@ -92,3 +92,54 @@ describe('parseUnifiedDiff round-trip', () => {
     expect(parsed.removed).toBe(0)
   })
 })
+
+// Measured 2026-07-28. Two defects in one function, both on the surface the
+// user approves a write from.
+describe('hunks are split, and large files do not build a giant LCS table', () => {
+  const numbered = (n: number) => Array.from({ length: n }, (_, i) => `line ${i + 1}`)
+
+  it('splits two distant edits into two hunks instead of one giant one', () => {
+    const a = numbered(200)
+    const b = [...a]
+    b[1] = 'line 2 CHANGED'
+    b[198] = 'line 199 CHANGED'
+    const diff = computeUnifiedDiff('big.ts', a.join('\n'), b.join('\n'))
+    const lines = diff.split('\n')
+
+    // Byte-for-byte what `git diff -U3` produces for the same input.
+    expect(lines.filter((l) => l.startsWith('@@'))).toEqual([
+      '@@ -1,5 +1,5 @@',
+      '@@ -196,5 +196,5 @@',
+    ])
+    // The whole diff has to fit in the panel (maxLines=40) or the second edit
+    // is invisible in what the user approves.
+    expect(lines.length).toBeLessThan(20)
+    expect(lines.slice(0, 40).join('\n')).toContain('line 199 CHANGED')
+  })
+
+  it('keeps a short gap inline as context rather than splitting', () => {
+    const a = numbered(20)
+    const b = [...a]
+    b[4] = 'line 5 CHANGED'
+    b[9] = 'line 10 CHANGED' // 4 lines apart — under 2*context
+    const diff = computeUnifiedDiff('small.ts', a.join('\n'), b.join('\n'))
+    expect(diff.split('\n').filter((l) => l.startsWith('@@'))).toHaveLength(1)
+  })
+
+  it('diffs a 20k-line file in milliseconds (the LCS table was O(n*m) memory)', () => {
+    const a = numbered(20000).join('\n')
+    const b = a.replace('line 1\n', 'line 1 CHANGED\n')
+    const started = performance.now()
+    const diff = computeUnifiedDiff('huge.ts', a, b)
+    expect(performance.now() - started).toBeLessThan(1000)
+    expect(diff.split('\n').filter((l) => l.startsWith('@@'))).toHaveLength(1)
+  })
+
+  it('falls back to a whole-block replacement past the cell budget', () => {
+    const a = Array.from({ length: 3000 }, (_, i) => `a${i}`).join('\n')
+    const b = Array.from({ length: 3000 }, (_, i) => `b${i}`).join('\n')
+    const parsed = parseUnifiedDiff(computeUnifiedDiff('x.ts', a, b))
+    expect(parsed.removed).toBe(3000)
+    expect(parsed.added).toBe(3000)
+  })
+})

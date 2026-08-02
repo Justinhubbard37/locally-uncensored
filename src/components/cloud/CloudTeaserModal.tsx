@@ -10,7 +10,9 @@ import { X, Cloud, Sparkles, MonitorDown } from 'lucide-react'
 import { useUIStore, type CloudTeaserTarget } from '../../stores/uiStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { cloudModelById } from '../../stores/cloudCatalogStore'
-import { useCreateStore, LOCAL_LANE_OPS, type CloudOp } from '../../stores/createStore'
+import { useCreateStore, type CreateIntent } from '../../stores/createStore'
+import { isIntentAvailable } from '../create/experimental/intents'
+import { isMlxImageHost } from '../../api/mlx-image'
 
 interface TeaserCopy {
   title: string
@@ -69,8 +71,12 @@ export function CloudTeaserModal() {
   }
   // 2.5.8: the lanes that ALSO run locally get a "Try local" path — the sheet
   // stops being a pure upsell and becomes the fork between the two lanes.
+  // Ask the same rule the IntentBar renders from, not a static op list: on the
+  // Mac only MLX image/video run locally, so a list-based answer offered a
+  // "Try local" button for lanes the bar doesn't even show (MAC-2).
   const localLane =
-    target?.surface === 'intent' && LOCAL_LANE_OPS.has(target.intent as CloudOp)
+    target?.surface === 'intent' &&
+    isIntentAvailable(target.intent as CreateIntent, 'local', isMlxImageHost())
       ? target.intent
       : null
   const copy: TeaserCopy | null =

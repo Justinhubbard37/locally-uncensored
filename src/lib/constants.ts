@@ -16,7 +16,6 @@ export const DEFAULT_SETTINGS: Settings = {
   onboardingDone: false,
   // Global Local/Cloud switch (2.5.7) — local is and stays the default.
   appMode: 'local',
-  cloudOnboardingSeen: false,
   // Cloud teasers in Local mode (2.5.8) — on by default, one-click off.
   cloudTeasersEnabled: true,
   personasEnabled: true,
@@ -49,6 +48,16 @@ export const DEFAULT_SETTINGS: Settings = {
   // Bug AA v2.5.0 — Ollama num_ctx override. 0 = use Ollama default (2048
   // on most builds). Users with RAG / long chats can bump this up.
   contextWindowOverride: 0,
+  builtinEngine: {
+    ctx: 8192,
+    flashAttn: 'auto',
+    cacheTypeK: 'f16',
+    cacheTypeV: 'f16',
+    threads: -1,
+    gpuLayers: -1,
+    mlock: false,
+    noMmap: false,
+  },
   // Bug BB v2.5.0 — GPU picker. "auto" + empty indices = no env-var,
   // runtime picks default. User sets these via Settings → Hardware.
   gpuVendor: 'auto',

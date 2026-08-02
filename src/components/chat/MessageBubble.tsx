@@ -3,8 +3,9 @@ import { User, Copy, Check, Pencil, RefreshCw, X, Wrench, Trash2 } from 'lucide-
 import { useState, useRef, useEffect, useMemo } from 'react'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ThinkingBlock } from './ThinkingBlock'
-import { ToolCallBlock } from './ToolCallBlock'
+import { ToolCallBand } from './ToolCallBand'
 import { ReflectionBlock } from './ReflectionBlock'
+import { groupAgentBlocks } from '../../lib/tool-call-groups'
 import { VramSwitchCard } from './VramSwitchCard'
 import { SpeakerButton } from './SpeakerButton'
 import { ChatArtifactCard } from './ChatArtifactCard'
@@ -198,26 +199,32 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
             bottom — every provider, every model. */}
         {!isUser && message.agentBlocks && message.agentBlocks.length > 0 && (
           <>
-            {[...message.agentBlocks]
-              .filter(
-                (b) =>
-                  b.phase === 'tool_call' ||
-                  b.phase === 'reflection' ||
-                  (b.phase === 'answer' && b.content.trim()),
-              )
-              .sort((a, b) => a.timestamp - b.timestamp)
-              .map((block) => {
-                if (block.phase === 'tool_call' && block.toolCall) {
-                  const isPending = !!pendingApprovalId && block.toolCall.id === pendingApprovalId
+            {groupAgentBlocks(
+              [...message.agentBlocks]
+                .filter(
+                  (b) =>
+                    b.phase === 'tool_call' ||
+                    b.phase === 'reflection' ||
+                    (b.phase === 'answer' && b.content.trim()),
+                )
+                .sort((a, b) => a.timestamp - b.timestamp),
+            )
+              .map((group) => {
+                // Consecutive tool calls render as ONE band that morphs from
+                // tool to tool and collapses to "N steps" when done (David
+                // 2026-07-31) instead of a chip per call.
+                if (group.kind === 'tools') {
                   return (
-                    <ToolCallBlock
-                      key={block.id}
-                      toolCall={block.toolCall}
-                      onApprove={isPending ? onApprove : undefined}
-                      onReject={isPending ? onReject : undefined}
+                    <ToolCallBand
+                      key={group.blocks[0].id}
+                      calls={group.calls}
+                      pendingApprovalId={pendingApprovalId}
+                      onApprove={onApprove}
+                      onReject={onReject}
                     />
                   )
                 }
+                const block = group.block
                 if (block.phase === 'reflection') {
                   return <ReflectionBlock key={block.id} content={block.content} />
                 }

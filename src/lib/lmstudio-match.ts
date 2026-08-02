@@ -30,10 +30,21 @@ export interface InstalledModelLike {
 // q<n>… / iq<n>… / f16 / f32 / bf16, delimited by @ . _ or -.
 const QUANT_TAIL = /[@._-]((?:ud-)?(?:iq\d|q\d|f16|f32|bf16)[a-z0-9_]*)$/i
 
+// gguf-split shard suffix ("-00001-of-00003"). Stripped during
+// normalisation: a split model's identity and quant live in the stem BEFORE
+// this tail, and the Rust-side listing collapses a set to that stem too.
+const SHARD_TAIL = /-\d{4,5}-of-\d{4,5}$/
+
+/** Lower-cased last path segment without `.gguf` or a shard suffix. */
+function normalBase(s: string): string {
+  return (s.toLowerCase().split(/[\\/]/).pop() || '')
+    .replace(/\.gguf$/, '')
+    .replace(SHARD_TAIL, '')
+}
+
 /** The quant token of a model id/filename (compacted, e.g. "q4km"), or null. */
 export function extractQuant(s: string): string | null {
-  const base = (s.toLowerCase().split(/[\\/]/).pop() || '').replace(/\.gguf$/, '')
-  const m = base.match(QUANT_TAIL)
+  const m = normalBase(s).match(QUANT_TAIL)
   return m ? m[1].replace(/[^a-z0-9]/g, '') : null
 }
 
@@ -46,8 +57,7 @@ export function extractQuant(s: string): string | null {
  * genuinely different finetunes never collapse together.
  */
 export function modelIdentity(s: string): string {
-  return (s.toLowerCase().split(/[\\/]/).pop() || '')
-    .replace(/\.gguf$/, '')
+  return normalBase(s)
     .replace(QUANT_TAIL, '')
     .replace(/[._-](instruct|it|chat|hf)$/i, '')
     .replace(/[^a-z0-9]/g, '')
@@ -64,7 +74,7 @@ export function matchesLmStudioInstalled(
   installed: InstalledModelLike[],
 ): boolean {
   if (!filename) return false
-  const wantBase = filename.toLowerCase().replace(/\.gguf$/, '')
+  const wantBase = normalBase(filename)
   const wantId = modelIdentity(filename)
   const wantQuant = extractQuant(filename)
   const lms = installed.filter((m) => {
@@ -77,7 +87,9 @@ export function matchesLmStudioInstalled(
       .filter(Boolean)
       .map((s) => String(s).toLowerCase())
     for (const c of candidates) {
-      const cBase = c.replace(/\.gguf$/, '')
+      // Keep any path prefix for the `/`-suffix check, but normalise the
+      // basename the same way as `wantBase` (drop .gguf and shard tails).
+      const cBase = c.replace(/\.gguf$/, '').replace(SHARD_TAIL, '')
       // (1) exact / path-suffix — full basename ids, already carry the quant
       if (cBase === wantBase || cBase.endsWith(`/${wantBase}`) || cBase.endsWith(`\\${wantBase}`)) {
         return true

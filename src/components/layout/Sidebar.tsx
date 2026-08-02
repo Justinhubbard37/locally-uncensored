@@ -31,6 +31,11 @@ export function Sidebar() {
   const [countdown, setCountdown] = useState('')
   const [dispatchPicker, setDispatchPicker] = useState(false)
   const [qrModalOpen, setQrModalOpen] = useState(false)
+  // Right-click menu on a conversation row. sweenscapehub searched the whole
+  // app and right-clicked the chats before asking in Discord how to delete one
+  // (2026-07-30): the buttons existed, but at 10 px and only on hover, and the
+  // gesture everyone tries first did nothing at all.
+  const [rowMenu, setRowMenu] = useState<{ id: string; x: number; y: number } | null>(null)
 
   const isCodingMode = chatMode === 'codex'
   const isRemoteMode = chatMode === 'remote'
@@ -182,6 +187,12 @@ export function Sidebar() {
   useEffect(() => {
     if (qrVisible && dispatchedMessageCount > 0) hideQr()
   }, [qrVisible, dispatchedMessageCount, hideQr])
+  useEffect(() => {
+    if (!rowMenu) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setRowMenu(null) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [rowMenu])
   // While the QR is visible, poll the connected-device list often so we
   // auto-hide it the moment the user's phone authenticates.
   useEffect(() => {
@@ -418,6 +429,10 @@ export function Sidebar() {
                   setActiveConversation(conv.id)
                   setView('chat')
                 }}
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  setRowMenu({ id: conv.id, x: e.clientX, y: e.clientY })
+                }}
               >
                 <div className="flex-1 min-w-0">
                   {editingId === conv.id ? (
@@ -458,18 +473,22 @@ export function Sidebar() {
                         <QrCode size={13} />
                       </button>
                     )}
-                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
                       <button
                         onClick={(e) => { e.stopPropagation(); setEditingId(conv.id); setEditTitle(conv.title) }}
-                        className="p-0.5 rounded hover:bg-white/10 text-gray-500 hover:text-gray-300"
+                        title="Rename chat"
+                        aria-label="Rename chat"
+                        className="p-1 rounded hover:bg-white/10 text-gray-500 hover:text-gray-300"
                       >
-                        <Edit3 size={10} />
+                        <Edit3 size={13} />
                       </button>
                       <button
                         onClick={(e) => { e.stopPropagation(); deleteConversation(conv.id) }}
-                        className="p-0.5 rounded hover:bg-red-500/20 text-gray-500 hover:text-red-400"
+                        title="Delete chat"
+                        aria-label="Delete chat"
+                        className="p-1 rounded hover:bg-red-500/20 text-gray-500 hover:text-red-400"
                       >
-                        <Trash2 size={10} />
+                        <Trash2 size={13} />
                       </button>
                     </div>
                   </div>
@@ -562,6 +581,47 @@ export function Sidebar() {
             )}
           </div>
         </motion.aside>
+      )}
+
+      {/* Right-click menu for a conversation row. The hover buttons stay, this
+          is the gesture people reach for first. */}
+      {rowMenu && (
+        <div
+          key="row-menu"
+          className="fixed inset-0 z-[110]"
+          onClick={() => setRowMenu(null)}
+          onContextMenu={(e) => { e.preventDefault(); setRowMenu(null) }}
+        >
+          <div
+            role="menu"
+            aria-label="Chat actions"
+            className="absolute min-w-[9rem] py-1 rounded-md bg-white dark:bg-[#141414] border border-gray-200 dark:border-white/10 shadow-lg text-[0.7rem]"
+            style={{ left: Math.min(rowMenu.x, window.innerWidth - 160), top: Math.min(rowMenu.y, window.innerHeight - 80) }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              role="menuitem"
+              onClick={() => {
+                const conv = conversations.find((c) => c.id === rowMenu.id)
+                setEditingId(rowMenu.id)
+                setEditTitle(conv?.title ?? '')
+                setRowMenu(null)
+              }}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/[0.06]"
+            >
+              <Edit3 size={12} />
+              <span>Rename</span>
+            </button>
+            <button
+              role="menuitem"
+              onClick={() => { deleteConversation(rowMenu.id); setRowMenu(null) }}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-red-500 hover:bg-red-500/10"
+            >
+              <Trash2 size={12} />
+              <span>Delete chat</span>
+            </button>
+          </div>
+        </div>
       )}
 
       {/* QR Modal — large QR + passcode + URL, opened from the LIVE panel */}

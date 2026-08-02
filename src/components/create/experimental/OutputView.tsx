@@ -1,7 +1,8 @@
 import { motion } from 'framer-motion'
 import { Cpu, Sparkles, ImageDown, Maximize2, Download, Wand2, MonitorOff, AudioLines } from 'lucide-react'
 import { useCreateStore, type GalleryItem, type ProgressPhase } from '../../../stores/createStore'
-import { downloadComfyFile, isTauri } from '../../../api/backend'
+import { backendCall, downloadComfyFile, isTauri } from '../../../api/backend'
+import { isMlxImageHost } from '../../../api/mlx-image'
 import { refreshResultUrl } from '../../../api/cloud/jobs'
 import { markGalleryItemAvailable } from './galleryUrl'
 import { useComfyMedia } from './useComfyMedia'
@@ -81,11 +82,62 @@ function extFor(contentType: string, kind: 'image' | 'video' | 'audio'): string 
 // after the last read); dataUrl items decode in place. Tauri gets the native
 // Save-As dialog (WebView2 blob-anchors are unreliable); failures surface via
 // setError instead of a silent no-op.
+/** Hand bytes to the user. Tauri gets the native Save-As dialog (WebView2
+ *  blob-anchors are unreliable); the browser build gets an anchor click. */
+async function saveBytes(bytes: Uint8Array, name: string, ext: string): Promise<void> {
+  if (!isTauri()) {
+    const blobUrl = URL.createObjectURL(new Blob([bytes as BlobPart]))
+    const a = document.createElement('a')
+    a.href = blobUrl
+    a.download = name
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(blobUrl)
+    return
+  }
+  const { invoke } = await import('@tauri-apps/api/core')
+  // Returns the chosen path, or null if the user cancelled — nothing to do then.
+  await invoke('save_binary_file_dialog', {
+    bytes: Array.from(bytes),
+    defaultName: name,
+    extension: ext,
+    extLabel: ext.toUpperCase(),
+  })
+}
+
 async function downloadGalleryItem(item: GalleryItem): Promise<void> {
+  // A local MLX render (Mac) carries BOTH a filename and a real file on disk.
+  // The filename is ours, not a ComfyUI output name — routing on its mere
+  // presence sent every Mac render into the ComfyUI proxy below, which cannot
+  // answer here, and downloadComfyFile swallows the failure. Disk first.
+  if (item.localPath) {
+    try {
+      const b64 = await backendCall<string>('read_media_file', { path: item.localPath })
+      const binary = atob(b64)
+      const bytes = new Uint8Array(binary.length)
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+      const ext = item.localPath.toLowerCase().endsWith('.mp4') ? 'mp4' : 'png'
+      await saveBytes(bytes, `lu-${item.id}.${ext}`, ext)
+    } catch (err) {
+      useCreateStore
+        .getState()
+        .setError(`Download failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    return
+  }
   if (item.filename && item.unavailable) {
     // The item's media already failed to load — the ComfyUI fetch would only
     // fail again (and downloadComfyFile swallows its errors). Be honest.
-    useCreateStore.getState().setError('Download needs the local engine. Start it and try again.')
+    // Only reachable for a ComfyUI-backed item. On a Mac that can only be a
+    // pre-2.6.0 leftover whose file was never written — there is no engine to
+    // start there, so "start it" would be the last piece of advice a Mac user
+    // could still be given about software they never had.
+    useCreateStore.getState().setError(
+      isMlxImageHost()
+        ? 'This render is not on disk any more, so there is nothing to save.'
+        : 'Download needs the local engine. Start it and try again.',
+    )
     return
   }
   try {
@@ -101,27 +153,8 @@ async function downloadGalleryItem(item: GalleryItem): Promise<void> {
     const res = await fetch(url)
     if (!res.ok) throw new Error(`fetch failed (${res.status})`)
     const ext = extFor(res.headers.get('content-type') ?? '', item.type)
-    const name = `lu-${item.id}.${ext}`
     const bytes = new Uint8Array(await res.arrayBuffer())
-    if (!isTauri()) {
-      const blobUrl = URL.createObjectURL(new Blob([bytes]))
-      const a = document.createElement('a')
-      a.href = blobUrl
-      a.download = name
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(blobUrl)
-      return
-    }
-    const { invoke } = await import('@tauri-apps/api/core')
-    // Returns the chosen path, or null if the user cancelled — nothing to do then.
-    await invoke('save_binary_file_dialog', {
-      bytes: Array.from(bytes),
-      defaultName: name,
-      extension: ext,
-      extLabel: ext.toUpperCase(),
-    })
+    await saveBytes(bytes, `lu-${item.id}.${ext}`, ext)
   } catch (err) {
     useCreateStore
       .getState()

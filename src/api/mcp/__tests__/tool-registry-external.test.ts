@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { ToolRegistry } from '../tool-registry'
-import { resolveCommandForPlatform } from '../external-client'
+import { commandCandidatesForPlatform } from '../external-client'
 import type { MCPToolDefinition, PermissionMap } from '../types'
 
 const fullPerms: PermissionMap = {
@@ -130,35 +130,43 @@ describe('ToolRegistry — getPermissionLevelWithOverrides (Phase 12)', () => {
   })
 })
 
-describe('external-client — resolveCommandForPlatform', () => {
-  it('appends .cmd for known Node-based commands on Windows', () => {
-    expect(resolveCommandForPlatform('npx', 'Win32')).toBe('npx.cmd')
-    expect(resolveCommandForPlatform('npm', 'Win32')).toBe('npm.cmd')
-    expect(resolveCommandForPlatform('pnpm', 'Win32')).toBe('pnpm.cmd')
-    expect(resolveCommandForPlatform('yarn', 'Win32')).toBe('yarn.cmd')
-    expect(resolveCommandForPlatform('bun', 'Win32')).toBe('bun.cmd')
-    expect(resolveCommandForPlatform('node', 'Win32')).toBe('node.cmd')
-    expect(resolveCommandForPlatform('deno', 'Win32')).toBe('deno.cmd')
+describe('external-client — commandCandidatesForPlatform', () => {
+  it('tries the .cmd shim first for npm-family launchers on Windows', () => {
+    expect(commandCandidatesForPlatform('npx', 'Win32')).toEqual(['npx.cmd', 'npx'])
+    expect(commandCandidatesForPlatform('npm', 'Win32')).toEqual(['npm.cmd', 'npm'])
+    expect(commandCandidatesForPlatform('pnpm', 'Win32')).toEqual(['pnpm.cmd', 'pnpm'])
+    expect(commandCandidatesForPlatform('yarn', 'Win32')).toEqual(['yarn.cmd', 'yarn'])
   })
 
-  it('leaves commands with extensions unchanged on Windows', () => {
-    expect(resolveCommandForPlatform('npx.cmd', 'Win32')).toBe('npx.cmd')
-    expect(resolveCommandForPlatform('mcp-server.exe', 'Win32')).toBe('mcp-server.exe')
+  it('tries the bare name first for exe-shipping runtimes on Windows', () => {
+    // node/deno/native bun install as .exe; node.cmd does not even exist in a
+    // standard Node install, so .cmd-first would break them outright.
+    expect(commandCandidatesForPlatform('node', 'Win32')).toEqual(['node', 'node.cmd'])
+    expect(commandCandidatesForPlatform('deno', 'Win32')).toEqual(['deno', 'deno.cmd'])
+    expect(commandCandidatesForPlatform('bun', 'Win32')).toEqual(['bun', 'bun.cmd'])
   })
 
-  it('leaves absolute / path-like commands unchanged on Windows', () => {
-    expect(resolveCommandForPlatform('C:\\Program Files\\node\\node.exe', 'Win32')).toBe(
-      'C:\\Program Files\\node\\node.exe'
-    )
-    expect(resolveCommandForPlatform('./bin/server', 'Win32')).toBe('./bin/server')
+  it('returns commands with extensions as the only candidate on Windows', () => {
+    expect(commandCandidatesForPlatform('npx.cmd', 'Win32')).toEqual(['npx.cmd'])
+    expect(commandCandidatesForPlatform('mcp-server.exe', 'Win32')).toEqual(['mcp-server.exe'])
   })
 
-  it('leaves unknown commands unchanged on Windows', () => {
-    expect(resolveCommandForPlatform('some-custom-mcp', 'Win32')).toBe('some-custom-mcp')
+  it('returns absolute / path-like commands as the only candidate on Windows', () => {
+    expect(commandCandidatesForPlatform('C:\\Program Files\\node\\node.exe', 'Win32')).toEqual([
+      'C:\\Program Files\\node\\node.exe',
+    ])
+    expect(commandCandidatesForPlatform('./bin/server', 'Win32')).toEqual(['./bin/server'])
   })
 
-  it('returns command unchanged on non-Windows platforms', () => {
-    expect(resolveCommandForPlatform('npx', 'MacIntel')).toBe('npx')
-    expect(resolveCommandForPlatform('npx', 'Linux x86_64')).toBe('npx')
+  it('offers the .cmd fallback for unknown commands on Windows', () => {
+    expect(commandCandidatesForPlatform('some-custom-mcp', 'Win32')).toEqual([
+      'some-custom-mcp',
+      'some-custom-mcp.cmd',
+    ])
+  })
+
+  it('returns the command alone on non-Windows platforms', () => {
+    expect(commandCandidatesForPlatform('npx', 'MacIntel')).toEqual(['npx'])
+    expect(commandCandidatesForPlatform('npx', 'Linux x86_64')).toEqual(['npx'])
   })
 })

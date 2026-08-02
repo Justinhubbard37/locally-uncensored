@@ -129,49 +129,82 @@ export async function checkBundlesInstalled(bundles: ModelBundle[]): Promise<Rec
     for (const b of bundles) result[b.name] = false
   }
 
+  // ComfyUI's own model lists — fetched once, used twice: to CONFIRM the
+  // size-check hits (a file the RUNNING ComfyUI cannot see must not count as
+  // installed) and as the fuzzy variant fallback further down.
+  // Issue #51 (adhney): ComfyUI lists partially-downloaded files too, so the
+  // fuzzy fallback would mark an incomplete download as INSTALLED. Drop any
+  // file check_model_sizes confirms is partial before matching.
+  let comfyLists: Record<string, string[]> | null = null
+  try {
+    const [rawCheckpoints, rawDiffModels, rawVaes, rawClips] = await Promise.all([
+      getCheckpoints(), getDiffusionModels(), getVAEModels(), getCLIPModels(),
+    ])
+    const [checkpoints, diffModels, vaes, clips] = await Promise.all([
+      filterPartialFiles(rawCheckpoints).then(s => Array.from(s)),
+      filterPartialFiles(rawDiffModels).then(s => Array.from(s)),
+      filterPartialFiles(rawVaes).then(s => Array.from(s)),
+      filterPartialFiles(rawClips).then(s => Array.from(s)),
+    ])
+    comfyLists = { checkpoints, diffusion_models: diffModels, vae: vaes, text_encoders: clips }
+  } catch {
+    comfyLists = null // ComfyUI not reachable · size-check verdicts stand
+  }
+
+  // pnwpdr4519 (Discord 2026-07-27): the size check looks at the directory LU
+  // resolves, but the RUNNING ComfyUI may scan a different install (second
+  // copy, moved install). "Installed" from the disk check alone then locks the
+  // user out: the Create picker (fed by ComfyUI's enums) shows nothing AND
+  // re-downloading is refused. When ComfyUI is reachable, a bundle only counts
+  // as installed if ComfyUI can actually see at least one of its listed files.
+  if (comfyLists) {
+    const visible = new Set<string>()
+    for (const arr of Object.values(comfyLists)) for (const n of arr) visible.add(normalizeModelBase(n))
+    for (const bundle of bundles) {
+      if (!result[bundle.name]) continue
+      const enumFiles = bundle.files.filter(f => f.filename && f.subfolder && ENUM_SUBFOLDERS.has(f.subfolder))
+      if (enumFiles.length === 0) continue
+      if (!enumFiles.some(f => visible.has(normalizeModelBase(f.filename!)))) {
+        result[bundle.name] = false
+        log.warn(`[discover] ${bundle.name}: files on disk but invisible to the running ComfyUI · not counting as installed`)
+      }
+    }
+  }
+
   // Fallback: for bundles not detected by exact filename, check ComfyUI's model lists
   // This catches variant files (e.g. fp8 version of a model with different filename)
   // STRICT: only exact base-name match · no substring matching (caused false positives
   // where z_image_turbo matched z_image_base, or gemma-4-31b matched gemma-4-e4b)
   const undetected = bundles.filter(b => !result[b.name])
-  if (undetected.length > 0) {
-    try {
-      const [rawCheckpoints, rawDiffModels, rawVaes, rawClips] = await Promise.all([
-        getCheckpoints(), getDiffusionModels(), getVAEModels(), getCLIPModels(),
-      ])
-      // Issue #51 (adhney): ComfyUI lists partially-downloaded files too, so the
-      // fuzzy fallback below would mark an incomplete download as INSTALLED. Drop
-      // any file check_model_sizes confirms is partial before matching.
-      const [checkpoints, diffModels, vaes, clips] = await Promise.all([
-        filterPartialFiles(rawCheckpoints).then(s => Array.from(s)),
-        filterPartialFiles(rawDiffModels).then(s => Array.from(s)),
-        filterPartialFiles(rawVaes).then(s => Array.from(s)),
-        filterPartialFiles(rawClips).then(s => Array.from(s)),
-      ])
-      const modelsBySubfolder: Record<string, string[]> = {
-        checkpoints, diffusion_models: diffModels, vae: vaes, text_encoders: clips,
-      }
-      for (const bundle of undetected) {
-        const allFound = bundle.files.every(f => {
-          if (!f.filename || !f.subfolder) return true
-          const models = modelsBySubfolder[f.subfolder] || []
-          // Strip extension and common quant suffixes for fuzzy matching
-          const base = f.filename.replace(/\.[^.]+$/, '').toLowerCase()
-            .replace(/[-_](fp4|fp8|fp16|bf16|e4m3fn|scaled|fp8_e4m3fn_scaled)$/g, '')
-          return models.some(m => {
-            const mBase = m.replace(/\.[^.]+$/, '').toLowerCase()
-              .replace(/[-_](fp4|fp8|fp16|bf16|e4m3fn|scaled|fp8_e4m3fn_scaled)$/g, '')
-            return mBase === base
-          })
-        })
-        if (allFound) result[bundle.name] = true
-      }
-    } catch {
-      // ComfyUI not reachable · keep exact-match results
+  if (undetected.length > 0 && comfyLists) {
+    const modelsBySubfolder = comfyLists
+    for (const bundle of undetected) {
+      const allFound = bundle.files.every(f => {
+        if (!f.filename || !f.subfolder) return true
+        const models = modelsBySubfolder[f.subfolder] || []
+        const base = normalizeModelBase(f.filename)
+        return models.some(m => normalizeModelBase(m) === base)
+      })
+      if (allFound) result[bundle.name] = true
     }
   }
 
   return result
+}
+
+/** Subfolders whose contents ComfyUI enumerates via object_info — the only
+ *  ones the visibility check can reason about (loras/upscale etc. stay on the
+ *  pure size check). */
+const ENUM_SUBFOLDERS = new Set(['checkpoints', 'diffusion_models', 'vae', 'text_encoders'])
+
+/** Base identity of a model file: basename only (ComfyUI enums can carry
+ *  nested-subdir prefixes), lowercase, extension and common quant suffixes
+ *  stripped. Shared by the installed-detection visibility check and the fuzzy
+ *  variant fallback so both agree on what "the same model" means. */
+export function normalizeModelBase(name: string): string {
+  const base = name.split(/[\\/]/).pop() ?? name
+  return base.replace(/\.[^.]+$/, '').toLowerCase()
+    .replace(/[-_](fp4|fp8|fp16|bf16|e4m3fn|scaled|fp8_e4m3fn_scaled)$/g, '')
 }
 
 /** #72: the backend used to resolve a failed `git pull` as
@@ -222,12 +255,36 @@ export async function installBundleComplete(bundle: ModelBundle): Promise<void> 
     }
   } catch { /* can't check · download everything */ }
 
+  // Lazily fetched ComfyUI visibility set: "already installed" is only true
+  // when the RUNNING ComfyUI lists the file. A file that exists on disk but is
+  // invisible to ComfyUI means LU and ComfyUI look at different model folders
+  // (pnwpdr4519 Discord 2026-07-27) — silently skipping it as installed left
+  // the user with no picker entry AND no way to re-download.
+  let visibleBases: Set<string> | null | undefined
+  const comfyCanSee = async (filename: string): Promise<boolean | null> => {
+    if (visibleBases === undefined) {
+      try {
+        const lists = await Promise.all([getCheckpoints(), getDiffusionModels(), getVAEModels(), getCLIPModels()])
+        visibleBases = new Set(lists.flat().map(normalizeModelBase))
+      } catch {
+        visibleBases = null // ComfyUI unreachable · cannot judge visibility
+      }
+    }
+    return visibleBases ? visibleBases.has(normalizeModelBase(filename)) : null
+  }
+
   // Step 1: Start downloads only for files NOT already installed
   for (const file of bundle.files) {
     if (!file.downloadUrl || !file.filename || !file.subfolder) continue
     if (installedFiles.has(file.filename)) {
-      log.info(`[discover] Skipping ${file.filename} · already installed`)
-      window.dispatchEvent(new CustomEvent('comfyui-download-exists', { detail: { filename: file.filename } }))
+      const visible = ENUM_SUBFOLDERS.has(file.subfolder) ? await comfyCanSee(file.filename) : null
+      if (visible === false) {
+        log.warn(`[discover] ${file.filename} exists on disk but the running ComfyUI does not list it`)
+        window.dispatchEvent(new CustomEvent('comfyui-model-invisible', { detail: { filename: file.filename } }))
+      } else {
+        log.info(`[discover] Skipping ${file.filename} · already installed`)
+        window.dispatchEvent(new CustomEvent('comfyui-download-exists', { detail: { filename: file.filename } }))
+      }
       continue
     }
     try {
@@ -501,7 +558,16 @@ export function getUncensoredTextModels(): DiscoverModel[] {
     { name: 'Agents A1 Abliterated', description: 'huihui abliterated Agents-A1 · uncensored 35B MoE (3B active) agent model, a rare combo. Apache-2.0.', pulls: '10K+', tags: ['35B MoE', 'Q4_K', '20 GB'], updated: 'New', agent: true, released: '2026-07', downloadUrl: HF('huihui-ai/Huihui-Agents-A1-abliterated-GGUF', 'Agents-A1-abliterated-Q4_K.gguf'), filename: 'Agents-A1-abliterated-Q4_K.gguf', sizeGB: 20 },
     { name: 'Rocinante XL 16B', description: 'TheDrummer Rocinante XL · roleplay / creative-writing specialist, successor to the classic Rocinante.', pulls: '6K+', tags: ['16B', 'Q4_K_M', '9.1 GB', 'RP'], updated: 'New', released: '2026-04', downloadUrl: HF('TheDrummer/Rocinante-XL-16B-v1-GGUF', 'Rocinante-XL-16B-v1a-Q4_K_M.gguf'), filename: 'Rocinante-XL-16B-v1a-Q4_K_M.gguf', sizeGB: 9.1 },
     { name: 'Cydonia 24B v4.3', description: 'TheDrummer Cydonia · the de-facto standard roleplay finetune of Mistral Small 24B.', pulls: '50K+', tags: ['24B', 'Q4_K_M', '13.4 GB', 'RP'], updated: 'Popular', released: '2025-12', downloadUrl: HF('TheDrummer/Cydonia-24B-v4.3-GGUF', 'Cydonia-24B-v4zg-Q4_K_M.gguf'), filename: 'Cydonia-24B-v4zg-Q4_K_M.gguf', sizeGB: 13.4 },
-    { name: 'DeepSeek V4 Flash Abliterated', description: 'huihui abliterated DeepSeek V4-Flash · 284B MoE (13B active), the most-downloaded uncensored model of 2026 so far (600K+). Single 165 GB file. MIT.', pulls: '614K+', tags: ['284B MoE', 'Q4_K', '154 GB'], updated: 'Hot', agent: true, released: '2026-05', downloadUrl: HF('huihui-ai/Huihui-DeepSeek-V4-Flash-abliterated-ds4-GGUF', 'Huihui-DeepSeek-V4-Flash-BF16-abliterated-ds4-Q4_K.gguf'), filename: 'Huihui-DeepSeek-V4-Flash-BF16-abliterated-ds4-Q4_K.gguf', sizeGB: 154 },
+    // 2026-08-01: swapped the ds4 single file for huihui's plain llama.cpp
+    // repo. Their "ds4" files are built for the DwarfStar engine first and
+    // "may work with other inference engines or not" (their README); a 154 GB
+    // download that might not load is the most expensive catalog bug we can
+    // ship. Base is still the V4-Flash preview: no GGUF uncensor of 0731
+    // exists yet (checked 2026-08-01, one day after the 0731 drop; only FP8
+    // and MLX abliterations are out). Watchlist: swap to the 0731 uncensor
+    // the day huihui or DavidAU ships one.
+    { name: 'DeepSeek V4 Flash Abliterated IQ1', group: 'DeepSeek V4 Flash Abliterated', description: 'huihui abliterated DeepSeek V4-Flash · 284B MoE (13B active), the most-downloaded uncensored model of 2026 so far. Smallest quant, single 87 GB file, runs on 96 GB RAM rigs. MIT.', pulls: '115K+', tags: ['284B MoE', 'UD-IQ1_M', '87 GB'], updated: 'Hot', agent: true, released: '2026-05', downloadUrl: HF('huihui-ai/Huihui-DeepSeek-V4-Flash-abliterated-GGUF', 'DeepSeek-V4-Flash-UD-IQ1_M.gguf'), filename: 'DeepSeek-V4-Flash-UD-IQ1_M.gguf', sizeGB: 86.8 },
+    { name: 'DeepSeek V4 Flash Abliterated Q3', group: 'DeepSeek V4 Flash Abliterated', description: 'huihui abliterated DeepSeek V4-Flash · Q3_K_S, higher fidelity. Single 122 GB file for big-RAM setups. MIT.', pulls: '115K+', tags: ['284B MoE', 'Q3_K_S', '122 GB'], updated: 'Hot', agent: true, released: '2026-05', downloadUrl: HF('huihui-ai/Huihui-DeepSeek-V4-Flash-abliterated-GGUF', 'ggml-model-Q3_K_S.gguf'), filename: 'ggml-model-Q3_K_S.gguf', sizeGB: 122 },
     { name: 'GLM 5.2 Abliterated', description: 'huihui abliterated GLM 5.2 · 744B MoE (40B active) uncensored frontier coder. Multi-part download, ~356 GB. MIT.', pulls: '13K+', tags: ['744B MoE', 'UD-Q3_K_M', '356 GB', 'Multi-part'], updated: 'New', agent: true, released: '2026-06', downloadUrl: HF('huihui-ai/Huihui-GLM-5.2-abliterated-GGUF', 'UD-Q3_K_M/GLM-5.2-UD-Q3_K_M-00001-of-00009.gguf'), filename: 'GLM-5.2-UD-Q3_K_M-00001-of-00009.gguf', sizeGB: 356 },
   ])
 }
@@ -602,7 +668,14 @@ export function getMainstreamTextModels(): DiscoverModel[] {
     { name: 'Qwen 3.5 9B DeepSeek V4 Distill', description: 'DeepSeek V4-Flash reasoning distilled into Qwen 3.5 9B · the "R1 moment" for V4, in 6 GB. Apache-2.0.', pulls: '118K+', tags: ['9B', 'Q4_K_M', '5.3 GB', 'Reasoning'], updated: 'Hot', agent: true, released: '2026-05', downloadUrl: HF('Jackrong/Qwen3.5-9B-DeepSeek-V4-Flash-GGUF', 'Qwen3.5-9B-DeepSeek-V4-Flash-Q4_K_M.gguf'), filename: 'Qwen3.5-9B-DeepSeek-V4-Flash-Q4_K_M.gguf', sizeGB: 5.3 },
     { name: 'Nemotron 3 Nano Omni 30B', description: 'NVIDIA Nemotron 3 Omni · 30B MoE (3B active) that reasons over text, images and audio. The only local omni model in its class.', pulls: '13K+', tags: ['30B MoE', 'UD-Q4_K_XL', '22.3 GB'], updated: 'New', agent: true, released: '2026-05', downloadUrl: HF('unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF', 'NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf'), filename: 'NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf', sizeGB: 22.3 },
     { name: 'Mistral Medium 3.5 128B', description: 'Mistral Medium 3.5 · frontier-class 128B dense drop with reasoning-effort control. Custom Mistral license (check terms for commercial use).', pulls: '222K+', tags: ['128B', 'UD-Q2_K_XL', '45 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('unsloth/Mistral-Medium-3.5-128B-GGUF', 'Mistral-Medium-3.5-128B-UD-Q2_K_XL.gguf'), filename: 'Mistral-Medium-3.5-128B-UD-Q2_K_XL.gguf', sizeGB: 45 },
-    { name: 'DeepSeek V4 Flash', description: 'DeepSeek V4-Flash · 284B MoE (13B active), 1M context, MIT. Multi-part download, needs ~145 GB disk and serious RAM.', pulls: '243K+', tags: ['284B MoE', 'UD-Q4_K_XL', '144 GB', 'Multi-part'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('unsloth/DeepSeek-V4-Flash-GGUF', 'UD-Q4_K_XL/DeepSeek-V4-Flash-UD-Q4_K_XL-00001-of-00005.gguf'), filename: 'DeepSeek-V4-Flash-UD-Q4_K_XL-00001-of-00005.gguf', sizeGB: 144 },
+    // 2026-08-01: 0731 replaces the April preview build. deepseek-ai calls
+    // 0731 the official V4-Flash release (beats V4-Pro Preview on agentic
+    // benchmarks at 13B active). Repos/paths/sizes HF-verified 2026-08-01;
+    // shards resolve at download time via resolveHfGgufFiles, llama.cpp
+    // merges the parts.
+    { name: 'DeepSeek V4 Flash 0731 IQ1', group: 'DeepSeek V4 Flash 0731', description: 'DeepSeek V4-Flash-0731 · the official V4-Flash release, sharper agentic tuning. 284B MoE (13B active), 1M context, MIT. Smallest quant, runs on 96 GB RAM rigs. Multi-part download.', pulls: '4K+', tags: ['284B MoE', 'UD-IQ1_S', '82.5 GB', 'Multi-part'], updated: 'Hot', agent: true, released: '2026-07', downloadUrl: HF('unsloth/DeepSeek-V4-Flash-0731-GGUF', 'UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00001-of-00003.gguf'), filename: 'DeepSeek-V4-Flash-0731-UD-IQ1_S-00001-of-00003.gguf', sizeGB: 82.5 },
+    { name: 'DeepSeek V4 Flash 0731 Q2', group: 'DeepSeek V4 Flash 0731', description: 'DeepSeek V4-Flash-0731 · Unsloth Dynamic Q2_K_XL, the quality/size sweet spot for this MoE. 1M context, MIT. Multi-part download.', pulls: '4K+', tags: ['284B MoE', 'UD-Q2_K_XL', '96.8 GB', 'Multi-part'], updated: 'Hot', agent: true, released: '2026-07', downloadUrl: HF('unsloth/DeepSeek-V4-Flash-0731-GGUF', 'UD-Q2_K_XL/DeepSeek-V4-Flash-0731-UD-Q2_K_XL-00001-of-00003.gguf'), filename: 'DeepSeek-V4-Flash-0731-UD-Q2_K_XL-00001-of-00003.gguf', sizeGB: 96.8 },
+    { name: 'DeepSeek V4 Flash 0731 Q4', group: 'DeepSeek V4 Flash 0731', description: 'DeepSeek V4-Flash-0731 · UD-Q4_K_XL full quality. Needs ~155 GB disk and serious RAM. 1M context, MIT. Multi-part download.', pulls: '4K+', tags: ['284B MoE', 'UD-Q4_K_XL', '155 GB', 'Multi-part'], updated: 'Hot', agent: true, released: '2026-07', downloadUrl: HF('unsloth/DeepSeek-V4-Flash-0731-GGUF', 'UD-Q4_K_XL/DeepSeek-V4-Flash-0731-UD-Q4_K_XL-00001-of-00005.gguf'), filename: 'DeepSeek-V4-Flash-0731-UD-Q4_K_XL-00001-of-00005.gguf', sizeGB: 155 },
     { name: 'Hunyuan 3 295B Q4', group: 'Hunyuan 3 295B', description: 'Tencent Hunyuan 3 · 295B MoE (21B active), Apache-2.0 without territorial limits. Needs a current llama.cpp / LM Studio build.', pulls: '20K+', tags: ['295B MoE', 'Q4_K_M', '170 GB'], updated: 'New', agent: true, released: '2026-07', downloadUrl: HF('AngelSlim/Hy3-GGUF', 'Hy3-Q4_K_M.gguf'), filename: 'Hy3-Q4_K_M.gguf', sizeGB: 170 },
     { name: 'Hunyuan 3 295B IQ1', group: 'Hunyuan 3 295B', description: 'Tencent Hunyuan 3 · 1 bit quant for 96 to 128 GB setups. Real quality tradeoff, but it runs. Apache-2.0.', pulls: '20K+', tags: ['295B MoE', 'IQ1_M', '83.3 GB'], updated: 'New', agent: true, released: '2026-07', downloadUrl: HF('AngelSlim/Hy3-GGUF', 'Hy3-IQ1_M.gguf'), filename: 'Hy3-IQ1_M.gguf', sizeGB: 83.3 },
     { name: 'GLM 5.2 744B MoE', description: 'ZhipuAI GLM 5.2 · 744B MoE (40B active), 1M context, MIT. The agentic-coding successor to GLM 5.1. Multi-part, ~304 GB.', pulls: '50K+', tags: ['744B MoE', 'UD-Q2_K_XL', '304 GB', 'Multi-part'], updated: 'Hot', agent: true, released: '2026-06', downloadUrl: HF('unsloth/GLM-5.2-GGUF', 'UD-Q2_K_XL/GLM-5.2-UD-Q2_K_XL-00001-of-00007.gguf'), filename: 'GLM-5.2-UD-Q2_K_XL-00001-of-00007.gguf', sizeGB: 304 },

@@ -23,7 +23,9 @@ interface UpdateState {
   totalBytes: number
   errorMessage: string | null
 
-  checkForUpdate: () => Promise<void>
+  /** `force` skips the 6h cooldown — for a user-triggered check, and for
+   *  the download path when the Update handle is missing. */
+  checkForUpdate: (force?: boolean) => Promise<void>
   downloadUpdate: () => Promise<void>
   installAndRestart: () => Promise<void>
   dismissUpdate: () => void
@@ -72,10 +74,10 @@ export const useUpdateStore = create<UpdateState>()(
       totalBytes: 0,
       errorMessage: null,
 
-      checkForUpdate: async () => {
+      checkForUpdate: async (force = false) => {
         const state = get()
         if (state.isChecking) return
-        if (state.lastChecked && Date.now() - state.lastChecked < CHECK_INTERVAL) return
+        if (!force && state.lastChecked && Date.now() - state.lastChecked < CHECK_INTERVAL) return
 
         set({ isChecking: true })
 
@@ -131,7 +133,23 @@ export const useUpdateStore = create<UpdateState>()(
       },
 
       downloadUpdate: async () => {
-        if (!_pendingUpdate) return
+        // The Update handle lives in this process only. `updateAvailable` is
+        // persisted, so after a relaunch — or when the startup check has not
+        // landed yet, or ran while offline — the badge offers a Download button
+        // with nothing behind it. This used to `return` silently: the user
+        // clicked and NOTHING happened, no spinner, no error. Re-check first
+        // (forced, or the 6h cooldown a failed check just armed would block
+        // it), and if the handle still is not there, say so.
+        if (!_pendingUpdate) {
+          await get().checkForUpdate(true)
+        }
+        if (!_pendingUpdate) {
+          set({
+            downloadStatus: 'error',
+            errorMessage: 'Could not reach the update server. Check your connection and try again.',
+          })
+          return
+        }
 
         set({ downloadStatus: 'downloading', downloadProgress: 0, downloadedBytes: 0, errorMessage: null })
         let downloaded = 0
@@ -163,7 +181,15 @@ export const useUpdateStore = create<UpdateState>()(
       },
 
       installAndRestart: async () => {
-        if (!_pendingUpdate) return
+        if (!_pendingUpdate) {
+          // Nothing was downloaded in THIS process — same dead-button problem
+          // as above, and here a re-check would not help.
+          set({
+            downloadStatus: 'error',
+            errorMessage: 'The downloaded update was lost when the app restarted. Download it again.',
+          })
+          return
+        }
 
         set({ downloadStatus: 'installing' })
 

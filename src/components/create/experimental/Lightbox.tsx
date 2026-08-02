@@ -58,7 +58,7 @@ export function Lightbox({ item, onClose }: { item: GalleryItem | null; onClose:
               title={
                 enhanceOk
                   ? 'Upscale this clip to 1080p on the cloud fleet'
-                  : 'Not enough credits left this month for a video enhance'
+                  : 'Not enough credits left this billing period for a video enhance'
               }
               className={cn(
                 'absolute top-4 right-16 h-9 px-3 flex items-center gap-1.5 rounded-lg text-[0.7rem] font-medium',

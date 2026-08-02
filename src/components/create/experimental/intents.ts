@@ -3,7 +3,7 @@ import {
   UserRound, Mic, Music, FastForward, PersonStanding,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import type { CreateIntent } from '../../../stores/createStore'
+import type { CreateBackend, CreateIntent } from '../../../stores/createStore'
 
 export interface IntentMeta {
   id: CreateIntent
@@ -103,13 +103,17 @@ export const INTENTS: IntentMeta[] = [
   // video, extend pick), so needsSource / needsPrompt describe only the
   // shared composer scaffolding. ──
   {
-    // Character training is CLOUD-FIRST (David 2026-07-19): the local lane
-    // needs a whole trainer runtime (musubi-tuner venv) that 2.5.8 does not
-    // ship, so no hasLocalLane until that exists.
+    // 2.6.0 ships the local trainer runtime (trainer.rs installs the pinned
+    // musubi-tuner venv, the Z-Image bases ride the regular download
+    // pipeline), so the local lane is real now. Without hasLocalLane the bar
+    // rendered the finished feature as a locked cloud teaser and a local
+    // user could never reach LocalTrainControls at all (found 2026-08-01 on
+    // the real Windows bundle). No requiresModels here: the lane runs its
+    // own three gates (trainer env, base files, photos).
     id: 'character', label: 'Character Studio', short: 'Character', icon: UserRound,
     placeholder: 'Describe the scene for your character…',
     needsSource: false, needsPrompt: false, allowsMask: false, isVideo: false,
-    cloudOnly: true,
+    cloudOnly: true, hasLocalLane: true,
     examples: [],
   },
   {
@@ -158,3 +162,59 @@ export const INTENTS: IntentMeta[] = [
 
 export const INTENT_MAP: Record<CreateIntent, IntentMeta> =
   Object.fromEntries(INTENTS.map((i) => [i.id, i])) as Record<CreateIntent, IntentMeta>
+
+/**
+ * The intents that have a REAL local pipeline on an MLX host (Apple Silicon
+ * Mac). Every local lane above is a ComfyUI graph, and the Mac has no ComfyUI
+ * at all — its local media is the in-process MLX path (api/mlx-image.ts,
+ * api/mlx-video.ts). MLX generate accepts prompt / steps / seed / size /
+ * negative and nothing else, and there is no ComfyUI /upload/image to stage a
+ * source through (loadImageRef's local branch uploads there), so plain
+ * text-to-image and text-to-video are the only intents that actually run.
+ *
+ * Everything else must NOT look like a working local tab — see visibleIntents
+ * / isIntentLocked below.
+ */
+const MLX_LOCAL_INTENTS: ReadonlySet<CreateIntent> = new Set<CreateIntent>(['image', 'video'])
+
+/**
+ * The intents to surface for a given backend + host. Pure so the rule is unit
+ * tested instead of buried in the IntentBar's JSX.
+ *
+ * Cloud shows everything. Local (ComfyUI, Windows/Linux) also shows
+ * everything — the hosted-only tools render as locked cloud teasers rather
+ * than disappearing. Local on an MLX Mac hides the intents that have neither a
+ * local MLX path nor a hosted teaser sheet (edit, removebg, animate): they
+ * need a ComfyUI node or a ComfyUI-staged source image, so leaving them
+ * selectable is a dead affordance that either errors on submit or — worse, the
+ * MLX case — silently drops the source and returns an unrelated fresh image.
+ */
+export function visibleIntents(backend: CreateBackend, mlxHost: boolean): IntentMeta[] {
+  if (backend === 'cloud' || !mlxHost) return INTENTS
+  return INTENTS.filter((m) => MLX_LOCAL_INTENTS.has(m.id) || m.cloudOnly === true)
+}
+
+/**
+ * Whether an intent renders as a locked cloud teaser instead of a selectable
+ * local tab. Cloud never locks. On local ComfyUI hosts only the genuinely
+ * hosted-only tools lock (the 2.5.8 lanes with hasLocalLane are real local
+ * tabs). On an MLX Mac every non-MLX intent that survives visibleIntents locks
+ * — those lanes' "local" implementation is a ComfyUI graph this host does not
+ * have, so the honest state is the cloud teaser, not a working-looking pill.
+ */
+export function isIntentLocked(meta: IntentMeta, backend: CreateBackend, mlxHost: boolean): boolean {
+  if (backend === 'cloud') return false
+  if (mlxHost) return !MLX_LOCAL_INTENTS.has(meta.id)
+  return meta.cloudOnly === true && !meta.hasLocalLane
+}
+
+/**
+ * Whether an intent is reachable as a working tab (shown AND not a locked
+ * teaser) for this backend + host. Same rule as the IntentBar, exposed for the
+ * result actions that FORCE-switch to an intent — "Edit with mask" on a
+ * finished image used to set 'edit' even where that lane cannot run.
+ */
+export function isIntentAvailable(id: CreateIntent, backend: CreateBackend, mlxHost: boolean): boolean {
+  const meta = INTENT_MAP[id]
+  return visibleIntents(backend, mlxHost).includes(meta) && !isIntentLocked(meta, backend, mlxHost)
+}

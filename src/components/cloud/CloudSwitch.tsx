@@ -7,7 +7,6 @@
 // shows the one-time cloud onboarding instead of switching silently. Flipping
 // OFF always works.
 
-import { Cloud } from 'lucide-react'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useCloudAuthStore, deriveCloudAvailable } from '../../stores/cloudAuthStore'
@@ -49,7 +48,14 @@ export function CloudSwitch() {
           : 'border-gray-200 dark:border-white/10 text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 hover:border-gray-300 dark:hover:border-white/20',
       )}
     >
-      <Cloud size={12} strokeWidth={on ? 2.25 : 1.75} className="shrink-0" />
+      <img
+        src="/LU-monogram-bw.png"
+        alt=""
+        width={12}
+        height={12}
+        draggable={false}
+        className="shrink-0 select-none dark:invert-0 invert"
+      />
       <span className="text-[0.65rem] font-medium leading-none">Cloud</span>
       <span
         aria-hidden

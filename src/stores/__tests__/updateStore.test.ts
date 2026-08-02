@@ -252,14 +252,21 @@ describe('updateStore', () => {
       expect(useUpdateStore.getState().downloadStatus).toBe('idle')
     })
 
-    it('downloadUpdate is no-op without pending update (dev mode)', async () => {
+    // These two used to assert the button did NOTHING without a pending
+    // update handle — the defect written down as expected behaviour. Both
+    // paths now surface a reason (see "the Download button never does
+    // nothing" below); what stays asserted here is that neither of them
+    // pretends a download is in flight.
+    it('downloadUpdate does not fake a download without a pending update', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')))
       await useUpdateStore.getState().downloadUpdate()
-      expect(useUpdateStore.getState().downloadStatus).toBe('idle')
+      expect(useUpdateStore.getState().downloadStatus).not.toBe('downloading')
+      expect(useUpdateStore.getState().downloadStatus).not.toBe('downloaded')
     })
 
-    it('installAndRestart is no-op without pending update', async () => {
+    it('installAndRestart does not fake an install without a pending update', async () => {
       await useUpdateStore.getState().installAndRestart()
-      expect(useUpdateStore.getState().downloadStatus).toBe('idle')
+      expect(useUpdateStore.getState().downloadStatus).not.toBe('installing')
     })
   })
 
@@ -289,5 +296,55 @@ describe('updateStore', () => {
       useUpdateStore.getState().clearDismiss()
       expect(useUpdateStore.getState().dismissed).toBeNull()
     })
+  })
+})
+
+// The Update handle lives in a module-level variable that dies with the
+// process, while `updateAvailable` is persisted — so the badge can offer a
+// Download button with nothing behind it (after a relaunch, before the startup
+// check lands, or when that check ran offline). It used to return silently.
+describe('the Download button never does nothing', () => {
+  beforeEach(() => {
+    useUpdateStore.setState({
+      updateAvailable: true,
+      latestVersion: '2.6.0',
+      lastChecked: null,
+      isChecking: false,
+      downloadStatus: 'idle',
+      errorMessage: null,
+    })
+  })
+
+  it('says why instead of silently returning when the handle is gone', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')))
+
+    await useUpdateStore.getState().downloadUpdate()
+
+    const s = useUpdateStore.getState()
+    expect(s.downloadStatus).toBe('error')
+    expect(s.errorMessage).toMatch(/connection|update server/i)
+  })
+
+  it('installAndRestart reports the lost download instead of doing nothing', async () => {
+    await useUpdateStore.getState().installAndRestart()
+
+    const s = useUpdateStore.getState()
+    expect(s.downloadStatus).toBe('error')
+    expect(s.errorMessage).toMatch(/download it again/i)
+  })
+
+  it('a forced check ignores the 6h cooldown', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => makeGitHubRelease('v2.6.0'),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUpdateStore.setState({ lastChecked: Date.now(), isChecking: false })
+
+    await useUpdateStore.getState().checkForUpdate()
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    await useUpdateStore.getState().checkForUpdate(true)
+    expect(fetchMock).toHaveBeenCalledOnce()
   })
 })
