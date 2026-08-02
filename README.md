@@ -60,7 +60,11 @@ Grab the latest release from [**Releases**](https://github.com/PurpleDoubleD/loc
 
 > **Antivirus warning?** Some engines flag unsigned NSIS installers that download other binaries — a **false positive**. The installer is built by GitHub Actions from the public source on `master`, and the auto-update channel is signed against a public minisign key. Verification steps: [SECURITY.md](SECURITY.md#antivirus--browser-false-positives).
 
-**Current release: v2.6.1** (August 2026). Portable-friendly installers for Windows and Linux (no admin rights required), under the short in-app name **LU** by LU Labs. Full history in [Releases](https://github.com/PurpleDoubleD/locally-uncensored/releases) and [CHANGELOG.md](CHANGELOG.md).
+**Current release: v2.6.2** (August 2026). Portable-friendly installers for Windows and Linux (no admin rights required), under the short in-app name **LU** by LU Labs. Full history in [Releases](https://github.com/PurpleDoubleD/locally-uncensored/releases) and [CHANGELOG.md](CHANGELOG.md).
+
+### What's new in 2.6.2
+
+Custom ComfyUI workflows are back, built on a community PR by Kizerfluid (#94). The workflow button in the Create prompt bar opens a manager popup: import any workflow saved with ComfyUI's Save (API Format), pair it with models through shared tags, and pick it in the Workflow selector under Advanced settings; Auto returns to the built-in graph. Prompt, size, steps and seed are still injected, custom I2V workflows get the source image wired in, and video nodes save to the gallery instead of the temp folder. Also fixed: read aloud on Windows N editions (playback now falls back to codec-free Web Audio), pip errors from a Python built without ssl name the real problem, and ComfyUI model discovery survives one unreadable folder.
 
 ### What's new in 2.6.1
 
