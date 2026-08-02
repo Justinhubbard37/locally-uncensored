@@ -20,21 +20,6 @@ import {
 import type { BundledModel } from '../api/engine'
 import type { PullProgress, AIModel, ModelCategory, ImageModel, VideoModel, CloudModel } from '../types/models'
 
-// Embedding models that should never appear in the chat model dropdown
-const EMBEDDING_PATTERNS = [
-  /embed/,
-  /nomic-embed/,
-  /bge-/,
-  /e5-/,
-  /gte-/,
-  /sentence-/,
-]
-
-function isEmbeddingModel(name: string): boolean {
-  const lower = name.toLowerCase()
-  return EMBEDDING_PATTERNS.some((pattern) => pattern.test(lower))
-}
-}
 
 // Boot-resume for the managed built-in engine (2.5.7): the llama-server
 // children are reaped on app quit and nothing on the Rust side respawns them,
@@ -55,7 +40,7 @@ async function resumeBuiltinEngines(bundled: BundledModel[]) {
     ) {
       await activateBuiltinModel(activeModel)
     }
-  } catch { /* engine unavailable â€” non-critical */ }
+  } catch { /* engine unavailable Ã¢â‚¬â€ non-critical */ }
   await resumeEmbedServer(bundled)
 }
 
@@ -69,7 +54,7 @@ async function resumeEmbedServer(bundled: BundledModel[]) {
       const embedStatus = await bundledEmbedStatus()
       if (!embedStatus.running) await startBundledEmbed(embed.path)
     }
-  } catch { /* embeddings server unavailable â€” non-critical */ }
+  } catch { /* embeddings server unavailable Ã¢â‚¬â€ non-critical */ }
 }
 
 export function useModels() {
@@ -79,7 +64,7 @@ export function useModels() {
     pausePull, completePull, dismissPull, setCategoryFilter,
   } = useModelStore()
 
-  // Global Local/Cloud switch: one choke point for every picker â€” cloud mode
+  // Global Local/Cloud switch: one choke point for every picker Ã¢â‚¬â€ cloud mode
   // surfaces only the hosted catalog, local mode hides it. The store keeps
   // the full list (no refetch on flip); this is a view, not a mutation.
   const appMode = useSettingsStore((s) => s.settings.appMode)
@@ -97,7 +82,7 @@ export function useModels() {
   useEffect(() => {
     const handler = () => { fetchModels().catch(() => {}) }
     window.addEventListener('lu-models-refresh', handler)
-    // A finished ComfyUI image/video download fires 'comfyui-model-downloaded' â€”
+    // A finished ComfyUI image/video download fires 'comfyui-model-downloaded' Ã¢â‚¬â€
     // from the download-store poller on completion AND from installBundleComplete
     // after it rescans ComfyUI. useModels must refetch on it too, or a freshly
     // downloaded model stays missing from the Installed tab + the chat/create
@@ -111,7 +96,7 @@ export function useModels() {
       window.removeEventListener('comfyui-model-downloaded', handler)
     }
     // fetchModels is reassigned below on every render but always wraps the
-    // same setModels â€” depending on it would just churn listeners.
+    // same setModels Ã¢â‚¬â€ depending on it would just churn listeners.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -143,7 +128,7 @@ export function useModels() {
               provider: pm.provider, providerName: pm.providerName,
               contextLength: pm.contextLength, supportsTools: pm.supportsTools, supportsVision: pm.supportsVision,
               thinkMode: pm.thinkMode,
-              // Friendly server label (LU Cloud) â€” pickers prefer it over the id.
+              // Friendly server label (LU Cloud) Ã¢â‚¬â€ pickers prefer it over the id.
               displayName: pm.name !== pm.id ? pm.name : undefined,
             } satisfies CloudModel
           })
@@ -151,7 +136,7 @@ export function useModels() {
       )
       for (const result of providerResults) {
         if (result.status === 'fulfilled') {
-          // Filter out embedding models (e.g. nomic-embed-text) â€” not usable for chat
+          // Filter out embedding models (e.g. nomic-embed-text) Ã¢â‚¬â€ not usable for chat
           allModels.push(...result.value.filter(m => !isEmbeddingModel(m.name)))
         }
       }
@@ -166,14 +151,14 @@ export function useModels() {
             builtinResumeAttempted = true
             void resumeBuiltinEngines(bundledRaw)
           }
-        } catch { /* engine command unavailable â€” non-critical */ }
+        } catch { /* engine command unavailable Ã¢â‚¬â€ non-critical */ }
       } else if (!builtinResumeAttempted) {
         // Non-builtin chat backend (LM Studio etc.): still resume the bundled
         // embeddings server when its GGUF exists, so RAG survives a relaunch.
         builtinResumeAttempted = true
         try {
           void resumeEmbedServer(await listBundledModels())
-        } catch { /* engine command unavailable â€” non-critical */ }
+        } catch { /* engine command unavailable Ã¢â‚¬â€ non-critical */ }
       }
       const ollamaEnabled = useProviderStore.getState().providers.ollama.enabled
       const hasOllamaModels = allModels.some(m => m.provider === 'ollama')
@@ -292,11 +277,11 @@ setModels([...allModels, ...comfyModels])
         try {
           await promise
           completePull(name)
-          try { await fetchModels() } catch { /* model list refresh failed â€” non-critical */ }
+          try { await fetchModels() } catch { /* model list refresh failed Ã¢â‚¬â€ non-critical */ }
           // Auto-activate the freshly downloaded chat model so the chat actually
           // switches to it instead of silently staying on the old default
           // (forte_exe 2026-06-14: downloaded models didn't appear selected and
-          // the chat kept reverting). Chat models only â€” image/video live in the
+          // the chat kept reverting). Chat models only Ã¢â‚¬â€ image/video live in the
           // Create view. Matched by exact list name so a mismatch just no-ops.
           {
             const freshly = useModelStore.getState().models.find((m) => m.name === name)
@@ -305,7 +290,7 @@ setModels([...allModels, ...comfyModels])
           // Auto-dismiss after 5s
           setTimeout(() => dismissPull(name), 5000)
         } catch (err) {
-          // Bug Z/a v2.5.0 â€” leonsk29 GH #48. Pre-v2.5.0 this catch was
+          // Bug Z/a v2.5.0 Ã¢â‚¬â€ leonsk29 GH #48. Pre-v2.5.0 this catch was
           // silent ("card stays visible"), which combined with the Rust-
           // side Ok(()) on stream-ended-without-success made LU flip the
           // badge to "Completed" even when Ollama returned a 400 or the
@@ -376,13 +361,13 @@ setModels([...allModels, ...comfyModels])
   }
 
   // Selecting a built-in model must also swap the loaded GGUF: the managed
-  // engine serves one model per process, so activation â†’ swap_bundled_model.
+  // engine serves one model per process, so activation Ã¢â€ â€™ swap_bundled_model.
   // Other providers just set the active model as before.
   const activateModel = useCallback((name: string) => {
     setActiveModel(name)
     const cfg = useProviderStore.getState().providers.openai
     if (cfg.enabled && cfg.managed && getProviderIdFromModel(name) === 'openai') {
-      void activateBuiltinModel(name).catch(() => { /* engine unavailable â€” non-critical */ })
+      void activateBuiltinModel(name).catch(() => { /* engine unavailable Ã¢â‚¬â€ non-critical */ })
     }
   }, [setActiveModel])
 
