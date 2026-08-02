@@ -4,6 +4,13 @@ All notable changes to Locally Uncensored are documented here.
 
 ## [Unreleased]
 
+## [2.6.1] - 2026-08-02
+
+A one-bug release, reported the night 2.6.0 went out.
+
+### Fixed
+
+- **Create could not submit anything on some setups.** 2.6.0 started forwarding caller headers through the localhost proxy so a keyed OpenAI-compatible backend would stop answering 401. The proxy also sets its own `Content-Type` when a request carries a body, and the HTTP client appends headers instead of replacing them, so every Create submit went out with the header twice. ComfyUI answers that with `Duplicate 'Content-Type' header found.` and a 400, but only when its aiohttp runs the pure Python parser. The C parser accepts the duplicate, which is why every run here passed while Create was dead for the reporter (#95). The caller's own value wins now, and the default is only filled in when the caller sends none. The same trap for `Content-Length`, `Host`, `Transfer-Encoding` and `Connection` is closed as well, while `Authorization` still rides along, which is what the forwarding was for.
 ## [2.6.0] - 2026-08-02
 
 The GGUF video release. Most of it came out of running the shipped build end to end on a real 12 GB card and fixing what broke, plus a round of customer reports from Discord and GitHub.
