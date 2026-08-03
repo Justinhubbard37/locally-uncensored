@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>How to Run Qwen 3.8 Max: Every Option That Actually Works</title>
+<meta name="description" content="Practical guide to using Qwen 3.8 Max today: the DashScope API with working code, OpenAI and Anthropic compatible endpoints, pricing, and the honest local answer.">
+<meta name="keywords" content="how to run qwen 3.8, qwen 3.8 api, qwen 3.8 max api, qwen 3.8 dashscope, qwen 3.8 openrouter, use qwen 3.8, qwen 3.8 api pricing, qwen 3.8 tutorial">
+<meta property="og:title" content="How to Run Qwen 3.8 Max: Every Option That Actually Works">
+<meta property="og:description" content="The DashScope API with working code, OpenAI and Anthropic compatible endpoints, pricing and rate limits, and the honest math on running it yourself.">
+<meta property="og:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<meta property="og:url" content="https://locallyuncensored.com/blog/how-to-run-qwen-3-8.html">
+<meta property="og:type" content="article">
+<meta property="article:published_time" content="2026-08-03">
+<meta property="article:author" content="PurpleDoubleD">
+<meta property="article:tag" content="AI">
+<meta property="article:tag" content="Qwen 3.8">
+<meta property="article:tag" content="Tutorial">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="How to Run Qwen 3.8 Max: Every Option That Actually Works">
+<meta name="twitter:description" content="API with working code, pricing, rate limits, and the honest local answer.">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<link rel="canonical" href="https://locallyuncensored.com/blog/how-to-run-qwen-3-8.html">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="../favicon.png">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BlogPosting","headline":"How to Run Qwen 3.8 Max: Every Option That Actually Works","description":"A practical guide to using Qwen 3.8 Max in August 2026: the DashScope API with working Python code, OpenAI and Anthropic compatible endpoints, pricing and rate limits, what the coming open weights change, and the honest answer on local hosting.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-08-03","dateModified":"2026-08-03","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/how-to-run-qwen-3-8.html"},"keywords":"how to run qwen 3.8, qwen 3.8 api, qwen 3.8 dashscope, qwen 3.8 api pricing"}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"How do I access Qwen 3.8 Max?","acceptedAnswer":{"@type":"Answer","text":"Through Alibaba's DashScope platform. Create an API key in the DashScope console, then call the OpenAI compatible endpoint with any OpenAI SDK. The API also accepts Anthropic format requests, so Claude style clients work by swapping the base URL and key."}},{"@type":"Question","name":"How much does the Qwen 3.8 Max API cost?","acceptedAnswer":{"@type":"Answer","text":"2 dollars per million input tokens and 6 dollars per million output tokens, with cache reads from 0.17 dollars per million. Rate limits at launch are 2 million tokens per minute and 15,000 requests per minute."}},{"@type":"Question","name":"Can I use Qwen 3.8 with tools and structured outputs?","acceptedAnswer":{"@type":"Answer","text":"Yes. Function calling, structured outputs, batch jobs, prefix completion, and fine tuning are supported, plus built in tools: code interpreter, web search, web extractor, and image search."}},{"@type":"Question","name":"Can I self host Qwen 3.8?","acceptedAnswer":{"@type":"Answer","text":"Not yet, and even after the promised weights drop, the Max needs around 1.2 terabytes of memory at 4 bit, which is datacenter hardware. The Qwen 3.8 27B going open weight in the same drop is the realistic self host target: roughly 16 GB of VRAM at 4 bit."}},{"@type":"Question","name":"Is Qwen 3.8 uncensored?","acceptedAnswer":{"@type":"Answer","text":"No, the hosted model carries the usual alignment and refusals. Uncensored community builds only become possible once the weights are public. Today the strongest uncensored Qwen options are abliterated builds of Qwen 3.6, which run locally on consumer GPUs."}}]}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/lu.css">
+<script defer src="/assets/lu.js"></script>
+  <script data-goatcounter="https://lu-uncensored.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<nav class="lu-nav">
+  <a class="lu-nav-brand" href="/" aria-label="Locally Uncensored">
+    <span class="lu-mono" data-mono="nav" data-size="40" aria-hidden="true"></span>
+    <span class="lu-nav-word">Locally <span class="accent">Uncensored</span></span>
+  </a>
+  <div class="lu-nav-links" id="lu-nav-links">
+    <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/blog/">Blog</a>
+    <a class="lu-nav-link" href="/guide/">Guide</a>
+    <a class="lu-nav-link" href="/remote-access/">Remote</a>
+  </div>
+  <div class="lu-nav-right">
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">908&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">300+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <span class="lu-nav-sep"></span>
+    <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
+    <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</nav>
+<div class="container lu-doc">
+  <div class="breadcrumb"><a href="../">Locally Uncensored</a> / <a href="./">Blog</a> / This Post</div>
+
+  <div class="post-meta">
+    <span class="post-tag">Model Guide</span>
+    <span>August 3, 2026</span>
+    <span>·</span>
+    <span>8 min read</span>
+  </div>
+
+  <article>
+    <h1>How to Run Qwen 3.8 Max: Every Option That Actually Works</h1>
+
+    <p><a href="qwen-3-8-max-explained.html">Qwen 3.8 Max</a> went generally available on August 3, 2026. This is the practical guide: every way to actually use it today, with working code, real prices, and no pretending. If you want the specs and benchmark story instead, start with the <a href="qwen-3-8-max-explained.html">explainer</a>.</p>
+
+    <h2>Option 1: The DashScope API (OpenAI Compatible)</h2>
+
+    <p>The primary route is Alibaba's DashScope platform. Create an API key in the DashScope console, then point any OpenAI SDK at the compatible endpoint:</p>
+
+    <pre><code>from openai import OpenAI
+
+client = OpenAI(
+    api_key="YOUR_DASHSCOPE_API_KEY",
+    base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+)
+
+resp = client.chat.completions.create(
+    model="qwen3.8-max",  # check the console model list for the exact id
+    messages=[{"role": "user", "content": "Summarize this repo's architecture."}],
+)
+print(resp.choices[0].message.content)</code></pre>
+
+    <p>Streaming, function calling, structured outputs, and vision input all work through this endpoint. The built in tools (code interpreter, web search, web extractor, image search) are enabled per request via the tools parameter.</p>
+
+    <p><strong>Pricing:</strong> $2 per million input tokens, $6 per million output tokens, cache reads from $0.17. <strong>Rate limits:</strong> 2M tokens per minute, 15K requests per minute at launch. Batch jobs and fine tuning are available from day one.</p>
+
+    <h2>Option 2: The Anthropic Compatible Endpoint</h2>
+
+    <p>New for this generation: the API also speaks the Anthropic request format. Tools built for Claude (including many coding agents) can point at Qwen 3.8 Max by swapping the base URL and API key, no request rewriting needed. If your agent stack is Claude shaped, this is the lowest friction way to try it.</p>
+
+    <h2>Option 3: Routers and Aggregators</h2>
+
+    <p>OpenRouter and the other aggregators typically list Qwen flagships within days of general availability. Until the weights are public there is only one upstream (Alibaba), so pricing tracks the official API and every request routes to the same place. The value is the one line model switch, not a better deal.</p>
+
+    <h2>Option 4: Locally (Read This Before You Try)</h2>
+
+    <p><strong>The Max does not run on your hardware.</strong> Roughly 2.4 trillion parameters means ~1.2 TB of weights at 4 bit, before any KV cache for the 1M context. The full math lives in <a href="can-you-run-qwen-3-8-locally.html">Can You Run Qwen 3.8 Locally?</a></p>
+
+    <p>The local path that IS real: Alibaba promised the open weight drop for the coming week, and it includes a <strong>Qwen 3.8 27B</strong>. That model should land around 16 GB at Q4_K_M, the same class as today's Qwen 3.6 27B, and it will be one click in <a href="https://locallyuncensored.com/">Locally Uncensored</a>'s Model Manager once GGUFs exist. Until then, <a href="how-to-run-qwen-3-6-locally.html">Qwen 3.6 runs today</a> on anything from 8 GB up.</p>
+
+    <h2>Which Option for Which Job</h2>
+
+    <table>
+      <thead><tr><th>You want</th><th>Use</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>Max quality, production API</td><td>DashScope, OpenAI compatible</td><td>First party, full tool support, cheapest cache pricing</td></tr>
+        <tr><td>Claude shaped agent stack</td><td>Anthropic compatible endpoint</td><td>No request rewriting</td></tr>
+        <tr><td>Quick comparison against other models</td><td>OpenRouter</td><td>One line model switch</td></tr>
+        <tr><td>Privacy, zero refusals, free</td><td>Local models via LU</td><td>Qwen 3.6 today, Qwen 3.8 27B after the drop</td></tr>
+      </tbody>
+    </table>
+
+    <h2>What About Uncensored Use?</h2>
+
+    <p>The hosted Qwen 3.8 Max carries the usual alignment and refusals, and API providers log by policy. If uncensored and private is the point, that is what local models are for: the abliterated builds of <a href="how-to-run-qwen-3-6-locally.html">Qwen 3.6</a> are among the strongest <a href="best-uncensored-ai-models-2026.html">uncensored models of 2026</a>, and the moment Qwen 3.8 27B weights are public, the <a href="abliterated-models-guide.html">abliteration pipeline</a> gets to work on a new generation. We will cover those builds when they exist.</p>
+
+    <h2>FAQ</h2>
+
+    <h3>How do I access Qwen 3.8 Max?</h3>
+    <p>DashScope API key, then the OpenAI compatible endpoint with any OpenAI SDK. An Anthropic compatible endpoint exists for Claude style clients.</p>
+
+    <h3>How much does it cost?</h3>
+    <p>$2 / M input, $6 / M output, cache reads from $0.17. Rate limits 2M tokens and 15K requests per minute.</p>
+
+    <h3>Can I use tools and structured outputs?</h3>
+    <p>Yes: function calling, structured outputs, batches, prefix completion, fine tuning, plus built in code interpreter, web search, web extractor, and image search.</p>
+
+    <h3>Can I self host it?</h3>
+    <p>The Max: no, ~1.2 TB at 4 bit. The 27B from the same drop: yes, ~16 GB at 4 bit. <a href="can-you-run-qwen-3-8-locally.html">Full breakdown here</a>.</p>
+
+    <h3>Is Qwen 3.8 uncensored?</h3>
+    <p>Hosted: no. Local uncensored builds become possible once weights are public; today's answer is abliterated Qwen 3.6.</p>
+
+    <h2>Getting Started</h2>
+
+    <p>While the API answers your hardest questions, a private, uncensored model can be running on your own GPU in the next five minutes:</p>
+
+    <pre><code>git clone https://github.com/PurpleDoubleD/locally-uncensored.git
+cd locally-uncensored
+# Windows: setup.bat | Linux: ./setup.sh</code></pre>
+
+    <p>Or download the installer from the <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest">releases page</a>, open the Model Manager, and pick a Qwen that fits your VRAM.</p>
+
+    <hr>
+
+    <p><em>Locally Uncensored is AGPL-3.0 licensed and free to use. Built by <a href="https://github.com/PurpleDoubleD">PurpleDoubleD</a>.</em></p>
+  </article>
+
+  <div class="post-footer">
+    <p>Run the models that actually fit your machine, privately and uncensored.</p>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored" class="cta-btn" target="_blank">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+      Get Started on GitHub
+    </a>
+  </div>
+</div>
+
+<footer>
+  <div class="footer-row footer-meta"><span>&copy; 2026 &middot; Locally Uncensored &middot; AGPL-3.0</span></div>
+  <div class="footer-row footer-links">
+    <a href="https://locallyuncensored.com/blog/">Blog</a>
+    <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
+    <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions">Discussions</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
+    <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
+    <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+  </div>
+</footer>
+</body>
+</html>
