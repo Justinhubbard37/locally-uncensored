@@ -16,6 +16,7 @@ import { MaskEditor } from './MaskEditor'
 import { VhsInstallModal } from './VhsInstallModal'
 import { INTENT_MAP, isIntentAvailable } from './intents'
 import { isMlxImageHost } from '../../../api/mlx-image'
+import { isLinux } from '../../../api/backend'
 import { fetchGalleryItemBlob } from './galleryUrl'
 import { loadImageRef } from './loadImage'
 
@@ -163,7 +164,13 @@ function CreateExperimentalInner() {
           <AlertTriangle size={12} className="shrink-0" />
           <span>
             ComfyUI is running on the CPU (no usable GPU detected). Generation will be extremely slow and may time out.
-            AMD GPU? Point LU at a ROCm/ZLUDA ComfyUI and set Settings → Hardware → ComfyUI GPU to force GPU.
+            {/* The right AMD path differs per OS — three users followed the
+                generic ZLUDA pointer on Linux, where ZLUDA guides are
+                Windows-only dead ends (numbrain/lapbo/suraj3014, 2026-08-02).
+                Linux AMD wants a ROCm torch inside ComfyUI's own venv. */}
+            {isLinux()
+              ? ' AMD GPU? Install the ROCm build of PyTorch into ComfyUI’s venv (pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2), then set Settings → Hardware → ComfyUI GPU to force GPU.'
+              : ' AMD GPU? Point LU at a ROCm/ZLUDA ComfyUI and set Settings → Hardware → ComfyUI GPU to force GPU.'}
           </span>
         </div>
       )}

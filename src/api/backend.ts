@@ -33,6 +33,15 @@ export function isMacOS(): boolean {
   return /Mac|iPhone|iPad|iPod/.test(plat) || /Mac OS X|Macintosh/.test(ua);
 }
 
+/** True on Linux (WebKitGTK reports "Linux ..." / "X11; Linux"). Same
+ *  runtime-check rule as isMacOS — one dist serves all three OS builds. */
+export function isLinux(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const plat = navigator.platform || "";
+  const ua = navigator.userAgent || "";
+  return (/Linux/.test(plat) || /Linux/.test(ua)) && !/Android/.test(ua);
+}
+
 /**
  * Launch policy: the macOS desktop app is now a full local+cloud app like
  * Windows/Linux (David 2026-07-22 — local mode built + tested). The former
