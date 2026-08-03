@@ -378,23 +378,35 @@ export async function recheckTtsAvailable(voice?: string): Promise<boolean> {
   return initTtsCheck(voice);
 }
 
-/** Synthesize text to a playable WAV data URL via a local Piper voice. */
+/** Decode a synthesis result into a blob: object URL. A data: URL is the
+ *  obvious carrier but the CSP only allows media-src blob:, so on the strict
+ *  Chromium of WebView2 every data:audio playback is silently blocked while
+ *  the lax WKWebView plays it (GitHub #77, the reason "read aloud" worked on
+ *  every Mac here and on no reporter's Windows). */
+export function base64ToBlobUrl(b64: string, mime: string): string {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return URL.createObjectURL(new Blob([bytes], { type: mime }));
+}
+
+/** Synthesize text to a playable WAV blob URL via a local Piper voice. */
 export async function synthesizeNeural(text: string, voice?: string): Promise<string> {
   const data = await backendCall<{ audio_base64?: string; mime?: string }>("synthesize", { text, voice });
   if (!data?.audio_base64) throw new Error("neural TTS returned no audio");
-  return `data:${data.mime || "audio/wav"};base64,${data.audio_base64}`;
+  return base64ToBlobUrl(data.audio_base64, data.mime || "audio/wav");
 }
 
 /**
  * Synthesize text via a user-configured external HTTP TTS engine (GitHub #58).
  * `url` is an OpenAI-compatible endpoint (e.g. Kokoro-FastAPI at
  * http://localhost:8880/v1/audio/speech); `voice` is that engine's voice name.
- * Returns a playable data URL (the Rust side honors the returned audio type).
+ * Returns a playable blob URL (the Rust side honors the returned audio type).
  */
 export async function synthesizeExternal(text: string, url: string, voice?: string): Promise<string> {
   const data = await backendCall<{ audio_base64?: string; mime?: string }>("synthesize_external", { text, url, voice });
   if (!data?.audio_base64) throw new Error("external TTS returned no audio");
-  return `data:${data.mime || "audio/wav"};base64,${data.audio_base64}`;
+  return base64ToBlobUrl(data.audio_base64, data.mime || "audio/wav");
 }
 
 /** Download a Piper voice model on demand. Blocks until done (~63 MB). */
@@ -495,9 +507,9 @@ async function playViaWebAudio(dataUrl: string): Promise<void> {
   }
 }
 
-/** Play a WAV data URL or MP3 blob URL; resolves when playback ends (or is
- *  stopped via stopNeuralAudio). Replaces any current clip. Object URLs are
- *  revoked once the clip settles so cloud TTS blobs don't pin memory. */
+/** Play a WAV/MP3 blob URL; resolves when playback ends (or is stopped via
+ *  stopNeuralAudio). Replaces any current clip. Object URLs are revoked once
+ *  the clip settles so TTS blobs don't pin memory. */
 export function playNeuralAudio(dataUrl: string): Promise<void> {
   return new Promise((resolve, reject) => {
     stopNeuralAudio();
