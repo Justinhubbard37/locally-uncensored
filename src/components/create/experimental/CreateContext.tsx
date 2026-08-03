@@ -11,6 +11,7 @@ import { installMlxStack } from '../../../api/mlx-install'
 import { useDownloadStore } from '../../../stores/downloadStore'
 import { downloadBundleFiles, waitOrAbort } from '../../../lib/bundle-install'
 import { ensureLocalFilename } from './loadImage'
+import { comfyStartupError } from './comfyError'
 import type { CloudQuota } from '../../../lib/render/cloud-jobs'
 
 /** Restart ComfyUI so a freshly installed node pack registers (packs only load
@@ -229,8 +230,15 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
       onProgress?.(`Starting ComfyUI… ${i * 2}s`)
       await waitOrAbort(2000, signal)
       if (await checkComfyConnection()) { checkConnection(); return }
+      // The process died — every further poll waits on a port that will
+      // never open. Fail now, with the crash instead of a guess (GH #98:
+      // the shipped app has no console, so "did not come up" was a dead
+      // end with nothing behind it).
+      const out = await backendCall<{ lines?: string[]; exited?: boolean }>('comfyui_last_output').catch(() => null)
+      if (out?.exited) throw new Error(comfyStartupError(out.lines))
     }
-    throw new Error('Installed ComfyUI but it did not come up. Check Settings → AI Backends.')
+    const out = await backendCall<{ lines?: string[] }>('comfyui_last_output').catch(() => null)
+    throw new Error(comfyStartupError(out?.lines))
   }, [checkConnection])
 
   // Install a capability in place — mirrors the VHS one-click flow (#72):

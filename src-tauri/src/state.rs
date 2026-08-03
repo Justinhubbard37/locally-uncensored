@@ -268,6 +268,12 @@ pub struct AppState {
     /// ran on the CPU). None = LU hasn't started ComfyUI this session.
     /// Surfaced to the Create tab via `get_comfy_gpu_status`.
     pub comfy_started_cpu: Mutex<Option<bool>>,
+    /// Ring buffer of the last ComfyUI stdout/stderr lines (GH #98). The
+    /// shipped app has no console, so a main.py that crashes on startup was
+    /// invisible: the user saw "did not come up" with nothing to check.
+    /// The drain threads push here; `comfyui_last_output` reads it back.
+    /// Arc because the drain threads outlive the command's State borrow.
+    pub comfy_output: Arc<Mutex<std::collections::VecDeque<String>>>,
     // ── In-process MLX media engine (macOS Apple-Silicon local image/video) ──
     // Ported from uselu/apps/bridge's `commands::mlx` / `commands::video`. The
     // app spawns its OWN Python MLX sidecar (server.py on 127.0.0.1:47712) —
@@ -360,6 +366,7 @@ impl AppState {
             comfy_gpu_cache: Mutex::new(HashMap::new()),
             comfy_gpu_mode: Mutex::new("auto".to_string()),
             comfy_started_cpu: Mutex::new(None),
+            comfy_output: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             install_mlx_diffusion: crate::install_state::InstallSlot::default(),
             install_mlx_image_model: crate::install_state::InstallSlot::default(),
             install_mlx_video: crate::install_state::InstallSlot::default(),

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
 use tracing::{error, info};
 
@@ -1291,27 +1291,42 @@ fn start_comfyui_blocking(state: &AppState) -> Result<serde_json::Value, String>
     #[cfg(target_os = "windows")]
     assign_to_kill_on_close_job(&child);
 
-    // Drain stdout/stderr in background threads to prevent buffer deadlock
+    // Drain stdout/stderr in background threads to prevent buffer deadlock.
+    // Each line also lands in the comfy_output ring buffer (GH #98): the
+    // shipped app has no console, so a startup crash printed here was
+    // invisible and every "did not come up" report ended in a blind spot.
+    {
+        let mut buf = state.comfy_output.lock().unwrap();
+        buf.clear();
+        buf.push_back(format!("[start] {} main.py --port {}", python, port_str));
+    }
+    let capture = |line: String, sink: &Arc<Mutex<std::collections::VecDeque<String>>>| {
+        println!("[ComfyUI] {}", line);
+        if let Ok(mut buf) = sink.lock() {
+            if buf.len() >= 400 {
+                buf.pop_front();
+            }
+            buf.push_back(line);
+        }
+    };
     if let Some(stdout) = child.stdout.take() {
+        let sink = state.comfy_output.clone();
         std::thread::spawn(move || {
             use std::io::{BufRead, BufReader};
             let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    println!("[ComfyUI] {}", line);
-                }
+            for line in reader.lines().map_while(Result::ok) {
+                capture(line, &sink);
             }
         });
     }
 
     if let Some(stderr) = child.stderr.take() {
+        let sink = state.comfy_output.clone();
         std::thread::spawn(move || {
             use std::io::{BufRead, BufReader};
             let reader = BufReader::new(stderr);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    println!("[ComfyUI] {}", line);
-                }
+            for line in reader.lines().map_while(Result::ok) {
+                capture(line, &sink);
             }
         });
     }
@@ -1364,6 +1379,27 @@ fn stop_comfyui_blocking(state: &AppState) -> Result<serde_json::Value, String> 
     } else {
         Ok(serde_json::json!({"status": "not_running"}))
     }
+}
+
+/// The last lines ComfyUI printed (GH #98). This is what "Check Settings →
+/// AI Backends" could never show: the actual crash. Also reports whether the
+/// tracked child has exited, so the frontend can say "crashed" instead of
+/// "still starting" while it polls a port that will never open.
+#[tauri::command]
+pub fn comfyui_last_output(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let lines: Vec<String> = state
+        .comfy_output
+        .lock()
+        .map(|b| b.iter().cloned().collect())
+        .unwrap_or_default();
+    let exited = {
+        let mut proc = state.comfy_process.lock().unwrap();
+        match proc.as_mut() {
+            Some(child) => matches!(child.try_wait(), Ok(Some(_)) | Err(_)),
+            None => true,
+        }
+    };
+    Ok(serde_json::json!({ "lines": lines, "exited": exited }))
 }
 
 #[tauri::command]

@@ -107,6 +107,7 @@ fn main() {
             commands::process::stop_comfyui,
             commands::process::fix_comfyui_cors,
             commands::process::comfyui_status,
+            commands::process::comfyui_last_output,
             commands::process::find_comfyui,
             commands::process::detect_all_comfyui_installs,
             commands::process::set_comfyui_path,
