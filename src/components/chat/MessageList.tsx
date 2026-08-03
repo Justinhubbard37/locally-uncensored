@@ -1,3 +1,4 @@
+import { useCallback, useRef } from 'react'
 import { useChatStore } from '../../stores/chatStore'
 import { useAutoScroll } from '../../hooks/useAutoScroll'
 import { MessageBubble } from './MessageBubble'
@@ -32,6 +33,23 @@ export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel
   const lastMessage = conversation?.messages[conversation.messages.length - 1]
   const scrollRef = useAutoScroll(lastMessage?.content)
 
+  // MessageBubble is memoised, so its handlers have to keep the same identity
+  // across renders. Binding the conversation id and the parent's callbacks
+  // through a ref keeps ONE function alive for the whole list instead of
+  // minting a fresh closure per message on every streaming frame.
+  const bind = useRef({ conversation, onRegenerate, onEdit })
+  bind.current = { conversation, onRegenerate, onEdit }
+
+  const handleRegenerate = useCallback((messageId: string) => {
+    const { conversation: c, onRegenerate: cb } = bind.current
+    if (c && cb) cb(c.id, messageId)
+  }, [])
+
+  const handleEdit = useCallback((messageId: string, content: string) => {
+    const { conversation: c, onEdit: cb } = bind.current
+    if (c && cb) cb(c.id, messageId, content)
+  }, [])
+
   if (!conversation) return null
 
   const visibleMessages = conversation.messages.filter((m) => m.role !== 'system' && !m.hidden)
@@ -54,10 +72,10 @@ export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel
             message={message}
             isLast={message.id === lastVisibleId}
             onRegenerate={message.role === 'assistant' && onRegenerate && !isGenerating
-              ? () => onRegenerate(conversation.id, message.id)
+              ? handleRegenerate
               : undefined}
             onEdit={message.role === 'user' && onEdit && !isGenerating
-              ? (msgId, content) => onEdit(conversation.id, msgId, content)
+              ? handleEdit
               : undefined}
             pendingApprovalId={pendingApprovalId}
             onApprove={onApprove}

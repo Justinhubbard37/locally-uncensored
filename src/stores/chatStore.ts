@@ -1,9 +1,10 @@
 import { create } from 'zustand'
-import { persist, createJSONStorage } from 'zustand/middleware'
+import { persist } from 'zustand/middleware'
 import { v4 as uuid } from 'uuid'
 import type { Conversation, Message, ChatArtifact } from '../types/chat'
 import type { AgentBlock } from '../types/agent-mode'
 import { idbStorage } from '../lib/idbStorage'
+import { coalescedJSONStorage } from '../lib/coalescedStorage'
 import { migrateBlockInPlace } from '../api/agents/block-helpers'
 import { useGenerationStore } from './generationStore'
 import { useRemoteStore } from './remoteStore'
@@ -59,6 +60,36 @@ interface ChatState {
    *  merge = add unseen ids + refresh ones with a newer updatedAt; existing
    *  chats are never dropped. replace = swap the whole list. Returns counts. */
   importConversations: (incoming: Conversation[], mode?: 'merge' | 'replace') => { added: number; skipped: number }
+}
+
+/**
+ * Coalescing persist backend (2.6.3). Every message update — including the
+ * once-per-frame flush that drives the streaming bubble — used to serialise the
+ * entire chat history and queue another IndexedDB write. With images in the
+ * history that was gigabytes of live strings per answer and an Out of Memory in
+ * the renderer. Now the newest state is written at most once per window.
+ */
+const chatStorage = coalescedJSONStorage<ChatState>(idbStorage)
+
+/**
+ * Write the chat history out NOW instead of waiting for the coalescing window.
+ * Call it when a turn finishes: an IndexedDB write cannot complete during
+ * unload, so the only reliable durability point is the moment the answer is
+ * complete, not the moment the user closes the app.
+ */
+export function flushChatPersist(): Promise<void> {
+  return chatStorage.flush()
+}
+
+// Best effort on the way out — the browser may not give the write time to
+// land, which is exactly why it is not the primary durability mechanism.
+// pagehide is what actually fires on close in a webview; visibilitychange
+// covers a minimise/background the OS never lets return.
+if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+  window.addEventListener('pagehide', () => { void chatStorage.flush() })
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') void chatStorage.flush()
+  })
 }
 
 export const useChatStore = create<ChatState>()(
@@ -310,9 +341,11 @@ export const useChatStore = create<ChatState>()(
       name: 'chat-conversations',
       // IndexedDB (disk-backed, tens of GB) instead of localStorage's ~5 MB cap —
       // chat history with inline images needs the room. idbStorage migrates existing
-      // localStorage data on first read. createJSONStorage wrap is still required
-      // (zustand v5 PersistStorage; raw StateStorage → "[object Object]", see FIX-3).
-      storage: createJSONStorage(() => idbStorage),
+      // localStorage data on first read. coalescedJSONStorage does the object<->string
+      // (de)serialisation createJSONStorage used to do (zustand v5 wants a
+      // PersistStorage; a raw StateStorage → "[object Object]", see FIX-3), and adds
+      // the write coalescing this store needs.
+      storage: chatStorage,
       // Phase 1 (v2.4.0) — rehydrate legacy singular `toolCall` into `toolCalls[]`.
       // Persisted shape is whatever was last written; migration runs on every load
       // and is idempotent, so version bumps are not required.

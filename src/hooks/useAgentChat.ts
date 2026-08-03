@@ -7,7 +7,7 @@ import { requestGenerationCancel } from '../api/vram-handoff'
 import { resolveWorkspace } from '../api/agents/workspace-resolve'
 import { useAgentModeStore } from '../stores/agentModeStore'
 import { streamOllamaChatWithTools } from '../lib/ollama-stream-tools'
-import { useChatStore } from '../stores/chatStore'
+import { useChatStore, flushChatPersist } from '../stores/chatStore'
 import { useGenerationStore } from '../stores/generationStore'
 import { agentVariantExists, createAgentVariant, getAgentModelName, canFixModel } from '../api/model-template-fix'
 import { useModelStore } from '../stores/modelStore'
@@ -1477,6 +1477,11 @@ export function useAgentChat() {
           capturedArtifacts.map((a) => ({ id: uuid(), name: a.name, content: a.content, mime: a.mime })),
         )
       }
+      // The run is done, including the artifacts attached just above, so put it
+      // on disk now. Persistence is coalesced while the run streams (2.6.3 —
+      // see coalescedStorage); an agent turn is long and its blocks are big, so
+      // this is where the result becomes durable.
+      void flushChatPersist()
       // Drop the per-run workspace scope so standalone tool calls from
       // other tabs don't accidentally land in this chat's folder.
       clearActiveChatId()

@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid'
 import { useCodexStore } from '../stores/codexStore'
 import { useModelStore } from '../stores/modelStore'
 import { useSettingsStore } from '../stores/settingsStore'
-import { useChatStore } from '../stores/chatStore'
+import { useChatStore, flushChatPersist } from '../stores/chatStore'
 import { getProviderForModel, getProviderIdFromModel } from '../api/providers'
 import { markToolsUnsupported } from '../api/tool-capability'
 import { toolRegistry } from '../api/mcp'
@@ -1787,6 +1787,12 @@ export function useCodex() {
       runningRef.current = false
       abortRef.current = null
       clearActiveChatId()
+
+      // The turn is done, including the hidden tool history inserted above, so
+      // put it on disk now. Persistence is coalesced while the run streams
+      // (2.6.3 — see coalescedStorage), and losing the tool chain would cost
+      // the next turn its context, not just the transcript.
+      void flushChatPersist()
       codexStore.setThreadStatus(convId, 'idle')
 
       // ── /loop driver ───────────────────────────────────────────────────

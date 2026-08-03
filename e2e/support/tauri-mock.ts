@@ -36,6 +36,16 @@ export interface TauriMockOptions {
    * behaviour must pin it; the default matches the historical CI target.
    */
   platform?: 'mac' | 'windows'
+  /**
+   * Deliver `assistantReply` as N separate SSE frames, `replyChunkDelayMs`
+   * apart, instead of one. A real engine emits a frame per token, which is what
+   * drives the once-per-animation-frame store flush in useChat — the path that
+   * caused the 2.6.2 renderer Out of Memory. Omit for the historical
+   * single-frame behaviour.
+   */
+  replyChunks?: number
+  /** Gap between streamed frames. Default 0 (same macrotask burst). */
+  replyChunkDelayMs?: number
 }
 
 export const DEFAULT_ASSISTANT_REPLY = 'PONG_BUILTIN_OK the built-in engine answered.'
@@ -143,6 +153,26 @@ export function tauriMockInit(opts: TauriMockOptions) {
       frame({}, 'stop') +
       'data: [DONE]\n\n'
     )
+  }
+
+  /** The same turn, split into `n` deliverable pieces. n=1 reproduces chatSse
+   *  byte for byte, so specs that do not opt in are unaffected. */
+  function chatSseParts(text: string, n: number): string[] {
+    if (n <= 1) return [chatSse(text)]
+    const frame = (delta: Record<string, unknown>, finish: string | null) =>
+      `data: ${JSON.stringify({
+        id: 'chatcmpl-e2e',
+        object: 'chat.completion.chunk',
+        model: opts.modelName,
+        choices: [{ index: 0, delta, finish_reason: finish }],
+      })}\n\n`
+    const size = Math.ceil(text.length / n)
+    const parts = [frame({ role: 'assistant' }, null)]
+    for (let i = 0; i < text.length; i += size) {
+      parts.push(frame({ content: text.slice(i, i + size) }, null))
+    }
+    parts.push(frame({}, 'stop') + 'data: [DONE]\n\n')
+    return parts
   }
 
   function router(cmd: string, args: any): Promise<any> {
@@ -343,17 +373,18 @@ export function tauriMockInit(opts: TauriMockOptions) {
       // ── chat streaming: drive the onChunk Channel ─────────────────
       case 'proxy_localhost_stream_chunked': {
         const channel = args?.onChunk
-        const bytes = enc(chatSse(opts.assistantReply))
+        const parts = chatSseParts(opts.assistantReply, opts.replyChunks ?? 1)
+        const gap = opts.replyChunkDelayMs ?? 0
         // Deliver on a macrotask so the app's `settled` promise is already
         // being awaited, mirroring the async Rust→WebView channel delivery.
+        parts.forEach((part, i) => {
+          setTimeout(() => {
+            try { channel?.onmessage?.(enc(part)) } catch { /* reader gone */ }
+          }, i * gap)
+        })
         setTimeout(() => {
-          try {
-            channel?.onmessage?.(bytes)
-            channel?.onmessage?.([]) // empty chunk = EOF marker
-          } catch {
-            /* reader gone */
-          }
-        }, 0)
+          try { channel?.onmessage?.([]) } catch { /* reader gone */ } // empty chunk = EOF
+        }, parts.length * gap)
         return Promise.resolve(null)
       }
       case 'proxy_localhost_stream':

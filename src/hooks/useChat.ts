@@ -1,6 +1,6 @@
 import { useRef, useState, useCallback } from "react"
 import { v4 as uuid } from "uuid"
-import { useChatStore } from "../stores/chatStore"
+import { useChatStore, flushChatPersist } from "../stores/chatStore"
 import { useModelStore } from "../stores/modelStore"
 import { useSettingsStore } from "../stores/settingsStore"
 import { useRAGStore } from "../stores/ragStore"
@@ -584,6 +584,12 @@ export function useChat() {
       setIsLoadingModel(false)
       useModelStore.getState().setIsModelLoading(false)
       abortRef.current = null
+
+      // The turn is done, so put it on disk now. Persistence is coalesced while
+      // tokens stream (2.6.3 — see coalescedStorage), and an IndexedDB write
+      // cannot finish during unload, so THIS is the point that makes a finished
+      // answer durable, not the pagehide handler.
+      void flushChatPersist()
 
       // Auto-read the finished response when the user opted in (#77, ElBiggus).
       // Default OFF and additionally gated on ttsEnabled; getState() (not the

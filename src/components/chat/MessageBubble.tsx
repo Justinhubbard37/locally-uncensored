@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion'
 import { User, Copy, Check, Pencil, RefreshCw, X, Wrench, Trash2 } from 'lucide-react'
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useRef, useEffect, useMemo, memo } from 'react'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ThinkingBlock } from './ThinkingBlock'
 import { ToolCallBlock } from './ToolCallBlock'
@@ -19,7 +19,10 @@ import { isAgentCompatible } from '../../lib/model-compatibility'
 
 interface Props {
   message: Message
-  onRegenerate?: () => void
+  /** Takes the message id rather than closing over it, so MessageList can pass
+   *  ONE stable function to every bubble — a per-message closure would be a new
+   *  prop on every render and defeat the memo() below. */
+  onRegenerate?: (messageId: string) => void
   onEdit?: (messageId: string, newContent: string) => void
   /** Tool-call id awaiting user approval. When the matching block in
    *  this message has that id, ToolCallBlock renders Approve/Reject
@@ -32,7 +35,7 @@ interface Props {
   isLast?: boolean
 }
 
-export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId, onApprove, onReject, isLast }: Props) {
+function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, onApprove, onReject, isLast }: Props) {
   const [copied, setCopied] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
   const [editContent, setEditContent] = useState('')
@@ -377,7 +380,7 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
               <button onClick={startEdit} className="p-1 rounded-md text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" aria-label="Edit message" title="Edit"><Pencil size={12} /></button>
             )}
             {!isUser && onRegenerate && (
-              <button onClick={onRegenerate} className="p-1 rounded-md text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" aria-label="Regenerate response" title="Regenerate"><RefreshCw size={12} /></button>
+              <button onClick={() => onRegenerate(message.id)} className="p-1 rounded-md text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" aria-label="Regenerate response" title="Regenerate"><RefreshCw size={12} /></button>
             )}
             <button onClick={handleCopy} className="p-1 rounded-md text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" aria-label="Copy message" title={copied ? 'Copied' : 'Copy'}>
               {copied ? <Check size={12} className="text-green-500" /> : <Copy size={12} />}
@@ -404,3 +407,12 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
     </motion.div>
   )
 }
+
+/**
+ * Memoised (2.6.3). The streaming flush replaces ONE message object per frame,
+ * but the whole list re-rendered with it — every markdown body, every
+ * highlighted code block, in a chat that can hold hundreds of messages. Only
+ * the bubble whose `message` reference actually changed re-renders now.
+ * Requires MessageList to pass stable handlers; see the note on Props.
+ */
+export const MessageBubble = memo(MessageBubbleImpl)
