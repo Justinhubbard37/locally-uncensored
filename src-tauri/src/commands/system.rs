@@ -332,6 +332,197 @@ pub fn get_current_time() -> Result<serde_json::Value, String> {
     }))
 }
 
+// ── Opening folders and launching apps (B1, Morgan 2026-08-03) ──────────────
+//
+// Morgan asked for an agent that can open a folder and start a program. The
+// deliberate limits, because this is a tool a MODEL calls, not a person:
+//
+//   * `desktop_open` opens only what already EXISTS on disk. A path that does
+//     not resolve is refused, which is what keeps this from doubling as a
+//     protocol-handler primitive: `https://…`, `file://…` and `mailto:` are not
+//     paths, so they never reach the opener. Web pages have web_fetch, and the
+//     UI has its own openExternal with a URL allowlist.
+//   * `app_launch` takes a name and nothing else. No arguments, by design: an
+//     app plus attacker-chosen argv is a different and much larger surface than
+//     "start Notepad", and nothing in Morgan's request needs it.
+//   * Neither builds a shell string by concatenation. Every value goes in as
+//     its own argv entry, so a path with a space, a quote or a semicolon is
+//     data. The one platform path that cannot avoid a shell (the Windows
+//     `cmd /C start` fallback) is reached only after the name has passed
+//     `validate_app_name`.
+
+/// Characters that let a name break out of a Windows `cmd /C` line. An
+/// application is called "Google Chrome", never "foo & del".
+const APP_NAME_FORBIDDEN: &[char] = &['&', '|', ';', '<', '>', '^', '"', '\'', '`', '\n', '\r', '%', '!'];
+
+/// An app name has to be a name. Rejecting rather than escaping keeps the rule
+/// readable and the same on all three platforms.
+fn validate_app_name(name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("app_launch: no application name given".into());
+    }
+    if trimmed.len() > 256 {
+        return Err("app_launch: application name is too long".into());
+    }
+    if let Some(bad) = trimmed.chars().find(|c| APP_NAME_FORBIDDEN.contains(c)) {
+        return Err(format!(
+            "app_launch: refused, the name contains {bad:?}. Pass a plain application name such as \"Notepad\" or \"Google Chrome\"."
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve and verify the target of `desktop_open`. Returns the existing path
+/// and whether it is a directory.
+fn resolve_existing(path: &str) -> Result<(std::path::PathBuf, bool), String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("desktop_open: no path given".into());
+    }
+    // A URL is not a path. Naming the case explicitly gives the model a usable
+    // error instead of "no such file or directory" on a string it thinks is fine.
+    if let Some(scheme) = trimmed.split("://").next().filter(|s| *s != trimmed) {
+        return Err(format!(
+            "desktop_open: {scheme}:// is a URL, not a path. This tool opens folders and files that exist on this machine."
+        ));
+    }
+    let p = std::path::PathBuf::from(trimmed);
+    let meta = std::fs::metadata(&p)
+        .map_err(|e| format!("desktop_open: cannot open {trimmed}: {e}"))?;
+    Ok((p, meta.is_dir()))
+}
+
+/// Open a folder or file in the desktop environment, or reveal it in the file
+/// manager with the item selected.
+#[tauri::command]
+pub fn desktop_open(path: String, reveal: Option<bool>) -> Result<serde_json::Value, String> {
+    let (target, is_dir) = resolve_existing(&path)?;
+    let reveal = reveal.unwrap_or(false);
+    let shown = target.to_string_lossy().to_string();
+    let mut cmd: std::process::Command;
+
+    #[cfg(target_os = "macos")]
+    {
+        cmd = std::process::Command::new("open");
+        if reveal {
+            cmd.arg("-R");
+        }
+        cmd.arg(&target);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        cmd = std::process::Command::new("explorer");
+        if reveal {
+            // explorer takes this as ONE argument: `/select,C:\path`.
+            let mut sel = std::ffi::OsString::from("/select,");
+            sel.push(target.as_os_str());
+            cmd.arg(sel);
+        } else {
+            cmd.arg(&target);
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // No portable "reveal" on Linux, so revealing a file opens the folder
+        // that holds it. Saying so beats silently doing something else.
+        let opened = if reveal && !is_dir {
+            target.parent().unwrap_or(&target).to_path_buf()
+        } else {
+            target.clone()
+        };
+        cmd = std::process::Command::new("xdg-open");
+        cmd.arg(&opened);
+    }
+
+    crate::process_util::suppress_window(&mut cmd);
+    let status = cmd
+        .status()
+        .map_err(|e| format!("desktop_open: could not start the file manager: {e}"))?;
+
+    // Windows Explorer reports a non-zero exit even when it did the right
+    // thing, so its code says nothing about success and is not checked.
+    #[cfg(not(target_os = "windows"))]
+    if !status.success() {
+        return Err(format!("desktop_open: the file manager refused {shown}"));
+    }
+    #[cfg(target_os = "windows")]
+    let _ = status;
+
+    Ok(serde_json::json!({
+        "path": shown,
+        "kind": if is_dir { "folder" } else { "file" },
+        "revealed": reveal,
+    }))
+}
+
+/// Launch an installed application by name. No arguments are forwarded.
+#[tauri::command]
+pub fn app_launch(name: String) -> Result<serde_json::Value, String> {
+    validate_app_name(&name)?;
+    let name = name.trim().to_string();
+
+    #[cfg(target_os = "macos")]
+    {
+        // `open -a` searches the launch services database, so "Chrome",
+        // "Google Chrome" and a full .app path all resolve.
+        let mut cmd = std::process::Command::new("open");
+        cmd.arg("-a").arg(&name);
+        let out = cmd
+            .output()
+            .map_err(|e| format!("app_launch: could not run open: {e}"))?;
+        if !out.status.success() {
+            let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(format!(
+                "app_launch: could not start {name}. {}",
+                if why.is_empty() { "It may not be installed.".into() } else { why }
+            ));
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        // A name that is already an executable on PATH (or a full path to one)
+        // needs no shell at all, so that is tried first.
+        let mut direct = std::process::Command::new(&name);
+        crate::process_util::suppress_window(&mut direct);
+        if direct.spawn().is_ok() {
+            return Ok(serde_json::json!({ "launched": name }));
+        }
+
+        #[cfg(target_os = "windows")]
+        let mut cmd = {
+            // `start` is a cmd builtin, so this is the one path that needs a
+            // shell. The empty "" is start's title argument: without it start
+            // treats a quoted name AS the title and opens a console instead.
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/C", "start", "", &name]);
+            c
+        };
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let mut cmd = {
+            // Desktop entries are how Linux names applications.
+            let mut c = std::process::Command::new("gtk-launch");
+            c.arg(&name);
+            c
+        };
+
+        crate::process_util::suppress_window(&mut cmd);
+        let status = cmd
+            .status()
+            .map_err(|e| format!("app_launch: could not start {name}: {e}"))?;
+        if !status.success() {
+            return Err(format!(
+                "app_launch: could not start {name}. It may not be installed under that name."
+            ));
+        }
+    }
+
+    Ok(serde_json::json!({ "launched": name }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,5 +612,90 @@ mod tests {
             "20 calls took {:?} — is something spawning a process again?",
             started.elapsed()
         );
+    }
+
+    // ── B1: opening folders and launching apps ──────────────────
+
+    #[test]
+    fn an_ordinary_application_name_passes() {
+        for name in ["Notepad", "Google Chrome", "Visual Studio Code", "firefox", "calc.exe"] {
+            assert!(validate_app_name(name).is_ok(), "rejected a real name: {name}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_could_break_out_of_a_command_line_is_refused() {
+        // The Windows fallback ends up in `cmd /C start`, so every character
+        // that means something to cmd has to be gone before we get there.
+        for name in [
+            "Notepad & del C:\\Windows\\*",
+            "foo | whoami",
+            "foo; rm -rf ~",
+            "foo > out.txt",
+            "foo`whoami`",
+            "foo\nshutdown",
+            "%USERPROFILE%",
+            "foo^&bar",
+        ] {
+            assert!(validate_app_name(name).is_err(), "let a payload through: {name}");
+        }
+    }
+
+    #[test]
+    fn an_empty_or_oversized_name_is_refused() {
+        assert!(validate_app_name("").is_err());
+        assert!(validate_app_name("   ").is_err());
+        assert!(validate_app_name(&"a".repeat(300)).is_err());
+    }
+
+    #[test]
+    fn a_url_is_not_a_path_and_says_so() {
+        // The rule that keeps desktop_open from becoming a way to make the
+        // machine follow a link the model chose.
+        for url in ["https://example.com", "file:///etc/passwd", "mailto:a@b.c"] {
+            let err = resolve_existing(url).unwrap_err();
+            assert!(
+                err.contains("URL") || err.contains("cannot open"),
+                "unhelpful error for {url}: {err}"
+            );
+        }
+        assert!(resolve_existing("https://example.com").unwrap_err().contains("URL"));
+    }
+
+    #[test]
+    fn a_path_that_does_not_exist_is_refused() {
+        let missing = std::env::temp_dir().join("lu-nope-4f1c9a2b").to_string_lossy().to_string();
+        assert!(resolve_existing(&missing).is_err());
+        assert!(resolve_existing("").is_err());
+    }
+
+    #[test]
+    fn an_existing_folder_resolves_and_is_reported_as_a_folder() {
+        let dir = std::env::temp_dir();
+        let (path, is_dir) = resolve_existing(&dir.to_string_lossy()).unwrap();
+        assert!(is_dir, "temp dir should be a directory");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn an_existing_file_resolves_and_is_reported_as_a_file() {
+        let f = std::env::temp_dir().join("lu-open-probe.txt");
+        std::fs::write(&f, b"probe").unwrap();
+        let (_, is_dir) = resolve_existing(&f.to_string_lossy()).unwrap();
+        assert!(!is_dir, "a regular file must not report as a folder");
+        let _ = std::fs::remove_file(&f);
+    }
+
+    #[test]
+    fn a_path_with_spaces_and_quotes_survives_resolution() {
+        // Nothing here concatenates a command line, so a hostile-looking name
+        // is just a name. This is the test that would fail the day someone
+        // rewrites the opener to build a shell string.
+        let dir = std::env::temp_dir().join("lu probe; rm -rf $HOME");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (path, is_dir) = resolve_existing(&dir.to_string_lossy()).unwrap();
+        assert!(is_dir);
+        assert!(path.to_string_lossy().contains("rm -rf"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

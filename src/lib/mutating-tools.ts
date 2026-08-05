@@ -28,4 +28,9 @@ export const MUTATING_TOOLS = new Set([
   'run_workflow',
   'delegate_task',
   'screenshot',
+  // B1: both put something on the user's screen or start a process. Neither
+  // belongs in a turn the user asked to be read-only, for the same reason
+  // screenshot does not.
+  'desktop_open',
+  'app_launch',
 ])

@@ -3,13 +3,14 @@
 import type { MCPToolDefinition } from './types'
 import type { ToolRegistry } from './tool-registry'
 import { backendCall, fetchExternal } from '../backend'
-import { getActiveChatId, getActiveWorkspace, isChatArtifactMode, captureChatArtifact } from '../agent-context'
+import { getActiveChatId, getActiveConversationId, getActiveWorkspace, isChatArtifactMode, captureChatArtifact } from '../agent-context'
 import { useAgentWorkflowStore } from '../../stores/agentWorkflowStore'
 import { WorkflowEngine } from '../../lib/workflow-engine'
 import type { StepResult } from '../../types/agent-workflows'
 import { DELEGATE_TASK_TOOL_DEF, buildDelegateExecutor } from '../agents/sub-agent'
 import { applyUniqueEdit } from '../../lib/surgical-edit'
 import { sliceFileReadResult } from '../../lib/file-read-window'
+import { writeTodos, summarizeTodos } from '../../stores/todoStore'
 import { isMlxImageHost, generateMlxImageDataUrl, listMlxImageModels, type MlxImageModel } from '../mlx-image'
 import { getVideoStatus, listVideoModels, generateVideo as generateMlxVideo, getVideoProgress, cancelVideo, readVideoAsBlobUrl, type VideoModel } from '../mlx-video'
 
@@ -42,6 +43,40 @@ function chatCtx(): { chatId?: string; workingDirectory?: string } {
 // every one of them is classified as mutating or read-only. It parses the file
 // rather than importing it, because importing pulls in the tool-registry cycle.
 const BUILTIN_TOOLS: MCPToolDefinition[] = [
+  // Planning
+  {
+    name: 'todo_write',
+    description:
+      'Write the plan for a multi-step task and keep it up to date. The list is shown to the user live, so it is how they see what you are doing and how far along you are. '
+      + 'USE FIRST on any task that needs more than about three tool calls: write the whole plan before the first step. '
+      + 'Then call it again after each step to flip that item to completed and the next one to in_progress. '
+      + 'Send the COMPLETE list every time. It replaces the previous one, it does not merge. Exactly one item should be in_progress at a time. '
+      + 'DO NOT use it for a single-step request, and NEVER mark an item completed before the work actually succeeded.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        todos: {
+          type: 'array',
+          description: 'The complete plan, in order. Replaces the previous list.',
+          items: {
+            type: 'object',
+            properties: {
+              content: { type: 'string', description: 'What this step does, one short line' },
+              status: {
+                type: 'string',
+                enum: ['pending', 'in_progress', 'completed'],
+                description: 'pending = not started, in_progress = working on it now, completed = done and verified',
+              },
+            },
+            required: ['content', 'status'],
+          },
+        },
+      },
+      required: ['todos'],
+    },
+    category: 'system',
+    source: 'builtin',
+  },
   // Web
   {
     name: 'web_search',
@@ -496,6 +531,44 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
       + 'Returns a short summary string (size + filename); the actual image is forwarded to the model via message content. '
       + 'NEVER call in a tight loop — screenshots are expensive and privacy-sensitive.',
     inputSchema: { type: 'object', properties: {}, required: [] },
+    category: 'desktop',
+    source: 'builtin',
+  },
+  {
+    name: 'desktop_open',
+    description:
+      'Open a folder or file on this machine in the desktop file manager or its default application. '
+      + 'USE when the user says "open my Downloads folder", "show me that file", "open this in Finder/Explorer". '
+      + 'Set `reveal` to true to open the containing folder with the item selected instead of opening the item itself. '
+      + 'The path must already EXIST on this machine; a path that does not resolve is refused. '
+      + 'NOT for web pages or links of any kind (https://, file://, mailto:) — those are refused. Use web_fetch to read a page. '
+      + 'This shows something on the user\'s screen, so call it when they asked to see something, not to inspect a file yourself: use file_read or file_list for that.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Absolute path to an existing folder or file on this machine' },
+        reveal: { type: 'boolean', description: 'Open the containing folder with the item selected, instead of opening the item (default false)' },
+      },
+      required: ['path'],
+    },
+    category: 'desktop',
+    source: 'builtin',
+  },
+  {
+    name: 'app_launch',
+    description:
+      'Start an installed desktop application by name. '
+      + 'USE for "open Chrome", "launch Notepad", "start Spotify". '
+      + 'Pass the application name as a person would say it ("Google Chrome", "Notepad", "Visual Studio Code"). '
+      + 'No arguments are passed to the application, deliberately — to run a command with arguments use shell_execute instead. '
+      + 'To open a document or folder rather than a program, use desktop_open.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Name of the installed application, e.g. "Google Chrome" or "Notepad"' },
+      },
+      required: ['name'],
+    },
     category: 'desktop',
     source: 'builtin',
   },
@@ -1128,6 +1201,26 @@ async function executeScreenshot(): Promise<string> {
   return JSON.stringify(data)
 }
 
+async function executeDesktopOpen(args: Record<string, any>): Promise<string> {
+  const path = typeof args.path === 'string' ? args.path.trim() : ''
+  if (!path) return 'Error: desktop_open needs a path.'
+  const data = await backendCall<{ path: string; kind: string; revealed: boolean }>(
+    'desktop_open',
+    { path, reveal: args.reveal === true },
+  )
+  const what = data.kind === 'folder' ? 'Folder' : 'File'
+  return data.revealed
+    ? `${what} revealed in the file manager: ${data.path}`
+    : `${what} opened: ${data.path}`
+}
+
+async function executeAppLaunch(args: Record<string, any>): Promise<string> {
+  const name = typeof args.name === 'string' ? args.name.trim() : ''
+  if (!name) return 'Error: app_launch needs an application name.'
+  const data = await backendCall<{ launched: string }>('app_launch', { name })
+  return `Launched ${data.launched}.`
+}
+
 async function executeImageGenerate(args: Record<string, any>): Promise<string> {
   // Feature EE (v2.5.0): the whole generation flow now goes through the VRAM
   // hand-off orchestrator. It resolves the image model (args.model or first
@@ -1378,6 +1471,23 @@ async function executeVideoGenerateMlx(prompt: string, merged: Record<string, an
   return 'Video generation timed out after 60 minutes; the generation was stopped.'
 }
 
+async function executeTodoWrite(args: Record<string, any>): Promise<string> {
+  // Purely conversation state: no backend call, no permission gate, nothing
+  // that can fail on a machine. The one real failure is having no conversation
+  // to attach the plan to, which happens when a tool runs outside a loop.
+  // The CONVERSATION id, not getActiveChatId(): that one is a filesystem slug
+  // derived from id + title, and PlanBar reads the plan out of chatStore by the
+  // real id. Keying by the slug wrote the plan where nothing ever looks.
+  const convId = getActiveConversationId()
+  if (!convId) return 'Error: no active conversation to attach a plan to.'
+
+  const todos = writeTodos(convId, args.todos)
+  if (todos.length === 0 && Array.isArray(args.todos) && args.todos.length > 0) {
+    return 'Error: every item needs a non-empty `content` string. Nothing was written.'
+  }
+  return summarizeTodos(todos)
+}
+
 async function executeGetCurrentTime(_args: Record<string, any>): Promise<string> {
   try {
     const data = await backendCall<{ unix: number; iso_local: string; iso_utc: string; timezone: string; timezone_offset: number }>(
@@ -1475,6 +1585,7 @@ function htmlToText(html: string): string {
 // ── Registration ────────────────────────────────────────────────
 
 const EXECUTOR_MAP: Record<string, (args: Record<string, any>) => Promise<string>> = {
+  todo_write: executeTodoWrite,
   web_search: executeWebSearch,
   web_fetch: executeWebFetch,
   file_read: executeFileRead,
@@ -1500,6 +1611,8 @@ const EXECUTOR_MAP: Record<string, (args: Record<string, any>) => Promise<string
   system_info: executeSystemInfo,
   process_list: executeProcessList,
   screenshot: executeScreenshot,
+  desktop_open: executeDesktopOpen,
+  app_launch: executeAppLaunch,
   image_generate: executeImageGenerate,
   video_generate: executeVideoGenerate,
   run_workflow: executeRunWorkflow,

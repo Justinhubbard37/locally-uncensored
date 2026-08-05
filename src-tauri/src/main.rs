@@ -181,6 +181,8 @@ fn main() {
             commands::system::system_info,
             commands::system::process_list,
             commands::system::screenshot,
+            commands::system::desktop_open,
+            commands::system::app_launch,
             commands::system::pick_folder,
             commands::system::is_onboarding_done,
             commands::system::set_onboarding_done,
