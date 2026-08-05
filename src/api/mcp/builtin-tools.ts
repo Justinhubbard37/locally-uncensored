@@ -9,6 +9,7 @@ import { WorkflowEngine } from '../../lib/workflow-engine'
 import type { StepResult } from '../../types/agent-workflows'
 import { DELEGATE_TASK_TOOL_DEF, buildDelegateExecutor } from '../agents/sub-agent'
 import { applyUniqueEdit } from '../../lib/surgical-edit'
+import { sliceFileReadResult } from '../../lib/file-read-window'
 import { isMlxImageHost, generateMlxImageDataUrl, listMlxImageModels, type MlxImageModel } from '../mlx-image'
 import { getVideoStatus, listVideoModels, generateVideo as generateMlxVideo, getVideoProgress, cancelVideo, readVideoAsBlobUrl, type VideoModel } from '../mlx-video'
 
@@ -84,14 +85,18 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
   {
     name: 'file_read',
     description:
-      'Read the complete contents of a file. PREFER absolute paths; relative paths resolve against the agent workspace (~/agent-workspace). '
-      + 'The entire file is returned — there is no pagination or range parameter. '
+      'Read a file. PREFER absolute paths; relative paths resolve against the agent workspace (~/agent-workspace). '
+      + 'Omitting offset/limit returns the whole file. For LARGE files pass offset (1-based start line) and limit '
+      + '(number of lines) to read a window — the response names the window and the total line count, and tells you '
+      + 'the offset for the next page. Very long whole-file reads get their middle truncated, so page large files. '
       + 'DO NOT re-read a file you just wrote with file_write; the write response already confirmed the save. '
       + 'For directory listings use file_list; for content search across many files use file_search.',
     inputSchema: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Path to the file (absolute preferred)' },
+        offset: { type: 'number', description: '1-based line to start reading from (optional)' },
+        limit: { type: 'number', description: 'Maximum number of lines to return (optional)' },
       },
       required: ['path'],
     },
@@ -706,7 +711,8 @@ async function executeFileRead(args: Record<string, any>): Promise<string> {
       : Math.floor((String(data.content || '').length * 3) / 4)
     return `[binary file — ${formatBytes(bytes)}, not shown. This tool reads text only; do not write binary content back through file_write.]`
   }
-  return data.content || ''
+  // Windowed read (audit C1) — see src/lib/file-read-window.ts.
+  return sliceFileReadResult(String(data.content || ''), args)
 }
 
 /** Last path segment, defaulting to file.txt. */

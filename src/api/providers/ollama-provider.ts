@@ -85,6 +85,9 @@ export class OllamaProvider implements ProviderClient {
       model,
       messages: ollamaMessages,
       stream: true,
+      // Audit A6: match the agent transport so a long turn never pays a
+      // cold multi-GB reload after Ollama's 5-minute default idle unload.
+      keep_alive: '30m',
     }
 
     // v2.4.6 Bug L: dropped hardcoded `num_gpu: 99`. Old code forced ALL
@@ -191,6 +194,8 @@ export class OllamaProvider implements ProviderClient {
       messages: ollamaMessages,
       tools,
       stream: false,
+      // Audit A6: see chatStream above.
+      keep_alive: '30m',
     }
 
     // v2.4.6 Bug L: see chatStream() above — same num_gpu:99 removal.

@@ -44,6 +44,7 @@ import { useAgentLoopStore } from '../stores/agentLoopStore'
 import { buildLoopRecheck, loopPassSaysDone } from '../lib/agent-commands'
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
+import { toolCallCapMs, raceWithToolTimeout, SHELL_EXECUTE_DEFAULT_TIMEOUT_MS, CODE_EXECUTE_DEFAULT_TIMEOUT_MS } from '../lib/tool-timeout'
 import { budgetFromSettings } from '../api/agents/budget'
 import type { ChatMessage, ToolCall, ToolDefinition } from '../api/providers/types'
 import type { StepResult, WorkflowEngineCallbacks } from '../types/agent-workflows'
@@ -715,7 +716,11 @@ export function useAgentChat() {
           // routing once the total tool count grows past the threshold
           // (Phase 9). The embedding call is best-effort: if Ollama is
           // unreachable it silently falls back to keyword-only.
-          const lastUserMsg = agentMessages.filter(m => m.role === 'user').pop()?.content || ''
+          // Route on the USER's instruction, never on the newest user-role
+          // message (audit B6): steers, over-loop notes and read-only blocks
+          // are pushed as role 'user', and routing on those swapped the tool
+          // list mid-run to whatever the harness said last.
+          const lastUserMsg = userContent
           // Small-Model Mode (Knob 1): tighten the tool cap and force the
           // embedding router even on a modest catalog (threshold 6) so a 3B-8B
           // model sees ≤6 semantically-ranked tools. Default mode keeps the
@@ -1204,10 +1209,21 @@ export function useAgentChat() {
             perToolOverrides
           )
           const needsApproval = permLevel !== 'auto'
+          // Exec-timeout parity with the Code tab (audit B8): without an
+          // injected default the Rust side used its 120 s fallback, so the
+          // same npm install that passed in Code died here after 2 minutes.
+          // The model's own timeout still wins when it sends one.
+          const toolArgs = { ...tc.function.arguments }
+          if (tc.function.name === 'shell_execute' && !toolArgs.timeout) {
+            toolArgs.timeout = SHELL_EXECUTE_DEFAULT_TIMEOUT_MS
+          }
+          if (tc.function.name === 'code_execute' && !toolArgs.timeout) {
+            toolArgs.timeout = CODE_EXECUTE_DEFAULT_TIMEOUT_MS
+          }
           const ac: AgentToolCall = {
             id: toolCallId,
             toolName: tc.function.name,
-            args: tc.function.arguments,
+            args: toolArgs,
             status: needsApproval ? 'pending_approval' : 'running',
             timestamp: Date.now(),
           }
@@ -1236,7 +1252,11 @@ export function useAgentChat() {
             const td = toolRegistry.getToolByName(name)
             return td ? { name: td.name, inputSchema: td.inputSchema } : undefined
           },
-          execute: (name: string, args: Record<string, any>) => toolRegistry.execute(name, args),
+          // Timeout backstop shared with Codex (audit B9): before this the
+          // Agent loop had NO ceiling around a tool call, so one hung tool
+          // wedged the whole run with no way out but a restart.
+          execute: (name: string, args: Record<string, any>) =>
+            raceWithToolTimeout(toolRegistry.execute(name, args), name, toolCallCapMs(name, args, settings)),
           lookupCache: convId ? makeInTurnCacheLookup({ convId, turnStartMs }) : undefined,
           explainError: (toolName, err) => explainToolError(toolName, err),
           awaitApproval: async (req) => {

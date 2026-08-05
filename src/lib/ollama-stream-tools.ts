@@ -46,6 +46,11 @@ export async function streamOllamaChatWithTools(
     messages: ollamaMessages,
     tools,
     stream: true,
+    // Audit A6: without this Ollama unloads the model after its 5-minute
+    // default idle. An agent step that runs a 10-minute build came back to a
+    // cold model and paid a multi-GB reload before the next thought — several
+    // times per long session. 30m matches the warm-up call in api/ollama.ts.
+    keep_alive: '30m',
     options: {},
   }
   if (options.temperature !== undefined) body.options.temperature = options.temperature

@@ -53,6 +53,39 @@ const TOOL_GROUPS: ToolGroup[] = [
     tools: ['shell_execute', 'code_execute'],
   },
   {
+    // Audit B3: a third of the registry sat in NO group and was therefore
+    // invisible to the model forever — all git_*, run_tests, the background
+    // shell and its status tools, pr_resume, gh_pr_create, project_init.
+    // The typed git tools return parsed porcelain instead of an opaque dump,
+    // which is exactly what a small model needs for "commit this".
+    keywords: ['git', 'commit', 'push', 'branch', 'merge', 'rebase', 'stage', 'staged', 'diff', 'changelog', 'version control'],
+    tools: ['git_status', 'git_diff', 'git_log', 'git_commit', 'git_push'],
+  },
+  {
+    keywords: ['test', 'tests', 'spec', 'vitest', 'jest', 'pytest', 'cargo test', 'failing', 'make it green', 'suite'],
+    tools: ['run_tests'],
+  },
+  {
+    keywords: ['pull request', 'pull-request', 'open a pr', 'create a pr', 'the pr', 'github', 'gh pr'],
+    tools: ['gh_pr_create', 'pr_resume', 'git_status', 'git_diff'],
+  },
+  {
+    // Long-running work belongs on the background bridge: it survives the
+    // 10-minute foreground timeout and the model can poll it. The timeout
+    // hint in useCodex points at shell_execute_background, so it has to be
+    // reachable when builds/installs are on the table (audit B4).
+    keywords: ['background', 'install', 'build', 'compile', 'long running', 'long-running', 'dataset', 'refactor everything', 'task status', 'still running'],
+    tools: ['shell_execute_background', 'shell_task_status', 'shell_task_list', 'shell_task_kill'],
+  },
+  {
+    keywords: ['scaffold', 'new project', 'init a', 'initialize', 'bootstrap', 'starter'],
+    tools: ['project_init'],
+  },
+  {
+    keywords: ['delegate', 'sub-agent', 'subagent', 'fan out', 'in parallel', 'parallelize', 'split the work'],
+    tools: ['delegate_task'],
+  },
+  {
     keywords: ['system', 'os', 'cpu', 'ram', 'memory', 'process', 'running', 'hostname'],
     tools: ['system_info', 'process_list'],
   },

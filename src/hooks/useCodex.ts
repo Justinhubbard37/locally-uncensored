@@ -50,6 +50,7 @@ import { canonicalToolName } from '../lib/loose-tool-parse'
 import { selectRelevantTools, selectRelevantToolsAsync } from '../lib/tool-selection'
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
+import { toolCallCapMs, raceWithToolTimeout, SHELL_EXECUTE_DEFAULT_TIMEOUT_MS, CODE_EXECUTE_DEFAULT_TIMEOUT_MS } from '../lib/tool-timeout'
 import { compactMessages, getModelMaxTokens, estimateTokens } from '../lib/context-compaction'
 import { resolveAgentNumCtx } from '../lib/agent-num-ctx'
 import { AgentLoopGuard } from '../lib/agent-loop-guard'
@@ -77,7 +78,7 @@ const CODEX_REVIEW_SYSTEM_PROMPT = `You are the Coding Agent in REVIEW MODE, a r
 
 REVIEW MODE CONTRACT (binding):
 - You MAY call: file_read, file_list, file_search, git_status, git_log, git_diff, system_info, process_list, get_current_time, web_fetch, web_search.
-- You MUST NOT call: file_write, file_edit, shell_execute, code_execute, run_tests, git_commit, git_push, gh_pr_create, image_generate, video_generate, run_workflow, screenshot, delegate_task. If you call them, the harness will reject the call and tell the model "review-only mode", wasted budget.
+- You MUST NOT call: file_write, file_edit, shell_execute, code_execute, run_tests, git_commit, git_push, gh_pr_create, image_generate, video_generate, run_workflow, screenshot, delegate_task. They are stripped from your tool list; attempting one fails as an unknown tool and wastes the step.
 - Output format: a markdown report with sections "## Summary", "## Findings (priority order)", "## Suggested follow-ups". For each finding cite the file + line range (path:line or path:start-end).
 - Be direct. No flattery, no boilerplate. If the code is fine, say so in one sentence and stop.`
 
@@ -135,7 +136,12 @@ const streamWithTools = streamOllamaChatWithTools
 // "Video generation auf simplen Prompt in Code und Agentmode") — they only
 // surface when the keyword router sees a creative intent in the prompt, so
 // pure coding turns keep the same lean tool list as before.
-const CODEX_CATEGORIES = ['filesystem', 'terminal', 'system', 'web', 'image', 'video'] as const
+// workflow joined with audit B11: delegate_task (the sub-agent fan-out, the
+// counterpart of Claude Code's Task tool) lived in that category and was
+// therefore unreachable from the Code tab. Local models only see it on a
+// delegate/parallel intent via the keyword router; cloud models get it in
+// the full catalog.
+const CODEX_CATEGORIES = ['filesystem', 'terminal', 'system', 'web', 'image', 'video', 'workflow'] as const
 
 
 // `.lurules` reader. MUST go through `fs_read` (the workspace-aware command)
@@ -775,7 +781,12 @@ export function useCodex() {
         }
 
         if (strategy === 'native') {
-          const lastUserMsg = messages.filter(m => m.role === 'user').pop()?.content || ''
+          // Route on the USER's instruction, never on the newest user-role
+          // message (audit B6): steers, nudges and blocked-tool notes are
+          // pushed as role 'user', and routing on those swapped the tool list
+          // mid-run to whatever the harness happened to say last. The real
+          // instruction is the routing intent for the whole run.
+          const lastUserMsg = instruction
           // CODEX_CATEGORIES filter: Codex is a CODING agent — screenshot,
           // run_workflow etc. are distractions that pollute the tool list for
           // small/3B models. Filter the registry by category BEFORE keyword
@@ -796,21 +807,19 @@ export function useCodex() {
           const codexTools = (settings.codexReviewMode || readOnlyTurn)
             ? codexToolsAll.filter((t) => !MUTATING_TOOLS.has(t.name))
             : codexToolsAll
-          // Keep the tool list LEAN — exactly like the uselu reference. A small
-          // model (qwen2.5-coder:7b) handed the full ~24-tool category set every
-          // turn degrades fast: it lapses into prose narration or dumps raw
-          // tool-call JSON instead of emitting clean native tool_calls, and the
-          // ReAct loop then stops after one step. uselu narrows to a handful of
-          // keyword-relevant tools, which keeps small models on-rails; git/test
-          // operations go through shell_execute (the dedicated git_*/run_tests
-          // tools are intentionally not surfaced by the keyword router). This
-          // line is the single most important parity point with uselu — do NOT
-          // replace it with the full `codexTools` set (that was the regression).
-          // Small-Model Mode (Knob 1): give Codex the embedding router it
-          // normally lacks (it ships keyword-only) plus a hard tool cap, so a
-          // 3B-8B coding model sees a short, semantically-ranked tool list.
-          // Default mode keeps the proven keyword-only selection — uselu parity,
-          // the single most important small-model line; do NOT widen it.
+          // Tool-list sizing is a MODEL-STRENGTH decision (audit B3):
+          //  - Small-Model Mode: embedding router + hard cap, ≤6 tools. A
+          //    3B-8B model handed the full catalog degrades fast (narrates,
+          //    dumps raw JSON, stops after one step — the old regression,
+          //    LongFuncEval arXiv 2505.10570).
+          //  - Local default: keyword routing over the coding categories,
+          //    uselu parity. Kept lean on purpose; the keyword groups now
+          //    cover git/tests/background so those are reachable when asked.
+          //  - Cloud/remote model: the FULL coding catalog. A hosted model
+          //    handles 25+ tools fine (that is exactly what Claude Code
+          //    sends), and keyword-guessing its toolbox from message one
+          //    starved 30-minute runs of git_commit/run_tests/background
+          //    shell mid-way.
           const relevantDefs = settings.smallModelMode
             ? await selectRelevantToolsAsync(lastUserMsg, codexTools, permissions, {
                 embed: (texts) => generateEmbeddings(texts),
@@ -818,7 +827,9 @@ export function useCodex() {
                 embeddingThreshold: 6,
                 maxTools: 6,
               })
-            : selectRelevantTools(lastUserMsg, codexTools, permissions)
+            : !isLocalModelByName(activeModel)
+              ? codexTools
+              : selectRelevantTools(lastUserMsg, codexTools, permissions)
           const tools: ToolDefinition[] = relevantDefs.map(t => ({
             type: 'function' as const,
             function: { name: t.name, description: t.description, parameters: t.inputSchema },
@@ -1257,11 +1268,11 @@ export function useCodex() {
           // own timeout to go higher/lower.
           if (toolName === 'shell_execute') {
             if (!toolArgs.cwd && hasValidWorkDir) toolArgs.cwd = workDir
-            if (!toolArgs.timeout) toolArgs.timeout = 600000
+            if (!toolArgs.timeout) toolArgs.timeout = SHELL_EXECUTE_DEFAULT_TIMEOUT_MS
           }
           if (toolName === 'code_execute') {
             if (!toolArgs.cwd && hasValidWorkDir) toolArgs.cwd = workDir
-            if (!toolArgs.timeout) toolArgs.timeout = 120000
+            if (!toolArgs.timeout) toolArgs.timeout = CODE_EXECUTE_DEFAULT_TIMEOUT_MS
           }
           // Resolve relative file paths against working directory.
           // Absolute-path detection must accept ANY drive letter (C:, D:, E:, …),
@@ -1330,45 +1341,13 @@ export function useCodex() {
             }),
         )
 
-        // 60 s per-call timeout is enforced by wrapping the executor function
-        // (keeps the original safety guard — a runaway tool cannot wedge the
-        // whole agent turn).
-        const withTimeout = (name: string, args: Record<string, any>) => {
-          // Shell/code/test/git tools enforce their OWN timeout in the Rust
-          // backend (args.timeout). A fixed 60s JS cap here used to preempt
-          // long-but-legitimate builds before the backend's timer fired — the
-          // root of "coding agent can't build anything / always times out"
-          // (David 2026-06-04). For those, set the JS race ceiling just ABOVE
-          // the tool's own timeout so the backend always wins; everything else
-          // keeps the original 60s guard.
-          //
-          // Same bug class hit the generation tools when they joined Codex in
-          // v2.5.3 (live E2E 2026-06-10: five video_generate attempts all died
-          // at "timed out (60s)" mid-VRAM-handoff). image/video generation has
-          // its own settings-driven deadline (imageGen/videoGenTimeoutMinutes,
-          // enforced in vram-handoff's poll) — set the JS ceiling above it so
-          // the generation pipeline's own timeout always wins, exactly like
-          // the shell tools.
-          const longRunning =
-            name === 'shell_execute' || name === 'code_execute' ||
-            name === 'shell_execute_background' || name === 'run_tests' ||
-            name === 'git_commit' || name === 'git_push'
-          const own = Number(args?.timeout)
-          const capMs =
-            name === 'image_generate'
-              ? (Math.max(1, Number(settings.imageGenTimeoutMinutes) || 20) * 60_000 + 120_000)
-              : name === 'video_generate'
-                ? (Math.max(1, Number(settings.videoGenTimeoutMinutes) || 60) * 60_000 + 120_000)
-                : longRunning
-                  ? (Number.isFinite(own) && own > 0 ? own + 15000 : 615000)
-                  : 60000
-          return Promise.race([
-            toolRegistry.execute(name, args),
-            new Promise<string>((_, reject) =>
-              setTimeout(() => reject(new Error(`Tool execution timed out (${Math.round(capMs / 1000)}s)`)), capMs)
-            ),
-          ])
-        }
+        // Per-call timeout backstop, shared with Agent mode since audit B8/B9
+        // (src/lib/tool-timeout.ts). The tool's own deadline always wins; the
+        // race only exists so a tool whose timer never fires cannot hold the
+        // loop forever — and the timer is cleared when the tool wins (B10),
+        // instead of parking a live closure for up to 615 s per call.
+        const withTimeout = (name: string, args: Record<string, any>) =>
+          raceWithToolTimeout(toolRegistry.execute(name, args), name, toolCallCapMs(name, args, settings))
 
         // Multi-File Stage-and-Approve (B10). When the user has codex
         // stage mode on, file_write calls don't hit the disk — they
