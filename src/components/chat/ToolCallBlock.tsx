@@ -1,4 +1,4 @@
-import { useState, memo } from 'react'
+import { useState, useEffect, memo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Search, Globe, FileText, FileEdit, Terminal, Image, Film, Loader2, Check, X, Clock, AlertCircle, FolderOpen, Cpu, Monitor, GitBranch, GitCompare, GitCommitHorizontal, GitPullRequest, FlaskConical, History, Users, Database, Download } from 'lucide-react'
 import type { AgentToolCall } from '../../types/agent-mode'
@@ -8,6 +8,7 @@ import { useGenerationStore } from '../../stores/generationStore'
 import { ModelPickerCard, ChangeModelInline, pickKindForToolCall } from './ModelPickerCard'
 import { DiffView } from './DiffView'
 import { requestGenerationCancel } from '../../api/vram-handoff'
+import { fileUrlToPath, readLocalFileAsBlobUrl } from '../../lib/local-media-url'
 
 // F1 (konata3602 commitment 2026-05-23) + render fix (konata3602 bug 2026-06-07)
 // — when image_generate / video_generate / screenshot produce a ComfyUI output,
@@ -75,14 +76,59 @@ export function comfyViewParams(url: string | null | undefined): { filename: str
 // Mac MLX media (hard rule: local image/video on Mac is MLX, never ComfyUI —
 // see api/mcp/builtin-tools.ts's executeImageGenerateMlx / executeVideoGenerateMlx).
 // There is no ComfyUI /view route for these, so the result carries a local
-// `blob:` (or, defensively, `data:`) URL created in THIS webview session
-// instead. Same F1 result shape as the ComfyUI path — `<kind> generated:
-// <file> (prompt: "...")\n<url>` — just a different url scheme. Exported for
-// unit testing.
+// `file://` URL pointing at the render the Rust side already wrote to disk.
+// Same F1 result shape as the ComfyUI path — `<kind> generated: <file>
+// (prompt: "...")\n<url>` — just a different url scheme. Exported for unit
+// testing.
 export function localMediaUrlFromResult(result: string | null | undefined): string | null {
   if (!result) return null
-  const m = result.match(/(blob:[^\s)\]]+|data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,[^\s)\]]+)/i)
+  // `file://` is the 2.6.3 form (B3): the result carries the PATH of a file the
+  // app already wrote, so it still resolves after a restart. `blob:` only
+  // appears in conversations recorded BEFORE that change, where it is already
+  // dead; it stays matched so those messages can say so plainly.
+  const m = result.match(/(file:\/\/[^\s)\]]+|blob:[^\s)\]]+|data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,[^\s)\]]+)/i)
   return m ? m[1] : null
+}
+
+/**
+ * Resolve a `file://` result line into something an element can display.
+ *
+ * The blob is created when the block mounts and revoked when it unmounts, so a
+ * long conversation full of generated images holds exactly the ones on screen
+ * rather than every one ever produced. Anything that is not one of our file
+ * URLs is handed straight back.
+ */
+function useDisplayableMediaUrl(url: string | null): { url: string | null; missing: boolean } {
+  const path = url ? fileUrlToPath(url) : null
+  // Nothing creates a blob: URL for a tool result any more, so one appearing in
+  // a stored result necessarily came from an earlier session and its blob died
+  // with that window. Saying so beats rendering a broken picture frame.
+  const staleBlob = !!url && url.startsWith('blob:')
+  const [resolved, setResolved] = useState<string | null>(null)
+  const [missing, setMissing] = useState(false)
+
+  useEffect(() => {
+    if (!path) { setResolved(null); setMissing(false); return }
+    let live = true
+    let made: string | null = null
+    setMissing(false)
+    readLocalFileAsBlobUrl(path)
+      .then((blobUrl) => {
+        // Unmounted while reading: revoke immediately, nothing will show it.
+        if (!live) { URL.revokeObjectURL(blobUrl); return }
+        made = blobUrl
+        setResolved(blobUrl)
+      })
+      .catch(() => { if (live) setMissing(true) })
+    return () => {
+      live = false
+      if (made) URL.revokeObjectURL(made)
+    }
+  }, [path])
+
+  if (staleBlob) return { url: null, missing: true }
+  if (!path) return { url, missing: false }
+  return { url: resolved, missing }
 }
 
 // Pull the "<file>" back out of the "<kind> generated: <file> (prompt: …"
@@ -176,7 +222,10 @@ function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
   // executeVideoGenerateMlx in api/mcp/builtin-tools.ts — no ComfyUI /view
   // route exists for those).
   const comfyPreviewUrl = comfyViewUrlFromResult(toolCall.result)
-  const localPreviewUrl = comfyPreviewUrl ? null : localMediaUrlFromResult(toolCall.result)
+  const rawLocalUrl = comfyPreviewUrl ? null : localMediaUrlFromResult(toolCall.result)
+  // B3: a `file://` line is read off disk here and released when this block
+  // unmounts. Everything else passes through untouched.
+  const { url: localPreviewUrl, missing: localMediaMissing } = useDisplayableMediaUrl(rawLocalUrl)
   const previewUrl = comfyPreviewUrl ?? localPreviewUrl
 
   // Model-Picker (v2.5.3): while a generation tool call is RUNNING and the
@@ -209,7 +258,10 @@ function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
   // A blob:/data: URL carries no `filename=` query param for isInlineVideoUrl
   // to key off, so fall back to the tool name — accurate since the MLX video
   // executor never produces an image result and vice versa.
-  const isVideoResult = !!localPreviewUrl
+  // Keyed off the RAW result line, not the resolved one: a file:// URL takes a
+  // moment to read off disk, and the kind of element to render must not depend
+  // on whether that read has landed yet.
+  const isVideoResult = !!rawLocalUrl
     ? toolCall.toolName === 'video_generate'
     : !!effectivePreviewUrl && isInlineVideoUrl(effectivePreviewUrl)
 
@@ -285,6 +337,16 @@ function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
           and no picture. A .mp4/.webm output renders in a <video>; everything
           else — including animated .webp — in an <img>. URL is bounded to OUR
           ComfyUI by comfyViewUrlFromResult (never auto-loads arbitrary URLs). */}
+      {/* B3: the file behind this result is gone, or it was recorded as a
+          session-scoped blob: URL before 2.6.3 and died with that window. An
+          honest line beats a broken picture frame. */}
+      {localMediaMissing && (
+        <div className="pl-5 pt-0.5">
+          <span className="text-[0.6rem] text-gray-500 dark:text-gray-500">
+            This render is no longer on disk.
+          </span>
+        </div>
+      )}
       {previewUrl && effectivePreviewUrl && (
         <div className="pl-5 pt-0.5 space-y-1">
           {isVideoResult ? (

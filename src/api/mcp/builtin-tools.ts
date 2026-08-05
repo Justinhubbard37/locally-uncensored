@@ -12,7 +12,8 @@ import { applyUniqueEdit } from '../../lib/surgical-edit'
 import { sliceFileReadResult } from '../../lib/file-read-window'
 import { writeTodos, summarizeTodos } from '../../stores/todoStore'
 import { isMlxImageHost, generateMlxImageDataUrl, listMlxImageModels, type MlxImageModel } from '../mlx-image'
-import { getVideoStatus, listVideoModels, generateVideo as generateMlxVideo, getVideoProgress, cancelVideo, readVideoAsBlobUrl, type VideoModel } from '../mlx-video'
+import { getVideoStatus, listVideoModels, generateVideo as generateMlxVideo, getVideoProgress, cancelVideo, type VideoModel } from '../mlx-video'
+import { pathToFileUrl } from '../../lib/local-media-url'
 
 /**
  * Helper: current chat id (+ folder workspace) as a fragment to spread into
@@ -1312,20 +1313,6 @@ function resolveMlxModel<T extends { id: string; name: string }>(
   )
 }
 
-/** Decode a `data:image/png;base64,...` result into a compact `blob:` URL —
- *  same b64 → Blob → createObjectURL pattern as readVideoAsBlobUrl
- *  (mlx-video.ts). Keeps the multi-hundred-KB PNG OUT of the tool-result
- *  string that gets fed back into the model's context; only the short
- *  blob: URL (which the CSP's img-src already allows) goes there. */
-function pngDataUrlToObjectUrl(dataUrl: string): string {
-  const comma = dataUrl.indexOf(',')
-  const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
-  const bin = atob(b64)
-  const bytes = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-  return URL.createObjectURL(new Blob([bytes], { type: 'image/png' }))
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
 }
@@ -1362,7 +1349,7 @@ async function executeImageGenerateMlx(prompt: string, merged: Record<string, an
   }
 
   try {
-    const { dataUrl } = await generateMlxImageDataUrl({
+    const { dataUrl, localPath } = await generateMlxImageDataUrl({
       prompt,
       model: model.id,
       steps: typeof merged.steps === 'number' ? merged.steps : undefined,
@@ -1371,9 +1358,20 @@ async function executeImageGenerateMlx(prompt: string, merged: Record<string, an
       height: typeof merged.height === 'number' ? merged.height : undefined,
       negativePrompt: typeof merged.negativePrompt === 'string' ? merged.negativePrompt : undefined,
     })
+    // B3: the result string is PERSISTED with the conversation, so what goes on
+    // this line has to outlive the window. The Rust side already wrote the PNG
+    // to disk before handing back the bytes, so the path is both stable and
+    // free. A blob: URL here used to leak (never revoked) AND die on the next
+    // launch, which quietly emptied every generated picture out of the history.
+    if (localPath) {
+      const filename = localPath.split(/[\\/]/).pop() || `mlx-${Date.now()}.png`
+      return `Image generated: ${filename} (prompt: "${prompt}")\n${pathToFileUrl(localPath)}`
+    }
+    // No path means the disk write failed on the Rust side. The bytes are still
+    // in hand, so show them rather than losing the render; a data: URL is
+    // self-contained and revokes nothing, it is only bulky.
     const filename = `mlx-${Date.now()}.png`
-    const url = pngDataUrlToObjectUrl(dataUrl)
-    return `Image generated: ${filename} (prompt: "${prompt}")\n${url}`
+    return `Image generated: ${filename} (prompt: "${prompt}")\n${dataUrl}`
   } catch (e) {
     return `Image generation failed: ${e instanceof Error ? e.message : String(e)}`
   }
@@ -1455,13 +1453,12 @@ async function executeVideoGenerateMlx(prompt: string, merged: Record<string, an
       return `Video generation failed: ${e instanceof Error ? e.message : String(e)}`
     }
     if (prog.status === 'complete') {
-      try {
-        const blobUrl = await readVideoAsBlobUrl(job.output)
-        const filename = job.output.split(/[\\/]/).pop() || `mlx-${Date.now()}.mp4`
-        return `Video generated: ${filename} (prompt: "${prompt}")\n${blobUrl}`
-      } catch (e) {
-        return `Video generation failed: could not read output — ${e instanceof Error ? e.message : String(e)}`
-      }
+      // Same rule as the image path: the file is already on disk, so the
+      // result carries its path and the viewer rebuilds a blob on demand. The
+      // old readVideoAsBlobUrl here pulled the whole clip into memory, never
+      // released it, and left a dead URL behind after a restart.
+      const filename = job.output.split(/[\\/]/).pop() || `mlx-${Date.now()}.mp4`
+      return `Video generated: ${filename} (prompt: "${prompt}")\n${pathToFileUrl(job.output)}`
     }
     if (prog.status === 'error') {
       return `Video generation failed: ${prog.error || 'mlx-video failed'}`
