@@ -43,6 +43,7 @@ interface ChatState {
   setConversationPersonaEnabled: (id: string, enabled: boolean) => void
   addMessage: (conversationId: string, message: Message) => void
   insertMessageBefore: (conversationId: string, beforeId: string, message: Message) => void
+  insertMessagesBefore: (conversationId: string, beforeId: string, messages: Message[]) => void
   updateMessageContent: (conversationId: string, messageId: string, content: string) => void
   updateMessageThinking: (conversationId: string, messageId: string, thinking: string) => void
   updateMessageUsage: (conversationId: string, messageId: string, usage: { promptTokens: number; completionTokens: number; totalTokens: number; estimated?: boolean }) => void
@@ -200,6 +201,23 @@ export const useChatStore = create<ChatState>()(
             if (idx < 0) return { ...c, messages: [...c.messages, message], updatedAt: Date.now() }
             const msgs = [...c.messages]
             msgs.splice(idx, 0, message)
+            return { ...c, messages: msgs, updatedAt: Date.now() }
+          }),
+        })),
+
+      // Batch variant (audit E2): the Codex run-end used to insert its whole
+      // tool history in a loop, one set() per message — several hundred store
+      // updates back to back, each cloning the conversation array while the
+      // coalesced persist serialised behind it. That was the visible hang at
+      // the end of a long run. One set(), one clone, one persist.
+      insertMessagesBefore: (conversationId, beforeId, messages) =>
+        set((state) => ({
+          conversations: state.conversations.map((c) => {
+            if (c.id !== conversationId) return c
+            const idx = c.messages.findIndex((m) => m.id === beforeId)
+            const msgs = [...c.messages]
+            if (idx < 0) msgs.push(...messages)
+            else msgs.splice(idx, 0, ...messages)
             return { ...c, messages: msgs, updatedAt: Date.now() }
           }),
         })),

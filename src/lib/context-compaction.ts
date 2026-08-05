@@ -78,6 +78,10 @@ export async function getModelMaxTokens(modelName: string): Promise<number> {
 
 const KEEP_RECENT = 4 // Always keep at least the last N messages untouched
 
+/** How much of the pinned first user message survives compaction. Enough for
+ * any real instruction; a pasted 200 KB file does not ride along forever. */
+const PINNED_TASK_MAX_CHARS = 8000
+
 /**
  * True for a message that is a tool RESULT — either the native `tool` role or
  * a Hermes `<tool_response>` carried on a user message. Used to trim a leading
@@ -140,14 +144,33 @@ export function compactMessages(
       : m,
   )
 
+  // Pin the TASK (audit C5). The oldest message is the user's actual
+  // instruction, and the suffix window is precisely the mechanism that drops
+  // it first — after which a 30-minute run works on whatever the recent tool
+  // results imply instead of what was asked. Keep the first user message
+  // (capped) out of the drop zone, alongside the system prompt.
+  const firstUserIdx = capped.findIndex((m) => m.role === 'user')
+  const pinnedTask =
+    firstUserIdx >= 0 && typeof capped[firstUserIdx].content === 'string'
+      ? {
+          ...capped[firstUserIdx],
+          content:
+            capped[firstUserIdx].content.length > PINNED_TASK_MAX_CHARS
+              ? truncateToolResult(capped[firstUserIdx].content, PINNED_TASK_MAX_CHARS)
+              : capped[firstUserIdx].content,
+        }
+      : null
+  const pinnedTokens = pinnedTask ? estimateMessageTokens([pinnedTask]) : 0
+
   // Accumulate a recent suffix that fits, newest-first. Keep at least
   // KEEP_RECENT messages even when that exceeds budget (recent context is the
   // most valuable), otherwise stop as soon as the next message would overflow.
+  const suffixBudget = Math.max(0, budget - pinnedTokens)
   const kept: OllamaChatMessage[] = []
   let used = 0
   for (let i = capped.length - 1; i >= 0; i--) {
     const t = estimateMessageTokens([capped[i]])
-    if (used + t > budget && kept.length >= KEEP_RECENT) break
+    if (used + t > suffixBudget && kept.length >= KEEP_RECENT) break
     kept.unshift(capped[i])
     used += t
   }
@@ -158,9 +181,16 @@ export function compactMessages(
     kept.shift()
   }
 
-  const droppedCount = capped.length - kept.length
+  // The pin is only needed when the first user message did NOT survive into
+  // the suffix on its own.
+  const pinNeeded = pinnedTask !== null && !kept.includes(capped[firstUserIdx])
+
+  const droppedCount = capped.length - kept.length - (pinNeeded ? 1 : 0)
   const compacted: OllamaChatMessage[] = []
   if (systemMsg) compacted.push(systemMsg)
+  if (pinNeeded && pinnedTask) {
+    compacted.push(pinnedTask)
+  }
   if (droppedCount > 0) {
     // Wording matters here: the old notice ("Re-read any file you still need
     // with file_read.") actively FED a re-read loop — every iteration the
@@ -168,7 +198,7 @@ export function compactMessages(
     // recovery path but make it single-shot and anti-repeat.
     compacted.push({
       role: 'system',
-      content: `[${droppedCount} earlier message${droppedCount === 1 ? '' : 's'} were trimmed to fit the context window. Results you already saw still hold. If a detail is genuinely missing, re-read that specific file once; never repeat a call that already ran.]`,
+      content: `[${droppedCount} earlier message${droppedCount === 1 ? '' : 's'} were trimmed to fit the context window. The original task above still stands. Results you already saw still hold. If a detail is genuinely missing, re-read that specific file once; never repeat a call that already ran.]`,
     })
   }
   compacted.push(...kept)

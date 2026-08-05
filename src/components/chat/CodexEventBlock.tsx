@@ -1,5 +1,5 @@
 import { Terminal, FileEdit, Brain, AlertCircle, CheckCircle, ChevronDown } from 'lucide-react'
-import { useState } from 'react'
+import { useState, memo } from 'react'
 import type { CodexEvent } from '../../types/codex'
 import { DiffView } from './DiffView'
 
@@ -7,7 +7,11 @@ interface Props {
   event: CodexEvent
 }
 
-export function CodexEventBlock({ event }: Props) {
+// memo (audit D2): events are append-only, so every existing block can skip
+// re-rendering while the transcript streams.
+export const CodexEventBlock = memo(CodexEventBlockImpl)
+
+function CodexEventBlockImpl({ event }: Props) {
   const [open, setOpen] = useState(event.type === 'error')
 
   if (event.type === 'instruction' || event.type === 'done') return null

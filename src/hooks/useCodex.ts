@@ -775,9 +775,30 @@ export function useCodex() {
         // I am the Coding Agent…" line never lands in the chat. The
         // post-stream echoDetected branch then drops the buffer entirely and
         // forces a silent retry.
+        //
+        // Coalesced per animation frame (audit D1) — Chat and Agent already
+        // did this; Codex wrote the store on every token, which re-rendered
+        // the whole transcript per token on long answers. settleLivePaint()
+        // cancels the queued frame the moment the stream call returns, so a
+        // stale frame can never fire AFTER a final direct write and repaint
+        // old content over it.
+        let livePaintPending: string | null = null
+        let livePaintFrame = false
+        const settleLivePaint = () => {
+          livePaintPending = null
+        }
         const liveContent = (c: string) => {
           if (echoRetriesRemaining > 0 && isSystemPromptEcho(c)) return
-          useChatStore.getState().updateMessageContent(convId!, assistantMsg.id, fullContent ? fullContent + '\n\n' + c : c)
+          livePaintPending = fullContent ? fullContent + '\n\n' + c : c
+          if (livePaintFrame) return
+          livePaintFrame = true
+          requestAnimationFrame(() => {
+            livePaintFrame = false
+            if (livePaintPending !== null) {
+              useChatStore.getState().updateMessageContent(convId!, assistantMsg.id, livePaintPending)
+              livePaintPending = null
+            }
+          })
         }
 
         if (strategy === 'native') {
@@ -907,6 +928,7 @@ export function useCodex() {
                 throw thinkErr
               }
             }
+            settleLivePaint()
             toolCalls = turn.toolCalls
             turnContent = turn.content || ''
             // Real consumed-context usage for THIS coding turn (system + tools +
@@ -1002,6 +1024,7 @@ export function useCodex() {
                 throw thinkErr
               }
             }
+            settleLivePaint()
             toolCalls = turn.toolCalls
             turnContent = turn.content || ''
             if (turn.promptEvalCount || turn.evalCount) {
@@ -1052,7 +1075,10 @@ export function useCodex() {
             },
           )
           shown += display.flush()
-          if (shown) liveContent(shown)
+          // Final paint DIRECT + settle the coalesced frame, so a queued
+          // stale frame can never fire after the writes below (audit D1).
+          settleLivePaint()
+          if (shown) useChatStore.getState().updateMessageContent(convId!, assistantMsg.id, fullContent ? fullContent + '\n\n' + shown : shown)
           const raw = hermesTurn.content
           if (hasToolCallTags(raw)) {
             toolCalls = parseHermesToolCalls(raw).map(tc => ({
@@ -1570,6 +1596,38 @@ export function useCodex() {
           if (!result) continue
           applyResultToToolCall(entry.ac, result)
           const isError = result.status === 'failed'
+
+          // Unified diff for the write tools — computed BEFORE the block
+          // update so the ToolCallBlock itself can render it (audit D5; the
+          // diff used to live only on the Codex event log, so the Agent view
+          // showed raw text where a change view belonged).
+          let acDiff: string | undefined
+          if (entry.ac.toolName === 'file_write') {
+            // Pre-read above captured the on-disk version; a missing file
+            // yields an all-add hunk. Empty diff → omit.
+            const oldText = oldContents.get(entry.ac.id) ?? ''
+            const newText =
+              typeof entry.injectedArgs.content === 'string'
+                ? entry.injectedArgs.content
+                : ''
+            acDiff = computeUnifiedDiff(entry.injectedArgs.path, oldText, newText) || undefined
+          } else if (entry.ac.toolName === 'file_edit') {
+            // Surgical edit — the tool only received old_string/new_string, so
+            // reconstruct the new content from the pre-read + the unique
+            // replacement to attach a real diff. If the edit did not apply
+            // uniquely the executor already returned an error; skip the diff.
+            const oldText = oldContents.get(entry.ac.id) ?? ''
+            const applied = applyUniqueEdit(
+              oldText,
+              typeof entry.injectedArgs.old_string === 'string' ? entry.injectedArgs.old_string : '',
+              typeof entry.injectedArgs.new_string === 'string' ? entry.injectedArgs.new_string : '',
+            )
+            acDiff = applied.ok
+              ? computeUnifiedDiff(entry.injectedArgs.path, oldText, applied.content ?? '') || undefined
+              : undefined
+          }
+          if (acDiff) entry.ac.diff = acDiff
+
           updateBlockById(entry.blockId, {
             toolCall: { ...entry.ac },
             toolCalls: [{ ...entry.ac }],
@@ -1587,44 +1645,11 @@ export function useCodex() {
             codexStore.addEvent(convId, {
               id: uuid(), type: 'terminal_output', content: resultStr, timestamp: Date.now(),
             })
-          } else if (entry.ac.toolName === 'file_write') {
-            // Attach a unified diff to EVERY file_change event (not only in
-            // stage mode). Pre-read above captured the on-disk version; a
-            // missing file yields an all-add hunk. Empty diff → omit.
-            const oldText = oldContents.get(entry.ac.id) ?? ''
-            const newText =
-              typeof entry.injectedArgs.content === 'string'
-                ? entry.injectedArgs.content
-                : ''
-            const diff = computeUnifiedDiff(
-              entry.injectedArgs.path,
-              oldText,
-              newText,
-            )
+          } else if (entry.ac.toolName === 'file_write' || entry.ac.toolName === 'file_edit') {
             codexStore.addEvent(convId, {
               id: uuid(), type: 'file_change', content: resultStr,
               filePath: entry.injectedArgs.path,
-              diff: diff || undefined,
-              timestamp: Date.now(),
-            })
-          } else if (entry.ac.toolName === 'file_edit') {
-            // Surgical edit — the tool only received old_string/new_string, so
-            // reconstruct the new content from the pre-read + the unique
-            // replacement to attach a real diff. If the edit did not apply
-            // uniquely the executor already returned an error; skip the diff.
-            const oldText = oldContents.get(entry.ac.id) ?? ''
-            const applied = applyUniqueEdit(
-              oldText,
-              typeof entry.injectedArgs.old_string === 'string' ? entry.injectedArgs.old_string : '',
-              typeof entry.injectedArgs.new_string === 'string' ? entry.injectedArgs.new_string : '',
-            )
-            const diff = applied.ok
-              ? computeUnifiedDiff(entry.injectedArgs.path, oldText, applied.content ?? '')
-              : undefined
-            codexStore.addEvent(convId, {
-              id: uuid(), type: 'file_change', content: resultStr,
-              filePath: entry.injectedArgs.path,
-              diff: diff || undefined,
+              diff: acDiff,
               timestamp: Date.now(),
             })
           } else if (isError) {
@@ -1789,27 +1814,37 @@ export function useCodex() {
       // the chat store. On the next turn, the history builder includes
       // them in the API payload so the model sees what it did before.
       // Hidden messages are filtered out by MessageBubble rendering.
-      const toolHistory = messages.slice(messagesStartLen)
+      //
+      // Capped + batched (audit E2). Uncapped, a 200-iteration run persisted
+      // hundreds of hidden messages of up to 60k chars each — tens of MB in
+      // one conversation, reserialised on every later persist. And the old
+      // one-set()-per-message insert loop was the visible hang at run end.
+      // The most recent chain is what the next turn actually needs; older
+      // steps are summarised by the visible transcript anyway.
+      const toolHistoryAll = messages.slice(messagesStartLen)
+      const HIDDEN_HISTORY_MAX = 60
+      let toolHistory = toolHistoryAll.slice(-HIDDEN_HISTORY_MAX)
+      // Never start the kept slice on an orphan tool result — strict
+      // providers 422 a result whose call fell outside the window.
+      while (toolHistory.length > 0 && toolHistory[0].role === 'tool') toolHistory = toolHistory.slice(1)
       if (toolHistory.length > 0 && convId) {
         const store = useChatStore.getState()
         // Find the assistant message we just filled so we can insert BEFORE it
         const convNow = store.conversations.find(c => c.id === convId)
         const assistantIdx = convNow?.messages.findIndex(m => m.id === assistantMsg.id) ?? -1
         if (assistantIdx > 0) {
-          for (const tm of toolHistory) {
-            store.insertMessageBefore(convId, assistantMsg.id, {
-              id: uuid(),
-              role: tm.role as 'assistant' | 'tool',
-              content: tm.content || '',
-              timestamp: Date.now(),
-              hidden: true,
-              tool_calls: tm.tool_calls as any,
-              // Persist the tool-result linkage so the next turn's history
-              // builder can replay it — without this, follow-up turns 422 on
-              // lu-cloud (see types/chat.ts Message.tool_call_id, Bug 4).
-              tool_call_id: tm.tool_call_id,
-            })
-          }
+          store.insertMessagesBefore(convId, assistantMsg.id, toolHistory.map((tm) => ({
+            id: uuid(),
+            role: tm.role as 'assistant' | 'tool',
+            content: tm.content || '',
+            timestamp: Date.now(),
+            hidden: true,
+            tool_calls: tm.tool_calls as any,
+            // Persist the tool-result linkage so the next turn's history
+            // builder can replay it — without this, follow-up turns 422 on
+            // lu-cloud (see types/chat.ts Message.tool_call_id, Bug 4).
+            tool_call_id: tm.tool_call_id,
+          })))
         }
       }
 

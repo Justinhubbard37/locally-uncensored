@@ -1,11 +1,12 @@
-import { useState } from 'react'
+import { useState, memo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Search, Globe, FileText, FileEdit, Terminal, Image, Film, Loader2, Check, X, Clock, AlertCircle, FolderOpen, Cpu, Monitor, GitBranch, Database, Download } from 'lucide-react'
+import { Search, Globe, FileText, FileEdit, Terminal, Image, Film, Loader2, Check, X, Clock, AlertCircle, FolderOpen, Cpu, Monitor, GitBranch, GitCompare, GitCommitHorizontal, GitPullRequest, FlaskConical, History, Users, Database, Download } from 'lucide-react'
 import type { AgentToolCall } from '../../types/agent-mode'
 import { getComfyHost, getComfyPort, downloadComfyFile } from '../../api/backend'
 import { useModelPickStore } from '../../stores/modelPickStore'
 import { useGenerationStore } from '../../stores/generationStore'
 import { ModelPickerCard, ChangeModelInline, pickKindForToolCall } from './ModelPickerCard'
+import { DiffView } from './DiffView'
 import { requestGenerationCancel } from '../../api/vram-handoff'
 
 // F1 (konata3602 commitment 2026-05-23) + render fix (konata3602 bug 2026-06-07)
@@ -100,21 +101,40 @@ interface Props {
   onReject?: () => void
 }
 
+// Complete over the registry (audit D4): 16 of 29 tools had no entry and fell
+// back to the Terminal icon, so a git_commit looked like a shell command and
+// a surgical file_edit like a plain write. Every builtin has a face now.
 const TOOL_ICONS: Record<string, typeof Search> = {
   web_search: Search,
   web_fetch: Globe,
   file_read: FileText,
   file_write: FileEdit,
+  file_edit: FileEdit,
   file_list: FolderOpen,
   file_search: Search,
   code_execute: Terminal,
   shell_execute: Terminal,
+  shell_execute_background: History,
+  shell_task_status: History,
+  shell_task_list: History,
+  shell_task_kill: X,
+  git_status: GitBranch,
+  git_diff: GitCompare,
+  git_log: GitBranch,
+  git_commit: GitCommitHorizontal,
+  git_push: GitBranch,
+  gh_pr_create: GitPullRequest,
+  pr_resume: GitPullRequest,
+  project_init: FolderOpen,
+  run_tests: FlaskConical,
   system_info: Cpu,
   process_list: Cpu,
   screenshot: Monitor,
   image_generate: Image,
   video_generate: Film,
   run_workflow: GitBranch,
+  delegate_task: Users,
+  get_current_time: Clock,
 }
 
 const STATUS_ICONS = {
@@ -127,7 +147,12 @@ const STATUS_ICONS = {
   cached: Database,
 }
 
-export function ToolCallBlock({ toolCall, onApprove, onReject }: Props) {
+// memo (audit D2): the Codex/Agent transcript re-renders on every streamed
+// frame, and each un-memoised block re-rendered with it. Block updates
+// replace the toolCall object, so reference equality is the right check.
+export const ToolCallBlock = memo(ToolCallBlockImpl)
+
+function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
   // Default: collapsed (closed)
   const [open, setOpen] = useState(toolCall.status === 'pending_approval')
 
@@ -331,9 +356,17 @@ export function ToolCallBlock({ toolCall, onApprove, onReject }: Props) {
                 {JSON.stringify(toolCall.args, null, 2)}
               </pre>
 
+              {/* Diff for the write tools (audit D5): a change view where a
+                  change happened, not raw result text. */}
+              {toolCall.diff && (
+                <div className="max-h-[300px] overflow-auto scrollbar-thin">
+                  <DiffView diff={toolCall.diff} />
+                </div>
+              )}
+
               {/* Result (raw text). The inline media preview now renders
                   always-visible above the collapsible (konata 2026-06-07). */}
-              {toolCall.result && (
+              {toolCall.result && !toolCall.diff && (
                 <pre className="text-[0.55rem] leading-relaxed text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-white/[0.02] rounded px-2 py-1 overflow-auto scrollbar-thin max-h-[300px]">
                   {toolCall.result}
                 </pre>

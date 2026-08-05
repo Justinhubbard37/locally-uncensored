@@ -79,13 +79,47 @@ describe('compactMessages', () => {
       { role: 'assistant', content: 'Recent answer' },
     ]
     const result = compactMessages(messages, 200)
-    expect(result.length).toBeLessThan(messages.length)
+    // The token load shrinks; the message COUNT may not, because the pinned
+    // task (audit C5) rides along where dropped content used to be.
+    expect(estimateMessageTokens(result)).toBeLessThan(estimateMessageTokens(messages))
     // System prompt always preserved
     expect(result[0].role).toBe('system')
     expect(result[0].content).toBe('System prompt')
+    // The ORIGINAL TASK is pinned right after the system prompt (audit C5) —
+    // before the pin, the oldest message was exactly the first to be dropped,
+    // so a long run forgot what it was asked to do.
+    expect(result[1].role).toBe('user')
+    expect(result[1].content).toContain('First question')
     // Recent messages preserved
     const lastMsg = result[result.length - 1]
     expect(lastMsg.content).toBe('Recent answer')
+  })
+
+  it('caps a giant pinned task instead of carrying it forever', () => {
+    const messages: OllamaChatMessage[] = [
+      { role: 'system', content: 'System prompt' },
+      { role: 'user', content: 'fix this file: ' + 'x'.repeat(50_000) },
+      ...Array.from({ length: 10 }, (_, i) => ({
+        role: (i % 2 === 0 ? 'assistant' : 'user') as 'assistant' | 'user',
+        content: `Message ${i} `.repeat(80),
+      })),
+    ]
+    const result = compactMessages(messages, 500)
+    const pinned = result[1]
+    expect(pinned.role).toBe('user')
+    expect(pinned.content).toContain('fix this file')
+    expect(pinned.content.length).toBeLessThan(10_000)
+  })
+
+  it('does not duplicate the task when it already survived into the suffix', () => {
+    const messages: OllamaChatMessage[] = [
+      { role: 'system', content: 'System prompt' },
+      { role: 'user', content: 'the only question' },
+      { role: 'assistant', content: 'Answer '.repeat(400) },
+    ]
+    const result = compactMessages(messages, 120)
+    const userCopies = result.filter((m) => m.role === 'user' && m.content.includes('the only question'))
+    expect(userCopies.length).toBe(1)
   })
 
   it('preserves system prompt always', () => {
