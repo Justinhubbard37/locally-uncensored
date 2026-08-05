@@ -275,6 +275,16 @@ export function tauriMockInit(opts: TauriMockOptions) {
         return Promise.resolve({ ok: true, was_loaded: false, running: true })
       case 'mlx_image_models':
         return Promise.resolve(mlxImageCatalog.map((m) => ({ ...m, installed: mlx.images.has(m.id) })))
+      // Rust holds the HF token in memory only, so a spec has to be able to
+      // see that the frontend pushed it down — not just that it was stored.
+      case 'set_hf_token': {
+        const token = String(m?.token ?? '').trim()
+        w.__E2E_HF_TOKEN__ = token || null
+        record('__E2E_MLX_CALLS__', { cmd, present: !!token })
+        return Promise.resolve({ ok: true, present: !!token })
+      }
+      case 'hf_token_present':
+        return Promise.resolve({ present: !!w.__E2E_HF_TOKEN__ })
       case 'install_mlx_diffusion':
         slot.imageEngine = 0
         record('__E2E_MLX_CALLS__', { cmd })

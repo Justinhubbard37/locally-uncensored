@@ -213,6 +213,8 @@ fn main() {
             commands::media_cmds::mlx_unload,
             commands::media_cmds::mlx_generate,
             commands::media_cmds::mlx_image_models,
+            commands::media_cmds::set_hf_token,
+            commands::media_cmds::hf_token_present,
             commands::media_cmds::mlx_image_install_model,
             commands::media_cmds::mlx_image_install_status,
             commands::media_cmds::mlx_image_delete_model,
