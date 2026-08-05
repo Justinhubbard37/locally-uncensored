@@ -39,9 +39,18 @@ describe('useCodex loop-detector (Bug #5 → AgentLoopGuard)', () => {
     expect(src).toMatch(/stronger model/i)
   })
 
-  it('injects the steer message into the model history', () => {
+  it('injects the steer message into the model history, AFTER the calls it refers to', () => {
     expect(src).toMatch(/batchVerdict\.action === 'steer'/)
-    expect(src).toContain("messages.push({ role: 'user', content: batchVerdict.message })")
+    expect(src).toContain("messages.push({ role: 'user', content: pendingSteer })")
+    // Audit F2: pushed at detection time the steer landed chronologically
+    // BEFORE the assistant tool_calls message it complains about, so the
+    // history read "do not repeat this" and then showed the model doing it.
+    const idxHold = src.indexOf('pendingSteer = batchVerdict.message')
+    const idxPush = src.indexOf("messages.push({ role: 'user', content: pendingSteer })")
+    const idxHistory = src.indexOf("messages.push({ role: 'assistant', content: turnContent || '', tool_calls: toolCalls })")
+    expect(idxHold).toBeGreaterThan(0)
+    expect(idxHistory).toBeGreaterThan(idxHold)
+    expect(idxPush).toBeGreaterThan(idxHistory)
   })
 
   it('checks the guard AFTER tool calls are collected but BEFORE executing', () => {

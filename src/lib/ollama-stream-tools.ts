@@ -96,6 +96,21 @@ export async function streamOllamaChatWithTools(
   let content = ''
   let thinking = ''
   let toolCalls: ToolCall[] = []
+  // Audit F1: some servers repeat the FULL tool_calls array in a later chunk
+  // (and the tail-buffer pass could append the same calls once more). Without
+  // this, the identical call ran twice. Byte-identical name+args within one
+  // turn is never two intended calls — that is what the repeat guard and the
+  // in-turn cache treat as one call too.
+  const seenCalls = new Set<string>()
+  const appendCalls = (raw: any[]) => {
+    for (const tc of raw) {
+      const repaired = repairToolCallArgs(tc.function.arguments)
+      const key = `${tc.function.name}|${JSON.stringify(repaired ?? {})}`
+      if (seenCalls.has(key)) continue
+      seenCalls.add(key)
+      toolCalls = [...toolCalls, { function: { name: tc.function.name, arguments: repaired } }]
+    }
+  }
   // Real token usage from the final Ollama chunk (top-level, not in `message`).
   // prompt_eval_count is the FULL consumed context (system + tools + RAG +
   // history) for THIS turn — the agent/code loop stores the latest so the
@@ -103,12 +118,33 @@ export async function streamOllamaChatWithTools(
   let promptEvalCount = 0
   let evalCount = 0
 
+  // No-bytes watchdog (audit A7): a wedged runner behind a live connection
+  // ends neither with data nor an error, and read() sat forever. Five silent
+  // minutes is a dead stream — thinking models still produce deltas.
+  const IDLE_TIMEOUT_MS = 300_000
   while (true) {
     if (options.signal?.aborted) {
       try { await reader.cancel() } catch { /* noop */ }
       break
     }
-    const { done, value } = await reader.read()
+    let idleTimer: ReturnType<typeof setTimeout> | undefined
+    let done: boolean, value: Uint8Array | undefined
+    try {
+      ;({ done, value } = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          idleTimer = setTimeout(
+            () => reject(new Error(`Ollama stream stalled: no data received for ${Math.round(IDLE_TIMEOUT_MS / 1000)}s.`)),
+            IDLE_TIMEOUT_MS,
+          )
+        }),
+      ]))
+    } catch (err) {
+      try { await reader.cancel() } catch { /* noop */ }
+      throw err
+    } finally {
+      clearTimeout(idleTimer)
+    }
     if (done) break
 
     buf += decoder.decode(value, { stream: true })
@@ -145,15 +181,7 @@ export async function streamOllamaChatWithTools(
           onThinking(thinking)
         }
         if (j.message.tool_calls && Array.isArray(j.message.tool_calls)) {
-          toolCalls = [
-            ...toolCalls,
-            ...j.message.tool_calls.map((tc: any) => ({
-              function: {
-                name: tc.function.name,
-                arguments: repairToolCallArgs(tc.function.arguments),
-              },
-            })),
-          ]
+          appendCalls(j.message.tool_calls)
         }
       }
       if (typeof j.prompt_eval_count === 'number') promptEvalCount = j.prompt_eval_count
@@ -173,15 +201,7 @@ export async function streamOllamaChatWithTools(
         throw new Error(`Ollama: ${j.error}`)
       }
       if (j.message?.tool_calls && Array.isArray(j.message.tool_calls)) {
-        toolCalls = [
-          ...toolCalls,
-          ...j.message.tool_calls.map((tc: any) => ({
-            function: {
-              name: tc.function.name,
-              arguments: repairToolCallArgs(tc.function.arguments),
-            },
-          })),
-        ]
+        appendCalls(j.message.tool_calls)
       }
       if (j.message?.content) {
         content += j.message.content

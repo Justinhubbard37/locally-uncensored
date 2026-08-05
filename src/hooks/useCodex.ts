@@ -1267,11 +1267,16 @@ export function useCodex() {
           useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent + msg)
           break
         }
+        // Steer is appended AFTER this iteration's assistant+tool messages
+        // (audit F2). Pushed here it landed chronologically BEFORE the calls
+        // it complains about, so the history read "do not repeat this" and
+        // then showed the model doing it.
+        let pendingSteer: string | null = null
         if (batchVerdict.action === 'steer') {
           // Let this batch still run (the in-turn cache serves it instantly),
           // but put the anti-repeat instruction in front of the NEXT turn.
           void diagLog('loop-guard-steer', { iter: i })
-          messages.push({ role: 'user', content: batchVerdict.message })
+          pendingSteer = batchVerdict.message
         }
 
         type BatchEntry = { tc: typeof toolCalls[number]; ac: AgentToolCall; blockId: string; injectedArgs: Record<string, any> }
@@ -1711,6 +1716,11 @@ export function useCodex() {
             })
             messages.push({ role: 'user', content: buildHermesToolResult(entry.ac.toolName, resultTextFor(result)) })
           }
+        }
+
+        // Now the steer sits AFTER the calls it refers to (audit F2).
+        if (pendingSteer) {
+          messages.push({ role: 'user', content: pendingSteer })
         }
       }
 

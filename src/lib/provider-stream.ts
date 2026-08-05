@@ -30,6 +30,42 @@ export interface StreamedProviderTurn {
   finishReason?: string
 }
 
+/**
+ * No-bytes watchdog (audit A7). A backend that wedges mid-stream (crashed
+ * runner behind a live proxy, half-dead connection) ends neither with data
+ * nor with an error — the loop just sat on read() forever with the typing
+ * dots on. Five minutes with not a single chunk is a dead stream, not a slow
+ * one: reasoners emit thinking deltas while they work, so even "silent"
+ * phases produce bytes.
+ */
+const STREAM_IDLE_TIMEOUT_MS = 300_000
+
+async function* withIdleGuard<T>(iter: AsyncIterable<T>, idleMs: number): AsyncGenerator<T> {
+  const it = iter[Symbol.asyncIterator]()
+  for (;;) {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let next: IteratorResult<T>
+    try {
+      next = await Promise.race([
+        it.next(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`Stream stalled: no data received for ${Math.round(idleMs / 1000)}s.`)),
+            idleMs,
+          )
+        }),
+      ])
+    } catch (err) {
+      try { await it.return?.(undefined as never) } catch { /* releasing the reader is best-effort */ }
+      throw err
+    } finally {
+      clearTimeout(timer)
+    }
+    if (next.done) return
+    yield next.value
+  }
+}
+
 export async function streamProviderTurn(
   provider: ProviderClient,
   model: string,
@@ -41,7 +77,7 @@ export async function streamProviderTurn(
   let content = ''
   let thinking = ''
   const turn: StreamedProviderTurn = { content: '', toolCalls: [], thinking: '' }
-  for await (const chunk of provider.chatStream(model, messages, options)) {
+  for await (const chunk of withIdleGuard(provider.chatStream(model, messages, options), STREAM_IDLE_TIMEOUT_MS)) {
     if (chunk.content) {
       content += chunk.content
       onContent?.(content, chunk.content)

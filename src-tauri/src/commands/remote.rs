@@ -545,6 +545,32 @@ enum ToolGate {
 /// which is the same "look at what this person is doing" class as `screenshot`,
 /// and screenshot was gated. With the default flipped, a tool added to the
 /// dispatch without a decision here is refused instead of silently exposed.
+/// Line window for `file_read` (audit C1) — mirror of the desktop
+/// `sliceFileReadResult`, so the relay and the app answer the same contract.
+/// No offset and no limit returns the content untouched.
+fn slice_file_read(content: &str, offset: Option<u64>, limit: Option<u64>) -> String {
+    if offset.unwrap_or(0) == 0 && limit.unwrap_or(0) == 0 {
+        return content.to_string();
+    }
+    let lines: Vec<&str> = content.split('\n').collect();
+    let total = lines.len();
+    let start = offset.filter(|o| *o > 0).unwrap_or(1).min(total as u64 + 1) as usize;
+    let count = limit.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(total);
+    let window: Vec<&str> = lines.iter().skip(start - 1).take(count).copied().collect();
+    let end = start + window.len() - if window.is_empty() { 0 } else { 1 };
+    let mut out = format!("[lines {}-{} of {}]\n{}", start, end, total, window.join("\n"));
+    if end < total {
+        let rest = total - end;
+        out.push_str(&format!(
+            "\n[{} more line{} — call file_read again with offset: {}]",
+            rest,
+            if rest == 1 { "" } else { "s" },
+            end + 1
+        ));
+    }
+    out
+}
+
 fn gate_for(tool: &str) -> ToolGate {
     match tool {
         // RCE-equivalent: gated behind the dedicated, default-OFF `shell`
@@ -646,7 +672,18 @@ async fn handle_agent_tool(
         "file_read" => {
             let path = body.args.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
             if path.is_empty() { Err("file_read needs a non-empty `path` argument.".into()) }
-            else { crate::commands::agent::file_read(path, chat_id.clone(), app_state.clone()) }
+            else {
+                // Windowed read parity with the desktop tool (audit C1): the
+                // relay serves the same tool contract, so offset/limit have to
+                // page here too or a mobile agent reads a 5000-line file whole.
+                let offset = body.args.get("offset").and_then(|v| v.as_u64());
+                let limit = body.args.get("limit").and_then(|v| v.as_u64());
+                crate::commands::agent::file_read(path, chat_id.clone(), app_state.clone())
+                    .map(|v| {
+                        let text = v.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                        serde_json::json!({ "content": slice_file_read(text, offset, limit) })
+                    })
+            }
         }
         "file_write" => {
             let path = body.args.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -2148,8 +2185,10 @@ button{-webkit-appearance:none;appearance:none}
     {name:'web_fetch', description:'Fetch a single URL and return its readable text (up to ~24 000 chars). Strips <script>, <style>, <nav>, <header>, <footer>, <aside>, <form> — returns main content only. PREFER this over web_search when you already know the target URL. NEVER call with localhost, private IPs (10.*, 192.168.*, 172.16-31.*), or file:// — they are refused. If response is empty or 4xx, try a different URL rather than retrying the same one.',
      parameters:[{name:'url',type:'string',description:'Full URL including protocol (http:// or https://)',required:true},
                  {name:'maxLength',type:'number',description:'Max chars to return (default: 24000)',required:false}]},
-    {name:'file_read', description:'Read the complete contents of a file. PREFER absolute paths; relative paths resolve against the agent workspace (~/agent-workspace). The entire file is returned — there is no pagination or range parameter. DO NOT re-read a file you just wrote with file_write; the write response already confirmed the save. For directory listings use file_list; for content search across many files use file_search.',
-     parameters:[{name:'path',type:'string',description:'Path to the file (absolute preferred)',required:true}]},
+    {name:'file_read', description:'Read a file. PREFER absolute paths; relative paths resolve against the agent workspace (~/agent-workspace). Omitting offset/limit returns the whole file. For LARGE files pass offset (1-based start line) and limit (number of lines) to read a window — the response names the window and the total line count, and tells you the offset for the next page. Very long whole-file reads get their middle truncated, so page large files. DO NOT re-read a file you just wrote with file_write; the write response already confirmed the save. For directory listings use file_list; for content search across many files use file_search.',
+     parameters:[{name:'path',type:'string',description:'Path to the file (absolute preferred)',required:true},
+                 {name:'offset',type:'number',description:'1-based line to start reading from (optional)',required:false},
+                 {name:'limit',type:'number',description:'Maximum number of lines to return (optional)',required:false}]},
     {name:'file_write', description:'Write a WHOLE file. Use for CREATING a new file or fully replacing one. To change part of an EXISTING file, PREFER file_edit — it is far cheaper than resending the whole file and never truncates a large one. Creates parent directories if missing. OVERWRITES existing content — there is NO append mode. PREFER absolute paths. Writes to the same path within one turn are serialized automatically via the sideEffectKey scheduler.',
      parameters:[{name:'path',type:'string',description:'Path to the file (absolute preferred)',required:true},
                  {name:'content',type:'string',description:'The complete new content of the file',required:true}]},

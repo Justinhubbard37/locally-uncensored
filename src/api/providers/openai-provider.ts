@@ -272,7 +272,12 @@ export class OpenAIProvider implements ProviderClient {
       JSON.stringify(body.messages || '').length + JSON.stringify(body.tools || '').length
     const promptTokens = Math.ceil(promptChars / 4)
     const headroom = Math.max(256, ctxLen - promptTokens - RESERVE)
-    body.max_tokens = requested > 0 ? Math.min(requested, headroom) : headroom
+    // Audit E6: an UNSET budget used to send the whole remaining window as
+    // max_tokens — six figures on a 128k model. Servers that validate
+    // max_tokens against the model's real OUTPUT limit reject that outright.
+    // 32k is beyond any single reply this app produces; an explicit user
+    // request still passes through un-capped (their server, their call).
+    body.max_tokens = requested > 0 ? Math.min(requested, headroom) : Math.min(headroom, 32768)
   }
 
   async *chatStream(
@@ -619,6 +624,20 @@ export class OpenAIProvider implements ProviderClient {
   private async probeContextFromServer(model: string): Promise<number | null> {
     if (!this.isLanBackend) return null
 
+    // Probe cache (audit E5): applyMaxTokens calls getContextLength on EVERY
+    // request, and a LAN backend without a catalog entry paid one or two HTTP
+    // probes per agent iteration. A loaded model's window does not move
+    // between iterations; 5 minutes covers an LM Studio reload with changed
+    // settings. Negative answers cache too — a server that has no context
+    // endpoint will not grow one mid-run.
+    const cacheKey = `${this.baseUrl}|${model}`
+    const hit = OpenAIProvider.probeCache.get(cacheKey)
+    if (hit && Date.now() - hit.at < 300_000) return hit.ctx
+    const remember = (ctx: number | null): number | null => {
+      OpenAIProvider.probeCache.set(cacheKey, { at: Date.now(), ctx })
+      return ctx
+    }
+
     // 1. LM Studio Enhanced API: /api/v0/models/<id>
     //    Base-URL ist typischerweise http://localhost:1234/v1 — wir tauschen
     //    /v1 gegen /api/v0 aus. Wenn der Server kein LM Studio ist, kommt 404
@@ -632,7 +651,7 @@ export class OpenAIProvider implements ProviderClient {
       if (lmsRes.ok) {
         const data = await lmsRes.json()
         const max = data?.max_context_length ?? data?.context_length
-        if (max && Number(max) > 0) return Number(max)
+        if (max && Number(max) > 0) return remember(Number(max))
       }
     } catch { /* fall through */ }
 
@@ -650,12 +669,16 @@ export class OpenAIProvider implements ProviderClient {
           data?.max_model_len ??
           data?.n_ctx_train ??
           data?.context_length
-        if (ctx && Number(ctx) > 0) return Number(ctx)
+        if (ctx && Number(ctx) > 0) return remember(Number(ctx))
       }
     } catch { /* fall through */ }
 
-    return null
+    return remember(null)
   }
+
+  /** Probe results per endpoint+model (audit E5). Static, not an instance
+   *  field: the lu-cloud provider builds a fresh delegate per call. */
+  private static probeCache = new Map<string, { at: number; ctx: number | null }>()
 
   async getContextLength(model: string): Promise<number> {
     // Cascade:

@@ -45,6 +45,7 @@ import { buildLoopRecheck, loopPassSaysDone } from '../lib/agent-commands'
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
 import { toolCallCapMs, raceWithToolTimeout, SHELL_EXECUTE_DEFAULT_TIMEOUT_MS, CODE_EXECUTE_DEFAULT_TIMEOUT_MS } from '../lib/tool-timeout'
+import { AgentLoopGuard } from '../lib/agent-loop-guard'
 import { budgetFromSettings } from '../api/agents/budget'
 import type { ChatMessage, ToolCall, ToolDefinition } from '../api/providers/types'
 import type { StepResult, WorkflowEngineCallbacks } from '../types/agent-workflows'
@@ -102,6 +103,14 @@ interface ApprovalEntry {
 
 // ── Hook ──────────────────────────────────────────────────────
 
+/**
+ * The pending next /loop pass. MODULE scope, not a hook ref (audit A3): the
+ * chat view unmounts on a view switch, and a timer parked in an unmounted
+ * instance's ref was unreachable for the remounted hook — stopAgent cleared
+ * its own (empty) ref while the old timer kept firing new passes.
+ */
+let agentLoopTimer: ReturnType<typeof setTimeout> | null = null
+
 export function useAgentChat() {
   const [isAgentRunning, setIsAgentRunning] = useState(false)
   const [pendingApproval, setPendingApproval] = useState<AgentToolCall | null>(null)
@@ -110,8 +119,6 @@ export function useAgentChat() {
   /** True once the user pressed stop, so the /loop driver does not start
    *  another pass on the run they just killed. */
   const userStoppedRef = useRef(false)
-  /** The pending next /loop pass, so stop can cancel it mid-interval. */
-  const loopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const approvalQueueRef = useRef<ApprovalEntry[]>([])
   const contentRef = useRef('')
   const thinkingRef = useRef('')
@@ -629,6 +636,12 @@ export function useAgentChat() {
     const executedCallKeys = new Set<string>()
     const callKey = (tc: { function: { name: string; arguments: unknown } }) =>
       tc.function.name + '|' + JSON.stringify(tc.function.arguments ?? {})
+    // Loop-detection (audit follow-up): agent-loop-guard's own header says it
+    // covers "Codex + Chat agent", but only Codex ever wired it — the agent
+    // loop relied on the exact-repeat set alone, which the epoch reset (B1)
+    // rightly weakened. Windowed batch repeats, per-epoch identical reads and
+    // repeated narration now watch this loop too.
+    const loopGuard = new AgentLoopGuard()
 
     try {
       // ── Agent Loop ──────────────────────────────────────────
@@ -1196,6 +1209,26 @@ export function useAgentChat() {
           }
         }
 
+        // Loop-detector, parity with Codex: narration first (the same line
+        // re-emitted every iteration), then the batch (windowed signature
+        // repeats + identical reads against an unchanged workspace). Steer is
+        // held and appended AFTER this iteration's history (audit F2), so it
+        // never sits chronologically before the calls it refers to.
+        const narrationVerdict = loopGuard.recordNarration(turnContent)
+        const batchVerdict = narrationVerdict.action === 'halt'
+          ? narrationVerdict
+          : loopGuard.recordBatch(
+              toolCalls.map((tc) => ({ name: tc.function.name, args: JSON.stringify(tc.function.arguments ?? {}) })),
+            )
+        if (batchVerdict.action === 'halt') {
+          contentRef.current =
+            (contentRef.current ? contentRef.current + '\n\n' : '') +
+            `_(halted: ${batchVerdict.reason}. The model is looping — try a stronger model for multi-step tasks, or rephrase the instruction.)_`
+          scheduleUIUpdate()
+          break
+        }
+        const pendingSteer = batchVerdict.action === 'steer' ? batchVerdict.message : null
+
         type BatchEntry = { tc: typeof toolCalls[number]; ac: AgentToolCall; blockId: string }
         const batch: BatchEntry[] = []
         budget.addToolCalls(toolCalls.length)
@@ -1456,6 +1489,11 @@ export function useAgentChat() {
           }
         }
 
+        // Now the steer sits AFTER the calls it refers to (audit F2).
+        if (pendingSteer) {
+          agentMessages.push({ role: 'user', content: pendingSteer })
+        }
+
         // Vision feedback (David 2026-06-03): after image_generate, hand the
         // generated picture to a vision-capable model so it SEES the result and
         // can comment — and learns the filename to chain into video_generate.
@@ -1628,9 +1666,14 @@ export function useAgentChat() {
             task: loopState.task, intervalMs: loopState.intervalMs,
             nextAt: Date.now() + loopState.intervalMs,
           })
-          loopTimerRef.current = setTimeout(() => {
-            loopTimerRef.current = null
-            if (runningRef.current) return
+          agentLoopTimer = setTimeout(() => {
+            agentLoopTimer = null
+            // A skipped pass clears the loop store too (audit A3) — leaving
+            // it standing painted a LoopBar promising a pass that never came.
+            if (runningRef.current) {
+              useAgentLoopStore.getState().clear()
+              return
+            }
             if (useChatStore.getState().activeConversationId !== convForLoop) {
               useAgentLoopStore.getState().clear()
               return
@@ -1655,9 +1698,9 @@ export function useAgentChat() {
     // Stop means stop: also cancel a /loop pass waiting out its interval,
     // otherwise the run the user just killed comes back by itself.
     userStoppedRef.current = true
-    if (loopTimerRef.current) {
-      clearTimeout(loopTimerRef.current)
-      loopTimerRef.current = null
+    if (agentLoopTimer) {
+      clearTimeout(agentLoopTimer)
+      agentLoopTimer = null
     }
     useAgentLoopStore.getState().clear()
     runningRef.current = false

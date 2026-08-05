@@ -231,7 +231,7 @@ export class AnthropicProvider implements ProviderClient {
     messages: ChatMessage[],
     tools: ToolDefinition[],
     options?: ChatOptions,
-  ): Promise<{ content: string; toolCalls: ToolCall[] }> {
+  ): Promise<{ content: string; toolCalls: ToolCall[]; promptEvalCount?: number; evalCount?: number }> {
     const { system, anthropicMessages } = this.convertMessages(messages)
 
     const body: Record<string, any> = {
@@ -299,7 +299,14 @@ export class AnthropicProvider implements ProviderClient {
       }
     }
 
-    return { content, toolCalls }
+    // Real usage (audit B7): without it the TokenCounter stayed on the
+    // char/4 estimate for every Anthropic agent turn.
+    return {
+      content,
+      toolCalls,
+      promptEvalCount: data.usage?.input_tokens || undefined,
+      evalCount: data.usage?.output_tokens || undefined,
+    }
   }
 
   async listModels(): Promise<ProviderModel[]> {
@@ -395,14 +402,25 @@ export class AnthropicProvider implements ProviderClient {
     }
 
     // Anthropic requires messages to alternate user/assistant.
-    // Merge consecutive same-role messages.
+    // Merge consecutive same-role messages. Block-array contents merge too
+    // (audit B7): the agent loop pushes one tool-result message PER call, and
+    // Anthropic requires all tool_result blocks answering one assistant turn
+    // to arrive in ONE user message. The old string-only merge left two
+    // parallel tool calls as two consecutive user messages, which the API
+    // rejects — so any multi-tool batch broke the whole Anthropic agent path.
+    const asBlocks = (content: string | Record<string, any>[]): Record<string, any>[] =>
+      typeof content === 'string' ? [{ type: 'text', text: content }] : content
     const merged: Record<string, any>[] = []
     for (const msg of anthropicMessages) {
       const last = merged[merged.length - 1]
-      if (last && last.role === msg.role && typeof last.content === 'string' && typeof msg.content === 'string') {
+      if (!last || last.role !== msg.role) {
+        merged.push(msg)
+        continue
+      }
+      if (typeof last.content === 'string' && typeof msg.content === 'string') {
         last.content += '\n\n' + msg.content
       } else {
-        merged.push(msg)
+        last.content = [...asBlocks(last.content), ...asBlocks(msg.content)]
       }
     }
 

@@ -98,9 +98,11 @@ describe('/loop actually loops', () => {
 
   it('starts the NEXT pass after the interval instead of killing the run', () => {
     const src = read('../../hooks/useCodex.ts')
-    expect(src).toContain('loopTimerRef.current = setTimeout(')
+    // The handle is module-scoped since audit A3 — a hook ref died with the
+    // unmounted Code view, so stopCodex could not reach a pending pass.
+    expect(src).toContain('let codexLoopTimer:')
+    expect(src).toContain('codexLoopTimer = setTimeout(fireLoopPass, loopState.intervalMs)')
     expect(src).toContain('buildLoopRecheck(loopState.task, nextPass)')
-    expect(src).toContain('}, loopState.intervalMs)')
   })
 
   it('stops on the done marker or on a cap the user set, and NOTHING else', () => {
@@ -136,9 +138,11 @@ describe('/loop actually loops', () => {
     const src = read('../../hooks/useCodex.ts')
     const stopIdx = src.indexOf('const stopCodex = useCallback(')
     expect(stopIdx).toBeGreaterThan(0)
-    const stopBody = src.slice(stopIdx, stopIdx + 600)
-    expect(stopBody).toContain('clearTimeout(loopTimerRef.current)')
+    const stopBody = src.slice(stopIdx, stopIdx + 900)
+    expect(stopBody).toContain('clearTimeout(codexLoopTimer)')
     expect(stopBody).toContain('userStoppedRef.current = true')
+    // And it reaches a run started by a PREVIOUS hook instance (audit A2).
+    expect(stopBody).toContain('abortConversation(')
   })
 
 })

@@ -216,14 +216,16 @@ describe('streamWithTools NDJSON parsing', () => {
 // (useAgentChat.ts) can share the same wire protocol — these checks now
 // guard the new location instead of useCodex.ts.
 describe('streamWithTools drift detection', () => {
-  it('ollama-stream-tools.ts still uses append-spread for tool_calls (not overwrite)', () => {
+  it('ollama-stream-tools.ts still appends tool_calls (not overwrite), deduped since audit F1', () => {
     const __filename = fileURLToPath(import.meta.url)
     const __dirname = dirname(__filename)
     const src = readFileSync(join(__dirname, '../../lib/ollama-stream-tools.ts'), 'utf8')
 
-    // Must contain the spread-append pattern, not the old overwrite
-    expect(src).toContain('...toolCalls,')
-    expect(src).toContain('...j.message.tool_calls.map')
+    // Every chunk AND the tail-buffer pass must go through the appending,
+    // deduping helper — split-across-lines calls still accumulate, while a
+    // server that repeats the full array cannot double-execute a call.
+    expect(src.match(/appendCalls\(j\.message\.tool_calls\)/g)?.length).toBe(2)
+    expect(src).toContain('seenCalls')
     // Must NOT contain the old overwrite pattern
     expect(src).not.toMatch(/toolCalls\s*=\s*j\.message\.tool_calls\.map/)
   })
