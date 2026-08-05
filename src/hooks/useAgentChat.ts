@@ -138,11 +138,31 @@ export function useAgentChat() {
 
   // ── Wait for user approval (enqueues; UI shows head of queue) ──
 
-  function waitForApproval(toolCall: AgentToolCall): Promise<boolean> {
+  function waitForApproval(toolCall: AgentToolCall, signal?: AbortSignal): Promise<boolean> {
     return new Promise((resolve) => {
+      // Audit A4: this promise used to resolve ONLY on a click. Stop while a
+      // tool sat awaiting approval meant the resolver was never called, the
+      // loop's finally never ran, and the conversation was wedged with the
+      // typing dots on forever. An abort now answers "no" for the user.
+      if (signal?.aborted) {
+        resolve(false)
+        return
+      }
+      const entry = { toolCall, resolve }
       const wasEmpty = approvalQueueRef.current.length === 0
-      approvalQueueRef.current.push({ toolCall, resolve })
+      approvalQueueRef.current.push(entry)
       if (wasEmpty) setPendingApproval(toolCall)
+      signal?.addEventListener(
+        'abort',
+        () => {
+          const idx = approvalQueueRef.current.indexOf(entry)
+          if (idx < 0) return // already answered by a click
+          approvalQueueRef.current.splice(idx, 1)
+          resolve(false)
+          if (idx === 0) advanceApprovalQueue()
+        },
+        { once: true },
+      )
     })
   }
 
@@ -1160,7 +1180,11 @@ export function useAgentChat() {
           if (blocked.length) {
             toolCalls = toolCalls.filter((tc) => !MUTATING_TOOLS.has(tc.function?.name ?? ''))
             const names = [...new Set(blocked.map((tc) => tc.function.name))].join(', ')
-            messages.push({
+            // `agentMessages`, not `messages` (audit follow-up): this guard was
+            // copied from useCodex, whose history array IS called messages. In
+            // this hook that name does not exist, so the first read-only turn
+            // that actually blocked a mutating call died on a ReferenceError.
+            agentMessages.push({
               role: 'user',
               content: `${names} is not available on this turn, it is a read-only command. Do not try to change anything. Finish with the written answer using what you have already read.`,
             })
@@ -1222,7 +1246,7 @@ export function useAgentChat() {
             // creation (permission level 'auto') bypass the approval
             // gate entirely. Only 'pending_approval' tools enqueue.
             if (entry.ac.status !== 'pending_approval') return true
-            const approved = await waitForApproval(entry.ac)
+            const approved = await waitForApproval(entry.ac, abort.signal)
             if (approved) {
               entry.ac.status = 'running'
               updateBlockById(convId!, assistantMessage.id, entry.blockId, {
@@ -1299,20 +1323,25 @@ export function useAgentChat() {
             content: contentLabel,
           })
 
-          // `mediaOk` guard: without it a ComfyUI error text was written into the
-          // PERSISTENT cross-conversation memory store as a 'reference' fact.
-          if ((result.status === 'completed' || result.status === 'cached') && entry.ac.result && mediaOk) {
-            const argsShort = JSON.stringify(entry.ac.args).substring(0, 100)
-            const resultShort = entry.ac.result.substring(0, 200)
-            useMemoryStore.getState().addMemory({
-              type: 'reference',
-              title: `${entry.ac.toolName} result`,
-              description: `${entry.ac.toolName}(${argsShort.substring(0, 60)}) → ${resultShort.substring(0, 60)}`,
-              content: `${entry.ac.toolName}(${argsShort}) → ${resultShort}`,
-              tags: [`agent:${entry.ac.toolName}`],
-              source: convId || 'agent',
-            })
-          }
+          // Per-tool-call memory writes were removed here (audit E1): every
+          // successful call became a permanent 'reference' memory, so a long
+          // run left hundreds of file_read/shell entries competing for the
+          // memory budget of every FUTURE conversation, plus one embedding
+          // call each against the same backend the chat was using. The
+          // curated turn-level extractor (extractMemoriesFromPair) is the
+          // memory path; raw tool results were never memories.
+        }
+
+        // Epoch reset (audit B1). The over-loop guard blocks a call whose
+        // name+args exactly repeat one already run THIS turn. But after a
+        // mutation the same call is legitimately new: edit → test → edit →
+        // test repeats `run_tests` with identical args and MUST re-run.
+        // Same dividing line the loop guard and the in-turn cache use: any
+        // side-effecting call may change what the next identical call
+        // returns, so the repeat set starts over. Media stays capped via
+        // imageGenDone/videoGenDone, which this reset does not touch.
+        if (batch.some((e) => MUTATING_TOOLS.has(e.ac.toolName))) {
+          executedCallKeys.clear()
         }
 
         // Feed results back into LLM history. Format differs per provider:

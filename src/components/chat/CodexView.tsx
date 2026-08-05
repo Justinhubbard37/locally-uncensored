@@ -455,7 +455,12 @@ export function CodexView() {
         <ChatInput
           onSend={(content) => sendInstruction(content)}
           onStop={stopCodex}
-          isGenerating={isRunning}
+          // Store flag, not the hook's local isRunning (audit A2): the view
+          // remounts on every tab switch and a fresh hook says "idle" while
+          // the old instance's loop is still running — which offered a second
+          // parallel send and no Stop button. The generating flag follows the
+          // conversation, not the hook instance.
+          isGenerating={isRunning || codexGenerating}
           slashCommands
           composerModel={<ModelSelector openUpward surface="code" />}
           composerAbove={<><LoopBar onStop={stopCodex} /><GoalBar /></>}

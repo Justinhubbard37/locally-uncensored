@@ -3,6 +3,7 @@
 import type { MCPToolDefinition, PermissionMap, PermissionLevel } from './types'
 import type { OllamaTool } from '../../types/agent-mode'
 import type { ToolDefinition } from '../providers/types'
+import { MUTATING_TOOLS } from '../../lib/mutating-tools'
 
 type ToolExecutor = (args: Record<string, any>) => Promise<string>
 /**
@@ -106,19 +107,30 @@ export class ToolRegistry {
     const entry = this.tools.get(name)
     if (!entry) return `Error: Unknown tool "${name}"`
 
+    // Audit B2: a retry re-RUNS the tool. For a side-effecting tool that is a
+    // second commit, a second push, a second shell command — never acceptable
+    // on spec. Reads may retry, and only on transient failures.
+    const retriable = !MUTATING_TOOLS.has(name)
+    const isTransientText = (s: string) =>
+      s.includes('timed out') || s.includes('ECONNREFUSED') || s.includes('fetch failed')
+
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         const result = await entry.executor(args)
         // If result is an error and we have retries left, retry
         if (result.startsWith('Error:') && attempt < maxRetries) {
           // Only retry on transient errors (timeout, network)
-          const isTransient = result.includes('timed out') || result.includes('ECONNREFUSED') || result.includes('fetch failed')
-          if (isTransient) continue
+          if (retriable && isTransientText(result)) continue
         }
         return result
       } catch (err) {
-        if (attempt < maxRetries) continue
         const message = err instanceof Error ? err.message : String(err)
+        // The throw path used to retry EVERYTHING once, blind — including a
+        // git_commit whose invoke threw after the commit landed, and aborted
+        // calls. Same rule as the string path: transient + non-mutating only,
+        // and an abort is the user speaking, not a network hiccup.
+        const aborted = (err as { name?: string })?.name === 'AbortError' || /abort/i.test(message)
+        if (attempt < maxRetries && retriable && !aborted && isTransientText(message)) continue
         return `Error: ${message}`
       }
     }

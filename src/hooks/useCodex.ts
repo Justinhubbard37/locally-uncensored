@@ -27,6 +27,7 @@ import {
 } from '../lib/agent-commands'
 import { useGenerationStore } from '../stores/generationStore'
 import { backendCall, isOllamaLocal } from '../api/backend'
+import { requestGenerationCancel } from '../api/vram-handoff'
 import { planWithArchitect, renderArchitectPlanSection } from '../api/agents/architect'
 import { fetchRepoMap, renderRepoMapSection } from '../api/agents/repo-map'
 import { isLocalModelByName } from '../api/agents/model-locality'
@@ -196,6 +197,15 @@ function codexCanThink(model: string): boolean {
   return mode ? mode === 'toggle' : isThinkingCompatible(model)
 }
 
+/**
+ * The pending next /loop pass. MODULE scope, not a hook ref (audit A3): the
+ * Code view unmounts on every tab switch, and a timer parked in an unmounted
+ * instance's ref was unreachable for the remounted hook — stopCodex cleared
+ * its own (empty) ref while the old timer kept firing new passes. One shared
+ * handle means whichever instance is alive can cancel the pending pass.
+ */
+let codexLoopTimer: ReturnType<typeof setTimeout> | null = null
+
 export function useCodex() {
   const [isRunning, setIsRunning] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
@@ -203,8 +213,6 @@ export function useCodex() {
   /** True once the user pressed stop, so the /loop driver does not start
    *  another pass on the run they just killed. Cleared when a new run starts. */
   const userStoppedRef = useRef(false)
-  /** The pending next /loop pass, so stop can cancel it mid-interval. */
-  const loopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const sendInstruction = useCallback(async (
     rawInstruction: string,
@@ -535,6 +543,17 @@ export function useCodex() {
     // realtime counter show only in the coding chat that's actually running,
     // not in every chat the user switches to (David 2026-06-12). Cleared below.
     useGenerationStore.getState().setGenerating(convId, true)
+    // Register the abort in the STORE, not just in hook refs (audit A2). The
+    // Code view unmounts on a tab switch and the remounted hook starts with
+    // empty refs — before this, a run that survived the switch had no working
+    // Stop button and a second instruction could start a parallel loop on the
+    // same conversation. With the store aborter, stopCodex (any instance) and
+    // chat deletion both reach the real controller. Cleared in finally.
+    useGenerationStore.getState().registerAborter(convId, () => {
+      runningRef.current = false
+      abort.abort()
+      requestGenerationCancel()
+    })
 
     // Architect / RepoMap pre-pass (B8 + B9). Both inject into the
     // system prompt BEFORE the first iteration and surface a visible
@@ -1531,7 +1550,7 @@ export function useCodex() {
                   toolName: req.toolName,
                   command: String(a.command ?? a.code ?? a.script ?? '').slice(0, 800),
                   cloudReason: !settings.codexConfirmShell && providerId === 'lu-cloud',
-                })
+                }, abort.signal)
               }
             : undefined,
           recordAudit: (entry) => {
@@ -1826,6 +1845,7 @@ export function useCodex() {
 
       setIsRunning(false)
       useGenerationStore.getState().setGenerating(convId, false)
+      useGenerationStore.getState().clearAborter(convId)
       runningRef.current = false
       abortRef.current = null
       clearActiveChatId()
@@ -1876,19 +1896,34 @@ export function useCodex() {
             task: loopState.task, intervalMs: loopState.intervalMs,
             nextAt: Date.now() + loopState.intervalMs,
           })
-          loopTimerRef.current = setTimeout(() => {
-            loopTimerRef.current = null
+          const fireLoopPass = () => {
+            codexLoopTimer = null
             // Bail if the user moved on or started something else meanwhile.
-            if (runningRef.current) return
+            // Clear the loop store too — leaving it standing painted a LoopBar
+            // that promised a pass which was never coming (audit A3).
+            if (runningRef.current) {
+              useAgentLoopStore.getState().clear()
+              return
+            }
             if (useChatStore.getState().activeConversationId !== convForLoop) {
               useAgentLoopStore.getState().clear()
+              return
+            }
+            // The Code view is not on screen (other chat mode, other view):
+            // do NOT start an invisible run — the loop's own contract is
+            // "never running invisibly" (David 2026-07-25). Defer instead of
+            // cancel, so peeking at Create doesn't kill a standing loop; the
+            // pass fires within 5 s of the view coming back.
+            if (useCodexStore.getState().chatMode !== 'codex') {
+              codexLoopTimer = setTimeout(fireLoopPass, 5000)
               return
             }
             void sendRef.current?.(buildLoopRecheck(loopState.task, nextPass), {
               displayContent: cap > 0 ? `pass ${nextPass} of ${cap}` : `pass ${nextPass}`,
               loop: { ...loopState, pass: nextPass },
             })
-          }, loopState.intervalMs)
+          }
+          codexLoopTimer = setTimeout(fireLoopPass, loopState.intervalMs)
         }
       }
     }
@@ -1903,14 +1938,18 @@ export function useCodex() {
     // Stop means stop: also cancel a /loop pass that is waiting out its
     // interval, otherwise the run the user just killed comes back by itself.
     userStoppedRef.current = true
-    if (loopTimerRef.current) {
-      clearTimeout(loopTimerRef.current)
-      loopTimerRef.current = null
+    if (codexLoopTimer) {
+      clearTimeout(codexLoopTimer)
+      codexLoopTimer = null
     }
     useAgentLoopStore.getState().clear()
     runningRef.current = false
     abortRef.current?.abort()
     abortRef.current = null
+    // The run may belong to a PREVIOUS hook instance (the Code view remounts
+    // on every tab switch) whose controller this instance never saw. The
+    // store-registered aborter reaches it regardless of who started it.
+    useGenerationStore.getState().abortConversation(useChatStore.getState().activeConversationId)
     setIsRunning(false)
   }, [])
 
