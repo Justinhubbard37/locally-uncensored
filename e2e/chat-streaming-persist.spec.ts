@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
 import { tauriMockInit, DEFAULT_MODEL_NAME } from './support/tauri-mock'
 import { seedOnboardingDone } from './support/cloud-mock'
+import { openNewChat } from './support/ui'
 
 /**
  * Regression cover for the 2.6.3 renderer Out of Memory (Morgan, 2026-08-03).
@@ -51,7 +52,11 @@ function inChat(page: Page, text: string) {
 
 test('a streamed answer renders live, lands in full, and survives a reload', async ({ page }) => {
   await boot(page)
-  await page.getByRole('button', { name: /New Chat/i }).click()
+  // openNewChat, not a bare click: right after onboarding the model list is
+  // still loading and Sidebar.handleNewChat drops a click with no active
+  // model. Deterministic on the Windows box, invisible on a fast Mac — this
+  // spec was the one E2E failure in the 2.6.3 Windows run.
+  await openNewChat(page)
 
   await send(page, 'FIRST-TURN-MARKER')
   // The memoised bubble did not freeze: the WHOLE answer arrives, not the
