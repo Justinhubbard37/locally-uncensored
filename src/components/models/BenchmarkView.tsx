@@ -147,6 +147,33 @@ export function BenchmarkView() {
                           style={{ width: `${barWidth}%` }}
                         />
                       </div>
+                      {/* The economy row: speed is only half the story. Two models
+                          can tie on t/s and differ by half again in tokens spent. */}
+                      <div className="flex items-center flex-wrap gap-x-3 gap-y-0.5 mt-1 text-[0.55rem] font-mono text-gray-500">
+                        {entry.avgTokens !== null && (
+                          <span title="Average tokens spent per prompt, reasoning included. Fewer for the same answers is the cheaper model.">
+                            {entry.avgTokens} tok
+                          </span>
+                        )}
+                        {entry.thinkShare !== null && entry.thinkShare > 0 && (
+                          <span title="Share of the output spent on reasoning before the answer">
+                            {Math.round(entry.thinkShare * 100)}% think
+                          </span>
+                        )}
+                        {entry.accuracy !== null && (
+                          <span
+                            title="How often the answer matched the expected result"
+                            className={entry.accuracy < 1 ? 'text-amber-500' : 'text-emerald-500'}
+                          >
+                            {Math.round(entry.accuracy * 100)}% correct
+                          </span>
+                        )}
+                        {entry.truncated > 0 && (
+                          <span title="Runs the token budget cut off before the model was done. Their token counts are a floor, not a measurement." className="text-red-500">
+                            {entry.truncated} cut off
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )

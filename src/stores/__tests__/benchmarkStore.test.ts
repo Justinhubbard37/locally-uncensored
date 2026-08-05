@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { useBenchmarkStore, getAverageSpeed, getLatestSpeed, getLeaderboard, computeGenerationTps } from '../benchmarkStore'
+import {
+  useBenchmarkStore, getAverageSpeed, getLatestSpeed, getLeaderboard, computeGenerationTps,
+  getAverageTokens, getAccuracy, getAverageThinkShare, getTruncatedCount, toMarkdownReport,
+} from '../benchmarkStore'
 import type { BenchmarkResult } from '../../lib/benchmark-prompts'
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -332,5 +335,109 @@ describe('benchmarkStore', () => {
       const tps = computeGenerationTps(1, 510, 500)
       expect(tps).toBe(100)
     })
+  })
+
+  // ── token economy (B6 — David 2026-08-05) ──────────────────
+
+  describe('getAverageTokens', () => {
+    it('averages the total token spend, rounded', () => {
+      const r = {
+        m: [makeResult('m', 40, { totalTokens: 5000 }), makeResult('m', 40, { totalTokens: 8000 })],
+      }
+      expect(getAverageTokens(r, 'm')).toBe(6500)
+    })
+
+    it('is null for a model with no runs', () => {
+      expect(getAverageTokens({}, 'unknown')).toBeNull()
+    })
+  })
+
+  describe('getAccuracy', () => {
+    it('is the fraction correct over runs that recorded a verdict', () => {
+      const r = {
+        m: [
+          makeResult('m', 40, { correct: true }),
+          makeResult('m', 40, { correct: false }),
+          makeResult('m', 40, { correct: true }),
+          makeResult('m', 40, {}), // pre-2.6.3 run, no verdict, excluded
+        ],
+      }
+      expect(getAccuracy(r, 'm')).toBeCloseTo(2 / 3, 5)
+    })
+
+    it('is null when no run recorded a verdict', () => {
+      expect(getAccuracy({ m: [makeResult('m', 40)] }, 'm')).toBeNull()
+    })
+  })
+
+  describe('getAverageThinkShare', () => {
+    it('averages thinkTokens over totalTokens', () => {
+      const r = {
+        m: [
+          makeResult('m', 40, { totalTokens: 100, thinkTokens: 40 }), // 0.4
+          makeResult('m', 40, { totalTokens: 200, thinkTokens: 20 }), // 0.1
+        ],
+      }
+      expect(getAverageThinkShare(r, 'm')).toBeCloseTo(0.25, 5)
+    })
+
+    it('ignores runs that recorded no think count', () => {
+      expect(getAverageThinkShare({ m: [makeResult('m', 40, { totalTokens: 100 })] }, 'm')).toBeNull()
+    })
+  })
+
+  describe('getTruncatedCount', () => {
+    it('counts only runs cut off by the token budget', () => {
+      const r = {
+        m: [
+          makeResult('m', 40, { finishReason: 'length' }),
+          makeResult('m', 40, { finishReason: 'stop' }),
+          makeResult('m', 40, { finishReason: 'length' }),
+          makeResult('m', 40, {}),
+        ],
+      }
+      expect(getTruncatedCount(r, 'm')).toBe(2)
+    })
+  })
+
+  describe('getLeaderboard carries the economy stats', () => {
+    it('reports tokens, accuracy, think share and truncation next to t/s', () => {
+      const r = {
+        m: [makeResult('m', 40, { totalTokens: 100, thinkTokens: 30, correct: true, finishReason: 'length' })],
+      }
+      const [entry] = getLeaderboard(r)
+      expect(entry.avgTps).toBe(40)
+      expect(entry.avgTokens).toBe(100)
+      expect(entry.accuracy).toBe(1)
+      expect(entry.thinkShare).toBeCloseTo(0.3, 5)
+      expect(entry.truncated).toBe(1)
+    })
+
+    it('leaves the new stats null when the runs predate them', () => {
+      const [entry] = getLeaderboard({ m: [makeResult('m', 40, { totalTokens: 200 })] })
+      expect(entry.accuracy).toBeNull()
+      expect(entry.thinkShare).toBeNull()
+      expect(entry.truncated).toBe(0)
+    })
+  })
+})
+
+describe('toMarkdownReport economy columns', () => {
+  it('has the economy header and fills a row', () => {
+    const r = { fast: [makeResult('fast', 44, { totalTokens: 5000, thinkTokens: 1000, correct: true })] }
+    const md = toMarkdownReport(r, '2026-08-05 12:00')
+    expect(md).toContain('Avg tokens')
+    expect(md).toContain('Think')
+    expect(md).toContain('Correct')
+    expect(md).toContain('| 5000 |') // avg tokens cell
+    expect(md).toContain('20%') // 1000 / 5000 thinking
+    expect(md).toContain('100%') // accuracy
+  })
+
+  it('marks a truncated run and dashes a stat it never recorded', () => {
+    const r = { m: [makeResult('m', 40, { totalTokens: 900, finishReason: 'length' })] }
+    const md = toMarkdownReport(r, '2026-08-05 12:00')
+    expect(md).toContain('900 (1 cut off)')
+    expect(md).toMatch(/\| 900 \(1 cut off\) \| - \| - \|/)
   })
 })
