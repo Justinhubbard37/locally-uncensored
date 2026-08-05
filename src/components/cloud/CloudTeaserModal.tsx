@@ -54,7 +54,6 @@ export function CloudTeaserModal() {
   const target = useUIStore((s) => s.cloudTeaser)
   const setCloudTeaser = useUIStore((s) => s.setCloudTeaser)
   const setCloudGateOpen = useUIStore((s) => s.setCloudGateOpen)
-  const setCloudExampleVideo = useUIStore((s) => s.setCloudExampleVideo)
   const setIntent = useCreateStore((s) => s.setIntent)
   const { updateSettings } = useSettingsStore()
   const teasersEnabled = useSettingsStore((s) => s.settings.cloudTeasersEnabled)
@@ -140,13 +139,12 @@ export function CloudTeaserModal() {
               <div className="flex items-center gap-2 pt-1">
                 <button
                   onClick={() => {
-                    // Intent teasers detour through the example video popup
-                    // (real footage of the tool); model rows go straight to
-                    // the gate since there is no per model clip.
-                    const t = target
+                    // 2.6.3 B5: intent teasers used to detour through an
+                    // example-video popup before the gate. That stage is gone
+                    // (David 2026-08-04), so both surfaces take the same path
+                    // the model rows always took, one click shorter.
                     close()
-                    if (t.surface === 'intent') setCloudExampleVideo(t)
-                    else setCloudGateOpen(true)
+                    setCloudGateOpen(true)
                   }}
                   className="flex-1 flex items-center justify-center gap-1.5 h-8 rounded-lg bg-white text-black text-[0.7rem] font-semibold hover:bg-gray-200 transition-colors"
                 >

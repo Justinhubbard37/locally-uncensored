@@ -153,6 +153,15 @@ export function CloudGateModal() {
                 Get LU Cloud <ArrowRight size={13} />
               </button>
               <StayLocalButton onLocal={stayLocal} />
+              {/* 2.6.3 B5: the sign-in entry used to exist ONLY on the plans
+                  step, so a returning subscriber had to click a button that
+                  reads like "buy" before finding a way to log in. It also made
+                  the whole login path depend on that one step surviving any
+                  change to where "Get LU Cloud" leads. It lives on both steps
+                  now, which costs one link and removes that dependency. */}
+              <button onClick={() => setStep('login')} className={linkRow + ' w-full pt-1'}>
+                Already got an account? Sign in <ArrowRight size={11} />
+              </button>
             </div>
           </div>
         ) : step === 'plans' ? (

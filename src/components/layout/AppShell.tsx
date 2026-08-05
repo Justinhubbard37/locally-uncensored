@@ -30,7 +30,6 @@ import { useCloudAuthStore, deriveCloudAvailable } from '../../stores/cloudAuthS
 import { useCreateStore } from '../../stores/createStore'
 import { CloudGateModal } from '../cloud/CloudGateModal'
 import { CloudTeaserModal } from '../cloud/CloudTeaserModal'
-import { CloudExampleModal } from '../cloud/CloudExampleModal'
 import { ReleaseNotesModal } from '../release/ReleaseNotesModal'
 import { ShortcutsModal } from './ShortcutsModal'
 import { CreditsExhaustedModal } from './CreditsExhaustedModal'
@@ -819,9 +818,6 @@ export function AppShell() {
       {/* Cloud discovery sheet: opened by the Local-mode teaser surfaces
           (locked Create tabs, hosted model rows). */}
       <CloudTeaserModal />
-      {/* Example video popup: teaser "See plans" detours here (intent
-          surfaces only) before the gate. */}
-      <CloudExampleModal />
       {/* What is new, once per version. Mounted inside the onboarded tree, so
           it can never stack on top of the onboarding wizard. */}
       <ReleaseNotesModal />
