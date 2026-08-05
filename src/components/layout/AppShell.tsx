@@ -31,6 +31,7 @@ import { useCreateStore } from '../../stores/createStore'
 import { CloudGateModal } from '../cloud/CloudGateModal'
 import { CloudTeaserModal } from '../cloud/CloudTeaserModal'
 import { CloudExampleModal } from '../cloud/CloudExampleModal'
+import { ReleaseNotesModal } from '../release/ReleaseNotesModal'
 import { ShortcutsModal } from './ShortcutsModal'
 import { CreditsExhaustedModal } from './CreditsExhaustedModal'
 import { Titlebar } from './Titlebar'
@@ -821,6 +822,9 @@ export function AppShell() {
       {/* Example video popup: teaser "See plans" detours here (intent
           surfaces only) before the gate. */}
       <CloudExampleModal />
+      {/* What is new, once per version. Mounted inside the onboarded tree, so
+          it can never stack on top of the onboarding wizard. */}
+      <ReleaseNotesModal />
       <ShortcutsModal />
       {/* Out-of-credits purchase prompt: opens when LU Cloud answers
           code:'credits_exhausted' (monthly budget + top-up wallet empty). */}
