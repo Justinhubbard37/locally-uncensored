@@ -4,6 +4,8 @@ import { useChatStore } from '../../stores/chatStore'
 import { useGenerationStore } from '../../stores/generationStore'
 import { ChatInput } from './ChatInput'
 import { ToolCallBlock } from './ToolCallBlock'
+import { ToolCallBand } from './ToolCallBand'
+import { groupAgentBlocks } from '../../lib/tool-call-groups'
 import { ThinkingBlock } from './ThinkingBlock'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { TokenCounter } from './TokenCounter'
@@ -278,24 +280,33 @@ export function CodexView() {
                                       (b.phase === 'answer' && stripChannelTags(b.content)),
                                   )
                                   .sort((a, b) => a.timestamp - b.timestamp)
+                                // Render EVERY answer normally + visible
+                                // (David 2026-06-04: "kein Collapse, ganz
+                                // normal wie eine Antwort"). Skip only a
+                                // verbatim repeat of the previous answer.
+                                const skippedAnswers = new Set<string>()
+                                let lastAnswer = ''
+                                for (const b of ordered) {
+                                  if (b.phase !== 'answer') continue
+                                  const a = stripChannelTags(b.content)
+                                  if (!a) continue
+                                  if (a === lastAnswer) skippedAnswers.add(b.id)
+                                  else lastAnswer = a
+                                }
                                 return (
                                   <div className="space-y-1">
-                                    {ordered.map((block, idx) => {
-                                      if (block.phase === 'tool_call' && block.toolCall) {
-                                        return <ToolCallBlock key={block.id} toolCall={block.toolCall} />
+                                    {groupAgentBlocks(ordered).map((group) => {
+                                      // Consecutive tool calls render as ONE
+                                      // band that morphs from tool to tool and
+                                      // collapses to "N steps" when done
+                                      // (David 2026-07-31).
+                                      if (group.kind === 'tools') {
+                                        return <ToolCallBand key={group.blocks[0].id} calls={group.calls} />
                                       }
+                                      const block = group.block
                                       if (block.phase === 'answer') {
                                         const answer = stripChannelTags(block.content)
-                                        if (!answer) return null
-                                        // Render EVERY answer normally + visible
-                                        // (David 2026-06-04: "kein Collapse, ganz
-                                        // normal wie eine Antwort"). Skip only a
-                                        // verbatim repeat of the previous answer.
-                                        const prev = ordered
-                                          .slice(0, idx)
-                                          .reverse()
-                                          .find((b) => b.phase === 'answer' && stripChannelTags(b.content))
-                                        if (prev && stripChannelTags(prev.content) === answer) return null
+                                        if (!answer || skippedAnswers.has(block.id)) return null
                                         return (
                                           <div key={block.id} className="px-1 py-0.5">
                                             <div className="text-[0.75rem] leading-relaxed">
@@ -311,11 +322,12 @@ export function CodexView() {
                               })()
                             : (
                                 <div className="space-y-0">
-                                  {msg.agentBlocks!
-                                    .filter((b) => b.phase === 'tool_call' && b.toolCall)
-                                    .map((block) => (
-                                      <ToolCallBlock key={block.id} toolCall={block.toolCall!} />
-                                    ))}
+                                  {(() => {
+                                    const calls = msg.agentBlocks!
+                                      .filter((b) => b.phase === 'tool_call' && b.toolCall)
+                                      .map((b) => b.toolCall!)
+                                    return calls.length > 0 ? <ToolCallBand calls={calls} /> : null
+                                  })()}
                                 </div>
                               )
 

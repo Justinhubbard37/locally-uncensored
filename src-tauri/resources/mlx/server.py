@@ -92,7 +92,7 @@ def _ensure_pipe(
     # A model the app already installed must load from disk alone. Without
     # this, diffusers re-validates all ~18 files against the hub on every
     # load: measured at 26 s per already-present file when the hub throttles
-    # anonymous traffic, and an outright failure with no network — so "local"
+    # anonymous traffic, and an outright failure with no network. "Local"
     # image generation silently depended on being online.
     if local_files_only:
         kwargs["local_files_only"] = True

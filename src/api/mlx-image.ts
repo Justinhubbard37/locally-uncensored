@@ -54,6 +54,9 @@ export interface MlxInstallStatus {
   status: 'idle' | 'installing' | 'complete' | 'error'
   logs: string[]
   error: string | null
+  download_progress: number
+  download_total: number
+  download_speed: number
 }
 
 export interface MlxGenerateArgs {
@@ -133,9 +136,9 @@ export const HF_TOKEN_ACCOUNT = 'huggingface-token'
 
 /**
  * Hand the HuggingFace token to Rust, which attaches it to every model
- * download it spawns. Anonymous hub traffic gets rate-limited into the ground
- * — a download that crawls at kilobytes per second is throttling, not a bad
- * connection — and gated repos need a token outright.
+ * download it spawns. Anonymous hub traffic gets rate-limited into the
+ * ground: a download that crawls at kilobytes per second is throttling, not
+ * a bad connection. Gated repos need a token outright.
  *
  * Rust keeps it in memory only; the keychain is the store of record, so this
  * has to run again on every app start.

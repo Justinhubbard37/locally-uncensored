@@ -1,7 +1,11 @@
-import { ArrowLeft, Trophy, Zap, Play, Square } from 'lucide-react'
+import { useState } from 'react'
+import { ArrowLeft, Trophy, Zap, Play, Square, Trash2, Download, ListChecks } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { useModels } from '../../hooks/useModels'
-import { useBenchmarkStore, getLatestSpeed, getLeaderboard } from '../../stores/benchmarkStore'
+import {
+  useBenchmarkStore, getLatestSpeed, getLeaderboard,
+  toMarkdownReport, unbenchmarked, staleModels,
+} from '../../stores/benchmarkStore'
 import { useBenchmark } from '../../hooks/useBenchmark'
 
 export function BenchmarkView() {
@@ -15,11 +19,36 @@ export function BenchmarkView() {
   const currentModel = useBenchmarkStore((s) => s.currentModel)
   const currentStep = useBenchmarkStore((s) => s.currentStep)
   const totalSteps = useBenchmarkStore((s) => s.totalSteps)
+  const clearResults = useBenchmarkStore((s) => s.clearResults)
+  const pruneMissing = useBenchmarkStore((s) => s.pruneMissing)
   const { runBenchmark, stopBenchmark } = useBenchmark()
   const leaderboard = getLeaderboard(results)
+  const [confirmClear, setConfirmClear] = useState(false)
 
   // Only show text models (benchmarks don't apply to image/video)
   const textModels = models.filter((m) => m.type === 'text')
+  const names = textModels.map((m) => m.name)
+  const pending = unbenchmarked(results, names)
+  const stale = staleModels(results, names)
+
+  /** Measure everything that has no run yet, one after another. The models
+   *  share one GPU, so this is a queue, not a fan-out (M0j0Risin, D#21). */
+  const runPending = async () => {
+    for (const name of pending) {
+      if (useBenchmarkStore.getState().isRunning) break
+      await runBenchmark(name)
+    }
+  }
+
+  const exportReport = () => {
+    const md = toMarkdownReport(results, new Date().toISOString().slice(0, 16).replace('T', ' '))
+    const url = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'lu-benchmark.md'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
 
   return (
     <div className="h-full overflow-y-auto scrollbar-thin">
@@ -31,7 +60,61 @@ export function BenchmarkView() {
           </button>
           <Trophy size={16} className="text-amber-400" />
           <h1 className="text-[0.8rem] font-semibold text-gray-800 dark:text-gray-200">Benchmark</h1>
+          <div className="ml-auto flex items-center gap-1">
+            {pending.length > 0 && (
+              <button
+                onClick={runPending}
+                disabled={isRunning}
+                title={`Benchmark the ${pending.length} model(s) with no result yet, one after another`}
+                className="flex items-center gap-1 px-2 py-1 rounded-md bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400 text-[0.6rem] hover:bg-gray-200 dark:hover:bg-white/10 transition-colors disabled:opacity-30"
+              >
+                <ListChecks size={11} />
+                Benchmark {pending.length} remaining
+              </button>
+            )}
+            {leaderboard.length > 0 && (
+              <button
+                onClick={exportReport}
+                title="Download the table as Markdown"
+                className="flex items-center gap-1 px-2 py-1 rounded-md bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400 text-[0.6rem] hover:bg-gray-200 dark:hover:bg-white/10 transition-colors"
+              >
+                <Download size={11} />
+                Export
+              </button>
+            )}
+            {leaderboard.length > 0 && (
+              <button
+                onClick={() => { if (confirmClear) { clearResults(); setConfirmClear(false) } else setConfirmClear(true) }}
+                onBlur={() => setConfirmClear(false)}
+                title="Delete every recorded benchmark run"
+                className={`flex items-center gap-1 px-2 py-1 rounded-md text-[0.6rem] transition-colors ${
+                  confirmClear
+                    ? 'bg-red-500/20 text-red-500'
+                    : 'bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400 hover:bg-red-500/15 hover:text-red-500'
+                }`}
+              >
+                <Trash2 size={11} />
+                {confirmClear ? 'Confirm' : 'Clear all'}
+              </button>
+            )}
+          </div>
         </div>
+
+        {/* Results whose model is gone — the "out of whack" state from D#21. */}
+        {stale.length > 0 && (
+          <div className="mb-4 flex items-center justify-between gap-3 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20">
+            <p className="text-[0.65rem] text-amber-600 dark:text-amber-400">
+              {stale.length} model{stale.length === 1 ? '' : 's'} in this table {stale.length === 1 ? 'is' : 'are'} no longer installed:{' '}
+              {stale.slice(0, 3).join(', ')}{stale.length > 3 ? ` and ${stale.length - 3} more` : ''}.
+            </p>
+            <button
+              onClick={() => pruneMissing(names)}
+              className="shrink-0 px-2 py-1 rounded-md bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[0.6rem] hover:bg-amber-500/25 transition-colors"
+            >
+              Remove them
+            </button>
+          </div>
+        )}
 
         {/* Leaderboard */}
         {leaderboard.length > 0 && (

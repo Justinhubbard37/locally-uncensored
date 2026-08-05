@@ -18,7 +18,7 @@ import { parseSSEStream } from '../sse'
 import { repairJson } from '../../lib/tool-call-repair'
 import { signalCreditsExhausted } from '../../lib/credits-exhausted'
 import { localFetch, localFetchStream, isPrivateOrLanHost, isDirectFetchAllowed, hostnameOf, ensureProxyAllowsHost } from '../backend'
-import { ensureBuiltinEngineAlive } from '../builtin-ensure'
+import { ensureBuiltinEngineAlive, explainDeadEngine } from '../builtin-ensure'
 
 // Transport routing lives in the `useLocalProxy` getter (below) plus the shared
 // host helpers in backend.ts. A direct webview fetch only works for hosts the
@@ -213,6 +213,22 @@ export class OpenAIProvider implements ProviderClient {
     return this.isLanBackend || !isDirectFetchAllowed(hostnameOf(this.baseUrl))
   }
 
+  /**
+   * Run a send and, when this slot is the app's own engine, translate a
+   * transport failure into a sentence about the engine. A refused connection
+   * to 127.0.0.1:8127 used to surface as the raw proxy error, which is how a
+   * fresh Windows install introduced itself to applejames on 2026-08-01 before
+   * they moved to Ollama. Anything that reached an HTTP response is untouched.
+   */
+  private async sendOrExplain(send: () => Promise<Response>): Promise<Response> {
+    try {
+      return await send()
+    } catch (err) {
+      if (this.config.managed === true) throw explainDeadEngine(err, this.baseUrl)
+      throw err
+    }
+  }
+
   private get headers(): Record<string, string> {
     const h: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -272,6 +288,12 @@ export class OpenAIProvider implements ProviderClient {
 
     if (options?.temperature !== undefined) body.temperature = options.temperature
     if (options?.topP !== undefined) body.top_p = options.topP
+    // Streaming tool turn: same wire shape as chatWithTools, but the calls
+    // come back as deltas which the accumulator below already merges.
+    if (options?.tools?.length) {
+      body.tools = options.tools
+      body.tool_choice = 'auto'
+    }
     await this.applyMaxTokens(model, body, options)
     // Reasoning-model knob (o1, o3, gpt-5-thinking, etc.). Toggle OFF →
     // "minimal" (least reasoning the API allows). Toggle ON → "high".
@@ -294,12 +316,12 @@ export class OpenAIProvider implements ProviderClient {
 
     if (this.useLocalProxy) await ensureProxyAllowsHost(this.baseUrl)
     const fetcher = this.useLocalProxy ? localFetchStream : fetch
-    let res = await fetcher(`${this.baseUrl}/chat/completions`, {
+    let res = await this.sendOrExplain(() => fetcher(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.headers,
       body: JSON.stringify(body),
       signal: options?.signal,
-    } as any)
+    } as any))
 
     // Retry without reasoning_effort if the model/endpoint rejects it. The LU
     // Cloud proxy deliberately passes upstream 400 AND 422 (DeepInfra's
@@ -466,12 +488,12 @@ export class OpenAIProvider implements ProviderClient {
 
     if (this.useLocalProxy) await ensureProxyAllowsHost(this.baseUrl)
     const fetcher = this.useLocalProxy ? localFetch : fetch
-    let res = await fetcher(`${this.baseUrl}/chat/completions`, {
+    let res = await this.sendOrExplain(() => fetcher(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.headers,
       body: JSON.stringify(body),
       signal: options?.signal,
-    } as any)
+    } as any))
 
     if (!res.ok && (res.status === 400 || res.status === 422) && ('reasoning_effort' in body || 'stream_options' in body)) {
       delete body.reasoning_effort

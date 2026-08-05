@@ -168,6 +168,17 @@ fn active_comfy_dir(state: &AppState) -> Option<PathBuf> {
         .or_else(|| crate::commands::process::find_comfyui_path().map(PathBuf::from))
 }
 
+/// A piped python child on Windows encodes stdio with the legacy code page
+/// (cp1252). The first Unicode character any tool prints then aborts the
+/// whole run with "UnicodeEncodeError: 'charmap' codec can't encode" — in
+/// practice the moment tqdm draws its block-glyph progress bar, which is
+/// exactly when the train step finally has a step total. Force UTF-8 stdio
+/// on every trainer child instead.
+fn force_python_utf8(cmd: &mut Command) {
+    cmd.env("PYTHONIOENCODING", "utf-8");
+    cmd.env("PYTHONUTF8", "1");
+}
+
 /// Run one child to completion, streaming stdout+stderr lines into the run
 /// state. Registers the child pid so cancel can kill it. Returns Err on
 /// non-zero exit (with the last stderr lines) or on cancel.
@@ -178,6 +189,7 @@ fn run_streamed(
     cancel: &Arc<std::sync::atomic::AtomicBool>,
     pid_slot: &Arc<Mutex<Option<u32>>>,
 ) -> Result<(), String> {
+    force_python_utf8(&mut cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -730,6 +742,22 @@ fn cancel_character_training_blocking(state: &AppState) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_trainer_child_gets_utf8_stdio() {
+        use super::force_python_utf8;
+        let mut cmd = std::process::Command::new("python");
+        force_python_utf8(&mut cmd);
+        let envs: Vec<(String, Option<String>)> = cmd
+            .get_envs()
+            .map(|(k, v)| (
+                k.to_string_lossy().into_owned(),
+                v.map(|v| v.to_string_lossy().into_owned()),
+            ))
+            .collect();
+        assert!(envs.contains(&("PYTHONIOENCODING".into(), Some("utf-8".into()))));
+        assert!(envs.contains(&("PYTHONUTF8".into(), Some("1".into()))));
+    }
+
     #[test]
     fn a_second_photo_never_overwrites_the_first() {
         use super::free_stem;

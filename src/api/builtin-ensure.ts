@@ -32,6 +32,25 @@ interface BundledList {
 // same promise is exactly "wait for the restart the other call kicked off".
 let inflight: Promise<void> | null = null
 
+/**
+ * Rewrite a transport failure against our own engine into something a user can
+ * act on. The Rust proxy reports a refused connection verbatim
+ * ("proxy_localhost_stream_chunked: error sending request for url
+ * (http://127.0.0.1:8127/v1/chat/completions)"), which reads like the app is
+ * broken rather than like the engine is down. Only touches errors that never
+ * reached an HTTP response — a real status code carries the server's own words
+ * and must survive untouched.
+ */
+export function explainDeadEngine(err: unknown, baseUrl: string): unknown {
+  const msg = err instanceof Error ? err.message : String(err ?? '')
+  const host = baseUrl.replace(/^https?:\/\//, '').replace(/\/.*$/, '')
+  const isTransport = /error sending request|connection refused|failed to fetch|ECONNREFUSED|tcp connect/i.test(msg)
+  if (!isTransport || !msg.includes(host.split(':')[0])) return err
+  return new Error(
+    `The built-in engine is not answering on ${host}. It either failed to start or was shut down. Open Settings, AI Backends, Built-in Engine and start it again, or pick a different backend. Original error: ${msg}`,
+  )
+}
+
 /** True when the `openai` slot is the app-managed built-in engine. */
 export function isManagedBuiltinSlot(): boolean {
   const cfg = useProviderStore.getState().providers.openai
@@ -67,7 +86,19 @@ export async function ensureBuiltinEngineAlive(modelName: string): Promise<void>
       }
       const bare = modelName.includes('::') ? modelName.split('::')[1] : modelName
       const hit = models.find((m) => m.name === bare)
-      if (!hit) return // not a bundled GGUF — some other openai-compat server
+      if (!hit) {
+        // The slot IS our engine (managed), the engine is NOT healthy, and the
+        // model the picker is holding is not on disk where the engine looks.
+        // Returning quietly here sent the send straight into a dead port, and
+        // the user got "proxy_localhost_stream_chunked: error sending request
+        // for url (http://127.0.0.1:8127/v1/chat/completions)" as their first
+        // impression of the app (applejames, Discord 2026-08-01, fresh install
+        // on Windows 10 — they gave up on the built-in engine and moved to
+        // Ollama). Say what is actually wrong instead.
+        throw new Error(
+          `The built-in engine has no model file named "${bare}". It may have been deleted, moved, or the download did not finish. Open Models, install it again, then pick it in the chat.`,
+        )
+      }
 
       // Restart with the user's expert tuning, not bare defaults — otherwise a
       // self-heal would silently drop a configured ctx/KV-quant until the next

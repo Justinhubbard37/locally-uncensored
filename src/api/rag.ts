@@ -38,13 +38,46 @@ async function extractTextFromDOCX(file: File): Promise<string> {
   return result.value
 }
 
+/**
+ * Hard ceiling per chunk, in characters. The embedding server processes one
+ * chunk in a single batch, and llama-server's default physical batch is 512
+ * tokens, so an oversized chunk comes back as
+ * "input (658 tokens) is too large to process" and the whole document fails
+ * to index (ChrisMcSheehy, D#91, 2026-07-27). ~4 chars per token puts 1200
+ * characters near 300 tokens, comfortably inside 512 even for token-dense
+ * text like code or CJK.
+ */
+const MAX_CHUNK_CHARS = 1200
+
+/** Split a run of text that carries no sentence break into pieces that fit,
+ *  preferring word boundaries. A PDF table, a bullet list, OCR output or a
+ *  code block is one "sentence" to the splitter below, and before this it
+ *  went to the embedder whole. */
+function splitOversized(text: string, limit: number): string[] {
+  if (text.length <= limit) return [text]
+  const out: string[] = []
+  let rest = text
+  while (rest.length > limit) {
+    const window = rest.slice(0, limit)
+    const cut = window.lastIndexOf(" ")
+    // No space in a whole window (CJK, a long URL, minified text) — cut hard.
+    const at = cut > limit * 0.5 ? cut : limit
+    out.push(rest.slice(0, at).trim())
+    rest = rest.slice(at).trim()
+  }
+  if (rest) out.push(rest)
+  return out.filter(Boolean)
+}
+
 export function chunkText(
   text: string,
   chunkSize = 500,
   overlap = 50
 ): string[] {
   const chunks: string[] = []
-  const sentences = text.split(/(?<=[.!?])\s+/)
+  const sentences = text
+    .split(/(?<=[.!?])\s+/)
+    .flatMap((s) => splitOversized(s, MAX_CHUNK_CHARS))
   let current = ""
 
   for (const sentence of sentences) {
@@ -58,7 +91,11 @@ export function chunkText(
     }
   }
   if (current.trim()) chunks.push(current.trim())
-  return chunks.filter((c) => c.length > 20)
+  // Final guarantee: the overlap prefix can push a chunk back over the ceiling,
+  // and one oversized chunk fails the whole document at the embedder.
+  return chunks
+    .flatMap((c) => splitOversized(c, MAX_CHUNK_CHARS))
+    .filter((c) => c.length > 20)
 }
 
 export async function generateEmbeddings(

@@ -62,3 +62,34 @@ describe('extractQuant + modelIdentity', () => {
     expect(modelIdentity('qwen/qwen2.5-vl-7b')).toBe('qwen25vl7b')
   })
 })
+
+describe('split GGUF (-NNNNN-of-NNNNN) shard tails', () => {
+  const lms = (model: string) => ({ provider: 'openai', providerName: 'LM Studio', model })
+  it('extractQuant sees the quant BEFORE the shard tail', () => {
+    expect(extractQuant('DeepSeek-V4-Flash-0731-UD-IQ1_S-00001-of-00003.gguf')).toBe('udiq1s')
+    expect(extractQuant('GLM-5.2-UD-Q2_K_XL-00001-of-00007.gguf')).toBe('udq2kxl')
+  })
+  it('modelIdentity is shard-independent', () => {
+    expect(modelIdentity('DeepSeek-V4-Flash-0731-UD-IQ1_S-00001-of-00003.gguf'))
+      .toBe(modelIdentity('DeepSeek-V4-Flash-0731-UD-IQ1_S.gguf'))
+  })
+  it('a first-shard Discover filename matches the collapsed installed name', () => {
+    expect(matchesLmStudioInstalled('DeepSeek-V4-Flash-0731-UD-IQ1_S-00001-of-00003.gguf', [
+      lms('DeepSeek-V4-Flash-0731-UD-IQ1_S'),
+    ])).toBe(true)
+  })
+  it('also matches when the installed side reports the first shard itself', () => {
+    expect(matchesLmStudioInstalled('DeepSeek-V4-Flash-0731-UD-IQ1_S-00001-of-00003.gguf', [
+      lms('DeepSeek-V4-Flash-0731-UD-IQ1_S-00001-of-00003.gguf'),
+    ])).toBe(true)
+  })
+  it('still refuses a quant sibling across shard tails', () => {
+    expect(matchesLmStudioInstalled('DeepSeek-V4-Flash-0731-UD-IQ1_S-00001-of-00003.gguf', [
+      lms('DeepSeek-V4-Flash-0731-UD-Q2_K_XL'),
+    ])).toBe(false)
+  })
+  it('does not mistake short numeric names for shard tails', () => {
+    expect(modelIdentity('llama-2-of-3.gguf')).toBe('llama2of3')
+    expect(extractQuant('phi-4-Q4_K_M.gguf')).toBe('q4km')
+  })
+})

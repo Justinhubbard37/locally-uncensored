@@ -124,6 +124,13 @@ export interface ChatOptions {
   // provider use its default.
   contextWindow?: number
   signal?: AbortSignal
+  // Tool definitions for a STREAMING tool turn. chatStream implementations
+  // that support tools include these in the request and stream tool-call
+  // deltas into the done-chunk's toolCalls; providers that cannot stream
+  // tools ignore the field, and their callers keep using chatWithTools.
+  // This is what lets Code/Agent mode stream on every transport instead of
+  // sitting silent until the whole call returns (David 2026-07-31).
+  tools?: ToolDefinition[]
 }
 
 // ── Streaming Chunk (unified output) ──────────────────────────

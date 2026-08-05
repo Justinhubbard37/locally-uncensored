@@ -369,6 +369,49 @@ pub fn register_openai_host(
     Ok(())
 }
 
+/// Attach the body and the caller's headers to a proxied request.
+///
+/// reqwest's `.header()` APPENDS, it does not replace. Setting Content-Type
+/// here and forwarding a caller that sends its own put the header on the wire
+/// twice, and aiohttp answers that with "Duplicate 'Content-Type' header
+/// found" — every Create submit on a ComfyUI with aiohttp 3.9+ died on it
+/// (GH #95). The caller's own value wins; we only fill in the default.
+fn apply_body_and_headers(
+    mut request: reqwest::RequestBuilder,
+    body: Option<String>,
+    headers: Option<std::collections::HashMap<String, String>>,
+) -> reqwest::RequestBuilder {
+    // Headers the HTTP stack derives from the request itself. A caller that
+    // sends one too would put it on the wire twice, which is the same failure
+    // as the Content-Type one below: aiohttp treats all of these as singletons
+    // and rejects the whole request when it sees two.
+    const STACK_OWNED: [&str; 4] = ["content-length", "host", "transfer-encoding", "connection"];
+
+    let caller_sets_content_type = headers
+        .as_ref()
+        .is_some_and(|h| h.keys().any(|k| k.eq_ignore_ascii_case("content-type")));
+
+    if let Some(body_str) = body {
+        if !caller_sets_content_type {
+            request = request.header("Content-Type", "application/json");
+        }
+        request = request.body(body_str);
+    }
+
+    // Caller headers (Authorization for keyed backends) — dropping them made
+    // every proxied request to an authed OpenAI-compat server 401.
+    if let Some(hdrs) = headers {
+        for (k, v) in hdrs {
+            if STACK_OWNED.iter().any(|s| k.eq_ignore_ascii_case(s)) {
+                continue;
+            }
+            request = request.header(k.as_str(), v.as_str());
+        }
+    }
+
+    request
+}
+
 /// Generic localhost proxy — fetch any localhost or configured-backend URL
 /// bypassing CORS. Used for Ollama and ComfyUI API calls in production mode.
 ///
@@ -407,17 +450,7 @@ pub async fn proxy_localhost(
         _ => client.get(&url),
     };
 
-    if let Some(body_str) = body {
-        request = request.header("Content-Type", "application/json").body(body_str);
-    }
-
-    // Caller headers (Authorization for keyed backends) — dropping them made
-    // every proxied request to an authed OpenAI-compat server 401.
-    if let Some(hdrs) = headers {
-        for (k, v) in hdrs {
-            request = request.header(k.as_str(), v.as_str());
-        }
-    }
+    request = apply_body_and_headers(request, body, headers);
 
     let resp = request
         .send()
@@ -455,15 +488,7 @@ pub async fn proxy_localhost_stream(url: String, method: Option<String>, body: O
         _ => client.get(&url),
     };
 
-    if let Some(body_str) = body {
-        request = request.header("Content-Type", "application/json").body(body_str);
-    }
-
-    if let Some(hdrs) = headers {
-        for (k, v) in hdrs {
-            request = request.header(k.as_str(), v.as_str());
-        }
-    }
+    request = apply_body_and_headers(request, body, headers);
 
     let resp = request
         .send()
@@ -532,15 +557,7 @@ pub async fn proxy_localhost_stream_chunked(
             _ => client.get(&url),
         };
 
-        if let Some(body_str) = body {
-            request = request.header("Content-Type", "application/json").body(body_str);
-        }
-
-        if let Some(hdrs) = headers {
-            for (k, v) in hdrs {
-                request = request.header(k.as_str(), v.as_str());
-            }
-        }
+        request = apply_body_and_headers(request, body, headers);
 
         // Race the request against cancellation even during connect/headers.
         let resp = tokio::select! {
@@ -840,6 +857,176 @@ pub async fn ollama_search(query: String) -> Result<serde_json::Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn built_headers(
+        body: Option<String>,
+        headers: Option<std::collections::HashMap<String, String>>,
+    ) -> reqwest::header::HeaderMap {
+        apply_body_and_headers(
+            reqwest::Client::new().post("http://127.0.0.1:8188/prompt"),
+            body,
+            headers,
+        )
+        .build()
+        .unwrap()
+        .headers()
+        .clone()
+    }
+
+    fn caller(name: &str, value: &str) -> std::collections::HashMap<String, String> {
+        let mut h = std::collections::HashMap::new();
+        h.insert(name.to_string(), value.to_string());
+        h
+    }
+
+    /// GH #95: the Create submit sends its own Content-Type, the proxy appended
+    /// a second one, and ComfyUI (aiohttp) answered "Duplicate 'Content-Type'
+    /// header found" — Create was dead on 2.6.0 for anyone on a current aiohttp.
+    #[test]
+    fn caller_content_type_is_never_sent_twice() {
+        for name in ["Content-Type", "content-type", "CONTENT-TYPE"] {
+            let sent = built_headers(
+                Some(r#"{"prompt":{}}"#.to_string()),
+                Some(caller(name, "application/json")),
+            );
+            assert_eq!(
+                sent.get_all(reqwest::header::CONTENT_TYPE).iter().count(),
+                1,
+                "{} produced a duplicate Content-Type",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn the_callers_own_content_type_wins() {
+        let sent = built_headers(
+            Some("<xml/>".to_string()),
+            Some(caller("Content-Type", "application/xml")),
+        );
+        assert_eq!(sent.get(reqwest::header::CONTENT_TYPE).unwrap(), "application/xml");
+    }
+
+    #[test]
+    fn a_body_without_caller_headers_still_gets_json() {
+        let sent = built_headers(Some("{}".to_string()), None);
+        assert_eq!(sent.get(reqwest::header::CONTENT_TYPE).unwrap(), "application/json");
+    }
+
+    /// The reason caller headers are forwarded at all: a keyed OpenAI-compat
+    /// backend answered 401 without them.
+    #[test]
+    fn authorization_still_rides_along() {
+        let sent = built_headers(Some("{}".to_string()), Some(caller("Authorization", "Bearer k")));
+        assert_eq!(sent.get(reqwest::header::AUTHORIZATION).unwrap(), "Bearer k");
+        assert_eq!(sent.get_all(reqwest::header::CONTENT_TYPE).iter().count(), 1);
+    }
+
+    #[test]
+    fn a_get_without_body_carries_no_content_type() {
+        let sent = built_headers(None, Some(caller("Authorization", "Bearer k")));
+        assert!(sent.get(reqwest::header::CONTENT_TYPE).is_none());
+    }
+
+    /// Live proof over a real socket against the strict aiohttp parser, the
+    /// one that rejected every 2.6.0 Create submit. Start the stub first
+    /// (scratchpad/strict-comfy-stub.py, AIOHTTP_NO_EXTENSIONS=1), then:
+    ///   cargo test --bin locally-uncensored live_strict -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn live_strict_aiohttp_takes_the_fixed_request_and_refuses_the_old_one() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let url = "http://127.0.0.1:18899/prompt";
+            let client = reqwest::Client::builder()
+                .user_agent("LocallyUncensored/2.0")
+                .build()
+                .unwrap();
+
+            // Exactly what 2.6.0 put on the wire: our own Content-Type, then
+            // the caller's on top.
+            let old = client
+                .post(url)
+                .header("Content-Type", "application/json")
+                .body(r#"{"prompt":{}}"#)
+                .header("Content-Type", "application/json")
+                .send()
+                .await
+                .expect("stub not running?");
+            let old_status = old.status();
+            let old_text = old.text().await.unwrap();
+
+            let new = apply_body_and_headers(
+                client.post(url),
+                Some(r#"{"prompt":{}}"#.to_string()),
+                Some(caller("Content-Type", "application/json")),
+            )
+            .send()
+            .await
+            .unwrap();
+            let new_status = new.status();
+            let new_text = new.text().await.unwrap();
+
+            println!("2.6.0 path : {} {}", old_status, old_text.trim());
+            println!("fixed path : {} {}", new_status, new_text.trim());
+
+            assert_eq!(old_status, 400, "the old order should still be refused");
+            // 3.13.2 names the header canonically, 3.13.5 echoes the spelling
+            // off the wire (reqwest sends it lowercase). Both are this bug.
+            assert!(old_text.to_lowercase().contains("duplicate 'content-type' header found"));
+            assert!(new_status.is_success(), "the fixed request must be accepted");
+            assert!(new_text.contains("prompt_id"));
+        });
+    }
+
+    /// The same trap as Content-Type, one level down: these are derived from
+    /// the request itself, so a caller that also sends one would double it.
+    /// aiohttp counts every one of them as a singleton.
+    #[test]
+    fn stack_owned_headers_are_never_doubled() {
+        let mut h = std::collections::HashMap::new();
+        h.insert("Content-Length".to_string(), "999".to_string());
+        h.insert("Host".to_string(), "evil.example".to_string());
+        h.insert("Transfer-Encoding".to_string(), "chunked".to_string());
+        h.insert("Connection".to_string(), "close".to_string());
+        h.insert("User-Agent".to_string(), "caller/1.0".to_string());
+        h.insert("Content-Type".to_string(), "application/json".to_string());
+        h.insert("Authorization".to_string(), "Bearer k".to_string());
+
+        let req = apply_body_and_headers(
+            reqwest::Client::builder()
+                .user_agent("LocallyUncensored/2.0")
+                .build()
+                .unwrap()
+                .post("http://127.0.0.1:8188/prompt"),
+            Some(r#"{"prompt":{}}"#.to_string()),
+            Some(h),
+        )
+        .build()
+        .unwrap();
+
+        for name in [
+            "content-type",
+            "content-length",
+            "host",
+            "transfer-encoding",
+            "connection",
+            "user-agent",
+            "authorization",
+        ] {
+            assert!(
+                req.headers().get_all(name).iter().count() <= 1,
+                "{} went out more than once",
+                name
+            );
+        }
+        // The caller cannot talk us into a wrong Host or a bogus length.
+        assert!(req.headers().get("host").is_none());
+        assert!(req.headers().get(reqwest::header::CONTENT_LENGTH).is_none());
+        // What it is allowed to set still arrives.
+        assert_eq!(req.headers().get(reqwest::header::AUTHORIZATION).unwrap(), "Bearer k");
+        assert_eq!(req.headers().get(reqwest::header::USER_AGENT).unwrap(), "caller/1.0");
+    }
 
     #[test]
     fn blocks_cloud_metadata_and_link_local() {

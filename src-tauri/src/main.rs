@@ -71,6 +71,10 @@ fn init_tracing() {
 fn main() {
     #[cfg(target_os = "linux")]
     apply_linux_webkit_workarounds();
+    // Before anything can spawn a child: an AppImage exports PYTHONHOME and
+    // PYTHONPATH into its own mount, and every python3 we start inherits them
+    // and dies on "No module named 'encodings'".
+    python::sanitize_appimage_python_env();
 
     init_tracing();
     tracing::info!(

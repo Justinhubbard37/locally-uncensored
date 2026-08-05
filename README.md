@@ -60,19 +60,27 @@ Grab the latest release from [**Releases**](https://github.com/PurpleDoubleD/loc
 
 > **Antivirus warning?** Some engines flag unsigned NSIS installers that download other binaries — a **false positive**. The installer is built by GitHub Actions from the public source on `master`, and the auto-update channel is signed against a public minisign key. Verification steps: [SECURITY.md](SECURITY.md#antivirus--browser-false-positives).
 
-**Current release: v2.5.9** (July 2026). Portable-friendly installers for Windows and Linux (no admin rights required), under the short in-app name **LU** by LU Labs. Full history in [Releases](https://github.com/PurpleDoubleD/locally-uncensored/releases) and [CHANGELOG.md](CHANGELOG.md).
+**Current release: v2.6.2** (August 2026). Portable-friendly installers for Windows and Linux (no admin rights required), under the short in-app name **LU** by LU Labs. Full history in [Releases](https://github.com/PurpleDoubleD/locally-uncensored/releases) and [CHANGELOG.md](CHANGELOG.md).
 
-### What's new in 2.5.9
+### What's new in 2.6.2
 
-A correctness release. Most of it is things that looked like they worked and did not.
+Custom ComfyUI workflows are back, built on a community PR by Kizerfluid (#94). The workflow button in the Create prompt bar opens a manager popup: import any workflow saved with ComfyUI's Save (API Format), pair it with models through shared tags, and pick it in the Workflow selector under Advanced settings; Auto returns to the built-in graph. Prompt, size, steps and seed are still injected, custom I2V workflows get the source image wired in, and video nodes save to the gallery instead of the temp folder. Also fixed: read aloud on Windows N editions (playback now falls back to codec-free Web Audio), pip errors from a Python built without ssl name the real problem, and ComfyUI model discovery survives one unreadable folder.
 
-- **Security fix in the coding agent.** Two ways a crafted commit message, PR title or PR link could get a shell command run without a confirmation dialog are closed, and both are pinned by tests. Worth updating for if you use the agent's git or GitHub tools.
-- **Setting up a local Create lane finally shows what it is doing.** The four local lanes (Talking Character, Music, Extend Video, Motion Control) arrived in 2.5.8, but installing one gave you a spinner and nothing else: no file name, no size, no percentage, nothing in the Downloads tray and no way out. The card now names the file and counts it up, the download appears in the tray like any other, and Cancel really stops the transfer. A dropped connection resumes where it stopped instead of starting over.
-- **The coding agent got a surgical `file_edit` tool** that changes the lines you asked for instead of rewriting whole files, plus a batch of real fixes: `num_ctx` is no longer pinned to 8192, verify loops stop serving stale shell and test results, diffs show deletions, and `.lurules` actually loads.
-- **Remote access works with non-Ollama backends.** A desktop running LM Studio, Lemonade or llama.cpp used to answer your phone with an empty model list and a 400 on chat. The bridge now translates between the phone and any OpenAI-compatible backend, including streaming, tool calls, vision and reasoning.
-- **Three video models are gone: CogVideoX (both) and Pyramid Flow.** They could never run, because their pipelines were built against ComfyUI node names no wrapper registers, and they offered 46 GB of downloads for that. Wan 2.1 and 2.2, LTX, SVD, FramePack, Hunyuan, Mochi and Cosmos are unaffected. Nothing says COMING SOON any more either, because nothing was.
-- **A failed image no longer counts as a delivered one.** When ComfyUI returned an error, the chat image tool handed the error text back as a result and told the model the picture was on screen. Failures are marked as failures now, with the real reason and a retry.
-- **Cloud renders are kept for seven days**, and Create says so once, with a download reminder, so the limit is stated up front. Trained characters on your shelf are not on that clock.
+### What's new in 2.6.1
+
+Create could not submit anything on setups whose ComfyUI runs the pure Python HTTP parser: the app put the Content-Type header on the wire twice and ComfyUI refused the request with a 400. The header a caller sends now wins, and the same trap is closed for the other headers the HTTP stack derives itself.
+
+### What's new in 2.6.0
+
+The GGUF video release: found by running the shipped build end to end on a real 12 GB card, plus a round of customer reports from Discord and GitHub.
+
+- **GGUF video models generate for the first time.** The catalog offered GGUF video bundles (19 GB downloads) that could never render a clip: the video pipeline only read the loaders that list `.safetensors`. The GGUF loaders are wired in now, the Video lane shows its starter card on an empty model list, and a freshly booted app no longer races its own model list.
+- **Video renders finish on 12 GB cards.** After sampling, the video decode ran full-frame next to the resident model, got paged by the Windows driver instead of a clean out-of-memory, and sat at 100% GPU for an hour. Every video decode now runs tiled whenever the installed ComfyUI supports it, which turns that hour into minutes.
+- **The render progress bar ticks.** The long phases (model load, frame decode) send no ComfyUI events for minutes, so the bar froze and looked hung while the GPU was working. It now ticks every second with the phase and elapsed time.
+- **The Linux AppImage no longer breaks Python installs.** It leaked its bundled libraries into every Python it launched, which broke ComfyUI installs for every AppImage user. Helper processes start clean now.
+- **Downloads got honest.** Big model downloads no longer die in a fixed timeout and resume where they stopped, and the Downloads tab shows real per-file progress with proper GB formatting.
+- **A pile of reported fixes.** Document chat handles files without punctuation, VRAM above 4 GB is no longer invented, deleting a chat is findable, read-aloud installs its Piper voice correctly, external MCP servers can actually spawn, the built-in engine says what is wrong instead of a proxy error, and the agent got a screenshot tool.
+- **LU Cloud grew too:** DeepSeek V4 Flash joined the cloud catalog, and the cloud Edit lane gained Qwen Image Edit, which edits from a plain instruction with no mask needed.
 
 ---
 

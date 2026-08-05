@@ -556,3 +556,12 @@ main.wrap.lu-doc{text-align:center;min-height:56vh;display:flex;flex-direction:c
 .lu-doc .copy-btn{padding:8px 14px;background:var(--accent);color:#fff;border-radius:6px;font-size:.8rem;font-weight:600}
 .lu-doc .copy-btn.copied{background:var(--green)}
 .lu-doc .small{font-size:.8rem;color:var(--fg-30);margin-top:20px}
+
+/* ── Language toggle + Google Translate cleanup ── */
+.lu-lang{display:flex;align-items:center;justify-content:center;width:34px;height:34px;border:0;background:none;padding:0;cursor:pointer;border-radius:var(--radius-sm);transition:background .15s}
+.lu-lang:hover{background:var(--fill-faint)}
+.lu-lang svg{width:20px;height:14px;border-radius:2.5px;display:block;box-shadow:0 0 0 1px rgba(127,127,127,.35)}
+.lu-lang.fixed{position:fixed;top:14px;right:14px;z-index:1000;background:rgba(20,20,26,.7)}
+#lu-gt,#goog-gt-tt,.goog-te-banner-frame,.goog-te-balloon-frame,body>.skiptranslate,.VIpgJd-ZVi9od-aZ2wEe-wOHMyf{display:none!important}
+body{top:0!important}
+font.goog-text-highlight{background:none!important;box-shadow:none!important}

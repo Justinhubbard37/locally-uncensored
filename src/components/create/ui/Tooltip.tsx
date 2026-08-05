@@ -15,16 +15,48 @@ export function Tooltip({ content, children, side = 'top', delay = 400, classNam
   const [show, setShow] = useState(false)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const open = () => { timer.current = setTimeout(() => setShow(true), delay) }
-  const close = () => { if (timer.current) clearTimeout(timer.current); setShow(false) }
+const open = () => {
+  if (timer.current) {
+    clearTimeout(timer.current)
+  }
+
+  timer.current = setTimeout(() => {
+    setShow(true)
+    timer.current = null
+  }, delay)
+}
+
+const close = () => {
+  if (timer.current) {
+    clearTimeout(timer.current)
+    timer.current = null
+  }
+
+  setShow(false)
+}
+
+const handleFocus = (
+  event: React.FocusEvent<HTMLSpanElement>,
+) => {
+  const target = event.target as HTMLElement
+
+  // Show focus tooltips for keyboard navigation, but not when a mouse
+  // click leaves the wrapped button focused.
+  if (target.matches(':focus-visible')) {
+    open()
+  }
+}
+
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current) }, [])
 
   return (
-    <span
+        <span
       className={cn('relative inline-flex', className)}
       onMouseEnter={open}
       onMouseLeave={close}
-      onFocus={open}
+      onPointerDown={close}
+      onClick={close}
+      onFocus={handleFocus}
       onBlur={close}
     >
       {children}

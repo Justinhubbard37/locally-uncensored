@@ -2,7 +2,6 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { ModelType, ClassifiedModel } from '../api/comfyui'
 import { classifyModel } from '../api/comfyui'
-import type { PreflightError } from '../api/preflight'
 // ModelType includes: flux, flux2, zimage, sdxl, sd15, wan, hunyuan, unknown
 
 export type ProgressPhase = 'idle' | 'queued' | 'loading-model' | 'loading-clip' | 'loading-vae' | 'sampling' | 'decoding' | 'complete'
@@ -41,9 +40,10 @@ export type CloudOp = 'character' | 'lipsync' | 'music' | 'extend' | 'motion'
  *  metadata, the IntentBar lock state and the backend-flip cleanup below —
  *  lives here (lowest layer) so intents.ts can derive from it without a
  *  component→store import cycle. */
-// Character stays cloud-first (David 2026-07-19): its local lane needs a
-// trainer runtime (musubi venv) that 2.5.8 does not ship.
-export const LOCAL_LANE_OPS: ReadonlySet<CloudOp> = new Set(['music', 'lipsync', 'extend', 'motion'])
+// Character joined in 2.6.0: trainer.rs ships the musubi venv install, so
+// the train lane is a real local tab now (it was cloud-first while 2.5.8
+// had no trainer runtime).
+export const LOCAL_LANE_OPS: ReadonlySet<CloudOp> = new Set(['music', 'lipsync', 'extend', 'motion', 'character'])
 
 /** An audio/video file (or training image) staged in the composer before
  *  upload. `blob` carries the bytes for the cloud upload; `url` is a local
@@ -127,6 +127,7 @@ export interface GalleryItem {
   id: string
   type: 'image' | 'video' | 'audio'
   filename: string
+  comfyType?: string
   subfolder: string
   prompt: string
   negativePrompt: string
@@ -278,9 +279,6 @@ interface CreateState {
   currentPromptId: string | null
   error: string | null
   lastGenTime: string | null
-  preflightReady: boolean | null
-  preflightErrors: PreflightError[]
-  preflightWarnings: string[]
   gallery: GalleryItem[]
   promptHistory: string[]
   /** Runtime-only (not persisted): populated by useCreate.fetchModels so the
@@ -300,7 +298,6 @@ interface CreateState {
    *  back to animated .webp; the modal resolves with the user's choice. */
   vhsInstallPrompt: ((choice: 'install' | 'webp' | 'cancel') => void) | null
 
-  setPreflightStatus: (ready: boolean | null, errors: PreflightError[], warnings: string[]) => void
   setMode: (mode: 'image' | 'video') => void
   setVideoBackend: (backend: VideoBackendKind) => void
   setImageSubMode: (subMode: 'text2img' | 'img2img') => void
@@ -455,9 +452,6 @@ export const useCreateStore = create<CreateState>()(
       currentPromptId: null,
       error: null,
       lastGenTime: null,
-      preflightReady: null,
-      preflightErrors: [],
-      preflightWarnings: [],
       gallery: [],
       promptHistory: [],
       imageModelList: [],
@@ -468,7 +462,6 @@ export const useCreateStore = create<CreateState>()(
       comfyRunning: false,
       vhsInstallPrompt: null,
 
-      setPreflightStatus: (ready, errors, warnings) => set({ preflightReady: ready, preflightErrors: errors, preflightWarnings: warnings }),
       setVideoBackend: (videoBackend) => set({ videoBackend, videoBackendInitialized: true }),
       setMode: (mode) => set((state) => {
         // Reset parameters to the correct defaults when switching modes
@@ -667,10 +660,10 @@ export const useCreateStore = create<CreateState>()(
           if (backend !== 'local') return { backend }
           const patch: Record<string, unknown> = { backend }
           if (s.utilityOp) Object.assign(patch, { utilityOp: null, mask: null, error: null })
-          // 2.5.8: music/lipsync/extend/motion run locally, so a backend flip
-          // keeps them selected; character stays cloud-only (its trainer
-          // runtime does not ship yet), so it drops on a flip to local just
-          // like upscale/eraser. LOCAL_LANE_OPS is the single source of truth.
+          // music/lipsync/extend/motion (2.5.8) and character (2.6.0, local
+          // musubi trainer) run locally, so a backend flip keeps them
+          // selected; only the genuinely hosted-only ops (upscale/eraser)
+          // drop. LOCAL_LANE_OPS is the single source of truth.
           if (s.cloudOp && !LOCAL_LANE_OPS.has(s.cloudOp)) {
             Object.assign(patch, { cloudOp: null, error: null })
           }

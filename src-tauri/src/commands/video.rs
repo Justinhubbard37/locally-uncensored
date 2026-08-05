@@ -368,7 +368,9 @@ pub fn video_list_models(_state: &AppState, _args: &Value) -> CmdResult {
             "name": c.name,
             "family": c.family,
             "repo": c.repo,
-            "sizeGB": c.size_gb,
+            // f32→JSON goes through f64 and turns 2.6 into 2.5999999046325684
+            // — round to the tenth the catalog means.
+            "sizeGB": (c.size_gb as f64 * 10.0).round() / 10.0,
             "minRamGB": c.min_ram_gb,
             "defaultFrames": c.default_frames,
             "needsConvert": c.needs_convert,
@@ -461,6 +463,11 @@ pub fn video_install_model(state: &AppState, args: &Value) -> CmdResult {
         std::fs::create_dir_all(parent).map_err(|e| internal(e.to_string()))?;
     }
     slot.start();
+    crate::install_state::watch_dir_size(
+        slot.clone(),
+        model_dir(entry.id),
+        (entry.size_gb as f64 * 1e9) as u64,
+    );
     let slot2 = slot.clone();
     let entry2 = entry.clone();
     std::thread::spawn(move || {

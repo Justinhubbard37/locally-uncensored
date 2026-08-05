@@ -370,7 +370,17 @@ async fn do_download(
     let client = reqwest::Client::builder()
         .user_agent("LocallyUncensored/1.5")
         .redirect(crate::commands::proxy::ssrf_safe_redirect_policy(10))
-        .timeout(std::time::Duration::from_secs(7200))
+        // A deadline on the whole request punishes people for having a slow
+        // line rather than a broken one: the 2 hour cap this replaces killed
+        // any download that legitimately took longer, and the catalog offers
+        // single files of 40 GB and sets of 155 GB. bob80817-dev, Discord
+        // 2026-07-29, after giving up: "all of your downloads have a habit of
+        // timing out". What we actually want to catch is a stalled transfer,
+        // so the limits are per-connect and per-read. A dead socket now fails
+        // in two minutes and resumes from the partial on the next attempt;
+        // a slow one is left to finish.
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| e.to_string())?;
 

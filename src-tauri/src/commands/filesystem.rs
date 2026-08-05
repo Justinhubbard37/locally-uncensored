@@ -301,12 +301,34 @@ pub fn fs_list(
     let max_entries = 500;
 
     if let Some(ref pat) = pattern {
-        // Glob pattern relative to dir
+        // The pattern is a second path channel and gets the same jail as `path`.
+        // Without this, `pattern: "../../.ssh/*"` listed the keys that
+        // `path: "../../.ssh"` refuses — and an ABSOLUTE pattern skipped the
+        // guessing entirely, because Path::join throws the base away when the
+        // joined component is absolute. glob 0.3 also follows `..` literally and
+        // matches dotfiles, so both had to be shut: reject the escape up front
+        // for a clear error, and re-check every match, since a glob result is a
+        // real path we never authorised.
+        // Prefix / RootDir / ParentDir are exactly the components that make
+        // `join` discard or climb out of the base — including the Windows-only
+        // shapes ("\.ssh\*" keeps only the drive, "C:foo\*" replaces the lot).
+        {
+            use std::path::Component;
+            let escapes = Path::new(pat.as_str()).components().any(|c| {
+                matches!(c, Component::Prefix(_) | Component::RootDir | Component::ParentDir)
+            });
+            if escapes {
+                return Err("Pattern escapes the allowed workspace".to_string());
+            }
+        }
         let glob_pattern = dir.join(pat).to_string_lossy().to_string();
         if let Ok(paths) = glob_match(&glob_pattern) {
             for entry in paths.flatten() {
                 if entries.len() >= max_entries {
                     break;
+                }
+                if contain_within(&dir, &entry).is_err() {
+                    continue;
                 }
                 entries.push(file_meta(&entry));
             }
@@ -753,6 +775,46 @@ mod jail_adversarial_tests {
         assert!(contain_within(root, Path::new("/Users/dave/project/src/x.rs")).is_ok());
         // The root itself.
         assert!(contain_within(root, root).is_ok());
+    }
+
+    /// Security review 2026-07-30. Every payload above was only ever sent
+    /// through `path`. `pattern` is a SECOND path channel and had no jail at
+    /// all: fs_list refused `path: "../../.ssh"` and then globbed
+    /// `pattern: "../../.ssh/*"` for the same directory, handing back names,
+    /// sizes and absolute paths. Run against the real fs_list on a real
+    /// directory, because the bug lived in the wiring, not in contain_within.
+    #[test]
+    fn a_glob_pattern_cannot_walk_out_of_the_workspace() {
+        use std::fs;
+        let base = std::env::temp_dir().join(format!("lu-globjail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let ws = base.join("workspace");
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(base.join("secret.txt"), b"private").unwrap();
+        fs::write(ws.join("inside.txt"), b"ok").unwrap();
+        let wd = Some(ws.to_string_lossy().to_string());
+
+        // `*` matches dotfiles too (require_literal_leading_dot is false), so
+        // "../*" was enough to enumerate a sibling .ssh by name.
+        for evil in ["../*", "../secret.txt", "../../*", "sub/../../*"] {
+            let out = fs_list(".".into(), None, Some(evil.to_string()), None, wd.clone());
+            let listed = out.map(|v| v.to_string()).unwrap_or_default();
+            assert!(!listed.contains("secret.txt"), "pattern {evil:?} leaked: {listed}");
+        }
+
+        // An absolute pattern needed no depth guessing at all: Path::join
+        // discards the base when the joined component is absolute.
+        let abs = base.join("*").to_string_lossy().to_string();
+        assert!(
+            fs_list(".".into(), None, Some(abs), None, wd.clone()).is_err(),
+            "absolute pattern accepted",
+        );
+
+        // The legitimate case must keep working.
+        let ok = fs_list(".".into(), None, Some("*.txt".into()), None, wd).expect("glob");
+        assert_eq!(ok["count"], 1);
+        assert!(ok.to_string().contains("inside.txt"));
+        let _ = fs::remove_dir_all(&base);
     }
 }
 

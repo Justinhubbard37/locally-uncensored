@@ -845,6 +845,38 @@ async fn handle_chat_event(
 
 // ─── Proxy handlers ───
 
+/// The path as the TARGET's router will see it: percent-decoded and with dot
+/// segments removed.
+///
+/// axum hands us `uri().path()` exactly as it arrived and routes on those raw
+/// bytes, so our own routing and the auth middleware agree with each other. The
+/// proxy targets do not: gin (Ollama) and aiohttp (ComfyUI) both decode before
+/// dispatching, so `/%75pload/image` never started with "/upload" for us while
+/// ComfyUI resolved it to the upload handler all the same. Every permission
+/// check on a proxied path goes through here.
+///
+/// Decoded ONCE, matching the target's single decode, so a double-encoded
+/// `%2570` stays inert on both sides rather than being over-blocked here and
+/// harmlessly delivered there. Only the GATE uses this: what gets forwarded is
+/// still the raw path, so a legitimately encoded segment (ComfyUI addresses
+/// /userdata/<name> with the slashes inside the name escaped) survives intact.
+fn gate_path(raw: &str) -> String {
+    let decoded = urlencoding::decode(raw)
+        .map(|c| c.into_owned())
+        .unwrap_or_else(|_| raw.to_string());
+    let mut out: Vec<&str> = Vec::new();
+    for seg in decoded.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    format!("/{}", out.join("/"))
+}
+
 /// Paths on the Ollama proxy that require the `downloads` permission.
 /// These mutate on-disk model state and/or saturate bandwidth.
 fn ollama_requires_downloads(path: &str) -> bool {
@@ -892,7 +924,7 @@ async fn proxy_ollama(
     // Enforce the `downloads` permission for any endpoint that writes model
     // state. Read-only endpoints (/api/tags, /api/chat, /api/show, etc.)
     // always remain open so an authenticated mobile can actually chat.
-    if ollama_requires_downloads(&path) {
+    if ollama_requires_downloads(&gate_path(&path)) {
         let perms = state.permissions.lock().await;
         if !perms.downloads {
             println!("[Remote] BLOCKED (downloads disabled): {} {}", req.method(), path);
@@ -932,7 +964,7 @@ async fn proxy_comfyui(
             println!("[Remote] BLOCKED (process_control disabled): {} {}", req.method(), stripped_owned);
             return forbidden("ComfyUI remote access disabled (enable Process Control)");
         }
-        if let Some(extra) = comfy_extra_permission(&stripped_owned) {
+        if let Some(extra) = comfy_extra_permission(&gate_path(&stripped_owned)) {
             let allowed = match extra {
                 "filesystem" => perms.filesystem,
                 "downloads" => perms.downloads,
@@ -5361,6 +5393,63 @@ mod jwt_refresh_tests {
         assert_eq!(fresh_claims.ip, "1.2.3.4");
         assert_eq!(fresh_claims.iat as u64, session_start);
         assert!(fresh_claims.exp >= claims.exp);
+    }
+}
+
+#[cfg(test)]
+mod proxy_gate_path_tests {
+    use super::{comfy_extra_permission, gate_path, ollama_requires_downloads};
+
+    /// Security review 2026-07-30. The gates matched `uri().path()`, which axum
+    /// hands over undecoded, and then forwarded that same raw path to a target
+    /// that decodes before dispatching. So `/api/%70ull` was not "/api/pull" for
+    /// us and was exactly that for Ollama, and `/%75pload/image` reached
+    /// ComfyUI's real upload handler with the filesystem permission switched off.
+    #[test]
+    fn a_percent_encoded_path_still_hits_its_permission_gate() {
+        for evil in [
+            "/api/%70ull",
+            "/api/pu%6Cl",
+            "/api/%64elete",
+            "/api/%70%75%6C%6C",
+            "/api/x/%2e%2e/pull",
+        ] {
+            assert!(
+                ollama_requires_downloads(&gate_path(evil)),
+                "downloads gate missed {evil:?} (gate saw {:?})",
+                gate_path(evil),
+            );
+        }
+        for (evil, want) in [
+            ("/%75pload/image", "filesystem"),
+            ("/upl%6Fad/mask", "filesystem"),
+            ("/%6Danager/queue", "downloads"),
+            ("/customnode%2Finstall", "downloads"),
+        ] {
+            assert_eq!(
+                comfy_extra_permission(&gate_path(evil)),
+                Some(want),
+                "comfy gate missed {evil:?}",
+            );
+        }
+    }
+
+    /// Only the gate decodes. Ordinary paths must not change meaning, and a
+    /// double-encoded escape has to stay inert on both sides: we decode once,
+    /// the target decodes once, so `%2570` is "%70" to them and never "/pull".
+    #[test]
+    fn decoding_is_single_pass_and_leaves_ordinary_paths_alone() {
+        assert_eq!(gate_path("/api/tags"), "/api/tags");
+        assert_eq!(gate_path("/api/chat"), "/api/chat");
+        assert_eq!(gate_path("/userdata/workflows%2Ffoo.json"), "/userdata/workflows/foo.json");
+        assert_eq!(gate_path("/api/%2570ull"), "/api/%70ull");
+        assert!(!ollama_requires_downloads(&gate_path("/api/%2570ull")));
+        // Read-only endpoints stay open, or an authenticated phone cannot chat.
+        for open in ["/api/tags", "/api/chat", "/api/show", "/api/embeddings"] {
+            assert!(!ollama_requires_downloads(&gate_path(open)), "{open} got gated");
+        }
+        assert_eq!(comfy_extra_permission(&gate_path("/prompt")), None);
+        assert_eq!(comfy_extra_permission(&gate_path("/history/abc-123")), None);
     }
 }
 

@@ -197,7 +197,18 @@ export function ToolCallBlock({ toolCall, onApprove, onReject }: Props) {
           className="flex items-center gap-1.5 py-0.5 text-left hover:opacity-80 transition-opacity flex-1 min-w-0"
         >
           <ToolIcon size={10} className="text-gray-500 dark:text-gray-500 shrink-0" />
-          <span className="text-[0.65rem] text-gray-600 dark:text-gray-400">{toolCall.toolName}</span>
+          <span className={`text-[0.65rem] ${isRunning ? 'lu-tool-shimmer' : 'text-gray-600 dark:text-gray-400'}`}>{toolCall.toolName}</span>
+          {isRunning && (
+            <span className="flex items-center gap-[3px] shrink-0" aria-hidden>
+              {[0, 1, 2].map((i) => (
+                <span
+                  key={i}
+                  className="lu-band-dot w-[3px] h-[3px] rounded-full bg-gray-400 dark:bg-gray-500"
+                  style={{ animationDelay: `${i * 0.2}s` }}
+                />
+              ))}
+            </span>
+          )}
           <StatusIcon size={9} className={`shrink-0 ${
             toolCall.status === 'completed' ? 'text-gray-400 dark:text-gray-500' :
             isFailed ? 'text-red-400/60' :

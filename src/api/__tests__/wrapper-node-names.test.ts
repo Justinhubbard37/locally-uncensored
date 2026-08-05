@@ -54,7 +54,9 @@ const CORE_NODES = new Set([
   // lora
   'LoraLoader', 'LoraLoaderModelOnly',
   // decode + image ops
-  'VAEDecode', 'VAEDecodeAudio', 'VAEEncode', 'VAEEncodeForInpaint', 'ImageScale',
+  // VAEDecodeTiled: core nodes.py; answered /object_info/VAEDecodeTiled live
+  // on the 2026-08-02 e2e box (full tile/overlap/temporal signature).
+  'VAEDecode', 'VAEDecodeTiled', 'VAEDecodeAudio', 'VAEEncode', 'VAEEncodeForInpaint', 'ImageScale',
   'GetVideoComponents', 'CreateVideo',
   // output
   'SaveImage', 'SaveAnimatedWEBP', 'SaveVideo', 'SaveAudioMP3',

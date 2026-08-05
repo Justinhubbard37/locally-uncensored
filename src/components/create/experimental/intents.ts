@@ -103,13 +103,17 @@ export const INTENTS: IntentMeta[] = [
   // video, extend pick), so needsSource / needsPrompt describe only the
   // shared composer scaffolding. ──
   {
-    // Character training is CLOUD-FIRST (David 2026-07-19): the local lane
-    // needs a whole trainer runtime (musubi-tuner venv) that 2.5.8 does not
-    // ship, so no hasLocalLane until that exists.
+    // 2.6.0 ships the local trainer runtime (trainer.rs installs the pinned
+    // musubi-tuner venv, the Z-Image bases ride the regular download
+    // pipeline), so the local lane is real now. Without hasLocalLane the bar
+    // rendered the finished feature as a locked cloud teaser and a local
+    // user could never reach LocalTrainControls at all (found 2026-08-01 on
+    // the real Windows bundle). No requiresModels here: the lane runs its
+    // own three gates (trainer env, base files, photos).
     id: 'character', label: 'Character Studio', short: 'Character', icon: UserRound,
     placeholder: 'Describe the scene for your character…',
     needsSource: false, needsPrompt: false, allowsMask: false, isVideo: false,
-    cloudOnly: true,
+    cloudOnly: true, hasLocalLane: true,
     examples: [],
   },
   {

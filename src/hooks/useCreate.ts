@@ -19,9 +19,10 @@ import {
   isPromptQueued,
   buildTxt2ImgWorkflow,
   buildTxt2VidWorkflow,
+  canRunVideoIntent,
   classifyModel,
   isI2VModel,
-  isT2VCapable,
+  videoLaneModels,
   extractComfyOutputFiles,
   galleryTypeForFile,
   MODEL_TYPE_DEFAULTS as COMFY_MODEL_DEFAULTS,
@@ -47,7 +48,6 @@ import {
 import { useCreateStore } from '../stores/createStore'
 import { useWorkflowStore } from '../stores/workflowStore'
 import { injectParameters } from '../api/workflows'
-import { preflightCheck } from '../api/preflight'
 import {
   generateMlxImageDataUrl, isMlxImageHost, isMlxImageModel,
   mlxStatus, listMlxImageModels, buildMlxImageModels, mergeImageModels, mlxModelIdFor,
@@ -92,33 +92,6 @@ export function useCreate() {
     // CreateTopControls stays in sync with the deeper useCreate state.
     useCreateStore.getState().setComfyRunning(ok)
     return ok
-  }, [])
-
-  const runPreflight = useCallback(async () => {
-    const state = useCreateStore.getState()
-    // Preflight validates a model against ComfyUI's installed node graph. On a
-    // Mac that question has no meaning — and asking it reaches out to port 8188,
-    // where a ComfyUI the user runs for something else would answer about nodes
-    // that have nothing to do with the MLX model being checked.
-    if (isMlxImageHost()) {
-      state.setPreflightStatus(null, [], [])
-      return
-    }
-    const activeModel = state.mode === 'image' ? state.imageModel : state.videoModel
-    if (!activeModel) {
-      state.setPreflightStatus(null, [], [])
-      return
-    }
-    try {
-      const result = await preflightCheck(activeModel, state.mode, state.width, state.height)
-      state.setPreflightStatus(
-        result.ready,
-        result.errors,
-        result.warnings.map(w => w.message),
-      )
-    } catch {
-      state.setPreflightStatus(null, [], [])
-    }
   }, [])
 
   const zeroModelRetries = useRef(0)
@@ -309,13 +282,11 @@ export function useCreate() {
           state.setImageModel(imgModels[0].name, imgModels[0].type)
         }
       }
-      // Run preflight check after models are loaded
-      setTimeout(() => runPreflight(), 100)
     } catch (err) {
       console.error('[useCreate] Failed to fetch models:', err)
       setModelLoadError(`Failed to load models: ${err instanceof Error ? err.message : 'ComfyUI API error'}`)
     }
-  }, [runPreflight])
+  }, [])
 
   // Auto-refresh models when a ComfyUI model download completes.
   // Schedules three fetches because real-world ComfyUI scans take longer than
@@ -680,12 +651,19 @@ export function useCreate() {
     // user never saw. Apply the picker's coercion here too (same one-rule
     // philosophy as the cloud op resolver after take-01).
     if (!localOp && mode === 'video' && state.videoModelList.length > 0) {
-      const capable = intent === 'animate' || intent === 'extend'
-        ? state.videoModelList.filter((m) => isI2VModel(m.name))
-        : state.videoModelList.filter((m) => isT2VCapable(m.name))
+      const capable = videoLaneModels(state.videoModelList, intent)
       if (capable.length > 0 && !capable.some((m) => m.name === activeModel)) {
         activeModel = capable[0].name
       }
+    } else if (!localOp && mode === 'video' && !canRunVideoIntent(activeModel, intent)) {
+      // The list has not arrived yet (fresh boot, ComfyUI still waking). The
+      // coercion above cannot run, and a persisted pick the lane cannot use
+      // must not reach the builder: that is how a T2V run right after app
+      // start went out as SVD's LoadImage graph and ComfyUI answered
+      // "Node 2 (LoadImage): Custom validation failed" while the chip already
+      // showed a capable model (David 2026-08-02).
+      setError('Video models are still loading. Give it a few seconds and hit Create again.')
+      return
     }
     // Always re-classify from model name to avoid stale type
     const imageModelType = classifyModel(activeModel)
@@ -1026,8 +1004,27 @@ export function useCreate() {
         await new Promise<void>((resolve, reject) => {
           const startTime = Date.now()
           const store = useCreateStore.getState()
+          // The bar and its seconds used to repaint only when ComfyUI sent an
+          // event. Long silent stretches are normal here (a 14B sampling step
+          // or a VAE decode on a full card emits nothing for minutes), so the
+          // label froze mid-run: David watched "Decoding... 266s" stand still
+          // for 10+ minutes while the GPU sat at 100% (2026-08-02). Events now
+          // only change phase and percent; a ticker repaints the elapsed time
+          // every second so a working render never looks hung.
+          let phasePct = 10
+          let phaseLabel = 'Queued...'
+          const paint = () => {
+            const elapsed = Math.round((Date.now() - startTime) / 1000)
+            setProgress(phasePct, `${phaseLabel} ${elapsed}s`)
+          }
+          const setPhase = (pct: number, label: string) => {
+            phasePct = pct
+            phaseLabel = label
+            paint()
+          }
           store.setProgressPhase('queued')
-          setProgress(10, 'Queued...')
+          setPhase(10, 'Queued...')
+          const ticker = setInterval(paint, 1000)
 
           // Activity watchdog (2.5.8): the old hard wall-clock cap killed a
           // REAL render at exactly 60 minutes while ComfyUI was still
@@ -1088,7 +1085,7 @@ export function useCreate() {
                     found = true
                     addToGallery({
                       id: uuid(), type: galleryTypeForFile(file.filename, mode),
-                      filename: file.filename, subfolder: file.subfolder ?? '',
+                      filename: file.filename, subfolder: file.subfolder ?? '', comfyType: file.type ?? 'output',
                       prompt, negativePrompt, model: activeModel,
                       modelType: mode === 'image' ? imageModelType : (videoModelsList.find(m => m.name === activeModel)?.type ?? 'wan'),
                       seed: seed === -1 ? 0 : seed,
@@ -1114,6 +1111,7 @@ export function useCreate() {
           let abortCheck: ReturnType<typeof setInterval> | null = null
 
           const cleanup = () => {
+            clearInterval(ticker)
             clearInterval(timeoutTimer)
             clearInterval(heartbeat)
             if (abortCheck) clearInterval(abortCheck)
@@ -1125,7 +1123,6 @@ export function useCreate() {
             if ('prompt_id' in event.data && event.data.prompt_id !== promptId) return
             lastActivity = Date.now()
 
-            const elapsed = Math.round((Date.now() - startTime) / 1000)
             const st = useCreateStore.getState()
 
             switch (event.type) {
@@ -1138,19 +1135,19 @@ export function useCreate() {
                 const classType = nodeClassMap.get(nodeId) || ''
                 if (LOADER_NODES.has(classType)) {
                   st.setProgressPhase('loading-model')
-                  setProgress(15, `Loading model... ${elapsed}s`)
+                  setPhase(15, 'Loading model...')
                 } else if (CLIP_LOADER_NODES.has(classType)) {
                   st.setProgressPhase('loading-clip')
-                  setProgress(25, `Loading text encoder... ${elapsed}s`)
+                  setPhase(25, 'Loading text encoder...')
                 } else if (VAE_LOADER_NODES.has(classType)) {
                   st.setProgressPhase('loading-vae')
-                  setProgress(30, `Loading VAE... ${elapsed}s`)
+                  setPhase(30, 'Loading VAE...')
                 } else if (SAMPLER_NODES.has(classType)) {
                   st.setProgressPhase('sampling')
-                  setProgress(35, `Sampling... ${elapsed}s`)
+                  setPhase(35, 'Sampling...')
                 } else if (DECODE_NODES.has(classType)) {
                   st.setProgressPhase('decoding')
-                  setProgress(90, `Decoding... ${elapsed}s`)
+                  setPhase(90, 'Decoding frames, the last long stretch...')
                 }
                 break
               }
@@ -1158,7 +1155,7 @@ export function useCreate() {
                 const { value, max } = event.data
                 const stepPct = 35 + (value / max) * 55 // 35% to 90%
                 st.setProgressPhase('sampling')
-                setProgress(Math.round(stepPct), `Sampling step ${value}/${max}... ${elapsed}s`)
+                setPhase(Math.round(stepPct), `Sampling step ${value}/${max}...`)
                 break
               }
               case 'execution_complete': {
@@ -1186,7 +1183,7 @@ export function useCreate() {
                       found = true
                       addToGallery({
                         id: uuid(), type: galleryTypeForFile(file.filename, mode),
-                        filename: file.filename, subfolder: file.subfolder ?? '',
+                        filename: file.filename, subfolder: file.subfolder ?? '', comfyType: file.type ?? 'output',
                         prompt, negativePrompt, model: activeModel,
                         modelType: mode === 'image' ? imageModelType : (videoModelsList.find(m => m.name === activeModel)?.type ?? 'wan'),
                         seed: seed === -1 ? 0 : seed,
@@ -1291,7 +1288,7 @@ export function useCreate() {
                     found = true
                     addToGallery({
                       id: uuid(), type: galleryTypeForFile(file.filename, mode),
-                      filename: file.filename, subfolder: file.subfolder ?? '',
+                      filename: file.filename, subfolder: file.subfolder ?? '', comfyType: file.type ?? 'output',
                       prompt, negativePrompt, model: activeModel,
                       modelType: mode === 'image' ? imageModelType : (videoModelsList.find(m => m.name === activeModel)?.type ?? 'wan'),
                       seed: seed === -1 ? 0 : seed,
@@ -1376,7 +1373,6 @@ export function useCreate() {
     mlxMissing,
     checkConnection,
     fetchModels,
-    runPreflight,
     generate,
     cancel,
   }

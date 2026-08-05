@@ -2134,7 +2134,7 @@ fn offload_local_models_blocking(state: &AppState, include_comfyui: Option<bool>
 
 /// Evict every model Ollama currently holds in memory via `keep_alive: 0`,
 /// leaving `ollama serve` running (idle serve is cheap). Best-effort.
-fn offload_ollama_loaded_models() -> bool {
+pub(crate) fn offload_ollama_loaded_models() -> bool {
     let client = match reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()

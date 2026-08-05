@@ -13,6 +13,18 @@ import type {
 
 // ─── Validation ───
 
+// A node of the API-format graph. The JSON arrives from a file the user picked
+// or a download, so no field is guaranteed; every walk over a graph narrows
+// through this guard before it reads one.
+interface WorkflowNode {
+  class_type?: string
+  inputs?: Record<string, any>
+}
+
+function isWorkflowNode(value: unknown): value is WorkflowNode {
+  return !!value && typeof value === 'object'
+}
+
 export function validateWorkflowJson(json: unknown): json is Record<string, any> {
   if (!json || typeof json !== 'object' || Array.isArray(json)) return false
   const obj = json as Record<string, any>
@@ -242,6 +254,16 @@ export function autoDetectParameterMap(workflow: Record<string, any>): Parameter
       case 'UNETLoader':
         map.model = { nodeId, inputKey: 'unet_name', loaderType: 'unet' }
         break
+      case 'LoadImage':
+        // A custom I2I/I2V workflow may contain more than one image
+        // loader. Use the first one as its primary LU source image.
+        if (!map.inputImage) {
+          map.inputImage = {
+            nodeId,
+            inputKey: 'image',
+          }
+        }
+        break
       case 'EmptyLatentImage':
       case 'EmptySD3LatentImage':
         map.width = { nodeId, inputKey: 'width' }
@@ -252,6 +274,21 @@ export function autoDetectParameterMap(workflow: Record<string, any>): Parameter
         map.width = { nodeId, inputKey: 'width' }
         map.height = { nodeId, inputKey: 'height' }
         map.frames = { nodeId, inputKey: 'length' }
+        break
+      case 'ImageResizeKJv2':
+        if (!map.width && typeof node.inputs?.width === 'number') {
+          map.width = {
+            nodeId,
+            inputKey: 'width',
+          }
+        }
+
+        if (!map.height && typeof node.inputs?.height === 'number') {
+          map.height = {
+            nodeId,
+            inputKey: 'height',
+          }
+        }
         break
       case 'SaveAnimatedWEBP':
         map.fps = { nodeId, inputKey: 'fps' }
@@ -301,15 +338,83 @@ export async function injectParameters(
   inject(paramMap.seed, params.seed === -1 ? Math.floor(Math.random() * 2147483647) : params.seed)
   inject(paramMap.steps, params.steps)
   inject(paramMap.cfgScale, params.cfgScale)
-  inject(paramMap.width, params.width)
-  inject(paramMap.height, params.height)
+  let widthMapping = paramMap.width
+  let heightMapping = paramMap.height
+
+  // Older installed custom I2V workflows may predate resize-node
+  // detection. Locate their source resize node at generation time so
+  // users do not have to remove and re-import the workflow.
+  if (!widthMapping || !heightMapping) {
+    const resizeEntry = Object.entries(wf).find(
+      ([, node]) =>
+        isWorkflowNode(node) &&
+        node.class_type === 'ImageResizeKJv2' &&
+        typeof node.inputs?.width === 'number' &&
+        typeof node.inputs?.height === 'number',
+    )
+
+    if (resizeEntry) {
+      if (!widthMapping) {
+        widthMapping = {
+          nodeId: resizeEntry[0],
+          inputKey: 'width',
+        }
+      }
+
+      if (!heightMapping) {
+        heightMapping = {
+          nodeId: resizeEntry[0],
+          inputKey: 'height',
+        }
+      }
+    }
+  }
+
+  inject(widthMapping, params.width)
+  inject(heightMapping, params.height)
   inject(paramMap.batchSize, params.batchSize)
   inject(paramMap.sampler, params.sampler)
   inject(paramMap.scheduler, params.scheduler)
 
+  const inputImage =
+    'inputImage' in params &&
+    typeof params.inputImage === 'string'
+      ? params.inputImage
+      : undefined
+
+  if (inputImage) {
+    let inputImageMapping = paramMap.inputImage
+
+    // Workflows installed before inputImage mapping existed have an older
+    // persisted parameterMap. Detect their LoadImage node at generation time
+    // so users do not have to remove and re-import those workflows.
+    if (!inputImageMapping) {
+      const loadImageEntry = Object.entries(wf).find(
+        ([, node]) => isWorkflowNode(node) && node.class_type === 'LoadImage',
+      )
+
+      if (loadImageEntry) {
+        inputImageMapping = {
+          nodeId: loadImageEntry[0],
+          inputKey: 'image',
+        }
+      }
+    }
+
+    inject(inputImageMapping, inputImage)
+  }
+
   if ('frames' in params) {
     inject(paramMap.frames, (params as VideoParams).frames)
     inject(paramMap.fps, (params as VideoParams).fps)
+
+    // A VHS_VideoCombine left on save_output:false writes the clip to
+    // ComfyUI's temp folder, where the gallery cannot play it back.
+    for (const node of Object.values(wf)) {
+      if (isWorkflowNode(node) && node.class_type === 'VHS_VideoCombine' && node.inputs) {
+        node.inputs.save_output = true
+      }
+    }
   }
 
   log.info('[workflows] Injected workflow nodes', { nodes: Object.entries(wf).map(([id, n]: [string, any]) =>
@@ -317,9 +422,9 @@ export async function injectParameters(
   ).join(' | ') })
 
   // Auto-resolve VAE and CLIP loaders with real model files
-  for (const [nodeId, node] of Object.entries(wf)) {
-    if (!node || typeof node !== 'object') continue
-    const ct = node.class_type as string
+  for (const node of Object.values(wf)) {
+    if (!isWorkflowNode(node)) continue
+    const ct = node.class_type
     try {
       if (ct === 'VAELoader' && node.inputs) {
         const vae = await findMatchingVAE(modelType)

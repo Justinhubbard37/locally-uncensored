@@ -270,6 +270,22 @@ export function isT2VCapable(name: string): boolean {
   return true
 }
 
+/** Can this model run the given video intent? Animate/Extend feed a start
+ *  image (i2v), everything else on the video lane is a text-to-video run.
+ *  ONE rule for the picker, the starter-bundle gate and submit: whenever two
+ *  of them disagreed a real user hit a wall. SVD-only boxes showed
+ *  "No matches" yet never offered the starter bundle, and a fresh boot
+ *  submitted a persisted SVD pick into the T2V lane, which builds SVD's
+ *  LoadImage graph and dies on "Custom validation failed" (David 2026-08-01). */
+export function canRunVideoIntent(name: string, intent: string): boolean {
+  return intent === 'animate' || intent === 'extend' ? isI2VModel(name) : isT2VCapable(name)
+}
+
+/** The video models the CURRENT intent can actually run (see canRunVideoIntent). */
+export function videoLaneModels(list: ClassifiedModel[], intent: string): ClassifiedModel[] {
+  return list.filter((m) => canRunVideoIntent(m.name, intent))
+}
+
 // ─── Default generation parameters per model type ───
 
 export interface ModelTypeDefaults {
@@ -1371,6 +1387,24 @@ export function buildSDXLImgWorkflow(params: GenerateParams): Record<string, any
 
 // ─── Image Workflow: FLUX (UNETLoader + CLIPLoader + VAELoader) ───
 
+/** UNET loader that understands GGUF quants. Core `UNETLoader` only enumerates
+ *  safetensors, so handing it a .gguf gets the workflow rejected with "Value
+ *  not in list" (stasicby-max, D#93 — the catalog offers uncensored Wan quants
+ *  as GGUF). The city96 pack's `UnetLoaderGGUF` reads them. Same rule as the
+ *  dynamic builder's addUnetLoader; this legacy path still carries the VRAM
+ *  handoff and the agent's video tool. */
+async function unetLoaderNode(model: string): Promise<Record<string, any>> {
+  if (!model.toLowerCase().endsWith('.gguf')) {
+    return { class_type: 'UNETLoader', inputs: { unet_name: model, weight_dtype: 'default' } }
+  }
+  if (!(await nodeExists('UnetLoaderGGUF'))) {
+    throw new Error(
+      'This model is a GGUF quant, which needs the ComfyUI-GGUF node pack. Install it from the model card, or pick the safetensors variant.',
+    )
+  }
+  return { class_type: 'UnetLoaderGGUF', inputs: { unet_name: model } }
+}
+
 export async function buildFluxImgWorkflow(params: GenerateParams): Promise<Record<string, any>> {
   validateParams(params)
   const seed = getSeed(params.seed)
@@ -1382,7 +1416,7 @@ export async function buildFluxImgWorkflow(params: GenerateParams): Promise<Reco
   const latentNode = modelType === 'flux2' ? 'EmptyFlux2LatentImage' : 'EmptySD3LatentImage'
 
   return {
-    '1': { class_type: 'UNETLoader', inputs: { unet_name: params.model, weight_dtype: 'default' } },
+    '1': await unetLoaderNode(params.model),
     '2': { class_type: 'CLIPLoader', inputs: { clip_name: clip, type: clipType, device: 'default' } },
     '3': { class_type: 'VAELoader', inputs: { vae_name: vae } },
     '4': { class_type: 'CLIPTextEncode', inputs: { text: params.prompt, clip: ['2', 0] } },
@@ -1421,10 +1455,12 @@ export async function buildWanVideoWorkflow(params: VideoParams): Promise<Record
 
   const vae = await findMatchingVAE('wan')
   const clip = await findMatchingCLIP('wan')
+  const { videoDecodeNode } = await import('./dynamic-workflow')
+  const hasTiledDecode = await nodeExists('VAEDecodeTiled')
 
   const workflow: Record<string, any> = {
     '1': { class_type: 'CLIPLoader', inputs: { clip_name: clip, type: 'wan', device: 'default' } },
-    '2': { class_type: 'UNETLoader', inputs: { unet_name: params.model, weight_dtype: 'default' } },
+    '2': await unetLoaderNode(params.model),
     '3': { class_type: 'VAELoader', inputs: { vae_name: vae } },
     '4': { class_type: 'CLIPTextEncode', inputs: { text: params.prompt, clip: ['1', 0] } },
     '5': { class_type: 'CLIPTextEncode', inputs: { text: params.negativePrompt || 'static, blurred, low quality, worst quality, deformed', clip: ['1', 0] } },
@@ -1437,7 +1473,7 @@ export async function buildWanVideoWorkflow(params: VideoParams): Promise<Record
         sampler_name: params.sampler, scheduler: params.scheduler, denoise: 1.0,
       },
     },
-    '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['3', 0] } },
+    '8': videoDecodeNode(['7', 0], ['3', 0], hasTiledDecode),
   }
 
   // Use SaveAnimatedWEBP if available, otherwise fall back to SaveImage (frame
@@ -1469,6 +1505,8 @@ export async function buildAnimateDiffWorkflow(params: VideoParams): Promise<Rec
 
   // AnimateDiff: batch_size=1, motion model handles temporal dimension
   const hasVHS = await nodeExists('VHS_VideoCombine')
+  const { videoDecodeNode } = await import('./dynamic-workflow')
+  const hasTiledDecode = await nodeExists('VAEDecodeTiled')
 
   const workflow: Record<string, any> = {
     '1': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: params.model } },
@@ -1486,7 +1524,7 @@ export async function buildAnimateDiffWorkflow(params: VideoParams): Promise<Rec
         sampler_name: params.sampler, scheduler: params.scheduler, denoise: 1.0,
       },
     },
-    '9': { class_type: 'VAEDecode', inputs: { samples: ['8', 0], vae: ['1', 2] } },
+    '9': videoDecodeNode(['8', 0], ['1', 2], hasTiledDecode),
   }
 
   // Use VHS_VideoCombine if available (produces MP4), otherwise SaveAnimatedWEBP, otherwise SaveImage

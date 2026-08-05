@@ -88,9 +88,6 @@ const INITIAL_STATE = {
   currentPromptId: null,
   error: null,
   lastGenTime: null,
-  preflightReady: null,
-  preflightErrors: [],
-  preflightWarnings: [],
   gallery: [],
   promptHistory: [],
 }
@@ -774,14 +771,14 @@ describe('createStore', () => {
       expect(after.source).not.toBeNull()
     })
 
-    it('clears character — training is cloud-first (David 2026-07-19), no local lane in 2.5.8', () => {
+    it('keeps character since 2.6.0 ships the local musubi trainer lane', () => {
       const s = useCreateStore.getState()
       s.setBackend('cloud')
       s.setIntent('character')
       useCreateStore.getState().setBackend('local')
       const after = useCreateStore.getState()
-      expect(after.cloudOp).toBeNull()
-      expect(after.intent()).not.toBe('character')
+      expect(after.cloudOp).toBe('character')
+      expect(after.intent()).toBe('character')
     })
 
     it('keeps motion — its DWPose + VACE local lane shipped in 2.5.8', () => {

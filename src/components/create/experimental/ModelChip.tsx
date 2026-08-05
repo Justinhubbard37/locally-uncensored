@@ -4,7 +4,7 @@ import { useSettingsStore } from '../../../stores/settingsStore'
 import { useUIStore } from '../../../stores/uiStore'
 import { Select, type SelectOption } from '../ui/Select'
 import { TYPE_BADGE } from './badges'
-import { isI2VModel, isT2VCapable, resolveLocalOpPick } from '../../../api/comfyui'
+import { resolveLocalOpPick, videoLaneModels } from '../../../api/comfyui'
 
 const CLOUD_BADGE = { label: 'Cloud', color: 'bg-violet-500/15 text-violet-500 dark:text-violet-200' }
 
@@ -113,12 +113,9 @@ function LocalModelChip() {
   // Mirror the cloud picker's op-gating (David 2026-07-17: "only offer models
   // that can actually do it"): Animate/Extend list i2v-capable local models,
   // Video lists t2v-capable ones (SVD/FramePack are i2v-only and drop there).
+  // Shared with Stage's missing-models gate so card and picker cannot drift.
   const rawList = isVideo ? videoModelList : imageModelList
-  const list = laneList ?? (!isVideo
-    ? rawList
-    : intent === 'animate' || intent === 'extend'
-      ? rawList.filter((m) => isI2VModel(m.name))
-      : rawList.filter((m) => isT2VCapable(m.name)))
+  const list = laneList ?? (!isVideo ? rawList : videoLaneModels(rawList, intent))
   const stored = laneList ? localOpModel : (isVideo ? videoModel : imageModel)
   // Reflect the model the run will really use — a leftover pick the current
   // op can't perform must not show as "selected". Lanes share the submit-side

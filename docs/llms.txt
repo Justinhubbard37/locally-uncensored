@@ -6,7 +6,7 @@ Locally Uncensored is a free, open-source (AGPL-3.0) local AI studio for the des
 
 ## Key Facts
 - Name: Locally Uncensored
-- Current Version: v2.5.9 (July 2026)
+- Current Version: v2.6.2 (August 2026)
 - Type: Desktop AI Application (local AI studio)
 - License: AGPL-3.0 (free and open source)
 - Platforms: Windows 10/11, Linux (deb, rpm, AppImage)
@@ -114,6 +114,10 @@ Locally Uncensored is a free, open-source (AGPL-3.0) local AI studio for the des
 - How to Run AI Locally (5-minute beginner guide): https://locallyuncensored.com/blog/how-to-run-ai-locally.html
 - LM Studio Alternatives 2026: https://locallyuncensored.com/blog/lm-studio-alternatives.html
 - Easiest Local AI Image Generator (no ComfyUI node graphs): https://locallyuncensored.com/blog/easiest-local-ai-image-generator.html
+- Run an LLM and Stable Diffusion Together on One GPU (VRAM math + pairings): https://locallyuncensored.com/blog/run-llm-and-stable-diffusion-together.html
+- Character LoRA Training, Locally (dataset, kohya_ss vs ai-toolkit, honest settings): https://locallyuncensored.com/blog/character-lora-training-local.html
+- Local AI Music Generation (ACE-Step on your own GPU, honest hardware notes): https://locallyuncensored.com/blog/local-ai-music-generation.html
+- AI Lipsync and Video Extend, Locally (Talking Character + Extend Video lanes): https://locallyuncensored.com/blog/ai-lipsync-and-video-extend-local.html
 - Local AI on Your Phone: https://locallyuncensored.com/blog/local-ai-on-your-phone.html
 - Best Local AI Apps 2026 (comparison): https://locallyuncensored.com/blog/best-local-ai-apps-2026.html
 - Best Uncensored AI Models 2026: https://locallyuncensored.com/blog/best-uncensored-ai-models-2026.html
@@ -125,5 +129,19 @@ Locally Uncensored is a free, open-source (AGPL-3.0) local AI studio for the des
 - How to Run Kimi K3 (API, OpenRouter, local): https://locallyuncensored.com/blog/how-to-run-kimi-k3.html
 - Can You Run Kimi K3 Locally (hardware math): https://locallyuncensored.com/blog/can-you-run-kimi-k3-locally.html
 - Kimi K3 vs Kimi K2.6: https://locallyuncensored.com/blog/kimi-k3-vs-kimi-k2-6.html
+- DeepSeek V4 Flash 0731 Explained (July 31 release): https://locallyuncensored.com/blog/deepseek-v4-flash-0731-explained.html
+- How to Run DeepSeek V4 Flash Locally (GGUF + hardware): https://locallyuncensored.com/blog/how-to-run-deepseek-v4-flash-locally.html
+- DeepSeek V4 Flash in the Cloud (LU Labs, API, OpenRouter): https://locallyuncensored.com/blog/deepseek-v4-flash-cloud.html
+- Can You Run DeepSeek V4 Flash Locally (hardware math): https://locallyuncensored.com/blog/deepseek-v4-flash-hardware-requirements.html
+- DeepSeek V4 Flash Abliterated (uncensored build): https://locallyuncensored.com/blog/deepseek-v4-flash-abliterated.html
+- How to Run DeepSeek V4 Pro: https://locallyuncensored.com/blog/how-to-run-deepseek-v4-pro.html
+- DeepSeek V4 Flash vs V4 Pro: https://locallyuncensored.com/blog/deepseek-v4-flash-vs-v4-pro.html
 - Abliterated Models Guide: https://locallyuncensored.com/blog/abliterated-models-guide.html
 - Locally Uncensored vs Open WebUI / LM Studio / Jan / GPT4All / Msty / SillyTavern / KoboldCpp: https://locallyuncensored.com/blog/
+
+## Comparisons
+- Alternatives & Comparisons hub (all head-to-heads and roundups): https://locallyuncensored.com/alternatives/
+- Locally Uncensored vs LM Studio (all-in-one studio vs polished chat client): https://locallyuncensored.com/vs/lm-studio/
+- Locally Uncensored vs ComfyUI (same engine, workflows built for you): https://locallyuncensored.com/vs/comfyui/
+- Locally Uncensored vs Ollama (engine vs all-in-one desktop app on top): https://locallyuncensored.com/vs/ollama/
+- Locally Uncensored vs Jan (two AGPL-3.0 apps, chat-only vs full studio): https://locallyuncensored.com/vs/jan/

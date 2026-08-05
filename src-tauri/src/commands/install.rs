@@ -267,7 +267,56 @@ fn is_transient_pip_error(stderr: &str) -> bool {
 /// Turn raw pip stderr into a user-friendly hint with troubleshooting
 /// guidance. The first line of the returned string is a short diagnosis;
 /// the rest is the truncated original error for context.
+/// "Python 3.8.10 at C:\Python38\python.exe", or just the path when the
+/// interpreter will not say. Costs one process launch, which is fine on an
+/// error path and is the single fact that turns "no matching wheel" from a
+/// riddle into an instruction: willes0504 (Discord 2026-07-28) had a stray
+/// 3.8 first in PATH and needed a volunteer plus a day to find that out.
+fn interpreter_description(python_bin: &str) -> String {
+    let mut cmd = Command::new(python_bin);
+    cmd.arg("--version");
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    match cmd.output() {
+        Ok(out) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let version = text.trim().lines().next().unwrap_or("").trim().to_string();
+            if version.is_empty() {
+                python_bin.to_string()
+            } else {
+                format!("{version} at {python_bin}")
+            }
+        }
+        Err(_) => python_bin.to_string(),
+    }
+}
+
 fn diagnose_pip_error(stderr: &str) -> String {
+    diagnose_pip_error_for(stderr, None)
+}
+
+/// Same diagnosis, plus which interpreter produced it when the caller knows.
+/// Version-shaped failures are unanswerable without that line.
+fn diagnose_pip_error_for(stderr: &str, python_bin: Option<&str>) -> String {
+    let base = diagnose_pip_error_inner(stderr);
+    let needs_interpreter = {
+        let lower = stderr.to_lowercase();
+        lower.contains("could not find a version")
+            || lower.contains("no matching distribution")
+            || lower.contains("no module named")
+            || lower.contains("modulenotfounderror")
+    };
+    match (needs_interpreter, python_bin) {
+        (true, Some(bin)) => format!("{base}\n\nLU used {}.", interpreter_description(bin)),
+        _ => base,
+    }
+}
+
+fn diagnose_pip_error_inner(stderr: &str) -> String {
     let lower = stderr.to_lowercase();
     let snippet: String = stderr.chars().take(400).collect();
 
@@ -281,6 +330,16 @@ fn diagnose_pip_error(stderr: &str) -> String {
          • Arch:   sudo pacman -S python-virtualenv\n\
          • Debian/Ubuntu: sudo apt install python3-venv\n\
          • Fedora: sudo dnf install python3-virtualenv"
+    } else if lower.contains("ssl module in python is not available") {
+        // numbrain (Discord, 2026-08-02): a pyenv/source-built python without
+        // the _ssl extension can't reach pypi AT ALL, and the generic SSL hint
+        // below (antivirus/clock) sent him in the wrong direction.
+        "This Python was built without the ssl module, so pip cannot reach \
+         pypi.org at all. Use your distro's regular python3 (it ships with \
+         ssl): check with  python3 -c \"import ssl\"  — if that fails, \
+         reinstall python3 via your package manager (pyenv builds need the \
+         OpenSSL headers installed first, e.g. libssl-dev / openssl-devel), \
+         then retry."
     } else if lower.contains("ssl") {
         "SSL error reaching pypi.org. Often caused by an antivirus / firewall \
          intercepting TLS, or a stale system clock. Disable TLS interception \
@@ -449,14 +508,14 @@ pub fn pip_install_streaming_with_retry_cancellable(
             .unwrap_or_default();
 
         if !is_transient_pip_error(&last_stderr) {
-            return Err(diagnose_pip_error(&last_stderr));
+            return Err(diagnose_pip_error_for(&last_stderr, Some(python_bin)));
         }
     }
 
     Err(format!(
         "Exhausted {} retry attempts for transient network errors.\n\n{}",
         max_attempts,
-        diagnose_pip_error(&last_stderr)
+        diagnose_pip_error_for(&last_stderr, Some(python_bin))
     ))
 }
 
@@ -994,6 +1053,11 @@ fn download_file_blocking(
     let client = reqwest::blocking::Client::builder()
         .user_agent("LocallyUncensored/2.3")
         .redirect(reqwest::redirect::Policy::limited(10))
+        // This path pulls installers and archives (hundreds of MB), so the
+        // whole-request deadline still fits. The blocking client has no
+        // read_timeout; the model downloader, which handles the 40 GB+ files,
+        // uses the async client and bounds the stall instead of the size.
+        .connect_timeout(std::time::Duration::from_secs(30))
         .timeout(std::time::Duration::from_secs(7200))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
@@ -2722,6 +2786,9 @@ pub fn install_whisper_status(state: State<'_, AppState>) -> Result<serde_json::
     Ok(serde_json::json!({
         "status": install.status,
         "logs": install.logs,
+        // The frontend shows `error` verbatim; without it every failure read
+        // as a bare "Install failed." while the diagnosis sat in `logs`.
+        "error": if install.status == "error" { install.logs.last().cloned() } else { None },
         "download_progress": install.download_progress,
         "download_total": install.download_total,
         "download_speed": install.download_speed,
@@ -2822,19 +2889,41 @@ pub fn install_tts(
             }
         };
 
-        update(
-            "installing",
-            &format!("Installing piper-tts via {} (this can take a few minutes)…", target_python),
-        );
+        // When `piper.download_voices` already imports (package AND its deps),
+        // pip would only re-resolve pins — and that upgrade can collide with a
+        // python process using the same site-packages: live repro 2026-07-31
+        // (Windows), the app's own running ComfyUI held onnxruntime's DLL and
+        // pip died on WinError 5, so read-aloud never got its voice. All that
+        // is actually missing then is the voice file — go straight to it.
+        let piper_ready = {
+            let mut probe = Command::new(&target_python);
+            probe
+                .args(["-c", "import piper.download_voices"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            #[cfg(target_os = "windows")]
+            probe.creation_flags(CREATE_NO_WINDOW);
+            probe.status().map(|s| s.success()).unwrap_or(false)
+        };
 
-        let mut args = build_tts_pip_args();
-        // PEP 668 escape hatch (Arch / Debian 12+ / Fedora 38+) — see
-        // install_whisper. No-op on Windows/macOS/venv Pythons.
-        if is_pep668_protected(&target_python) {
-            args.push("--break-system-packages");
-            args.push("--user");
-        }
-        match pip_install_streaming_with_retry_cancellable(&args, &target_python, 3, &install_state, None) {
+        let pip_result = if piper_ready {
+            update("installing", "piper-tts is already installed — skipping pip.");
+            Ok(())
+        } else {
+            update(
+                "installing",
+                &format!("Installing piper-tts via {} (this can take a few minutes)…", target_python),
+            );
+            let mut args = build_tts_pip_args();
+            // PEP 668 escape hatch (Arch / Debian 12+ / Fedora 38+) — see
+            // install_whisper. No-op on Windows/macOS/venv Pythons.
+            if is_pep668_protected(&target_python) {
+                args.push("--break-system-packages");
+                args.push("--user");
+            }
+            pip_install_streaming_with_retry_cancellable(&args, &target_python, 3, &install_state, None)
+        };
+        match pip_result {
             Ok(()) => {
                 update(
                     "installing",
@@ -2889,6 +2978,8 @@ pub fn install_tts_status(state: State<'_, AppState>) -> Result<serde_json::Valu
     Ok(serde_json::json!({
         "status": install.status,
         "logs": install.logs,
+        // Same contract as install_whisper_status: the frontend reads `error`.
+        "error": if install.status == "error" { install.logs.last().cloned() } else { None },
     }))
 }
 
@@ -3403,6 +3494,20 @@ mod tests {
     }
 
     #[test]
+    fn a_python_without_ssl_is_named_not_blamed_on_antivirus() {
+        // numbrain's exact pip wording (Discord 2026-08-02): the interpreter
+        // itself has no _ssl, so the antivirus/clock hint is the wrong trail.
+        let msg = diagnose_pip_error(
+            "WARNING: pip is configured with locations that require TLS/SSL, \
+             however the ssl module in Python is not available.",
+        );
+        let lower = msg.to_lowercase();
+        assert!(lower.contains("built without the ssl module"));
+        assert!(lower.contains("import ssl"));
+        assert!(!lower.contains("antivirus"));
+    }
+
+    #[test]
     fn diagnose_403_suggests_vpn() {
         let msg = diagnose_pip_error("HTTP 403 from pytorch.org");
         let lower = msg.to_lowercase();
@@ -3440,6 +3545,44 @@ mod tests {
         let msg = diagnose_pip_error("ERROR: Could not find a version that satisfies the requirement torch");
         let lower = msg.to_lowercase();
         assert!(lower.contains("python") || lower.contains("version") || lower.contains("3.10"));
+    }
+
+    /// willes0504 (Discord 2026-07-28) read "ComfyUI needs Python 3.10, 3.11
+    /// or 3.12" while a stray 3.8 sat first in PATH. Naming the interpreter we
+    /// actually used is the difference between a riddle and an instruction.
+    #[test]
+    fn a_version_failure_names_the_interpreter_lu_used() {
+        let msg = diagnose_pip_error_for(
+            "ERROR: Could not find a version that satisfies the requirement torch (from versions: none)",
+            Some("/definitely/not/a/real/python-zzz"),
+        );
+        assert!(msg.contains("LU used"), "got: {msg}");
+        assert!(msg.contains("/definitely/not/a/real/python-zzz"), "got: {msg}");
+    }
+
+    #[test]
+    fn a_missing_module_failure_also_names_the_interpreter() {
+        let msg = diagnose_pip_error_for(
+            "ModuleNotFoundError: No module named 'encodings'",
+            Some("/definitely/not/a/real/python-zzz"),
+        );
+        assert!(msg.contains("LU used"), "got: {msg}");
+    }
+
+    #[test]
+    fn unrelated_failures_do_not_get_an_interpreter_line() {
+        // A disk-full or permission problem says nothing about the version.
+        let msg = diagnose_pip_error_for(
+            "OSError: [Errno 28] No space left on device",
+            Some("/definitely/not/a/real/python-zzz"),
+        );
+        assert!(!msg.contains("LU used"), "got: {msg}");
+    }
+
+    #[test]
+    fn without_an_interpreter_the_diagnosis_is_unchanged() {
+        let stderr = "ERROR: Could not find a version that satisfies the requirement torch";
+        assert_eq!(diagnose_pip_error(stderr), diagnose_pip_error_for(stderr, None));
     }
 
     #[test]
