@@ -5,6 +5,7 @@ import { useCreateStore, MODEL_TYPE_DEFAULTS } from '../../../stores/createStore
 import { classifyModel } from '../../../api/comfyui'
 import { useCreateExp } from './CreateContext'
 import { intentToJob } from '../../../lib/render/cloud-jobs'
+import { meterState } from '../../../lib/render/credits-meter'
 import {
   cloudModelById,
   defaultCloudModel,
@@ -110,11 +111,18 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
         ? frames / fps
         : undefined
   const costFallback = quota?.costs[intentKind === 'audio' ? 'image' : intentKind] ?? 0
+  // The exact rule the meter chip renders, so the button can never invite a run
+  // the chip is already refusing. Credits alone were not enough: a user out of
+  // monthly character trainings kept an enabled Create button and got a 429.
   const creditsOk =
     backend !== 'cloud' ||
     (quota != null &&
-      quota.remaining.credits >=
-        runCredits(intentKind, intentOp, pickedModel, runSeconds, costFallback, targetResolution))
+      meterState(
+        quota,
+        runCredits(intentKind, intentOp, pickedModel, runSeconds, costFallback, targetResolution),
+        intentKind,
+        intentOp,
+      ).kind === 'ok')
   // Match useCloudCreate's submit-time edit fallback so the Neg gate reflects
   // the model the run actually uses, not a t2i model still in the picker.
   const runModel =
