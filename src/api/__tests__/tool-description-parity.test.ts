@@ -216,12 +216,6 @@ const MOBILE_SKIP: ReadonlySet<string> = new Set<string>([
   'shell_execute_background',
   'shell_task_status', 'shell_task_kill', 'shell_task_list',
   'video_generate',
-  // B1 (2.6.3): desktop_open and app_launch put a window on the DESKTOP
-  // screen. Driven from the phone, the user is by definition not looking at
-  // that screen, so the tool would appear to do nothing. remote.rs has no
-  // dispatcher for either, and adding one would mean the phone can open
-  // windows on an unattended machine.
-  'desktop_open', 'app_launch',
 ])
 
 describe('tool-description-parity — name sets', () => {

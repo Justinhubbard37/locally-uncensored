@@ -2,7 +2,7 @@ import { useRef, useState, useCallback } from 'react'
 import { v4 as uuid } from 'uuid'
 import { streamProviderTurn } from '../lib/provider-stream'
 import { createHermesDisplayFilter } from '../lib/hermes-stream'
-import { setActiveChatId, clearActiveChatId, chatWorkspaceSlug, setActiveWorkspace, setActiveAgentModel, renderWorkspaceSection, setChatArtifactMode, takeChatArtifacts } from '../api/agent-context'
+import { setActiveChatId, setActiveConversationId, clearActiveChatId, chatWorkspaceSlug, setActiveWorkspace, setActiveAgentModel, renderWorkspaceSection, setChatArtifactMode, takeChatArtifacts } from '../api/agent-context'
 import { isOllamaLocal } from '../api/backend'
 import { requestGenerationCancel } from '../api/vram-handoff'
 import { resolveWorkspace } from '../api/agents/workspace-resolve'
@@ -37,7 +37,8 @@ import { buildExtractionPrompt, parseExtractionResponse } from '../lib/memory-ex
 import { useAgentWorkflowStore } from '../stores/agentWorkflowStore'
 import { WorkflowEngine } from '../lib/workflow-engine'
 import type { AgentBlock, AgentToolCall, OllamaChatMessage } from '../types/agent-mode'
-import { selectRelevantToolsAsync } from '../lib/tool-selection'
+import { selectRelevantToolsAsync, ALWAYS_INCLUDE, SMALL_MODEL_MAX_TOOLS } from '../lib/tool-selection'
+import { renderToolRoster, renderToolNames } from '../lib/tool-roster'
 import { MUTATING_TOOLS } from '../lib/mutating-tools'
 import { useAgentGoalStore, renderGoalSection } from '../stores/agentGoalStore'
 import { useAgentLoopStore } from '../stores/agentLoopStore'
@@ -54,6 +55,7 @@ import { useToolAuditStore } from '../stores/toolAuditStore'
 import { makeInTurnCacheLookup } from '../api/agents/in-turn-cache'
 import { explainError as explainToolError } from '../api/agents/error-hints'
 import { finalStripThinkingTags } from '../lib/thinking-stripper'
+import { platformPromptLine } from '../lib/host-platform'
 
 // ── Standalone memory extraction (usable outside React hooks) ──
 
@@ -371,6 +373,7 @@ export function useAgentChat() {
     const convForSlug = useChatStore.getState().conversations.find((c) => c.id === convId)
     const slug = chatWorkspaceSlug(convId, convForSlug?.title)
     setActiveChatId(slug)
+    setActiveConversationId(convId)
 
     // Multi-Repo Agent (B15) + workspace unification (B17): pin the
     // resolved workspace so chatCtx() in builtin-tools.ts threads it
@@ -497,13 +500,23 @@ export function useAgentChat() {
     // Chat-Tools mode uses a conversational prompt (NOT the autonomous-agent
     // one) so plain chat keeps its normal voice and only reaches for a tool
     // when the user actually needs it.
+    // The roster the prompt shows comes from the same filtered registry the
+    // request draws on, so the prompt can never advertise a tool a permission
+    // blocked or omit one that was added since (audit 2026-08-05).
+    const offeredTools = toolRegistry.getAvailableTools(permissions)
+      .filter((t) => toolMatchesCurated(t.name))
     let agentSystemPrompt = strategy === 'hermes_xml'
       ? buildHermesToolPrompt(hermesToolDefs) + (systemPrompt ? `\n\n${systemPrompt}` : '')
       : opts?.chatToolsMode
         ? buildChatToolsSystemPrompt(systemPrompt)
         : settings.smallModelMode
-          ? buildAgentSystemPromptLean(systemPrompt)
-          : buildAgentSystemPrompt(systemPrompt)
+          // Lean names only what survives the 6-tool cap, which is exactly the
+          // always-included set; the rest is in the request's tool list.
+          ? buildAgentSystemPromptLean(
+              systemPrompt,
+              renderToolNames(offeredTools.filter((t) => ALWAYS_INCLUDE.includes(t.name))),
+            )
+          : buildAgentSystemPrompt(systemPrompt, renderToolRoster(offeredTools))
     // Standing goal (/goal) — same section Code injects, so the objective
     // survives a switch between the two surfaces.
     agentSystemPrompt += renderGoalSection(useAgentGoalStore.getState().getGoal(convId))
@@ -743,7 +756,7 @@ export function useAgentChat() {
             toolRegistry.getAll().filter((t) => toolMatchesCurated(t.name)),
             permissions,
             settings.smallModelMode
-              ? { embed: (texts) => generateEmbeddings(texts), topN: 5, embeddingThreshold: 6, maxTools: 6 }
+              ? { embed: (texts) => generateEmbeddings(texts), topN: 5, embeddingThreshold: 6, maxTools: SMALL_MODEL_MAX_TOOLS }
               : { embed: (texts) => generateEmbeddings(texts) }
           )
           const tools: ToolDefinition[] = relevantDefs.map(t => ({
@@ -1754,14 +1767,20 @@ export function extractMediaPrompt(text: string): string {
   return stripped || p
 }
 
-function buildAgentSystemPrompt(basePrompt: string): string {
+function buildAgentSystemPrompt(basePrompt: string, roster: string): string {
   const agentInstructions = `You are an autonomous AI agent inside LU with full access to this computer. You execute tasks end-to-end by using tools, you do NOT just describe what to do.
 
+${platformPromptLine()}
+
 Available tools:
-- Filesystem: file_read, file_write, file_list, file_search
-- Web: web_search, web_fetch
-- System: shell_execute, code_execute, system_info, screenshot, process_list, get_current_time
-- Creative: image_generate, video_generate (text-to-video, or animate a generated image via inputImage), run_workflow
+${roster}
+
+That list is what LU can do. Your request carries the subset that fits the task at hand, and on a local model it is a subset. Only ever call a tool that is in your tool list. Calling one that is not there fails as an unknown tool and wastes a step. If you need one that is missing, name it in your answer and carry on with what you have.
+
+PLAN FIRST (todo_write):
+- Any task that needs more than about three tool calls starts with todo_write: write the whole plan before the first step. The user sees that list live, it is how they know what you are doing.
+- After each step, call todo_write again with the COMPLETE list, flipping the finished item to completed and the next one to in_progress. Exactly one item is in_progress at a time.
+- Never mark an item completed before the work actually succeeded. Skip the plan entirely for a single-step request.
 
 AUTONOMY CONTRACT (read carefully, this is the most important rule):
 - When the user asks you to BUILD, CREATE, MAKE, or WRITE something (a file, a website, a script, a folder structure), you MUST execute it via tools, typically file_write.
@@ -1783,10 +1802,11 @@ Creative tools, image_generate, video_generate:
 
 Other rules:
 - You MUST use tools — NEVER answer from memory or guess file contents.
+- To CHANGE part of an existing file use file_edit (replace a UNIQUE old_string with new_string), never file_write: rewriting a large file to change three lines truncates it and costs a fortune in tokens. file_write is for creating a new file or fully replacing one.
 - PATHS: use paths relative to your working directory (e.g. \`package.json\`, \`src/app.ts\`, \`.\` for the current folder). Never start a path with \`/\` or a drive letter (\`C:\\\`), that escapes your workspace and fails. To list the current folder, use file_list with path \`.\`.
 - For filesystem READ tasks: file_list first if needed, then file_read.
 - For web tasks: web_search → web_fetch on the best URL → answer based on real data. web_search returns ONLY short snippets, ALWAYS call web_fetch to read the page.
-- If you need to know the OS, paths, or hardware: call system_info once at the start.
+- The OS is stated above, so do not spend a call finding it out. For hardware or exact system paths: call system_info once at the start.
 - Chain multiple tools as needed. If a tool fails, try a different approach.
 - Be concise in text. All the work happens in tool calls.
 - Respond in the same language the user uses.`
@@ -1802,13 +1822,17 @@ Other rules:
 // small-model tool-calling (LongFuncEval, arXiv 2505.10570) and small models
 // have a limited instruction-following budget. Keep only what a small model
 // needs to ACT — same tool names + native call format as the full prompt.
-function buildAgentSystemPromptLean(basePrompt: string): string {
+function buildAgentSystemPromptLean(basePrompt: string, alwaysThere: string): string {
   const lean = `You are an autonomous agent in LU with tools on this computer. Do tasks by CALLING tools, do not just describe them.
 
-Tools: file_read, file_write, file_list, file_search, web_search, web_fetch, shell_execute, code_execute, system_info, get_current_time, image_generate, video_generate.
+${platformPromptLine()}
+
+You always have: ${alwaysThere}. Your request carries the other tools that fit the task. Read their names there, do not guess.
 
 Rules:
+- For a task of more than about three steps, call todo_write FIRST with the whole plan, then again after each step with the complete list (one item in_progress, finished ones completed). The user watches that list.
 - To build/create/write something, CALL the tool (usually file_write), never paste a code block and say "save this".
+- To change an existing file use file_edit with a unique old_string, not file_write.
 - PATHS: use relative paths (e.g. \`package.json\`, \`.\`). Never start with \`/\` or a drive letter, it escapes your workspace and fails.
 - Emit the tool call as your FIRST output, no "Okay, let me…" preamble. Valid JSON, one at a time. Never guess file contents, file_read first.
 - After each tool result, if a step remains, immediately call the next tool. Do not narrate "I will now…" and then stop.

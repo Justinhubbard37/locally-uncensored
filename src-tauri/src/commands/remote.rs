@@ -1843,6 +1843,11 @@ button{-webkit-appearance:none;appearance:none}
 .chat-welcome-logo{font-size:1.25rem;font-weight:700;letter-spacing:0.06em;color:var(--primary);margin-top:-2px;opacity:0.95}
 .chat-welcome-tag{font-size:0.58rem;letter-spacing:0.22em;text-transform:uppercase;color:var(--text-secondary);opacity:0.75}
 .chat-messages{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 14px 8px;display:flex;flex-direction:column;gap:2px}
+.plan-strip{position:sticky;top:0;z-index:2;margin:-4px -4px 8px;padding:6px 8px;border:1px solid rgba(59,130,246,.22);border-radius:8px;background:rgba(24,24,27,.94);backdrop-filter:blur(6px)}
+.plan-head{font-size:9px;letter-spacing:.12em;color:#6b7280;margin-bottom:3px}
+.plan-item{font-size:11px;line-height:1.45;color:#9ca3af}
+.plan-item.plan-completed{color:#4b5563;text-decoration:line-through}
+.plan-item.plan-in_progress{color:#e5e7eb;font-weight:600}
 .msg-group{display:flex;flex-direction:column;margin-bottom:12px}
 .msg-group.user{align-items:flex-end}
 .msg-group.bot{align-items:flex-start}
@@ -2072,7 +2077,7 @@ button{-webkit-appearance:none;appearance:none}
   // with live Thought/Action/Observation cards streamed into the chat.
   // The old "you can't run tools" text was from v2.3.3 before the mobile
   // bridge could actually execute them.
-  var CODEX_PROMPT = 'You are the Coding Agent, an autonomous coding agent inside LU. You execute coding tasks end-to-end by reading files, writing code, and running shell commands. You MUST use tools — never guess file contents.\n\n=== HARD RULES ===\n\n1. AFTER EVERY TOOL RESULT, your very next message MUST be EITHER (a) another tool call to continue the work, OR (b) the final user-facing summary. Empty assistant messages are a FAILURE.\n\n2. DO NOT stop after the first tool. Real coding tasks take 3-15 tool calls. Stopping after one file_read or one shell_execute without producing the requested artefact = FAILURE. "I have called one tool, that is enough" is NOT a valid stop reason.\n\n3. NEVER say "Now I will create X" / "Next I\'ll write Y" as plain prose and then stop. Do the next step RIGHT NOW as a concrete tool call.\n\n4. When your plan has N steps, execute ALL N steps in one session — each step as a concrete tool call. Plan in tool-call form, not prose-then-stop.\n\n5. The ONLY reasons to stop calling tools: (a) the user task is FULLY done with concrete artefacts on disk, OR (b) you are stuck and genuinely need user input.\n\n=== WORKFLOW ===\n\n1. Understand the task.\n2. Explore (file_list, file_read, file_search) when you need to know existing layout.\n3. Plan changes (in your head, not as a stop point).\n4. Implement (file_write) — chain ALL writes without stopping.\n5. Verify (shell_execute / code_execute / file_read).\n6. Only THEN write a short summary of what you did.\n\n=== FILE & DIRECTORY RULES ===\n\n- file_write AUTOMATICALLY creates any missing parent directories. Never call shell_execute with `mkdir`, `New-Item -ItemType Directory`, `md`, or `os.makedirs` to set up a folder before writing — just file_write the target path directly.\n- All relative paths resolve to the current chat workspace folder. Always pass relative paths (e.g. `client/public/index.html`) — do not hard-code absolute drive paths.\n- shell_execute runs inside the workspace folder by default. Do not `cd` into a parent or sibling folder; prefer relative commands.\n- On Windows, the shell is PowerShell. Quote arguments with spaces. Use forward slashes in paths inside commands. Avoid `mkdir -p` (PowerShell mkdir does not accept -p) — again, just use file_write.\n\n=== GENERAL ===\n\n- Always read a file before modifying it.\n- Chain tool calls: after each tool result, if there is another step left, IMMEDIATELY call the next tool.\n- If a command fails, diagnose and retry with corrected arguments — do not introduce yourself again.\n- After 2-3 failures of the same approach, switch strategy (e.g. file_write instead of shell mkdir) instead of repeating.\n- Be concise in text. All real work happens in tool calls.\n- Respond in the same language the user used in their message.';
+  var CODEX_PROMPT = 'You are the Coding Agent, an autonomous coding agent inside LU. You execute coding tasks end-to-end by reading files, writing code, and running shell commands. You MUST use tools — never guess file contents.\n\n=== HARD RULES ===\n\n1. AFTER EVERY TOOL RESULT, your very next message MUST be EITHER (a) another tool call to continue the work, OR (b) the final user-facing summary. Empty assistant messages are a FAILURE.\n\n2. DO NOT stop after the first tool. Real coding tasks take 3-15 tool calls. Stopping after one file_read or one shell_execute without producing the requested artefact = FAILURE. "I have called one tool, that is enough" is NOT a valid stop reason.\n\n3. NEVER say "Now I will create X" / "Next I\'ll write Y" as plain prose and then stop. Do the next step RIGHT NOW as a concrete tool call.\n\n4. When your plan has N steps, execute ALL N steps in one session — each step as a concrete tool call. Plan in tool-call form, not prose-then-stop.\n\n5. The ONLY reasons to stop calling tools: (a) the user task is FULLY done with concrete artefacts on disk, OR (b) you are stuck and genuinely need user input.\n\n=== WORKFLOW ===\n\n1. Understand the task.\n2. If the task needs more than about three tool calls, call todo_write with the WHOLE plan before you start. The user sees that list live on their phone. It is how they follow a long run on a small screen. Call it again after each step with the complete list, the finished item completed and the next one in_progress. Never mark an item completed before it actually succeeded.\n3. Explore (file_list, file_read, file_search) when you need to know existing layout.\n4. Implement (file_write) — chain ALL writes without stopping.\n5. Verify (shell_execute / code_execute / file_read).\n6. Only THEN write a short summary of what you did.\n\n=== FILE & DIRECTORY RULES ===\n\n- file_write AUTOMATICALLY creates any missing parent directories. Never call shell_execute with `mkdir`, `New-Item -ItemType Directory`, `md`, or `os.makedirs` to set up a folder before writing — just file_write the target path directly.\n- All relative paths resolve to the current chat workspace folder. Always pass relative paths (e.g. `client/public/index.html`) — do not hard-code absolute drive paths.\n- shell_execute runs inside the workspace folder by default. Do not `cd` into a parent or sibling folder; prefer relative commands.\n- On Windows, the shell is PowerShell. Quote arguments with spaces. Use forward slashes in paths inside commands. Avoid `mkdir -p` (PowerShell mkdir does not accept -p) — again, just use file_write.\n\n=== GENERAL ===\n\n- Always read a file before modifying it.\n- Chain tool calls: after each tool result, if there is another step left, IMMEDIATELY call the next tool.\n- If a command fails, diagnose and retry with corrected arguments — do not introduce yourself again.\n- After 2-3 failures of the same approach, switch strategy (e.g. file_write instead of shell mkdir) instead of repeating.\n- Be concise in text. All real work happens in tool calls.\n- Respond in the same language the user used in their message.';
 
   // ── Thinking-compatible prefixes (parity with desktop) ──
   // Keep in sync with THINKING_COMPATIBLE in src/lib/model-compatibility.ts.
@@ -2179,6 +2184,8 @@ button{-webkit-appearance:none;appearance:none}
   // same model behaviour follows us onto mobile. Tests in
   // src/api/__tests__/tool-description-parity.test.ts pin this parity.
   var AGENT_TOOLS = [
+    {name:'todo_write', description:'Write the plan for a multi-step task and keep it up to date. The list is shown to the user live, so it is how they see what you are doing and how far along you are. USE FIRST on any task that needs more than about three tool calls: write the whole plan before the first step. Then call it again after each step to flip that item to completed and the next one to in_progress. Send the COMPLETE list every time. It replaces the previous one, it does not merge. Exactly one item should be in_progress at a time. DO NOT use it for a single-step request, and NEVER mark an item completed before the work actually succeeded.',
+     parameters:[{name:'todos',type:'array',description:'The complete plan, in order. Replaces the previous list.',required:true}]},
     {name:'web_search', description:'Search the web via the configured provider (Brave, Tavily, or auto). Returns a ranked list of {title, url, snippet}. PREFER web_fetch on promising URLs for full content — snippets are teasers, not answers. DO NOT call more than 3x per turn with similar queries; refine the query instead of re-searching. For current date/time, use get_current_time — do NOT web_search for it.',
      parameters:[{name:'query',type:'string',description:'The search query string',required:true},
                  {name:'maxResults',type:'number',description:'Maximum results to return (default: 5, max: 20)',required:false}]},
@@ -2200,7 +2207,7 @@ button{-webkit-appearance:none;appearance:none}
      parameters:[{name:'path',type:'string',description:'Directory to search in (recursive by default)',required:true},
                  {name:'pattern',type:'string',description:'Regex pattern to search for',required:true},
                  {name:'maxResults',type:'number',description:'Maximum matching files (default: 50)',required:false}]},
-    {name:'shell_execute', description:'Run a shell command. PowerShell on Windows, bash on Unix. Returns stdout, stderr, exit code. PREFER dedicated tools where available: file_read over `cat`, file_list over `ls`/`dir`, file_search over `grep`, get_current_time over `date`. Use shell_execute for git, npm, cargo, docker, package managers, or platform utilities without a dedicated tool. NEVER use to permanently delete without confirmation (rm -rf, Remove-Item -Recurse, git reset --hard). Default timeout 120 s; set higher only for known long-running builds.',
+    {name:'shell_execute', description:'Run a shell command. PowerShell on Windows, bash on Unix. Returns stdout, stderr, exit code. PREFER dedicated tools where available: file_read over `cat`, file_list over `ls`/`dir`, file_search over `grep`, get_current_time over `date`. Use shell_execute for git, npm, cargo, docker, package managers, or platform utilities without a dedicated tool. This is also how you open things on the desktop: a folder, a file, or an application. The system prompt states which OS this is and gives the exact command. NEVER use to permanently delete without confirmation (rm -rf, Remove-Item -Recurse, git reset --hard). Default timeout 120 s; set higher only for known long-running builds.',
      parameters:[{name:'command',type:'string',description:'The full command to execute',required:true},
                  {name:'cwd',type:'string',description:'Working directory (optional, absolute preferred)',required:false},
                  {name:'timeout',type:'number',description:'Timeout in milliseconds (default: 120000)',required:false},
@@ -2456,6 +2463,13 @@ button{-webkit-appearance:none;appearance:none}
   // (missing arg, permission, underlying tool error). We surface those
   // as clean observations instead of "HTTP 500: ..." red errors.
   function runAgentTool(tool, args){
+    // todo_write never leaves the browser: it writes the plan strip and nothing
+    // else. Sending it to the desktop bridge would need a Rust dispatcher and a
+    // permission gate for something that touches no file and no process, and it
+    // would put a network round trip in front of a UI update.
+    if(tool === 'todo_write'){
+      return Promise.resolve(applyTodoWrite(args && args.todos));
+    }
     return fetch('/remote-api/agent-tool',{
       method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},
@@ -3038,6 +3052,52 @@ button{-webkit-appearance:none;appearance:none}
     row.innerHTML = html;
   }
 
+  // ── Plan strip (todo_write) ───────────────────────────────────
+  // Mirrors the desktop PlanBar. On a phone this matters more than on the
+  // desktop: the screen is small, the transcript scrolls away in three tool
+  // calls, and the whole reason to watch a run from a phone is to know where it
+  // is. Per chat, in memory only — a plan outlives neither the run nor a reload.
+  var todosByChat = {};
+
+  function applyTodoWrite(raw){
+    var key = currentChatId || '';
+    var out = [];
+    if(Object.prototype.toString.call(raw) === '[object Array]'){
+      for(var i=0;i<raw.length && out.length<40;i++){
+        var e = raw[i];
+        if(!e || typeof e !== 'object') continue;
+        var content = typeof e.content === 'string' ? e.content.trim() : '';
+        if(!content) continue;
+        // Anything unrecognised counts as not started: a typo must never mark
+        // work done that was never done. Same rule as the desktop store.
+        var st = (e.status === 'completed' || e.status === 'in_progress') ? e.status : 'pending';
+        out.push({content: content.slice(0,200), status: st});
+      }
+    }
+    todosByChat[key] = out;
+    renderChat();
+    if(out.length === 0) return 'Plan cleared.';
+    var done = 0, current = null, lines = [];
+    for(var j=0;j<out.length;j++){
+      if(out[j].status === 'completed') done++;
+      if(out[j].status === 'in_progress' && !current) current = out[j].content;
+      lines.push((out[j].status==='completed'?'[x] ':out[j].status==='in_progress'?'[>] ':'[ ] ')+out[j].content);
+    }
+    return 'Plan updated ('+done+'/'+out.length+' done'+(current?', now: '+current:'')+').\n'+lines.join('\n');
+  }
+
+  function renderPlanStrip(){
+    var t = todosByChat[currentChatId || ''];
+    if(!t || !t.length) return '';
+    var done = 0, items = '';
+    for(var i=0;i<t.length;i++){
+      if(t[i].status === 'completed') done++;
+      var mark = t[i].status==='completed' ? '&#10003;' : t[i].status==='in_progress' ? '&#9654;' : '&#9675;';
+      items += '<div class="plan-item plan-'+t[i].status+'">'+mark+' '+H(t[i].content)+'</div>';
+    }
+    return '<div class="plan-strip"><div class="plan-head">PLAN '+done+'/'+t.length+'</div>'+items+'</div>';
+  }
+
   function renderChat(){
     var p = el('chat-area');
     if(!p) return;
@@ -3055,6 +3115,7 @@ button{-webkit-appearance:none;appearance:none}
       return;
     }
     var html = '<div class="chat-messages" id="chat-msgs">';
+    html += renderPlanStrip();
     for(var i=0;i<msgs.length;i++){
       var m = msgs[i];
       // Skip hidden tool-call history (persisted for continue capability

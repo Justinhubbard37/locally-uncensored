@@ -35,9 +35,13 @@ describe('AGENT_TOOL_DEFS', () => {
     // v2.5.9 M1: file_edit (surgical SEARCH/REPLACE edit) (→ 30 tools).
     // 2026-08-05 audit C4: todo_write — the plan the model keeps and the user
     // sees above the composer (→ 31 tools).
-    // 2.6.3 B1 (Morgan): desktop_open and app_launch — open a folder, start a
-    // program (→ 33 tools).
-    expect(AGENT_TOOL_DEFS).toHaveLength(33)
+    // 2.6.3 B1 (Morgan): opening a folder or starting a program is NOT a tool.
+    // desktop_open and app_launch existed here briefly and were removed on
+    // 2026-08-06: they only wrapped `open` / `explorer` / `xdg-open`, cost ~478
+    // tokens of every system prompt, and inherited the same confirm gate
+    // shell_execute already had, so they bought nothing. The capability lives
+    // in shell_execute plus the platform line from lib/host-platform.ts.
+    expect(AGENT_TOOL_DEFS).toHaveLength(31)
   })
 
   const expectedTools = [
@@ -106,11 +110,8 @@ describe('AGENT_TOOL_DEFS', () => {
     // v2.5.0 sprint A/B/C from uselu: codex tools default to confirm (writes,
     // shell, git, gh, project_init, run_tests — all touch the user's machine).
     // v2.5.0 Feature EE: video_generate (image category → confirm default).
-    // 2.6.3 B1: desktop_open and app_launch are desktop category, so they
-    // inherit confirm. That is the point — a tool that opens a window or
-    // starts a program asks first, exactly like screenshot does.
     expect(confirmNames).toEqual([
-      'app_launch', 'code_execute', 'delegate_task', 'desktop_open',
+      'code_execute', 'delegate_task',
       'file_edit', 'file_list', 'file_read', 'file_search',
       'file_write', 'gh_pr_create', 'git_commit', 'git_diff', 'git_log',
       'git_push', 'git_status', 'image_generate', 'pr_resume', 'project_init',

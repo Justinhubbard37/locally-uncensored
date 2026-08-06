@@ -225,6 +225,7 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
       'Run a shell command. PowerShell on Windows, bash on Unix. Returns stdout, stderr, exit code. '
       + 'PREFER dedicated tools where available: file_read over `cat`, file_list over `ls`/`dir`, file_search over `grep`, get_current_time over `date`. '
       + 'Use shell_execute for git, npm, cargo, docker, package managers, or platform utilities without a dedicated tool. '
+      + 'This is also how you open things on the desktop: a folder, a file, or an application. The system prompt states which OS this is and gives the exact command. '
       + 'NEVER use to permanently delete without confirmation (rm -rf, Remove-Item -Recurse, git reset --hard). '
       + 'Default timeout 120 s; set higher only for known long-running builds.',
     inputSchema: {
@@ -535,44 +536,15 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
     category: 'desktop',
     source: 'builtin',
   },
-  {
-    name: 'desktop_open',
-    description:
-      'Open a folder or file on this machine in the desktop file manager or its default application. '
-      + 'USE when the user says "open my Downloads folder", "show me that file", "open this in Finder/Explorer". '
-      + 'Set `reveal` to true to open the containing folder with the item selected instead of opening the item itself. '
-      + 'The path must already EXIST on this machine; a path that does not resolve is refused. '
-      + 'NOT for web pages or links of any kind (https://, file://, mailto:) — those are refused. Use web_fetch to read a page. '
-      + 'This shows something on the user\'s screen, so call it when they asked to see something, not to inspect a file yourself: use file_read or file_list for that.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'Absolute path to an existing folder or file on this machine' },
-        reveal: { type: 'boolean', description: 'Open the containing folder with the item selected, instead of opening the item (default false)' },
-      },
-      required: ['path'],
-    },
-    category: 'desktop',
-    source: 'builtin',
-  },
-  {
-    name: 'app_launch',
-    description:
-      'Start an installed desktop application by name. '
-      + 'USE for "open Chrome", "launch Notepad", "start Spotify". '
-      + 'Pass the application name as a person would say it ("Google Chrome", "Notepad", "Visual Studio Code"). '
-      + 'No arguments are passed to the application, deliberately — to run a command with arguments use shell_execute instead. '
-      + 'To open a document or folder rather than a program, use desktop_open.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: 'Name of the installed application, e.g. "Google Chrome" or "Notepad"' },
-      },
-      required: ['name'],
-    },
-    category: 'desktop',
-    source: 'builtin',
-  },
+  // Opening a folder, a file or an application is deliberately NOT a tool. It
+  // is `open` / `Invoke-Item` / `xdg-open`, so a dedicated tool would only wrap
+  // a shell command, which is the anti-pattern Anthropic names in "Writing
+  // effective tools for AI agents", and which no comparable agent ships. The
+  // two tools that used to live here cost ~478 tokens of every system prompt on
+  // a registry that already overflows a 4k-context local model, and bought no
+  // safety, since shell_execute is behind the same confirmation gate. What the
+  // model actually lacked was knowing which OS it is on: see platformPromptLine
+  // in lib/host-platform.ts. Removed 2026-08-06.
 
   // Image
   {
@@ -1202,26 +1174,6 @@ async function executeScreenshot(): Promise<string> {
   return JSON.stringify(data)
 }
 
-async function executeDesktopOpen(args: Record<string, any>): Promise<string> {
-  const path = typeof args.path === 'string' ? args.path.trim() : ''
-  if (!path) return 'Error: desktop_open needs a path.'
-  const data = await backendCall<{ path: string; kind: string; revealed: boolean }>(
-    'desktop_open',
-    { path, reveal: args.reveal === true },
-  )
-  const what = data.kind === 'folder' ? 'Folder' : 'File'
-  return data.revealed
-    ? `${what} revealed in the file manager: ${data.path}`
-    : `${what} opened: ${data.path}`
-}
-
-async function executeAppLaunch(args: Record<string, any>): Promise<string> {
-  const name = typeof args.name === 'string' ? args.name.trim() : ''
-  if (!name) return 'Error: app_launch needs an application name.'
-  const data = await backendCall<{ launched: string }>('app_launch', { name })
-  return `Launched ${data.launched}.`
-}
-
 async function executeImageGenerate(args: Record<string, any>): Promise<string> {
   // Feature EE (v2.5.0): the whole generation flow now goes through the VRAM
   // hand-off orchestrator. It resolves the image model (args.model or first
@@ -1608,8 +1560,6 @@ const EXECUTOR_MAP: Record<string, (args: Record<string, any>) => Promise<string
   system_info: executeSystemInfo,
   process_list: executeProcessList,
   screenshot: executeScreenshot,
-  desktop_open: executeDesktopOpen,
-  app_launch: executeAppLaunch,
   image_generate: executeImageGenerate,
   video_generate: executeVideoGenerate,
   run_workflow: executeRunWorkflow,
