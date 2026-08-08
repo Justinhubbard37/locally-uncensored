@@ -179,6 +179,78 @@ fn force_python_utf8(cmd: &mut Command) {
     cmd.env("PYTHONUTF8", "1");
 }
 
+/// cu121 wheels carry kernels up to sm_90 (Hopper). Blackwell reports
+/// compute capability 12.x, so every RTX 50 card needs the cu128 build.
+/// An unreadable probe keeps the cu121 default.
+fn torch_index_for_cap(cap_major: Option<u32>) -> &'static str {
+    match cap_major {
+        Some(major) if major >= 12 => "https://download.pytorch.org/whl/cu128",
+        _ => "https://download.pytorch.org/whl/cu121",
+    }
+}
+
+/// venv + repo on disk proved nothing: an aborted torch download passed as
+/// "ready" and died in the first training step. The cheapest honest signal
+/// is torch's package marker inside the venv's site-packages.
+fn torch_installed(root: &Path) -> bool {
+    let venv = root.join("venv");
+    if venv.join("Lib").join("site-packages").join("torch").join("version.py").exists() {
+        return true;
+    }
+    let Ok(entries) = fs::read_dir(venv.join("lib")) else { return false };
+    entries.filter_map(Result::ok).any(|e| {
+        e.path().join("site-packages").join("torch").join("version.py").exists()
+    })
+}
+
+/// Runs inside the trainer venv. Keep the printed markers in sync with
+/// preflight_verdict below.
+const TORCH_PREFLIGHT_PY: &str = "import torch\nprint('TORCH_OK', torch.__version__)\nif torch.cuda.is_available():\n    cap = torch.cuda.get_device_capability(0)\n    print('CAP', cap[0], cap[1])\n    print('ARCHS', ' '.join(torch.cuda.get_arch_list()))\n";
+
+/// Two failure classes that both used to surface as a raw CUDA error deep in
+/// the latent cache: torch not importable (half install), and a build whose
+/// kernel list stops below the GPU's compute capability (cu121 on Blackwell,
+/// which imports fine and even reports CUDA as available).
+fn preflight_verdict(exit_ok: bool, stdout: &str, stderr: &str) -> Result<(), String> {
+    if !exit_ok || !stdout.contains("TORCH_OK") {
+        let tail = stderr
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .next_back()
+            .unwrap_or("no detail from python")
+            .to_string();
+        return Err(format!(
+            "PyTorch is missing or broken in the trainer environment. Run the trainer install again from Character Studio. ({tail})"
+        ));
+    }
+    let mut cap_major: Option<u32> = None;
+    let mut arch_max: Option<u32> = None;
+    for line in stdout.lines() {
+        let l = line.trim();
+        if let Some(rest) = l.strip_prefix("CAP ") {
+            cap_major = rest.split_whitespace().next().and_then(|v| v.parse().ok());
+        } else if let Some(rest) = l.strip_prefix("ARCHS ") {
+            for arch in rest.split_whitespace() {
+                let digits: String = arch.chars().filter(|c| c.is_ascii_digit()).collect();
+                if digits.len() >= 2 {
+                    if let Ok(n) = digits[..digits.len() - 1].parse::<u32>() {
+                        arch_max = Some(arch_max.map_or(n, |p| p.max(n)));
+                    }
+                }
+            }
+        }
+    }
+    if let (Some(cap), Some(max)) = (cap_major, arch_max) {
+        if cap > max {
+            return Err(format!(
+                "This PyTorch build has no kernels for your GPU (compute capability {cap}.x, the build stops at {max}.x). An RTX 50 card on the old cu121 build does exactly this. Run the trainer install again from Character Studio, it now picks the matching build."
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Run one child to completion, streaming stdout+stderr lines into the run
 /// state. Registers the child pid so cancel can kill it. Returns Err on
 /// non-zero exit (with the last stderr lines) or on cancel.
@@ -368,13 +440,24 @@ pub fn install_character_trainer(
         }
         let vpy = venv_python(&root).to_string_lossy().to_string();
 
-        // 3) torch (cu121 wheels run on every driver the app supports)
+        // 3) torch, routed by the same nvidia-smi probe the ComfyUI installer
+        // uses (D#37): Blackwell gets cu128, everything else keeps cu121.
         set_status(&install, "installing", "Step 3/4: Installing PyTorch into the trainer venv (~2.5 GB, one time)...");
+        let cap = crate::commands::install::detect_nvidia_compute_cap_major();
+        let torch_index = torch_index_for_cap(cap);
+        push_log(&install, &format!(
+            "GPU compute capability: {}, PyTorch wheels: {torch_index}",
+            cap.map_or("unknown".to_string(), |c| format!("{c}.x")),
+        ));
         let mut torch = Command::new(&vpy);
-        torch.args([
-            "-m", "pip", "install", "--progress-bar", "off", "--no-input",
-            "torch", "torchvision", "--index-url", "https://download.pytorch.org/whl/cu121",
-        ]);
+        let mut torch_args = vec!["-m", "pip", "install", "--progress-bar", "off", "--no-input"];
+        if cap.is_some_and(|c| c >= 12) {
+            // A finished cu121 install satisfies pip on a Blackwell box and
+            // would never be replaced; force the matching build in.
+            torch_args.push("--force-reinstall");
+        }
+        torch_args.extend(["torch", "torchvision", "--index-url", torch_index]);
+        torch.args(&torch_args);
         if let Err(e) = run_streamed(torch, "torch install", &install, &cancel, &pid_slot) {
             set_status(&install, if e == "cancelled" { "cancelled" } else { "error" }, &e);
             return;
@@ -403,7 +486,9 @@ pub fn character_trainer_status(
 ) -> Result<serde_json::Value, String> {
     let root = trainer_root(&app);
     let comfy = active_comfy_dir(state.inner());
-    let env_ready = venv_python(&root).exists() && repo_dir(&root).join("src").exists();
+    let env_ready = venv_python(&root).exists()
+        && repo_dir(&root).join("src").exists()
+        && torch_installed(&root);
     let dit = resolve_base_file(&root, comfy.as_deref(), DIT_CANDIDATES, "diffusion_models");
     let te = resolve_base_file(&root, comfy.as_deref(), TE_CANDIDATES, "text_encoders");
     let vae = resolve_base_file(&root, comfy.as_deref(), VAE_CANDIDATES, "vae");
@@ -580,6 +665,27 @@ pub fn start_character_training(
         let te_s = te.to_string_lossy().to_string();
         let vae_s = vae.to_string_lossy().to_string();
 
+        // 0) preflight. Both failure classes used to pass every disk check
+        // and die mid-run as a raw CUDA error the UI could not explain.
+        set_status(&run, "running", "Checking the training environment...");
+        let mut probe = Command::new(&vpy_s);
+        probe.args(["-c", TORCH_PREFLIGHT_PY]);
+        force_python_utf8(&mut probe);
+        #[cfg(target_os = "windows")]
+        probe.creation_flags(CREATE_NO_WINDOW);
+        let verdict = match probe.output() {
+            Ok(out) => preflight_verdict(
+                out.status.success(),
+                &String::from_utf8_lossy(&out.stdout),
+                &String::from_utf8_lossy(&out.stderr),
+            ),
+            Err(e) => Err(format!("could not run the trainer python: {e}")),
+        };
+        if let Err(msg) = verdict {
+            set_status(&run, "error", &msg);
+            return;
+        }
+
         // 1) latent cache
         set_status(&run, "running", "Step 1/4: Caching image latents...");
         let mut c1 = Command::new(&vpy_s);
@@ -742,6 +848,76 @@ fn cancel_character_training_blocking(state: &AppState) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn blackwell_routes_to_cu128_and_older_cards_keep_cu121() {
+        use super::torch_index_for_cap;
+        assert_eq!(torch_index_for_cap(Some(12)), "https://download.pytorch.org/whl/cu128");
+        assert_eq!(torch_index_for_cap(Some(13)), "https://download.pytorch.org/whl/cu128");
+        assert_eq!(torch_index_for_cap(Some(9)), "https://download.pytorch.org/whl/cu121");
+        assert_eq!(torch_index_for_cap(Some(8)), "https://download.pytorch.org/whl/cu121");
+        assert_eq!(torch_index_for_cap(None), "https://download.pytorch.org/whl/cu121");
+    }
+
+    #[test]
+    fn preflight_fails_loud_when_torch_does_not_import() {
+        use super::preflight_verdict;
+        let msg = preflight_verdict(
+            false,
+            "",
+            "Traceback (most recent call last):\nModuleNotFoundError: No module named 'torch'",
+        )
+        .unwrap_err();
+        assert!(msg.contains("Run the trainer install again"));
+        assert!(msg.contains("No module named 'torch'"));
+    }
+
+    #[test]
+    fn preflight_names_the_kernel_gap_on_blackwell_with_cu121() {
+        use super::preflight_verdict;
+        let out = "TORCH_OK 2.3.1+cu121\nCAP 12 0\nARCHS sm_50 sm_60 sm_70 sm_75 sm_80 sm_86 sm_90\n";
+        let msg = preflight_verdict(true, out, "").unwrap_err();
+        assert!(msg.contains("compute capability 12.x"));
+        assert!(msg.contains("no kernels"));
+    }
+
+    #[test]
+    fn preflight_passes_on_a_matching_build_and_on_cpu_only() {
+        use super::preflight_verdict;
+        let ok = "TORCH_OK 2.7.0+cu128\nCAP 12 0\nARCHS sm_80 sm_90 sm_100 sm_120 compute_120\n";
+        assert!(preflight_verdict(true, ok, "").is_ok());
+        assert!(preflight_verdict(true, "TORCH_OK 2.3.1\n", "").is_ok());
+    }
+
+    #[test]
+    fn a_half_install_is_not_ready_until_torch_lands() {
+        use super::torch_installed;
+        use std::fs;
+        let root = std::env::temp_dir().join(format!("lu-trainer-torch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+
+        // venv exists, torch does not: the Sockenmonster case.
+        fs::create_dir_all(root.join("venv").join("lib").join("python3.11").join("site-packages")).unwrap();
+        assert!(!torch_installed(&root));
+
+        // unix layout
+        let unix_torch = root
+            .join("venv").join("lib").join("python3.11").join("site-packages").join("torch");
+        fs::create_dir_all(&unix_torch).unwrap();
+        fs::write(unix_torch.join("version.py"), "__version__ = '2.7.0'").unwrap();
+        assert!(torch_installed(&root));
+
+        // windows layout on its own
+        let root2 = std::env::temp_dir().join(format!("lu-trainer-torch-win-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root2);
+        let win_torch = root2.join("venv").join("Lib").join("site-packages").join("torch");
+        fs::create_dir_all(&win_torch).unwrap();
+        fs::write(win_torch.join("version.py"), "__version__ = '2.7.0'").unwrap();
+        assert!(torch_installed(&root2));
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&root2);
+    }
+
     #[test]
     fn every_trainer_child_gets_utf8_stdio() {
         use super::force_python_utf8;

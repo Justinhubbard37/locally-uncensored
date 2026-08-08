@@ -50,6 +50,7 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
   // agent" banner instead of leaving the user staring at a JSON dump.
   const activeConversationId = useChatStore((s) => s.activeConversationId)
   const deleteMessage = useChatStore((s) => s.deleteMessage)
+  const updateMessageContent = useChatStore((s) => s.updateMessageContent)
   const isAgentActive = useAgentModeStore((s) =>
     activeConversationId ? s.agentModeActive[activeConversationId] ?? false : false
   )
@@ -117,6 +118,15 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
     [thoughtOnly, isAgentActive, chatToolsEnabled, message.thinking],
   )
 
+  // A turn whose visible body comes from per-iteration answer blocks has no
+  // single editable text, so the pencil hides there instead of editing a
+  // field nobody sees. Also used below to pick the content fallback.
+  const hasRealAnswerBlocks = useMemo(() => [...cleanBlocks.values()].some(Boolean), [cleanBlocks])
+  // No editing while the turn still streams: the flush would overwrite the
+  // edit a frame later. Done is marked by usage arriving with the done chunk.
+  const canEditAssistant = !isUser && !hasRealAnswerBlocks
+    && !!(message.content || '').trim() && (!isLast || !!message.usage)
+
   useEffect(() => {
     if (isEditing && editRef.current) {
       editRef.current.focus()
@@ -132,14 +142,23 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
   }
 
   const startEdit = () => {
-    // Edit the short slash command, not its expanded instruction.
-    setEditContent(message.displayContent || message.content)
+    // User: edit the short slash command, not its expanded instruction.
+    // Assistant: edit what the model actually said.
+    setEditContent(isUser ? (message.displayContent || message.content) : message.content)
     setIsEditing(true)
   }
 
   const confirmEdit = () => {
-    if (editContent.trim() && editContent !== message.content && onEdit) {
-      onEdit(message.id, editContent.trim())
+    const next = editContent.trim()
+    if (next && next !== message.content) {
+      if (isUser) {
+        // Editing your own message re-asks the question (resend path).
+        onEdit?.(message.id, next)
+      } else if (activeConversationId) {
+        // Editing the model's answer rewrites history in place (D#81):
+        // no resend, and every later turn reads the edited text as context.
+        updateMessageContent(activeConversationId, message.id, next)
+      }
     }
     setIsEditing(false)
   }
@@ -188,6 +207,11 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
       </div>
 
       <div className="max-w-[80%] space-y-0.5">
+        {/* Group chat: name the speaker. Only group turns carry modelId, so
+            single-model chats render exactly as before. */}
+        {!isUser && message.modelId && (
+          <div className="text-[0.55rem] font-mono text-gray-400 dark:text-gray-500 pl-1">{message.modelId}</div>
+        )}
         {/* Thinking block — auto-expands while this (last) turn is still
             producing so the reasoning streams LIVE, then collapses (David 2026-06-04). */}
         {!isUser && message.thinking && (
@@ -308,7 +332,7 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
               : 'px-1 py-0.5')
           }
         >
-          {isUser && isEditing ? (
+          {isEditing ? (
             <div className="space-y-1">
               <textarea
                 ref={editRef}
@@ -342,8 +366,7 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
               // Judge "has a real answer block" on the STRIPPED text: a block
               // holding nothing but a LOOP_DONE line must not suppress the
               // fallback, or the turn renders blank.
-              const hasAnswerBlock = [...cleanBlocks.values()].some(Boolean)
-              if (hasAnswerBlock) return null
+              if (hasRealAnswerBlocks) return null
               return (
                 <div className="text-[0.78rem] leading-relaxed">
                   <MarkdownRenderer content={cleanContent} />
@@ -409,6 +432,9 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
           <div className={'flex items-center gap-0.5 ' + (isUser ? 'justify-end pr-0.5' : 'justify-start pl-0.5')}>
             {isUser && onEdit && (
               <button onClick={startEdit} className="p-1 rounded-md text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" aria-label="Edit message" title="Edit"><Pencil size={12} /></button>
+            )}
+            {canEditAssistant && (
+              <button onClick={startEdit} className="p-1 rounded-md text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" aria-label="Edit response" title="Edit"><Pencil size={12} /></button>
             )}
             {!isUser && onRegenerate && (
               <button onClick={() => onRegenerate(message.id)} className="p-1 rounded-md text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" aria-label="Regenerate response" title="Regenerate"><RefreshCw size={12} /></button>

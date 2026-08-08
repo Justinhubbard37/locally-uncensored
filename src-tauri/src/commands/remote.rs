@@ -1643,7 +1643,8 @@ async fn mobile_landing() -> Html<String> {
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name='theme-color' content='#0e0e0e'>
-<title>LU</title>
+<title>AI Terminal</title>
+<meta name="apple-mobile-web-app-title" content="AI Terminal">
 <!-- Bug #5: no third-party requests. System fonts only, inline SVG icons. -->
 <!-- Bug #6: restrictive CSP. Self origin only. Inline styles/scripts are
      required because the whole page is a single Rust string; data: images

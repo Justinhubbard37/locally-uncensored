@@ -41,6 +41,8 @@ interface ChatState {
    *  persona's systemPrompt without changing the global Settings
    *  selection. */
   setConversationPersonaEnabled: (id: string, enabled: boolean) => void
+  /** Group chat v1: the models that answer in turn (capped at 4). */
+  setGroupModels: (id: string, models: string[]) => void
   addMessage: (conversationId: string, message: Message) => void
   insertMessageBefore: (conversationId: string, beforeId: string, message: Message) => void
   insertMessagesBefore: (conversationId: string, beforeId: string, messages: Message[]) => void
@@ -173,6 +175,13 @@ export const useChatStore = create<ChatState>()(
         set((state) => ({
           conversations: state.conversations.map((c) =>
             c.id === id ? { ...c, personaEnabled: enabled } : c
+          ),
+        })),
+
+      setGroupModels: (id, models) =>
+        set((state) => ({
+          conversations: state.conversations.map((c) =>
+            c.id === id ? { ...c, groupModels: models.slice(0, 4), updatedAt: Date.now() } : c
           ),
         })),
 

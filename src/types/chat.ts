@@ -39,6 +39,10 @@ export interface Message {
    *  running (David 2026-06-12). Undefined for normal coding instructions. */
   slashCommand?: string
   thinking?: string
+  /** Which model produced this assistant turn. Set in group chats so the
+   *  bubble can label the speaker and the payload builder can tag the other
+   *  models' lines. Absent on single-model chats. */
+  modelId?: string
   timestamp: number
   images?: ImageAttachment[]
   sources?: { documentName: string; chunkIndex: number; preview: string }[]
@@ -82,6 +86,9 @@ export interface Conversation {
    *  individually without losing the selection in Settings. Undefined
    *  on legacy chats and treated as enabled. */
   personaEnabled?: boolean
+  /** Group chat v1: two to four models that answer in turn on every user
+   *  message. Fewer than two entries means a normal single-model chat. */
+  groupModels?: string[]
   createdAt: number
   updatedAt: number
 }

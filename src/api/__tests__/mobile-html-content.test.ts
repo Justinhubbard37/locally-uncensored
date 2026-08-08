@@ -75,8 +75,13 @@ describe('mobile_landing HTML › LU branding assets', () => {
     expect(matches.length).toBeGreaterThanOrEqual(4)
   })
 
-  it('has LU wordmark and no old brand strings', () => {
-    expect(html).toContain('<title>LU</title>')
+  it('keeps the browser tab discreet and the in-page wordmark LU (D#101)', () => {
+    // The tab title and the saved-to-homescreen name are what bystanders
+    // see; both stay a neutral "AI Terminal". Inside the page the LU
+    // wordmark is fine, the person using it knows what it is.
+    expect(html).toContain('<title>AI Terminal</title>')
+    expect(html).toContain('name="apple-mobile-web-app-title" content="AI Terminal"')
+    expect(html).not.toContain('<title>LU</title>')
     expect(html).toContain('class="auth-logo">LU<')
     expect(html).not.toContain('LUncensored')
     expect(html).not.toContain('Locally Uncensored')

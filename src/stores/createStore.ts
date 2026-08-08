@@ -241,6 +241,9 @@ interface CreateState {
   musicDuration: number
   /** Music: optional lyrics passed to models that take them. Runtime-only. */
   musicLyrics: string
+  /** Music: the how-to note next to the lyrics box was opened once, which
+   *  retires its notification dot. Persisted. */
+  musicHowtoSeen: boolean
   /** Upscale target for the cloud super-resolution endpoint. */
   targetResolution: '2k' | '4k' | '8k'
   showNegative: boolean
@@ -360,6 +363,7 @@ interface CreateState {
   setExtendSource: (s: { jobId: string; url: string; label: string } | null) => void
   setMusicDuration: (s: number) => void
   setMusicLyrics: (l: string) => void
+  setMusicHowtoSeen: (v: boolean) => void
   setSource: (img: ImageRef | null) => void
   setMask: (img: ImageRef | null) => void
   setBackend: (backend: CreateBackend) => void
@@ -444,6 +448,7 @@ export const useCreateStore = create<CreateState>()(
       extendSource: null as { jobId: string; url: string; label: string } | null,
       musicDuration: 60,
       musicLyrics: '',
+      musicHowtoSeen: false,
       targetResolution: '4k' as '2k' | '4k' | '8k',
       showNegative: false,
       selectedLoras: [] as { name: string; strength: number }[],
@@ -674,6 +679,7 @@ export const useCreateStore = create<CreateState>()(
       setExtendSource: (extendSource) => set({ extendSource }),
       setMusicDuration: (s2) => set({ musicDuration: Math.max(5, Math.min(240, Math.floor(s2))) }),
       setMusicLyrics: (musicLyrics) => set({ musicLyrics: musicLyrics.slice(0, 2000) }),
+      setMusicHowtoSeen: (musicHowtoSeen) => set({ musicHowtoSeen }),
       setSource: (source) => set({ source, sourceSetAt: source ? Date.now() : 0, ...(source ? {} : { mask: null }) }),
       setMask: (mask) => set({ mask }),
       // Flipping to local clears the intents that have no local lane
@@ -784,6 +790,7 @@ export const useCreateStore = create<CreateState>()(
         // 2.5.8 cloud categories: only the cheap scalar prefs persist — the
         // staged media (blobs / object URLs) and cloudOp are runtime-only.
         musicDuration: state.musicDuration,
+        musicHowtoSeen: state.musicHowtoSeen,
         triggerWord: state.triggerWord,
         trainSteps: state.trainSteps,
       }),

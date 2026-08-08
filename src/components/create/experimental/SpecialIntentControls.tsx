@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
-  AudioLines, Download, Film, ImagePlus, Mic, Music2, Trash2, Upload, Wand2, X,
+  AudioLines, Download, Film, ImagePlus, Info, Mic, Music2, Trash2, Upload, Wand2, X,
 } from 'lucide-react'
 import { useCreateStore, type CreateIntent, type MediaRef, type GalleryItem } from '../../../stores/createStore'
 import { useCloudCatalogStore, cloudModelById, modelForOp } from '../../../stores/cloudCatalogStore'
@@ -678,7 +678,15 @@ function MusicControls() {
   const setMusicDuration = useCreateStore((s) => s.setMusicDuration)
   const musicLyrics = useCreateStore((s) => s.musicLyrics)
   const setMusicLyrics = useCreateStore((s) => s.setMusicLyrics)
+  const cloudOpModel = useCreateStore((s) => s.cloudOpModel)
+  // Only ace-step-1.5 has a lyrics input on the wire (catalog `lyrics` flag);
+  // the other music endpoints write their own lyrics from the prompt, so
+  // offering the box there would be a lie.
+  const canLyrics = cloudModelById(modelForOp('audio', 'music', cloudOpModel))?.lyrics === true
+  const musicHowtoSeen = useCreateStore((s) => s.musicHowtoSeen)
+  const setMusicHowtoSeen = useCreateStore((s) => s.setMusicHowtoSeen)
   const [lyricsOpen, setLyricsOpen] = useState(musicLyrics.length > 0)
+  const [howtoOpen, setHowtoOpen] = useState(false)
 
   return (
     <div className="space-y-2">
@@ -694,20 +702,64 @@ function MusicControls() {
             format={(v) => `${Math.floor(v / 60)}:${String(v % 60).padStart(2, '0')}`}
           />
         </div>
-        <button
-          onClick={() => setLyricsOpen((o) => !o)}
-          className={cn(
-            't-control flex items-center gap-1.5 px-2.5 h-[var(--control-h-sm)] rounded-md border transition-colors',
-            lyricsOpen
-              ? 'bg-white/[0.06] border-white/10 text-gray-200'
-              : 'bg-white/[0.03] border-white/[0.06] text-gray-400 hover:text-gray-200',
+        {canLyrics ? (
+          <button
+            onClick={() => setLyricsOpen((o) => !o)}
+            className={cn(
+              't-control flex items-center gap-1.5 px-2.5 h-[var(--control-h-sm)] rounded-md border transition-colors',
+              lyricsOpen
+                ? 'bg-white/[0.06] border-white/10 text-gray-200'
+                : 'bg-white/[0.03] border-white/[0.06] text-gray-400 hover:text-gray-200',
+            )}
+          >
+            <Music2 size={12} /> Lyrics
+          </button>
+        ) : (
+          <span className="t-control text-gray-500">
+            This model writes its own lyrics from the prompt. Pick ACE-Step 1.5 to sing yours.
+          </span>
+        )}
+        <div className="relative">
+          <button
+            onClick={() => {
+              setHowtoOpen((o) => !o)
+              if (!musicHowtoSeen) setMusicHowtoSeen(true)
+            }}
+            className={cn(
+              't-control flex items-center gap-1.5 px-2.5 h-[var(--control-h-sm)] rounded-md border transition-colors',
+              howtoOpen
+                ? 'bg-white/[0.06] border-white/10 text-gray-200'
+                : 'bg-white/[0.03] border-white/[0.06] text-gray-400 hover:text-gray-200',
+            )}
+          >
+            <Info size={12} /> How to
+          </button>
+          {!musicHowtoSeen && (
+            <span aria-hidden className="absolute top-0 right-0 w-1.5 h-1.5 rounded-full bg-lu-accent pointer-events-none" />
           )}
-        >
-          <Music2 size={12} /> Lyrics
-        </button>
+        </div>
       </div>
       <AnimatePresence>
-        {lyricsOpen && (
+        {howtoOpen && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="t-control px-3 py-2 rounded-md bg-white/[0.03] border border-white/[0.06] text-gray-400 space-y-1 text-left">
+              <p className="text-gray-200">Make it sing your words</p>
+              <p>The prompt sets the style: comma-separated tags like slow jazz, smoky female vocals, upright bass.</p>
+              <p>Only ACE-Step 1.5 sings your own lyrics. The other music models write theirs from the prompt.</p>
+              <p>Structure your lines with [Verse], [Chorus] and [Bridge] markers so the model sings them. Plain lines get wrapped in a [Verse] for you.</p>
+              <p>Leave the lyrics box empty for an instrumental track, and write in the language you want sung.</p>
+              <p>The length slider bills per second, tracks can run up to 4 minutes.</p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {canLyrics && lyricsOpen && (
           <motion.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
@@ -717,7 +769,7 @@ function MusicControls() {
             <textarea
               value={musicLyrics}
               onChange={(e) => setMusicLyrics(e.target.value)}
-              placeholder="Optional lyrics. Models that sing will use them…"
+              placeholder="Your lyrics. [Verse] and [Chorus] markers make them sing best…"
               rows={3}
               className="w-full t-control px-2.5 py-1.5 rounded-md bg-white/[0.03] border border-white/[0.06] text-gray-200 placeholder-gray-600 focus:outline-none focus:border-white/15 resize-none"
             />
