@@ -21,6 +21,7 @@ import { useRemoteStore } from '../../stores/remoteStore'
 import { useModelHealthStore } from '../../stores/modelHealthStore'
 import { extractMemoriesFromPair } from '../../hooks/useMemory'
 import { detectLocalBackends, type DetectedBackend } from '../../lib/backend-detector'
+import { whenRunsIdle } from '../../lib/run-idle'
 import { backendCall, isTauri } from '../../api/backend'
 import { idbStorage } from '../../lib/idbStorage'
 import type { AIModel } from '../../types/models'
@@ -776,8 +777,14 @@ export function AppShell() {
 
       // Multiple backends detected → show selection dialog so the user can
       // change which one is the primary openai-compat provider if they want.
-      setDetectedBackends(backends)
-      setShowSelector(true)
+      // G25: never mid-run. Detection lands seconds after startup, and when a
+      // run was already streaming by then the modal stood over the chat for
+      // the rest of a 20 minute agent run (R17c). Wait until every surface
+      // (chat, agent, coding) is idle before opening it.
+      whenRunsIdle(() => {
+        setDetectedBackends(backends)
+        setShowSelector(true)
+      })
     })
   }, [onboardingDone])
 

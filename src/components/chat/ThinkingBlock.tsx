@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronDown, Brain } from 'lucide-react'
 import { MarkdownRenderer } from './MarkdownRenderer'
@@ -6,18 +6,29 @@ import { stripModelNoise } from '../../lib/strip-model-noise'
 
 interface Props {
     thinking: string
-    /** True while the model is actively producing this turn. Auto-expands the
-     *  block so the reasoning is visible STREAMING in real time (David 2026-06-04),
-     *  then auto-collapses once the turn finishes. The user can still toggle. */
+    /** True while the model is actively producing this turn. While it is,
+     *  the COLLAPSED block shows a bounded, self-scrolling live peek of the
+     *  reasoning (G14-7, David 2026-08-07: thinking stays folded everywhere
+     *  and streams inside a 3-4 line window; supersedes the 2026-06-04
+     *  auto-expand). The user can still expand for the full text. */
     streaming?: boolean
 }
 
+// Four lines of the 0.65rem / leading-relaxed reasoning text.
+const PREVIEW_MAX_H = 'max-h-[68px]'
+
 export function ThinkingBlock({ thinking, streaming }: Props) {
-    // null = follow `streaming` automatically; true/false = user override.
-    const [userToggled, setUserToggled] = useState<boolean | null>(null)
-    const open = userToggled !== null ? userToggled : !!streaming
-    // When the turn ends, drop the manual override so the NEXT turn auto-expands.
-    useEffect(() => { if (!streaming) setUserToggled(null) }, [streaming])
+    const [open, setOpen] = useState(false)
+    const previewRef = useRef<HTMLDivElement>(null)
+
+    // Keep the live peek pinned to the newest reasoning. No dep array on
+    // purpose: the text grows every streaming frame, so this runs each render
+    // and the window tracks the bottom, same pattern as SlashStepsBlock.
+    useEffect(() => {
+        if (streaming && !open && previewRef.current) {
+            previewRef.current.scrollTop = previewRef.current.scrollHeight
+        }
+    })
 
     // Strip orchestration out of the reasoning too (2.5.9): Qwen3-32B writes
     // its planned call as a raw <tool_call> tag inside the thought, and that
@@ -30,17 +41,31 @@ export function ThinkingBlock({ thinking, streaming }: Props) {
     return (
         <div className="mb-0.5">
             <button
-                onClick={() => setUserToggled(!open)}
+                onClick={() => setOpen((o) => !o)}
                 className="flex items-center gap-1.5 py-0.5 text-left hover:opacity-80 transition-opacity"
                 aria-label="Toggle thinking details"
             >
                 <Brain size={10} className="text-blue-400/70 shrink-0" />
-                <span className="text-[0.6rem] text-blue-400/70">Thinking</span>
+                <span className={`text-[0.6rem] text-blue-400/70 ${streaming ? 'lu-tool-shimmer' : ''}`}>Thinking</span>
                 <ChevronDown
                     size={9}
                     className={`text-blue-400/50 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
                 />
             </button>
+
+            {!open && streaming && (
+                // Collapsed + streaming: bounded live peek. The top fades so
+                // older reasoning scrolls up out of view; clicks fall through
+                // to the header toggle.
+                <div
+                    ref={previewRef}
+                    className={`pl-4 pb-1 pt-0.5 ${PREVIEW_MAX_H} overflow-hidden pointer-events-none [mask-image:linear-gradient(to_bottom,transparent,#000_20px)]`}
+                >
+                    <div className="text-[0.65rem] leading-relaxed italic text-blue-200/40">
+                        <MarkdownRenderer content={cleaned} />
+                    </div>
+                </div>
+            )}
 
             <AnimatePresence>
                 {open && (

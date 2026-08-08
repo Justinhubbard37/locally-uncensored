@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { Fragment, useState, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { AlertCircle, Check, ChevronDown, Wrench } from 'lucide-react'
-import type { AgentToolCall } from '../../types/agent-mode'
+import type { AgentBlock, AgentToolCall } from '../../types/agent-mode'
 import {
   ToolCallBlock,
   comfyViewUrlFromResult,
@@ -11,10 +11,16 @@ import {
   activeToolCall,
   groupDurationLabel,
   groupIsLive,
+  type BandNote,
 } from '../../lib/tool-call-groups'
 
 interface Props {
   calls: AgentToolCall[]
+  /** G14-4: narration the grouping absorbed from between the calls. Rendered
+   * inside the EXPANDED view at its original position; folded away with the
+   * rest while collapsed, which is the whole point of the band. */
+  notes?: BandNote[]
+  renderNote?: (block: AgentBlock) => ReactNode
   pendingApprovalId?: string | null
   onApprove?: () => void
   onReject?: () => void
@@ -33,7 +39,7 @@ interface Props {
  * pending_approval), and completed media results (konata 2026-06-07 "and no
  * image") — those calls keep rendering below the band whatever its state.
  */
-export function ToolCallBand({ calls, pendingApprovalId, onApprove, onReject }: Props) {
+export function ToolCallBand({ calls, notes, renderNote, pendingApprovalId, onApprove, onReject }: Props) {
   const [userToggled, setUserToggled] = useState<boolean | null>(null)
   const expanded = userToggled ?? false
   const live = groupIsLive(calls)
@@ -74,7 +80,16 @@ export function ToolCallBand({ calls, pendingApprovalId, onApprove, onReject }: 
           expanded
           onToggle={() => setUserToggled(false)}
         />
-        <div className="space-y-0.5 pl-1">{calls.map(blockFor)}</div>
+        <div className="space-y-0.5 pl-1">
+          {calls.map((tc, i) => (
+            <Fragment key={tc.id}>
+              {blockFor(tc)}
+              {renderNote && (notes ?? []).filter((n) => n.afterCall === i).map((n) => (
+                <Fragment key={n.block.id}>{renderNote(n.block)}</Fragment>
+              ))}
+            </Fragment>
+          ))}
+        </div>
       </div>
     )
   }

@@ -4,6 +4,7 @@ import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
 import { CodeBlock } from './CodeBlock'
+import { codeBlockText } from '../../lib/markdown-code'
 import { openExternal } from '../../api/backend'
 import type { Components } from 'react-markdown'
 
@@ -42,7 +43,12 @@ const components: Components = {
     const isBlock = match || (typeof children === 'string' && children.includes('\n'))
 
     if (isBlock) {
-      return <CodeBlock code={String(children).replace(/\n$/, '')} language={match?.[1]} />
+      // Coerce through the helper, never through a bare cast: an empty fence
+      // arrives as undefined and used to print the word "undefined" in a code
+      // box, which is what every code block looks like for the moment between
+      // its opening fence and its first character. Live capture and the shapes
+      // it has to survive are in lib/markdown-code.ts.
+      return <CodeBlock code={codeBlockText(children)} language={match?.[1]} />
     }
 
     return (

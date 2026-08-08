@@ -9,6 +9,7 @@ import { ModelPickerCard, ChangeModelInline, pickKindForToolCall } from './Model
 import { DiffView } from './DiffView'
 import { requestGenerationCancel } from '../../api/vram-handoff'
 import { fileUrlToPath, readLocalFileAsBlobUrl } from '../../lib/local-media-url'
+import { hiddenFromTranscript } from '../../lib/transcript-visibility'
 
 // F1 (konata3602 commitment 2026-05-23) + render fix (konata3602 bug 2026-06-07)
 // — when image_generate / video_generate / screenshot produce a ComfyUI output,
@@ -196,7 +197,15 @@ const STATUS_ICONS = {
 // memo (audit D2): the Codex/Agent transcript re-renders on every streamed
 // frame, and each un-memoised block re-rendered with it. Block updates
 // replace the toolCall object, so reference equality is the right check.
-export const ToolCallBlock = memo(ToolCallBlockImpl)
+//
+// The gate sits OUTSIDE the implementation on purpose: a tool that another
+// surface already owns must not mount the block at all, and an early return
+// inside ToolCallBlockImpl would have to come after its hooks. See
+// lib/transcript-visibility.ts for which calls those are and why.
+export const ToolCallBlock = memo(function ToolCallBlockGate(props: Props) {
+  if (hiddenFromTranscript(props.toolCall)) return null
+  return <ToolCallBlockImpl {...props} />
+})
 
 function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
   // Default: collapsed (closed)

@@ -89,3 +89,81 @@ export function createHermesDisplayFilter(): HermesDisplayFilter {
     },
   }
 }
+
+const THINK_OPEN = '<think>'
+const THINK_CLOSE = '</think>'
+
+export interface ThinkStreamSplitter {
+  /** Feed one display-safe delta; returns what goes where RIGHT NOW. */
+  feed(delta: string): { prose: string; thinking: string }
+  /** Stream over: classify whatever is still held back. */
+  flush(): { prose: string; thinking: string }
+  inThink(): boolean
+}
+
+/**
+ * Route `<think>` spans out of a live stream and into the thinking channel
+ * (G35, David 2026-08-07: the thought must stream inside the same bounded
+ * 3-line window everywhere, never full-height into the bubble).
+ *
+ * `startInThink` exists because the Qwen3 chat templates put the OPENING
+ * `<think>` into the prompt: the reply begins mid-thought and only ever sends
+ * the closer, so a splitter that waits for an opener would classify the whole
+ * thought as prose. Callers pass their keep-thinking gate here. If the model
+ * then answers without any think tags after all, everything streamed into the
+ * thinking channel and the authoritative end-of-turn parse (which reruns on
+ * the FULL raw text) puts it back into content: the UI self-heals at turn
+ * end, the failure mode is cosmetic and transient.
+ *
+ * Like the tool-call filter this is UI-only: callers still accumulate the
+ * full raw text and the turn-end parse decides what counts.
+ */
+export function createThinkStreamSplitter(opts?: { startInThink?: boolean }): ThinkStreamSplitter {
+  let pending = ''
+  let inThink = opts?.startInThink === true
+
+  return {
+    feed(delta: string): { prose: string; thinking: string } {
+      pending += delta
+      let prose = ''
+      let thinking = ''
+      while (true) {
+        if (inThink) {
+          const close = pending.indexOf(THINK_CLOSE)
+          if (close === -1) {
+            const keep = cutTagSuffix(pending, THINK_CLOSE)
+            thinking += pending.slice(0, pending.length - keep)
+            pending = keep > 0 ? pending.slice(pending.length - keep) : ''
+            return { prose, thinking }
+          }
+          thinking += pending.slice(0, close)
+          pending = pending.slice(close + THINK_CLOSE.length)
+          inThink = false
+          continue
+        }
+        const open = pending.indexOf(THINK_OPEN)
+        if (open !== -1) {
+          prose += pending.slice(0, open)
+          pending = pending.slice(open + THINK_OPEN.length)
+          inThink = true
+          continue
+        }
+        const hold = cutTagSuffix(pending, THINK_OPEN)
+        prose += pending.slice(0, pending.length - hold)
+        pending = pending.slice(pending.length - hold)
+        return { prose, thinking }
+      }
+    },
+
+    flush(): { prose: string; thinking: string } {
+      const res = inThink ? { prose: '', thinking: pending } : { prose: pending, thinking: '' }
+      pending = ''
+      inThink = false
+      return res
+    },
+
+    inThink(): boolean {
+      return inThink
+    },
+  }
+}

@@ -15,6 +15,7 @@ import { effectiveContextWindow } from "../lib/context-window"
 import { useAgentChat } from "./useAgentChat"
 import { parseAgentCommand, parseLoopSpec } from '../lib/agent-commands'
 import { planResend } from '../lib/resend-plan'
+import { isOrphanRun } from '../lib/orphan-run'
 import { applyGoalCommand } from '../lib/goal-command'
 import { useMemory } from "./useMemory"
 import { useAgentModeStore } from "../stores/agentModeStore"
@@ -62,6 +63,20 @@ export function useChat() {
   // Agent mode composition
   const agentChat = useAgentChat()
   const { extractAndSave } = useMemory()
+
+  // G29: a run outlives this hook instance when the chat view unmounts on a
+  // view switch, so the conversation's own flag is the only honest source for
+  // "is something still in flight here". Without it the composer showed Send
+  // next to a running clock and the user had no way to end the run.
+  const activeConversationId = useChatStore((s) => s.activeConversationId)
+  const storeGenerating = useGenerationStore((s) => !!s.generating[activeConversationId ?? ''])
+  const orphanRun = isOrphanRun(storeGenerating, isGenerating, agentChat.isAgentRunning)
+
+  /** End a run this instance does not own: the aborter the run registered is
+   *  a closure over its own controller, so it still reaches it. */
+  const stopOrphanRun = useCallback(() => {
+    useGenerationStore.getState().abortConversation(useChatStore.getState().activeConversationId)
+  }, [])
 
   const sendMessage = useCallback(async (content: string, images?: ImageAttachment[]) => {
     const { activeModel } = useModelStore.getState()
@@ -646,8 +661,10 @@ export function useChat() {
 
   return {
     sendMessage,
-    stopGeneration: agentChat.isAgentRunning ? agentChat.stopAgent : stopGeneration,
-    isGenerating: isGenerating || agentChat.isAgentRunning,
+    stopGeneration: agentChat.isAgentRunning
+      ? agentChat.stopAgent
+      : orphanRun ? stopOrphanRun : stopGeneration,
+    isGenerating: isGenerating || agentChat.isAgentRunning || orphanRun,
     isLoadingModel,
     regenerateMessage,
     editAndResend,

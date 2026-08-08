@@ -2,7 +2,7 @@ import { useCallback, useRef } from 'react'
 import { useChatStore } from '../../stores/chatStore'
 import { useAutoScroll } from '../../hooks/useAutoScroll'
 import { MessageBubble } from './MessageBubble'
-import { TypingIndicator } from './TypingIndicator'
+import { WorkingAnchor } from './WorkingAnchor'
 
 interface Props {
   /** GLOBAL generating flag — guards regenerate/edit so a second concurrent
@@ -31,7 +31,17 @@ export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel
   })
 
   const lastMessage = conversation?.messages[conversation.messages.length - 1]
-  const scrollRef = useAutoScroll(lastMessage?.content)
+  // The approval id is part of the scroll trigger (G31): a run waiting for a
+  // decision often adds NO content, so the list stood still while the inline
+  // Approve/Reject grew in below the fold. Growth WITHOUT a trigger (Working
+  // anchor mounting, a thinking block streaming while content stays empty) is
+  // covered by the hook's ResizeObserver (G33). The resumeKey is the last
+  // USER message: sending jumps all the way down even after scrolling away.
+  const lastUserMessage = conversation?.messages.filter((m) => m.role === 'user').at(-1)
+  const { ref: scrollRef, contentRef } = useAutoScroll(
+    `${lastMessage?.content ?? ''}|${pendingApprovalId ?? ''}`,
+    lastUserMessage?.id,
+  )
 
   // MessageBubble is memoised, so its handlers have to keep the same identity
   // across renders. Binding the conversation id and the parent's callbacks
@@ -65,31 +75,34 @@ export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel
         maskImage: 'linear-gradient(to bottom, transparent 0, #000 28px)',
       }}
     >
-      {visibleMessages
-        .map((message) => (
-          <MessageBubble
-            key={message.id}
-            message={message}
-            isLast={message.id === lastVisibleId}
-            onRegenerate={message.role === 'assistant' && onRegenerate && !isGenerating
-              ? handleRegenerate
-              : undefined}
-            onEdit={message.role === 'user' && onEdit && !isGenerating
-              ? handleEdit
-              : undefined}
-            pendingApprovalId={pendingApprovalId}
-            onApprove={onApprove}
-            onReject={onReject}
-          />
-        ))}
-      {/* 3-dot loading indicator stays visible the entire time the agent
-          is still working — including between tool calls and while the
-          final answer is streaming. Previously it only showed when the
-          last assistant message was empty, which made multi-turn agent
-          runs look frozen between iterations (per user feedback). */}
-      {showTyping && lastMessage?.role === 'assistant' && (
-        <TypingIndicator label={isLoadingModel ? 'Loading model...' : undefined} />
-      )}
+      {/* Single wrapper so the hook's ResizeObserver sees ALL content height,
+          anchor included (G33). */}
+      <div ref={contentRef}>
+        {visibleMessages
+          .map((message) => (
+            <MessageBubble
+              key={message.id}
+              message={message}
+              isLast={message.id === lastVisibleId}
+              onRegenerate={message.role === 'assistant' && onRegenerate && !isGenerating
+                ? handleRegenerate
+                : undefined}
+              onEdit={message.role === 'user' && onEdit && !isGenerating
+                ? handleEdit
+                : undefined}
+              pendingApprovalId={pendingApprovalId}
+              onApprove={onApprove}
+              onReject={onReject}
+            />
+          ))}
+        {/* The run anchor stays visible the entire time the agent is still
+            working, including between tool calls and while the final answer
+            streams. G14-6: one shimmering "Working" with the clock beside it,
+            instead of three dots here and a floating counter elsewhere. */}
+        {showTyping && lastMessage?.role === 'assistant' && (
+          <WorkingAnchor isRunning label={isLoadingModel ? 'Loading model' : undefined} />
+        )}
+      </div>
     </div>
   )
 }

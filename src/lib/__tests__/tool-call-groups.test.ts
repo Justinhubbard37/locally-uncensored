@@ -28,14 +28,74 @@ describe('groupAgentBlocks', () => {
     expect((groups[0] as any).calls.map((c: AgentToolCall) => c.toolName)).toEqual(['file_read', 'file_write'])
   })
 
-  it('splits groups at interleaved answers, keeping order', () => {
+  // G14-4 (David 2026-08-07): this test used to assert the OPPOSITE, that an
+  // interleaved answer splits the band. That split is exactly the stack he
+  // was looking at ("die Toolcalls kommen alle untereinander"), because any
+  // model that narrates between calls produced band(1), note, band(1). The
+  // documented behaviour is now: interior narration is absorbed as a note.
+  it('absorbs narration between calls into ONE band, anchored to its call', () => {
     const t1 = toolBlock(call('file_read', 'completed'))
-    const ans = answerBlock('found it')
+    const ans = answerBlock('Step 1 done, proceeding to step 2.')
     const t2 = toolBlock(call('file_write', 'completed'))
     const t3 = toolBlock(call('shell_execute', 'completed'))
     const groups = groupAgentBlocks([t1, ans, t2, t3])
-    expect(groups.map(g => g.kind)).toEqual(['tools', 'single', 'tools'])
-    expect((groups[2] as any).calls).toHaveLength(2)
+    expect(groups.map(g => g.kind)).toEqual(['tools'])
+    const band = groups[0] as any
+    expect(band.calls).toHaveLength(3)
+    expect(band.notes).toEqual([{ afterCall: 0, block: ans }])
+  })
+
+  it('NEGATIVE CONTROL: the trailing answer stays OUTSIDE the band', () => {
+    // The final answer is the model's actual reply. Swallowing it into a
+    // collapsed band would hide the one thing David asked to see (G14-2).
+    const t1 = toolBlock(call('file_read', 'completed'))
+    const t2 = toolBlock(call('file_write', 'completed'))
+    const fin = answerBlock('All done, results above.')
+    const groups = groupAgentBlocks([t1, t2, fin])
+    expect(groups.map(g => g.kind)).toEqual(['tools', 'single'])
+    expect((groups[0] as any).notes).toEqual([])
+  })
+
+  it('NEGATIVE CONTROL: narration before the FIRST call is not band content', () => {
+    const intro = answerBlock('Let me start by reading the file.')
+    const t1 = toolBlock(call('file_read', 'completed'))
+    const t2 = toolBlock(call('file_write', 'completed'))
+    const groups = groupAgentBlocks([intro, t1, t2])
+    expect(groups.map(g => g.kind)).toEqual(['single', 'tools'])
+  })
+
+  it('G21-2: an interior thinking block is absorbed as a note, band unbroken', () => {
+    // Until 2026-08-07 this case asserted the SPLIT ('tools','single','tools').
+    // David, live at R19: "die Denkblasen muessen zwischen den Tool Calls dann
+    // genau da kommen, in der richtigen Reihenfolge" AND the band must stay
+    // one row (G14-4), so round k's thought anchors after round k-1's call.
+    const t1 = toolBlock(call('file_read', 'completed'))
+    const think: AgentBlock = { id: `th-${++ts}`, phase: 'thinking', content: 'hm', timestamp: ts }
+    const t2 = toolBlock(call('file_write', 'completed'))
+    const groups = groupAgentBlocks([t1, think, t2])
+    expect(groups.map(g => g.kind)).toEqual(['tools'])
+    const band = groups[0] as any
+    expect(band.notes.map((n: any) => [n.afterCall, n.block.phase])).toEqual([[0, 'thinking']])
+  })
+
+  it('G21-2 NEGATIVE CONTROL: a TRAILING thought stays a single after the band', () => {
+    const t1 = toolBlock(call('file_read', 'completed'))
+    const think: AgentBlock = { id: `th-${++ts}`, phase: 'thinking', content: 'closing thought', timestamp: ts }
+    const groups = groupAgentBlocks([t1, think])
+    expect(groups.map(g => g.kind)).toEqual(['tools', 'single'])
+    expect((groups[1] as any).block.phase).toBe('thinking')
+  })
+
+  it('multiple notes between two calls all anchor to the earlier call, in order', () => {
+    const t1 = toolBlock(call('file_read', 'completed'))
+    const n1 = answerBlock('first note')
+    const n2 = answerBlock('second note')
+    const t2 = toolBlock(call('file_write', 'completed'))
+    const band = groupAgentBlocks([t1, n1, n2, t2])[0] as any
+    expect(band.notes.map((n: any) => [n.afterCall, n.block.content])).toEqual([
+      [0, 'first note'],
+      [0, 'second note'],
+    ])
   })
 
   it('keeps a lone tool call as a group of one', () => {
@@ -48,6 +108,56 @@ describe('groupAgentBlocks', () => {
     const broken: AgentBlock = { id: 'x', phase: 'tool_call', content: '', timestamp: 1 }
     const groups = groupAgentBlocks([broken])
     expect(groups[0].kind).toBe('single')
+  })
+})
+
+// ── G34 (David 2026-08-07, R17d) ──────────────────────────────────────────
+// "die tools sind nicht im call band alle untereinander." The screenshots
+// showed 15+ loose chips with loose Thinking rows between them. Replaying the
+// REAL persisted R17d sequence (47 rounds of thinking+call pairs, each pair
+// sharing one timestamp, pulled from the app's IndexedDB) proves the grouping
+// itself is correct: ONE band, every interior thought absorbed. The loose
+// chips were the band EXPANDED BY THE HARNESS: __luTools clicks every
+// "N steps" header once a minute to count the trail and left them open, and
+// ToolCallBand renders `expanded` above `live`. Fixed in the harness
+// (__luTools collapses what it opened); this test pins the app side down.
+describe('G34: the real R17d shape groups into one band', () => {
+  function r17dSequence(rounds: number): AgentBlock[] {
+    // Exactly the persisted shape: per round one thinking block and one call
+    // block with the SAME millisecond timestamp (round end writes both).
+    const blocks: AgentBlock[] = []
+    for (let round = 0; round < rounds; round++) {
+      const at = 1_000 + round * 15_000
+      blocks.push({ id: `th-${round}`, phase: 'thinking', content: `thought ${round}`, timestamp: at })
+      const tc: AgentToolCall = { id: `tc-${round}`, toolName: `tool_${round}`, args: {}, status: 'completed', timestamp: at }
+      blocks.push({ id: `bl-${round}`, phase: 'tool_call', content: '', toolCall: tc, toolCalls: [tc], timestamp: at })
+    }
+    return blocks
+  }
+
+  it('47 thinking+call rounds produce one leading thought and ONE band of 47', () => {
+    const groups = groupAgentBlocks(r17dSequence(47))
+    expect(groups).toHaveLength(2)
+    expect(groups[0].kind).toBe('single')
+    expect((groups[0] as any).block.phase).toBe('thinking')
+    const band = groups[1] as any
+    expect(band.kind).toBe('tools')
+    expect(band.calls).toHaveLength(47)
+    // Every per-round thought except the leading one is an interior note.
+    expect(band.notes).toHaveLength(46)
+    expect(band.notes.every((n: any) => n.block.phase === 'thinking')).toBe(true)
+  })
+
+  it('NEGATIVE CONTROL: a trailing thought stays outside the band (G21-2)', () => {
+    const blocks = r17dSequence(3)
+    blocks.push({ id: 'th-final', phase: 'thinking', content: 'closing thought', timestamp: 99_000 })
+    const groups = groupAgentBlocks(blocks)
+    const last = groups[groups.length - 1] as any
+    expect(last.kind).toBe('single')
+    expect(last.block.id).toBe('th-final')
+    const band = groups.find((g) => g.kind === 'tools') as any
+    expect(band.calls).toHaveLength(3)
+    expect(band.notes).toHaveLength(2)
   })
 })
 
