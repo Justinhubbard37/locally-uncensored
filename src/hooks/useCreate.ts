@@ -48,6 +48,7 @@ import {
 import { useCreateStore } from '../stores/createStore'
 import { useWorkflowStore } from '../stores/workflowStore'
 import { injectParameters } from '../api/workflows'
+import { applyNativeHiresFix } from '../api/hires-fix'
 import {
   generateMlxImageDataUrl, isMlxImageHost, isMlxImageModel,
   mlxStatus, listMlxImageModels, buildMlxImageModels, mergeImageModels, mlxModelIdFor,
@@ -432,7 +433,8 @@ export function useCreate() {
     }
     const {
       mode, prompt, negativePrompt, imageModel, videoModel,
-      sampler, scheduler, steps, cfgScale, width, height, seed, batchSize, frames, fps, denoise, i2iImage, i2vImage,
+      sampler, scheduler, steps, cfgScale, width, height, seed, batchSize, frames, fps, denoise,
+      hiresFixEnabled, hiresScale, hiresDenoise, hiresSteps, hiresUpscaleMethod, i2iImage, i2vImage,
       source, mask, growMaskBy, removebg, selectedLoras, selectedVae, clipSkip,
       setIsGenerating, setProgress, setCurrentPromptId, setError, addToGallery, addToPromptHistory,
     } = state
@@ -771,6 +773,8 @@ export function useCreate() {
     } catch { /* ignore — VRAM housekeeping is best-effort */ }
 
     try {
+      let outputWidth = width
+      let outputHeight = height
       const baseParams = {
         prompt, negativePrompt, model: activeModel, sampler, scheduler, steps, cfgScale, width, height, seed, batchSize,
         ...(isRemoveBg && effInputImage ? { removebg: true, inputImage: effInputImage } : {}),
@@ -969,6 +973,25 @@ export function useCreate() {
         }
       }
 
+      // Native HiRes is a graph transform, not a special workflow. Apply
+      // it after Auto/custom workflow construction so the same switch works on
+      // every compatible local text-to-image graph. Unsupported custom graphs
+      // fail with an actionable message rather than silently ignoring the knob.
+      if (hiresFixEnabled && intent === 'image') {
+        setProgress(8, 'Adding native HiRes Fix...')
+        const hires = applyNativeHiresFix(workflow, {
+          baseWidth: width,
+          baseHeight: height,
+          scale: hiresScale,
+          denoise: hiresDenoise,
+          steps: hiresSteps,
+          upscaleMethod: hiresUpscaleMethod,
+        })
+        workflow = hires.workflow
+        outputWidth = hires.width
+        outputHeight = hires.height
+      }
+
       setProgress(10, 'Submitting to ComfyUI...')
       let promptId: string
       try {
@@ -1089,7 +1112,7 @@ export function useCreate() {
                       prompt, negativePrompt, model: activeModel,
                       modelType: mode === 'image' ? imageModelType : (videoModelsList.find(m => m.name === activeModel)?.type ?? 'wan'),
                       seed: seed === -1 ? 0 : seed,
-                      steps, cfgScale, sampler, scheduler, width, height, batchSize,
+                      steps, cfgScale, sampler, scheduler, width: outputWidth, height: outputHeight, batchSize,
                       createdAt: Date.now(), builderUsed, intent,
                     })
                   }
@@ -1187,7 +1210,7 @@ export function useCreate() {
                         prompt, negativePrompt, model: activeModel,
                         modelType: mode === 'image' ? imageModelType : (videoModelsList.find(m => m.name === activeModel)?.type ?? 'wan'),
                         seed: seed === -1 ? 0 : seed,
-                        steps, cfgScale, sampler, scheduler, width, height, batchSize,
+                        steps, cfgScale, sampler, scheduler, width: outputWidth, height: outputHeight, batchSize,
                         createdAt: Date.now(), builderUsed,
                       })
                     }
@@ -1259,7 +1282,9 @@ export function useCreate() {
             }
 
             const elapsedSec = Math.round(elapsed / 1000)
-            const expectedSteps = mode === 'video' ? steps * frames * 0.5 : steps * 2
+            const expectedSteps = mode === 'video'
+              ? steps * frames * 0.5
+              : steps + (hiresFixEnabled && intent === 'image' ? hiresSteps : 0)
             const pct = Math.min(10 + (attempts / expectedSteps * 85), 95)
 
             try {
@@ -1292,7 +1317,7 @@ export function useCreate() {
                       prompt, negativePrompt, model: activeModel,
                       modelType: mode === 'image' ? imageModelType : (videoModelsList.find(m => m.name === activeModel)?.type ?? 'wan'),
                       seed: seed === -1 ? 0 : seed,
-                      steps, cfgScale, sampler, scheduler, width, height, batchSize,
+                      steps, cfgScale, sampler, scheduler, width: outputWidth, height: outputHeight, batchSize,
                       createdAt: Date.now(), builderUsed, intent,
                     })
                   }
