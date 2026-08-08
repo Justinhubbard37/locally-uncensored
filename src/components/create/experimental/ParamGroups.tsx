@@ -1,4 +1,5 @@
-import { Gauge, Boxes, FlaskConical, RotateCcw, HelpCircle } from 'lucide-react'
+import { Gauge, Boxes, FlaskConical, RotateCcw, HelpCircle, RectangleHorizontal, RectangleVertical } from 'lucide-react'
+import { VIDEO_RES_PRESETS, ASPECT_RATIOS, applyAspect, presetForOrientation, matchesPreset } from '../../../lib/create-resolution'
 import { useCreateStore } from '../../../stores/createStore'
 import { useCreateExp } from './CreateContext'
 import { cloudModelById, defaultCloudModel } from '../../../stores/cloudCatalogStore'
@@ -65,6 +66,39 @@ export function ParamGroups() {
         <div className="grid grid-cols-2 gap-2">
           <NumberField label="Width" value={s.width} min={64} max={4096} step={64} mono onChange={(v) => s.setSize(v, s.height)} suffix="px" />
           <NumberField label="Height" value={s.height} min={64} max={4096} step={64} mono onChange={(v) => s.setSize(s.width, v)} suffix="px" />
+        </div>
+        {/* D#93 (stasicby): Wan's native sizes as one-click chips, an
+            orientation flip, and ratio chips that respend the current pixel
+            budget. Everything just writes the same width/height fields. */}
+        <div className="flex flex-wrap items-center gap-1 pt-1">
+          {isVideo && VIDEO_RES_PRESETS.map((p) => (
+            <button
+              key={p.label}
+              onClick={() => { const d = presetForOrientation(p, s.height > s.width); s.setSize(d.width, d.height) }}
+              className={cn(
+                'px-1.5 py-0.5 rounded border t-control transition-colors',
+                matchesPreset(s.width, s.height, p)
+                  ? 'border-white/20 bg-white/[0.08] text-gray-200'
+                  : 'border-white/[0.08] text-gray-400 hover:text-gray-200 hover:bg-white/[0.06]',
+              )}
+            >{p.label}</button>
+          ))}
+          <button
+            aria-label="Swap orientation"
+            title="Swap portrait and landscape"
+            onClick={() => s.setSize(s.height, s.width)}
+            className="px-1.5 py-0.5 rounded border border-white/[0.08] t-control text-gray-400 hover:text-gray-200 hover:bg-white/[0.06] transition-colors inline-flex items-center gap-1"
+          >
+            {s.height > s.width ? <RectangleVertical size={10} /> : <RectangleHorizontal size={10} />}
+            flip
+          </button>
+          {ASPECT_RATIOS.map((r) => (
+            <button
+              key={r.label}
+              onClick={() => { const d = applyAspect(s.width, s.height, r.w, r.h); s.setSize(d.width, d.height) }}
+              className="px-1.5 py-0.5 rounded border border-white/[0.08] t-control text-gray-400 hover:text-gray-200 hover:bg-white/[0.06] transition-colors"
+            >{r.label}</button>
+          ))}
         </div>
       </Section>
 
