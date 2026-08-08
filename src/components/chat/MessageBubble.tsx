@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { User, Copy, Check, Pencil, RefreshCw, X, Wrench, Trash2 } from 'lucide-react'
+import { User, Copy, Check, Pencil, RefreshCw, X, Wrench, Trash2, Scissors } from 'lucide-react'
 import { useState, useRef, useEffect, useMemo, memo } from 'react'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ThinkingBlock } from './ThinkingBlock'
@@ -11,6 +11,7 @@ import { SpeakerButton } from './SpeakerButton'
 import { ChatArtifactCard } from './ChatArtifactCard'
 import type { Message } from '../../types/chat'
 import { stripModelNoise } from '../../lib/strip-model-noise'
+import { truncationNotice } from '../../lib/answer-notes'
 import { useAgentModeStore } from '../../stores/agentModeStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useModelStore } from '../../stores/modelStore'
@@ -370,6 +371,16 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
               return (
                 <div className="text-[0.78rem] leading-relaxed">
                   <MarkdownRenderer content={cleanContent} />
+                  {/* Cut-off marker: a turn the model did not finish on its own
+                      terms (length budget / dropped connection). The benchmark
+                      screen has always flagged cut-offs; the chat did not, so a
+                      truncated answer read as complete (David 2026-08-08). */}
+                  {truncationNotice(message.finishReason) && (
+                    <div className="mt-1 inline-flex items-center gap-1 text-[0.6rem] text-amber-600/80 dark:text-amber-300/70">
+                      <Scissors size={9} className="shrink-0" />
+                      <span>{truncationNotice(message.finishReason)}</span>
+                    </div>
+                  )}
                   {/* A reasoning-only reply used to print a stand-in sentence
                       here ("The model only produced internal reasoning and no
                       answer"). That is our text in the model's mouth (G14-3,

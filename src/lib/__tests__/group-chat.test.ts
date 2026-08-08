@@ -3,7 +3,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, it, expect, beforeEach } from 'vitest'
-import { isGroupChat, groupSystemPrompt, groupHistory, GROUP_CHAT_MAX } from '../group-chat'
+import { isGroupChat, groupSystemPrompt, groupHistory, stripImpersonatedSpeakers, GROUP_CHAT_MAX } from '../group-chat'
 import { useChatStore } from '../../stores/chatStore'
 import type { Message } from '../../types/chat'
 
@@ -65,6 +65,46 @@ describe('groupHistory', () => {
     const withImg = [msg({ role: 'user', content: 'look', images: [{ name: 'x.png', data: 'AAA', mimeType: 'image/png' }] })]
     const out = groupHistory(withImg, 'qwen')
     expect(out[0].images).toEqual([{ data: 'AAA', mimeType: 'image/png' }])
+  })
+})
+
+describe('stripImpersonatedSpeakers', () => {
+  const others = ['phi-4-mini', 'granite-4.0-micro', 'hf.co/Qwen/Qwen3-4B-GGUF']
+
+  it('cuts a fabricated next-speaker line and everything after it', () => {
+    const out = stripImpersonatedSpeakers(
+      'I disagree, because the topic is fresh.\n[phi-4-mini] Actually it is not.',
+      others,
+    )
+    expect(out).toBe('I disagree, because the topic is fresh.')
+  })
+
+  it('cuts a whole impersonated multi-turn tail', () => {
+    const out = stripImpersonatedSpeakers(
+      'My take.\n\n[granite-4.0-micro] no\n[phi-4-mini] yes',
+      others,
+    )
+    expect(out).toBe('My take.')
+  })
+
+  it('matches an id even when it contains regex metacharacters', () => {
+    const out = stripImpersonatedSpeakers('Real.\n[hf.co/Qwen/Qwen3-4B-GGUF] fake', others)
+    expect(out).toBe('Real.')
+  })
+
+  it('leaves an inline mention of another model untouched (negative control)', () => {
+    const t = 'I agree with [phi-4-mini] on this one.'
+    expect(stripImpersonatedSpeakers(t, others)).toBe(t)
+  })
+
+  it('leaves an ordinary bracketed word untouched (negative control)', () => {
+    const t = 'See the note [1] and the label [draft] below.'
+    expect(stripImpersonatedSpeakers(t, others)).toBe(t)
+  })
+
+  it('returns the text unchanged when there are no other models', () => {
+    const t = 'solo answer'
+    expect(stripImpersonatedSpeakers(t, [])).toBe(t)
   })
 })
 

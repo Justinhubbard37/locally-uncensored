@@ -49,6 +49,7 @@ interface ChatState {
   updateMessageContent: (conversationId: string, messageId: string, content: string) => void
   updateMessageThinking: (conversationId: string, messageId: string, thinking: string) => void
   updateMessageUsage: (conversationId: string, messageId: string, usage: { promptTokens: number; completionTokens: number; totalTokens: number; estimated?: boolean }) => void
+  updateMessageFinishReason: (conversationId: string, messageId: string, finishReason: string) => void
   updateMessageAgentBlocks: (conversationId: string, messageId: string, blocks: AgentBlock[]) => void
   updateMessageArtifacts: (conversationId: string, messageId: string, artifacts: ChatArtifact[]) => void
   deleteMessagesAfter: (conversationId: string, messageId: string) => void
@@ -264,6 +265,19 @@ export const useChatStore = create<ChatState>()(
               ? {
                 ...c,
                 messages: c.messages.map((m) => (m.id === messageId ? { ...m, usage } : m)),
+                updatedAt: Date.now(),
+              }
+              : c
+          ),
+        })),
+
+      updateMessageFinishReason: (conversationId, messageId, finishReason) =>
+        set((state) => ({
+          conversations: state.conversations.map((c) =>
+            c.id === conversationId
+              ? {
+                ...c,
+                messages: c.messages.map((m) => (m.id === messageId ? { ...m, finishReason } : m)),
                 updatedAt: Date.now(),
               }
               : c

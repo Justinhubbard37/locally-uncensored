@@ -3,6 +3,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
+import { MATH_OPTIONS } from '../../lib/markdown-math'
 import { CodeBlock } from './CodeBlock'
 import { codeBlockText } from '../../lib/markdown-code'
 import { openExternal } from '../../api/backend'
@@ -126,7 +127,7 @@ const components: Components = {
 export function MarkdownRenderer({ content }: Props) {
   return (
     <div className="markdown-content text-gray-800 dark:text-gray-200">
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={components}>
+      <ReactMarkdown remarkPlugins={[remarkGfm, [remarkMath, MATH_OPTIONS]]} rehypePlugins={[rehypeKatex]} components={components}>
         {content}
       </ReactMarkdown>
     </div>

@@ -32,6 +32,27 @@ export interface GroupWireMessage {
   images?: { data: string; mimeType: string }[]
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** A model's OWN lines go over the wire untagged; the other speakers arrive
+ *  tagged "[model-id] …". So a "[other-model] …" line in a model's own reply can
+ *  only be fabrication: a weak model (two Phi-4-mini in one group, Discord
+ *  2026-08-08) copies the format and appends a line pretending to BE the next
+ *  speaker. v1 let that through. Cut from the first line that starts with another
+ *  participant's exact tag to the end. Line-anchored and exact-id-only, so an
+ *  inline mention ("I agree with [other]") or an ordinary "[note]" in prose is
+ *  untouched; only a fabricated turn header is removed. */
+export function stripImpersonatedSpeakers(text: string, otherModels: string[]): string {
+  const ids = otherModels.filter((m) => m.trim()).map(escapeRegExp)
+  if (!ids.length) return text
+  const tag = new RegExp(`^[ \\t>]*\\[(?:${ids.join('|')})\\]`)
+  const lines = text.split('\n')
+  const cut = lines.findIndex((l) => tag.test(l))
+  return cut === -1 ? text : lines.slice(0, cut).join('\n').trim()
+}
+
 /** The shared history as one model sees it: other speakers tagged, own turns
  *  clean, empty placeholders dropped. */
 export function groupHistory(messages: Message[], model: string): GroupWireMessage[] {

@@ -27,7 +27,8 @@ import { isThinkingCompatible, isPlainTextPlanner } from "../lib/model-compatibi
 import { stripNonCanonicalTags, finalStripThinkingTags } from "../lib/thinking-stripper"
 import { isMultimodalUnsupportedError, MULTIMODAL_UNSUPPORTED_MESSAGE } from "../lib/ollama-errors"
 import type { ImageAttachment, Message } from "../types/chat"
-import { isGroupChat, groupSystemPrompt, groupHistory } from "../lib/group-chat"
+import { isGroupChat, groupSystemPrompt, groupHistory, stripImpersonatedSpeakers } from "../lib/group-chat"
+import { emptyAnswerExplanation } from "../lib/answer-notes"
 import { log } from "../lib/logger"
 
 /**
@@ -85,6 +86,10 @@ async function runGroupTurn(convId: string, model: string, allModels: string[], 
   let inThink = false
   let discardBuf = ''
   let frameScheduled = false
+  let groupFinish: string | undefined
+  // A model's own lines are untagged; a "[other-model]" tag in its OWN reply is
+  // it speaking for someone else, which v1 must not show.
+  const others = allModels.filter((m) => m !== model)
 
   try {
     const { provider, modelId } = getProviderForModel(model)
@@ -134,7 +139,7 @@ async function runGroupTurn(convId: string, model: string, allModels: string[], 
       if ((chunk.content || (chunk.thinking && keepThinking)) && !frameScheduled) {
         frameScheduled = true
         requestAnimationFrame(() => {
-          useChatStore.getState().updateMessageContent(convId, assistantMessage.id, stripNonCanonicalTags(contentAcc))
+          useChatStore.getState().updateMessageContent(convId, assistantMessage.id, stripImpersonatedSpeakers(stripNonCanonicalTags(contentAcc), others))
           if (keepThinking && thinkingAcc) {
             useChatStore.getState().updateMessageThinking(convId, assistantMessage.id, thinkingAcc)
           }
@@ -142,11 +147,13 @@ async function runGroupTurn(convId: string, model: string, allModels: string[], 
         })
       }
       if (chunk.done) {
-        contentAcc = finalStripThinkingTags(contentAcc, keepThinking)
+        if (chunk.finishReason) groupFinish = chunk.finishReason
+        contentAcc = stripImpersonatedSpeakers(finalStripThinkingTags(contentAcc, keepThinking), others)
         useChatStore.getState().updateMessageContent(convId, assistantMessage.id, contentAcc)
         if (keepThinking && thinkingAcc) {
           useChatStore.getState().updateMessageThinking(convId, assistantMessage.id, thinkingAcc)
         }
+        if (groupFinish) useChatStore.getState().updateMessageFinishReason(convId, assistantMessage.id, groupFinish)
         if (chunk.promptEvalCount || chunk.evalCount) {
           const promptTokens = chunk.promptEvalCount || 0
           const completionTokens = chunk.evalCount || 0
@@ -159,10 +166,12 @@ async function runGroupTurn(convId: string, model: string, allModels: string[], 
       }
     }
     if (!abort.signal.aborted && !contentAcc.trim()) {
+      // Empty turn: say WHY, length-aware, not a flat "didn't return an answer".
+      // The bubble already labels the speaker, so no model prefix here.
       useChatStore.getState().updateMessageContent(
         convId,
         assistantMessage.id,
-        `${model} didn't return a visible answer that time.`,
+        emptyAnswerExplanation({ finishReason: groupFinish, captured: !!thinkingAcc.trim(), keepThinking }),
       )
     }
   } catch (err) {
@@ -645,7 +654,10 @@ export function useChat() {
         }
 
         if (chunk.done) {
-          if (chunk.finishReason) finishReason = chunk.finishReason
+          if (chunk.finishReason) {
+            finishReason = chunk.finishReason
+            useChatStore.getState().updateMessageFinishReason(convId!, assistantMessage.id, chunk.finishReason)
+          }
           // Final safety pass — catches any orphan tags that leaked through
           // mid-stream (partial chunks, provider restarts, etc.).
           contentRef.current = finalStripThinkingTags(contentRef.current, keepThinking)
@@ -688,16 +700,7 @@ export function useChat() {
         // content EMPTY — the user saw a collapsed Thinking pill and nothing
         // else, which reads as a hang/crash (David, cloud Qwen3.6 2026-07-12:
         // 40k chars of looped reasoning, token budget gone, zero answer).
-        const explanation =
-          finishReason === 'length'
-            ? (captured
-                ? 'The model spent its entire token budget thinking and never wrote the answer. Try again, reasoning is not deterministic, or turn Thinking off for this question.'
-                : 'The model hit its token limit before writing an answer. Try again, or raise Max Tokens in Settings.')
-            : finishReason === 'disconnect'
-              ? 'The connection dropped before the model finished its answer. Check your network and try again.'
-              : captured && keepThinking
-                ? 'The model finished thinking but never wrote an answer. Try again, or turn Thinking off for this question.'
-                : "I didn't return a visible answer that time, please try again."
+        const explanation = emptyAnswerExplanation({ finishReason, captured: !!captured, keepThinking })
         if (captured && keepThinking) {
           // Thinking ON: surface the reasoning AND say why there's no answer
           // (the collapsed thinking pill alone reads as dead air).

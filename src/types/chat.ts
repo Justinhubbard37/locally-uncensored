@@ -72,6 +72,11 @@ export interface Message {
   // of only the visible messages); it flips to false once the model reports the
   // exact prompt_eval_count / usage.prompt_tokens.
   usage?: { promptTokens: number; completionTokens: number; totalTokens: number; estimated?: boolean }
+  /** Why generation ended, when the model did NOT stop on its own terms:
+   *  'length' (token budget) or 'disconnect'. Drives the small cut-off badge so
+   *  a truncated answer is not shown as if it were complete (parity with the
+   *  benchmark screen). Absent or 'stop' on a clean finish. */
+  finishReason?: string
 }
 
 export interface Conversation {
