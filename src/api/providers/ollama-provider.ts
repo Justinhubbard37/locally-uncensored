@@ -37,6 +37,9 @@ interface OllamaModelEntry {
   size: number
   digest: string
   modified_at: string
+  /** ['completion','tools','thinking','vision',...]. Ollama states this per
+   *  model in /api/tags. Older servers omit it. */
+  capabilities?: string[]
   details: {
     parent_model: string
     format: string
@@ -270,6 +273,21 @@ export class OllamaProvider implements ProviderClient {
       provider: 'ollama' as const,
       providerName: 'Ollama',
       contextLength: undefined, // fetched on demand via getContextLength
+      // Ollama says per model whether it can call tools, and this dropped that
+      // answer on the floor, so every Ollama model reached resolveToolSupport
+      // with `undefined` and the decision fell through to the family-name list
+      // in model-compatibility. That list matches on substrings, so a
+      // completion-only build whose name merely contains a known family was
+      // declared native and got a `tools` payload it cannot accept. Measured
+      // 2026-08-06 on DESKTOP-D1TO33K: `hf.co/DevQuasar/huihui-ai.Qwen3-4B-
+      // abliterated-GGUF:Q4_K_M` reports ['completion'] and was still routed
+      // native, purely because the name contains 'qwen3'.
+      //
+      // The server's own answer wins; the heuristic stays as the fallback for
+      // an older Ollama that says nothing, which is why this is `undefined`
+      // and not `true` when the field is absent. openai-provider.ts already
+      // works exactly this way.
+      supportsTools: Array.isArray(m.capabilities) ? m.capabilities.includes('tools') : undefined,
     }))
   }
 

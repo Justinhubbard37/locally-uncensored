@@ -219,6 +219,10 @@ export interface Settings {
    * Until 2.5.9 this was hard-wired into useCodex, so the confirm toggle above
    * silently did nothing on a cloud model (David 2026-07-24). Same safe default,
    * but now it is a real switch the user can see and turn off.
+   *
+   * G15a (2026-08-07): governs BOTH surfaces. Agent mode ran the same exec
+   * tools on the same cloud model unattended while the Code tab confirmed
+   * them; one policy now, riding on top of Agent's per-tool permission levels.
    */
   codexCloudConfirmShell: boolean
   /**

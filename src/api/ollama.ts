@@ -6,7 +6,26 @@ export async function listModels(): Promise<OllamaModel[]> {
   const res = await localFetch(ollamaUrl("/tags"))
   if (!res.ok) throw new Error("Failed to fetch models")
   const data = await res.json()
-  return (data.models || []).map((m: any) => ({ ...m, type: "text" as const }))
+  return (data.models || []).map((m: any) => ({
+    ...m,
+    type: "text" as const,
+    // /api/tags states this per model. Without the mapping the field arrives as
+    // `capabilities` and nothing ever looks at it, so every Ollama model
+    // reached the picker and resolveToolSupport with `supportsTools:
+    // undefined` and fell through to the family-name list in
+    // model-compatibility. A completion-only build whose name merely contains
+    // a known family then got a wrench in the picker and a `tools` payload it
+    // cannot accept.
+    //
+    // THIS is the path the app uses for Ollama: useModels calls this function
+    // directly (useModels.ts:168). OllamaProvider.listModels carries the same
+    // mapping, but nothing routes Ollama through the provider class, which is
+    // why fixing only there changed nothing on the real build.
+    //
+    // Absent field stays undefined, never false: no answer must not read as a
+    // denial, or an older Ollama would push every model onto the hermes path.
+    supportsTools: Array.isArray(m.capabilities) ? m.capabilities.includes("tools") : undefined,
+  }))
 }
 
 export async function showModel(name: string) {

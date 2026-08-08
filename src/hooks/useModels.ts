@@ -121,6 +121,17 @@ export function useModels() {
                 name: pm.id, model: pm.id, size: 0, digest: '', modified_at: '',
                 details: { parent_model: '', format: '', family: '', families: [], parameter_size: '', quantization_level: '' },
                 type: 'text' as const, provider: 'ollama', providerName: 'Ollama',
+                // This literal rebuilds the model field by field and used to
+                // stop one field short, while the branch right below it passes
+                // supportsTools straight through. So Ollama's own per-model
+                // tool answer died here, every model arrived with `undefined`,
+                // the picker read that as "not false" and drew a wrench on a
+                // completion-only model, and resolveToolSupport fell through to
+                // the family-name list. Caught on the installed build
+                // 2026-08-06, after two fixes further upstream changed nothing,
+                // because `hasOllamaModels` is true by the time the api/ollama
+                // path below would have run.
+                contextLength: pm.contextLength, supportsTools: pm.supportsTools,
               }
             }
             const prefixedName = prefixModelName(pm.provider, pm.id)

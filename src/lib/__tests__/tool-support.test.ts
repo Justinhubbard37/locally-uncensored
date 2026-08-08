@@ -14,7 +14,7 @@ vi.stubGlobal('localStorage', {
 // Drive the reactive cache through its real API so the precedence under test
 // is the one the app runs.
 import { markToolsUnsupported, resetToolCapabilityCache } from '../../api/tool-capability'
-import { resolveToolSupport, canUseTools, toolStrategyFor } from '../tool-support'
+import { resolveToolSupport, canUseTools, toolStrategyFor, applyLiveCapabilities } from '../tool-support'
 
 beforeEach(() => {
   store.clear()
@@ -125,5 +125,49 @@ describe('unrestricted models follow the server, no app update needed', () => {
     expect(resolveToolSupport({ name: UNRESTRICTED[0], supportsTools: true })).toBe('none')
     resetToolCapabilityCache()
     expect(resolveToolSupport({ name: UNRESTRICTED[0], supportsTools: true })).toBe('native')
+  })
+})
+
+// ── G32 (R20-Mac wire proof 2026-08-07) ───────────────────────────────
+//
+// LM Studio and every other local OpenAI-compatible server share providerId
+// 'openai' with the real cloud presets. The Agent surface used to route the
+// whole providerId to native before this resolution ever ran, so a local
+// model whose server declared it tool-less still got a `tools` payload. Now
+// the declared flag reaches this resolution for every provider; these cases
+// pin down what it must answer.
+describe('G32: a local openai-compatible server that says no tools gets the prompt transport', () => {
+  it('LM Studio declaring no tool_use resolves to hermes_xml, and the model stays usable', () => {
+    expect(toolStrategyFor({ name: 'openai::qwen2.5-0.5b-instruct', supportsTools: false })).toBe('hermes_xml')
+    expect(canUseTools({ name: 'openai::qwen2.5-0.5b-instruct', supportsTools: false })).toBe(true)
+  })
+
+  it('NEGATIVE CONTROL: genuine cloud models stay native', () => {
+    // Cloud listings declare true or say nothing; neither may downgrade.
+    expect(toolStrategyFor({ name: 'anthropic::claude-sonnet-4-20250514' })).toBe('native')
+    expect(toolStrategyFor({ name: 'openai::gpt-4o' })).toBe('native')
+    expect(toolStrategyFor({ name: 'lu-cloud::qwen3-32b', supportsTools: true })).toBe('native')
+  })
+})
+
+describe('applyLiveCapabilities (G26, R18 witness 2026-08-07)', () => {
+  it('R18: family heuristic says native, the template has no tools, run degrades to the prompt transport', () => {
+    // hf.co/DevQuasar/huihui-ai.Qwen3-4B-abliterated passes the qwen3 family
+    // check but its chat template cannot parse tools; Ollama refuses at chat
+    // time. /api/show already knows, so the run never burns the native attempt.
+    expect(applyLiveCapabilities('native', ['completion', 'thinking'])).toBe('hermes_xml')
+  })
+
+  it('NEGATIVE CONTROL: a template WITH tools keeps native', () => {
+    expect(applyLiveCapabilities('native', ['completion', 'tools'])).toBe('native')
+  })
+
+  it('NEGATIVE CONTROL: a failed probe (empty list) changes nothing, optimistic as before', () => {
+    expect(applyLiveCapabilities('native', [])).toBe('native')
+  })
+
+  it('a non-native plan is never touched', () => {
+    expect(applyLiveCapabilities('hermes_xml', ['completion', 'tools'])).toBe('hermes_xml')
+    expect(applyLiveCapabilities('template_fix', [])).toBe('template_fix')
   })
 })

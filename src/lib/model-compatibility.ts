@@ -15,10 +15,11 @@ import type { ProviderId } from '../api/providers/types'
  * `lu-cloud` used to be missing here, and the name heuristic then decided per
  * model: families that happen to be listed in AGENT_COMPATIBLE (qwen3-coder,
  * hermes, …) resolved to 'native', everything else — Kimi K2.6, MiniMax,
- * DeepSeek-V4 — fell through to 'hermes_xml'. The Hermes branch calls
- * chatNonStreaming(), which posts to the LOCAL Ollama endpoint, so a cloud
- * model that isn't installed locally answered "Chat API error: 404" and the
- * whole Chat-tab agent run died (live repro 2026-07-27, Kimi K2.6 + Cloud).
+ * DeepSeek-V4 — fell through to 'hermes_xml'. The Hermes branch back then
+ * called chatNonStreaming(), which posted to the LOCAL Ollama endpoint, so a
+ * cloud model that isn't installed locally answered "Chat API error: 404" and
+ * the whole Chat-tab agent run died (live repro 2026-07-27, Kimi K2.6 +
+ * Cloud). Hermes turns stream through the provider abstraction today.
  * Cloud tool capability is server-driven: the picker hides tool-less models
  * (`supports_tools` from /api/inference/v1/models) and the proxy rejects them
  * with a clean 400, so 'native' is both correct and safe here.

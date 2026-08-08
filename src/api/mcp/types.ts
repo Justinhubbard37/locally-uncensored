@@ -34,6 +34,11 @@ export interface JSONSchemaProp {
   enum?: string[]
   items?: JSONSchemaProp
   properties?: Record<string, JSONSchemaProp>
+  /** Required keys of a NESTED object schema. The type carried `properties` but
+   *  not this, so a nested object could declare its fields and never mark any
+   *  of them mandatory. `todo_write` (2026-08-05) is the first tool to need it:
+   *  every plan item must have both a content and a status. */
+  required?: string[]
   additionalProperties?: boolean | JSONSchemaProp
   default?: unknown
   minimum?: number

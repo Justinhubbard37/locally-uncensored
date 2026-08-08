@@ -6,8 +6,7 @@ import { useAgentModeStore } from '../../stores/agentModeStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useModelStore } from '../../stores/modelStore'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { isAgentCompatible } from '../../lib/model-compatibility'
-import { getToolCapability } from '../../api/tool-capability'
+import { canUseTools } from '../../lib/tool-support'
 import { FEATURE_FLAGS } from '../../lib/constants'
 import { AgentWorkspaceDialog } from './AgentWorkspaceDialog'
 import type { AgentWorkspace } from '../../types/agent-workspace'
@@ -31,19 +30,29 @@ export function AgentModeToggle() {
   if (!FEATURE_FLAGS.AGENT_MODE || !activeConversationId) return null
 
   const isActive = agentModeActive[activeConversationId] ?? false
-  // Tool-capability precedence, same order the dropdown icon uses so the toggle
-  // and the marker never disagree:
+  // ONE source of truth for "can this model drive tools", the same function the
+  // run itself asks. This toggle used to re-derive it, and the copy went stale:
   //   1. a run PROVED it rejects tools (reactive cache, cloud 405 / ollama
   //      "does not support tools") → disabled, even if the name looks capable
-  //   2. server-declared capability (LU Cloud /models → supports_tools): false
-  //      keeps Agent disabled up front so the user never eats a mid-run 400 on
-  //      the cloud models without function calling (Hermes 3, Euryale, …)
-  //   3. otherwise the family name heuristic, unchanged for every local model
+  //   2. server-declared capability (supports_tools): for a CLOUD model false
+  //      still means disabled up front, so nobody eats a mid-run 400 on the
+  //      models without function calling (Hermes 3, Euryale, …)
+  //   3. otherwise the family name heuristic
+  //
+  // ⚠️ The old copy of this stopped at "serverTools === false → disabled" and
+  // that is wrong for a LOCAL model. `resolveToolSupport` maps exactly that
+  // case to 'hermes', because the prompt transport drives those models fine.
+  // Measured on the installed build 2026-08-06: with
+  // hf.co/DevQuasar/huihui-ai.Qwen3-4B-abliterated-GGUF, which Ollama reports
+  // as `capabilities: ['completion']`, the Coding surface ran 51 tool steps
+  // while this toggle sat greyed out saying "not agent-compatible". Same
+  // model, same backend, same schema, opposite verdicts on the two surfaces.
+  // The picker badge was corrected the same day (three states, not two) and
+  // this toggle was not brought along.
   const serverTools = activeModelMeta && 'supportsTools' in activeModelMeta ? activeModelMeta.supportsTools : undefined
-  const isCompatible =
-    (activeModel && getToolCapability(activeModel) === 'unsupported') ? false
-    : serverTools !== undefined ? serverTools
-    : (activeModel ? isAgentCompatible(activeModel) : false)
+  const isCompatible = activeModel
+    ? canUseTools({ name: activeModel, supportsTools: serverTools })
+    : false
 
   const conversation = conversations.find((c) => c.id === activeConversationId)
   const hasMessages = (conversation?.messages?.length ?? 0) > 0

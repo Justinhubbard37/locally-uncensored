@@ -9,7 +9,7 @@ import { useModelStore } from '../stores/modelStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useMemoryStore } from '../stores/memoryStore'
 import { getOllamaTools, executeAgentTool } from '../api/tool-registry'
-import { chatNonStreaming } from '../api/agents'
+import { streamProviderTurn } from './provider-stream'
 import { buildHermesToolPrompt, parseHermesToolCalls, stripToolCallTags, hasToolCallTags } from '../api/hermes-tool-calling'
 import { resolveToolCallingStrategy } from './agent-strategy'
 import type { AgentWorkflow, WorkflowStep, StepResult, WorkflowEngineCallbacks } from '../types/agent-workflows'
@@ -222,20 +222,20 @@ export class WorkflowEngine {
     let output = ''
 
     if (step.allowedTools && step.allowedTools.length === 0) {
-      // No tools — pure prompt
-      if (strategy === 'hermes_xml') {
-        output = await chatNonStreaming(modelToUse, messages.map(m => ({ role: m.role, content: m.content })))
-      } else {
-        const stream = provider.chatStream(modelToUse, messages, {
-          temperature: settings.temperature,
-          // Bug AA v2.5.0 — keep num_ctx override for workflow steps too.
-          contextWindow: settings.contextWindowOverride || undefined,
-          signal: this.abortController.signal,
-        })
-        for await (const chunk of stream) {
-          if (chunk.content) output += chunk.content
-          if (chunk.done) break
-        }
+      // No tools — pure prompt. One transport for every strategy: without a
+      // tool contract the hermes and native paths send the same plain chat,
+      // and the provider abstraction routes it to the right server. The old
+      // hermes branch here posted to Ollama unconditionally (G32b), which
+      // 404s the moment the model lives on LM Studio.
+      const stream = provider.chatStream(modelToUse, messages, {
+        temperature: settings.temperature,
+        // Bug AA v2.5.0 — keep num_ctx override for workflow steps too.
+        contextWindow: settings.contextWindowOverride || undefined,
+        signal: this.abortController.signal,
+      })
+      for await (const chunk of stream) {
+        if (chunk.content) output += chunk.content
+        if (chunk.done) break
       }
     } else {
       // With tools
@@ -264,7 +264,21 @@ export class WorkflowEngine {
           allowedTools.map(t => ({ name: t.function.name, description: t.function.description, parameters: t.function.parameters as any, permission: 'auto' as const }))
         )
         const hermesMessages = [{ role: 'system' as const, content: hermesSystem }, ...messages]
-        const rawContent = await chatNonStreaming(modelToUse, hermesMessages.map(m => ({ role: m.role, content: m.content })))
+        // G32b: through the provider, not Ollama's /api/chat. hermes_xml is
+        // reachable for LM Studio and friends now (a server-declared
+        // tool-less model lands here), and those models are not installed in
+        // Ollama, so the old chatNonStreaming call answered 404.
+        const hermesTurn = await streamProviderTurn(
+          provider,
+          modelToUse,
+          hermesMessages.map(m => ({ role: m.role, content: m.content })),
+          {
+            temperature: settings.temperature,
+            contextWindow: settings.contextWindowOverride || undefined,
+            signal: this.abortController.signal,
+          },
+        )
+        const rawContent = hermesTurn.content
 
         if (hasToolCallTags(rawContent)) {
           const toolCalls = parseHermesToolCalls(rawContent)

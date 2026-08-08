@@ -118,7 +118,24 @@ const TOOL_GROUPS: ToolGroup[] = [
 // a tool result reveals the user really wanted a file read). Keeping
 // `get_current_time` here means the agent NEVER has to fall back to web
 // for a trivial date question just because the keyword list missed.
-export const ALWAYS_INCLUDE = ['file_read', 'file_write', 'file_edit', 'get_current_time']
+// `todo_write` is here rather than in a keyword group on purpose: the moment a
+// task turns out to need a plan is usually mid-run, several tool results after
+// the prompt that routed the catalog. Keyword-gating it would mean the agent
+// can only plan when the user happened to say "plan".
+export const ALWAYS_INCLUDE = ['file_read', 'file_write', 'file_edit', 'get_current_time', 'todo_write']
+
+/**
+ * The tool cap Small-Model Mode sends to a 3B-8B model.
+ *
+ * Derived, not typed: ALWAYS_INCLUDE is a floor the cap cannot cut into, so a
+ * fixed number silently shrinks the router every time that set grows. It was
+ * 6 against 4 always-included tools, which left the semantic router 2 slots.
+ * Adding todo_write (2026-08-05) cut that to 1 without anyone touching the
+ * cap, and a coding turn with exactly one routed tool loses file_list AND
+ * file_search AND shell_execute. Two free slots is the number the research
+ * behind this mode was tuned on, so that is what is preserved.
+ */
+export const SMALL_MODEL_MAX_TOOLS = ALWAYS_INCLUDE.length + 2
 
 /** Tool count at which embedding-based routing becomes worth the round trip. */
 export const EMBEDDING_ROUTING_THRESHOLD = 15
