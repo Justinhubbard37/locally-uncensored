@@ -26,6 +26,10 @@ export interface CloudModel {
   lora?: boolean
   /** Lipsync base input: still portrait ('image') or existing clip ('video'). */
   lipsync_source?: 'image' | 'video'
+  /** Music: the endpoint has a real lyrics input (server truth, 2026-08-08:
+   *  only ace-step-1.5). The lyrics box is offered only when set; the other
+   *  music endpoints write their own lyrics from the prompt. */
+  lyrics?: boolean
   /** Whether the hosted endpoint honours guidance_scale (CFG). */
   cfg?: boolean
   /** Whether the hosted endpoint honours negative_prompt. */
@@ -79,7 +83,7 @@ export const CLOUD_MODEL_SEED: CloudModel[] = [
   { id: 'qwen3-tts-clone', label: 'Qwen3 TTS Voice Clone', kind: 'audio', ops: ['tts'] },
   { id: 'qwen3-tts-design', label: 'Qwen3 TTS Voice Design', kind: 'audio', ops: ['tts'] },
   { id: 'ace-step', label: 'ACE-Step (fast)', kind: 'audio', ops: ['music'], credits: { base: 1200, per_s: 20 } },
-  { id: 'ace-step-1.5', label: 'ACE-Step 1.5', kind: 'audio', ops: ['music'], credits: { base: 1800, per_s: 30 } },
+  { id: 'ace-step-1.5', label: 'ACE-Step 1.5', kind: 'audio', ops: ['music'], lyrics: true, credits: { base: 1800, per_s: 30 } },
   { id: 'sonilo-music', label: 'Sonilo Music', kind: 'audio', ops: ['music'], credits: { base: 15000, per_s: 250 } },
   { id: 'wan-2.2-spicy-extend', label: 'Wan 2.2 Spicy Extend', kind: 'video', ops: ['extend'], t2v: false, i2v: false },
   { id: 'ltx-2-extend', label: 'LTX-2 Extend', kind: 'video', ops: ['extend'], t2v: false, i2v: false },
