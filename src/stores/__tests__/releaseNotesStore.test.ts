@@ -39,6 +39,28 @@ describe('the notes table', () => {
     const versions = RELEASE_NOTES.map((n) => n.version)
     expect(new Set(versions).size).toBe(versions.length)
   })
+
+  it('2.6.3 carries full details with a Local and a Cloud section', () => {
+    const note = releaseNoteFor('2.6.3')
+    const titles = (note?.details ?? []).map((s) => s.title)
+    expect(titles).toContain('Local')
+    expect(titles).toContain('Cloud')
+    for (const s of note?.details ?? []) {
+      expect(s.items.length, `${s.title}: items`).toBeGreaterThanOrEqual(3)
+      for (const i of s.items) expect(i.trim().length, `${s.title}: empty item`).toBeGreaterThan(0)
+    }
+  })
+
+  it('the modal renders the expander and the sections', () => {
+    // Source guard, same pattern as the settings guards: the sheet must offer
+    // Show all changes and map note.details, or the table above is dead data.
+    const { readFileSync } = require('node:fs')
+    const { resolve } = require('node:path')
+    const src = readFileSync(resolve(__dirname, '../../components/release/ReleaseNotesModal.tsx'), 'utf8')
+    expect(src).toContain('Show all changes')
+    expect(src).toContain('note.details.map')
+    expect(src).toContain('section.items.map')
+  })
 })
 
 describe('shouldShowReleaseNotes', () => {
