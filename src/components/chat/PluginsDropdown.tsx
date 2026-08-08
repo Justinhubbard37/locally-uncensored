@@ -1,8 +1,10 @@
 import { useState } from 'react'
-import { Plug, ChevronDown, Bone, User, Wrench } from 'lucide-react'
+import { Plug, ChevronDown, Bone, User, Users, Wrench } from 'lucide-react'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useChatStore } from '../../stores/chatStore'
+import { useModelStore } from '../../stores/modelStore'
 import { useToolSupport } from '../../hooks/useToolSupport'
+import { GROUP_CHAT_MAX, isGroupChat } from '../../lib/group-chat'
 import type { CavemanMode } from '../../types/settings'
 
 const CAVEMAN_MODES: { value: CavemanMode; label: string; desc: string }[] = [
@@ -18,6 +20,7 @@ export function PluginsDropdown({ openUpward = false }: { openUpward?: boolean }
   const [open, setOpen] = useState(false)
   const [cavemanOpen, setCavemanOpen] = useState(false)
   const [personaOpen, setPersonaOpen] = useState(false)
+  const [groupOpen, setGroupOpen] = useState(false)
   const { getActivePersona, setActivePersona } = useSettingsStore()
   const activePersona = getActivePersona()
   const allPersonas = useSettingsStore((s) => s.personas)
@@ -48,6 +51,13 @@ export function PluginsDropdown({ openUpward = false }: { openUpward?: boolean }
   // chat" bug David flagged.
   const personaEnabledOnChat = activeConv?.personaEnabled === true
 
+  // Group chat v1 (Nurse KillJoy): the selection lives on the conversation,
+  // exactly like the persona flag, so every chat keeps its own line-up.
+  const setGroupModels = useChatStore((s) => s.setGroupModels)
+  const models = useModelStore((s) => s.models)
+  const groupModels = activeConv?.groupModels ?? []
+  const isGroupActive = isGroupChat(activeConv?.groupModels)
+
   const isCavemanActive = cavemanMode && cavemanMode !== 'off'
   const isPersonaActive = activePersona && activePersona.id !== 'unrestricted' && personaEnabledOnChat
   const currentCaveman = CAVEMAN_MODES.find((m) => m.value === (cavemanMode || 'off'))
@@ -60,11 +70,12 @@ export function PluginsDropdown({ openUpward = false }: { openUpward?: boolean }
       >
         <Plug size={10} />
         <span>Plugins</span>
-        {(isCavemanActive || isPersonaActive || chatToolsEnabled) && (
+        {(isCavemanActive || isPersonaActive || chatToolsEnabled || isGroupActive) && (
           <div className="flex gap-0.5">
             {chatToolsEnabled && <div className="w-1 h-1 rounded-full bg-blue-400" />}
             {isCavemanActive && <div className="w-1 h-1 rounded-full bg-amber-400" />}
             {isPersonaActive && <div className="w-1 h-1 rounded-full bg-green-400" />}
+            {isGroupActive && <div className="w-1 h-1 rounded-full bg-purple-400" />}
           </div>
         )}
         <ChevronDown size={8} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
@@ -215,6 +226,72 @@ export function PluginsDropdown({ openUpward = false }: { openUpward?: boolean }
                   })}
                 </div>
               )}
+            </div>
+
+            <div className="border-t border-gray-200 dark:border-white/[0.06] my-1" />
+
+            {/* ── Group chat (v1) ─────────────────────────── */}
+            <div className="px-2.5">
+              <button
+                onClick={() => { setGroupOpen(!groupOpen); setCavemanOpen(false); setPersonaOpen(false) }}
+                className="w-full flex items-center justify-between py-1.5"
+              >
+                <div className="flex items-center gap-1.5">
+                  <Users size={10} className={isGroupActive ? 'text-purple-400' : 'text-gray-400'} />
+                  <span className="text-[0.6rem] font-medium text-gray-600 dark:text-gray-300">Group chat</span>
+                  <span className={`text-[0.55rem] ${isGroupActive ? 'text-purple-400' : 'text-gray-500'}`}>
+                    {isGroupActive ? `${groupModels.length} models` : 'Off'}
+                  </span>
+                </div>
+                <ChevronDown size={9} className={`text-gray-500 transition-transform ${groupOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {groupOpen && (activeConvId ? (
+                <div className="pb-1.5 space-y-0.5 max-h-[180px] overflow-y-auto scrollbar-thin">
+                  <p className="px-2 pb-0.5 text-[0.5rem] leading-snug text-gray-400">
+                    Pick 2 to {GROUP_CHAT_MAX} models. They answer in turn on every message, and each sees what the others said.
+                  </p>
+                  {models.map((m) => {
+                    const on = groupModels.includes(m.name)
+                    const full = !on && groupModels.length >= GROUP_CHAT_MAX
+                    return (
+                      <button
+                        key={m.name}
+                        disabled={full}
+                        onClick={() =>
+                          setGroupModels(
+                            activeConvId,
+                            on ? groupModels.filter((x) => x !== m.name) : [...groupModels, m.name],
+                          )
+                        }
+                        className={`w-full flex items-center gap-1.5 px-2 py-1 rounded text-left transition-colors ${
+                          on
+                            ? 'bg-purple-500/10 text-purple-600 dark:text-purple-400'
+                            : full
+                              ? 'text-gray-400/50 cursor-default'
+                              : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-white/[0.04] hover:text-gray-700 dark:hover:text-gray-300'
+                        }`}
+                      >
+                        {on && <div className="w-1 h-1 rounded-full bg-purple-400 shrink-0" />}
+                        <span className="text-[0.55rem] font-medium truncate">{m.name}</span>
+                      </button>
+                    )
+                  })}
+                  {groupModels.length === 1 && (
+                    <p className="px-2 text-[0.5rem] text-gray-400">One more model turns this into a group.</p>
+                  )}
+                  {groupModels.length > 0 && (
+                    <button
+                      onClick={() => setGroupModels(activeConvId, [])}
+                      className="w-full px-2 py-1 rounded text-left text-[0.55rem] text-gray-500 hover:bg-gray-50 dark:hover:bg-white/[0.04] hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+                    >
+                      Turn off
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <p className="pb-1.5 px-2 text-[0.5rem] text-gray-400">Open a chat first, the group lives on the conversation.</p>
+              ))}
             </div>
 
           </div>

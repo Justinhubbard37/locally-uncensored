@@ -27,6 +27,7 @@ import { isThinkingCompatible, isPlainTextPlanner } from "../lib/model-compatibi
 import { stripNonCanonicalTags, finalStripThinkingTags } from "../lib/thinking-stripper"
 import { isMultimodalUnsupportedError, MULTIMODAL_UNSUPPORTED_MESSAGE } from "../lib/ollama-errors"
 import type { ImageAttachment, Message } from "../types/chat"
+import { isGroupChat, groupSystemPrompt, groupHistory } from "../lib/group-chat"
 import { log } from "../lib/logger"
 
 /**
@@ -47,6 +48,133 @@ function lastMediaFromBlocks(m: Message): { kind: 'image' | 'video'; args?: Reco
     }
   }
   return null
+}
+
+/** One model's turn in a group round. Deliberately the PLAIN conversation
+ *  path only: no RAG, no memory injection, no chat-tools, no caveman. The
+ *  group is talk between models; every knob it skips belongs to the
+ *  single-model paths and their tests. */
+async function runGroupTurn(convId: string, model: string, allModels: string[], abort: AbortController) {
+  const { settings } = useSettingsStore.getState()
+  const conv = useChatStore.getState().conversations.find((c) => c.id === convId)
+  if (!conv) return
+
+  const assistantMessage: Message = {
+    id: uuid(),
+    role: 'assistant',
+    content: '',
+    thinking: '',
+    modelId: model,
+    timestamp: Date.now(),
+  }
+  useChatStore.getState().addMessage(convId, assistantMessage)
+
+  const personaPrompt = conv.personaEnabled === true ? conv.systemPrompt : ''
+  const messages = [
+    { role: 'system' as const, content: groupSystemPrompt(model, allModels, personaPrompt) },
+    ...groupHistory(conv.messages, model),
+  ]
+
+  const providerId = getProviderIdFromModel(model)
+  const canThink = isThinkingCompatible(model)
+  const useThinking: boolean | undefined = canThink ? settings.thinkingEnabled === true : undefined
+  const keepThinking = useThinking === true
+
+  let contentAcc = ''
+  let thinkingAcc = ''
+  let inThink = false
+  let discardBuf = ''
+  let frameScheduled = false
+
+  try {
+    const { provider, modelId } = getProviderForModel(model)
+    let effectiveCtx: number | undefined = settings.contextWindowOverride || undefined
+    if (providerId === 'ollama') {
+      try {
+        effectiveCtx = effectiveContextWindow(await getModelContextCached(modelId), settings.contextWindowOverride)
+      } catch { /* keep override-or-undefined */ }
+    }
+
+    const stream = provider.chatStream(modelId, messages, {
+      temperature: settings.temperature,
+      topP: settings.topP,
+      topK: settings.topK,
+      maxTokens: settings.maxTokens || undefined,
+      contextWindow: effectiveCtx,
+      thinking: useThinking,
+      signal: abort.signal,
+    })
+
+    for await (const chunk of stream) {
+      if (abort.signal.aborted) break
+      if (chunk.thinking && keepThinking) thinkingAcc += chunk.thinking
+      if (chunk.content) {
+        for (const char of chunk.content) {
+          if (!inThink) {
+            contentAcc += char
+            if (contentAcc.endsWith('<think>')) {
+              contentAcc = contentAcc.slice(0, -7)
+              inThink = true
+            }
+          } else if (keepThinking) {
+            thinkingAcc += char
+            if (thinkingAcc.endsWith('</think>')) {
+              thinkingAcc = thinkingAcc.slice(0, -8)
+              inThink = false
+            }
+          } else {
+            discardBuf += char
+            if (discardBuf.endsWith('</think>')) {
+              discardBuf = ''
+              inThink = false
+            }
+          }
+        }
+      }
+      if ((chunk.content || (chunk.thinking && keepThinking)) && !frameScheduled) {
+        frameScheduled = true
+        requestAnimationFrame(() => {
+          useChatStore.getState().updateMessageContent(convId, assistantMessage.id, stripNonCanonicalTags(contentAcc))
+          if (keepThinking && thinkingAcc) {
+            useChatStore.getState().updateMessageThinking(convId, assistantMessage.id, thinkingAcc)
+          }
+          frameScheduled = false
+        })
+      }
+      if (chunk.done) {
+        contentAcc = finalStripThinkingTags(contentAcc, keepThinking)
+        useChatStore.getState().updateMessageContent(convId, assistantMessage.id, contentAcc)
+        if (keepThinking && thinkingAcc) {
+          useChatStore.getState().updateMessageThinking(convId, assistantMessage.id, thinkingAcc)
+        }
+        if (chunk.promptEvalCount || chunk.evalCount) {
+          const promptTokens = chunk.promptEvalCount || 0
+          const completionTokens = chunk.evalCount || 0
+          useChatStore.getState().updateMessageUsage(convId, assistantMessage.id, {
+            promptTokens,
+            completionTokens,
+            totalTokens: promptTokens + completionTokens,
+          })
+        }
+      }
+    }
+    if (!abort.signal.aborted && !contentAcc.trim()) {
+      useChatStore.getState().updateMessageContent(
+        convId,
+        assistantMessage.id,
+        `${model} didn't return a visible answer that time.`,
+      )
+    }
+  } catch (err) {
+    if ((err as Error).name !== 'AbortError') {
+      syncOllamaHealthFromError(err)
+      useChatStore.getState().updateMessageContent(
+        convId,
+        assistantMessage.id,
+        `Error from ${model}: ${(err as Error).message || 'Connection failed'}`,
+      )
+    }
+  }
 }
 
 export function useChat() {
@@ -76,6 +204,38 @@ export function useChat() {
    *  a closure over its own controller, so it still reaches it. */
   const stopOrphanRun = useCallback(() => {
     useGenerationStore.getState().abortConversation(useChatStore.getState().activeConversationId)
+  }, [])
+
+  /** One group round: the user's line goes in once, then every group model
+   *  answers in turn on the shared, attribution-tagged history. One abort
+   *  controller spans the whole round, so Stop ends the round, not just the
+   *  model that happened to be talking. */
+  const runGroupRound = useCallback(async (convId: string, content: string, images: ImageAttachment[] | undefined, models: string[]) => {
+    useChatStore.getState().addMessage(convId, {
+      id: uuid(),
+      role: 'user',
+      content,
+      images,
+      timestamp: Date.now(),
+    })
+
+    const abort = new AbortController()
+    abortRef.current = abort
+    useGenerationStore.getState().registerAborter(convId, () => abort.abort())
+    setIsGenerating(true)
+    useGenerationStore.getState().setGenerating(convId, true)
+    try {
+      for (const model of models) {
+        if (abort.signal.aborted) break
+        await runGroupTurn(convId, model, models, abort)
+      }
+    } finally {
+      setIsGenerating(false)
+      useGenerationStore.getState().setGenerating(convId, false)
+      useGenerationStore.getState().clearAborter(convId)
+      abortRef.current = null
+      void flushChatPersist()
+    }
   }, [])
 
   const sendMessage = useCallback(async (content: string, images?: ImageAttachment[]) => {
@@ -118,6 +278,17 @@ export function useChat() {
         })
       }
       return agentChat.sendAgentMessage(content, images)
+    }
+
+    // Group chat v1 (Nurse KillJoy): two to four models answer in turn in
+    // ONE conversation. Runs BEFORE the chat-tools router on purpose: a
+    // group round is a conversation, never a tool run, and the agent path
+    // has already delegated above.
+    {
+      const groupConv = store.conversations.find((c) => c.id === store.activeConversationId)
+      if (groupConv && isGroupChat(groupConv.groupModels)) {
+        return runGroupRound(groupConv.id, content, images, groupConv.groupModels)
+      }
     }
 
     // Chat-Tools routing (David 2026-06-11): web/file/image/video should work

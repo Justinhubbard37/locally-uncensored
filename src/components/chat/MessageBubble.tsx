@@ -207,6 +207,11 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
       </div>
 
       <div className="max-w-[80%] space-y-0.5">
+        {/* Group chat: name the speaker. Only group turns carry modelId, so
+            single-model chats render exactly as before. */}
+        {!isUser && message.modelId && (
+          <div className="text-[0.55rem] font-mono text-gray-400 dark:text-gray-500 pl-1">{message.modelId}</div>
+        )}
         {/* Thinking block — auto-expands while this (last) turn is still
             producing so the reasoning streams LIVE, then collapses (David 2026-06-04). */}
         {!isUser && message.thinking && (
