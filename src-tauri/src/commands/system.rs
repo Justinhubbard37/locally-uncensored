@@ -91,6 +91,52 @@ fn screenshot_blocking() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({ "image": b64, "format": "png", "encoding": "base64" }))
 }
 
+/// How long a screen capture may take before we stop waiting for it.
+///
+/// G28 (Mac, R01a, 2026-08-07): the agent's `screenshot` step took 138
+/// SECONDS. macOS shows its Screen Recording consent dialog and holds
+/// `/usr/sbin/screencapture` until somebody answers it, and `.status()` waits
+/// forever by definition. An interactive agent run cannot stand still for two
+/// minutes on a picture of the screen. 20 s is far above a real capture (tens
+/// of milliseconds, seconds at worst on a huge display) and far below the
+/// wait a blocked consent dialog imposes.
+const SCREENSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Run a capture command with a deadline. `Ok(())` only when it exited zero in
+/// time; the process is killed on timeout so no orphan sits on the display
+/// server. Exported for the unit test, which is the only honest way to prove
+/// the deadline fires without a consent dialog to hand.
+pub(crate) fn run_capture_bounded(
+    mut cmd: std::process::Command,
+    max: std::time::Duration,
+    timeout_msg: &str,
+) -> Result<(), String> {
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Screenshot failed: {}", e))?;
+    let deadline = std::time::Instant::now() + max;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err("Screenshot failed: the capture command exited with an error.".to_string())
+                }
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(timeout_msg.to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(e) => return Err(format!("Screenshot failed: {}", e)),
+        }
+    }
+}
+
 /// Quote a path for a PowerShell SINGLE-quoted string literal: only `'` is
 /// special there, and it escapes by doubling.
 ///
@@ -123,19 +169,21 @@ fn capture_screen_to(tmp: &std::path::Path) -> Result<(), String> {
         ps_single_quoted(&tmp.to_string_lossy())
     );
 
-    let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .output()
-        .map_err(|e| format!("Screenshot failed: {}", e))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "Screenshot failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(())
+    // Same deadline as macOS (G28). PowerShell itself can wedge on a locked
+    // session or a stalled GDI call, and an agent run must not stand still
+    // for it either. stderr is dropped in exchange for the bound; the
+    // actionable half was always the exit status.
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+        .creation_flags(0x08000000); // CREATE_NO_WINDOW
+    run_capture_bounded(
+        cmd,
+        SCREENSHOT_TIMEOUT,
+        &format!(
+            "Screenshot timed out after {}s. The screen may be locked or a remote session has no display attached.",
+            SCREENSHOT_TIMEOUT.as_secs()
+        ),
+    )
 }
 
 // macOS: the native `screencapture` CLI. `-x` = silent (no shutter sound),
@@ -145,13 +193,22 @@ fn capture_screen_to(tmp: &std::path::Path) -> Result<(), String> {
 // generic failure.
 #[cfg(target_os = "macos")]
 fn capture_screen_to(tmp: &std::path::Path) -> Result<(), String> {
-    let status = std::process::Command::new("/usr/sbin/screencapture")
-        .args(["-x", "-t", "png"])
-        .arg(tmp)
-        .status()
-        .map_err(|e| format!("Screenshot failed: {}", e))?;
-    if !status.success() || !tmp.exists() {
-        return Err("Screenshot failed — grant LU the Screen Recording permission in System Settings ▸ Privacy & Security ▸ Screen Recording, then try again.".to_string());
+    const PERMISSION_HINT: &str = "grant LU the Screen Recording permission in System Settings ▸ Privacy & Security ▸ Screen Recording, then try again.";
+    let mut cmd = std::process::Command::new("/usr/sbin/screencapture");
+    cmd.args(["-x", "-t", "png"]).arg(tmp);
+    // A timeout here almost always means the consent dialog is up and nobody
+    // has answered it, so say that rather than blaming the capture.
+    run_capture_bounded(
+        cmd,
+        SCREENSHOT_TIMEOUT,
+        &format!(
+            "Screenshot timed out after {}s, macOS is most likely waiting for a Screen Recording permission dialog. Answer it, or {}",
+            SCREENSHOT_TIMEOUT.as_secs(),
+            PERMISSION_HINT
+        ),
+    )?;
+    if !tmp.exists() {
+        return Err(format!("Screenshot failed, no image was written. Please {}", PERMISSION_HINT));
     }
     Ok(())
 }
@@ -424,4 +481,58 @@ mod tests {
         );
     }
 
+    /// G28 (Mac, R01a 2026-08-07): the screenshot step took 138 SECONDS
+    /// because macOS held `screencapture` on its consent dialog and the old
+    /// code waited with `.status()`, which has no deadline at all. These use
+    /// `/bin/sleep` as a stand-in for a blocked capture, because a real
+    /// consent dialog cannot be summoned from a unit test.
+    #[test]
+    #[cfg(unix)]
+    fn a_blocked_capture_is_killed_at_the_deadline() {
+        let mut cmd = std::process::Command::new("/bin/sleep");
+        cmd.arg("30");
+        let started = std::time::Instant::now();
+        let err = run_capture_bounded(
+            cmd,
+            std::time::Duration::from_millis(300),
+            "Screenshot timed out, the consent dialog is probably up.",
+        )
+        .unwrap_err();
+        assert!(err.contains("timed out"), "message must say what happened: {err}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "the deadline did not fire, waited {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// NEGATIVE CONTROL: a capture that finishes normally is untouched by the
+    /// deadline and must not be reported as a failure.
+    #[test]
+    #[cfg(unix)]
+    fn a_normal_capture_is_not_cut_short() {
+        let mut ok = std::process::Command::new("/usr/bin/true");
+        ok.stdout(std::process::Stdio::null());
+        assert!(run_capture_bounded(ok, std::time::Duration::from_secs(5), "unused").is_ok());
+    }
+
+    /// NEGATIVE CONTROL: a real failure still reads as a failure, not as a
+    /// timeout, so the permission hint is not blamed for the wrong thing.
+    #[test]
+    #[cfg(unix)]
+    fn a_failing_capture_is_reported_as_a_failure() {
+        let mut bad = std::process::Command::new("/usr/bin/false");
+        bad.stdout(std::process::Stdio::null());
+        let err = run_capture_bounded(bad, std::time::Duration::from_secs(5), "TIMEOUT-MARKER").unwrap_err();
+        assert!(!err.contains("TIMEOUT-MARKER"), "a non-zero exit is not a timeout: {err}");
+        assert!(err.contains("Screenshot failed"), "{err}");
+    }
+
+    /// The deadline shipped to users has to be generous enough for a real
+    /// capture on a big display and short enough to not stall an agent run.
+    #[test]
+    fn the_shipped_deadline_is_sane() {
+        assert!(SCREENSHOT_TIMEOUT >= std::time::Duration::from_secs(5));
+        assert!(SCREENSHOT_TIMEOUT <= std::time::Duration::from_secs(60));
+    }
 }
