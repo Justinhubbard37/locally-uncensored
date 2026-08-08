@@ -27,7 +27,7 @@ reported since 2.6.2.
   JIT-loaded below its maximum stops dying on server-truncated prompts.
 - **A generated image fed back to a text-only model no longer ends the run.**
   The loop swaps its own attachment for a text note and carries on.
-- **Long chats stopped eating memory.** Streaming no longer rewrites the
+- **Long chats got a deep memory fix.** Streaming no longer rewrites the
   whole history once per animation frame, and generated images survive a
   restart instead of pointing at dead blob URLs.
 - **The credits meter tells the truth** about video and training budgets, and
@@ -40,6 +40,10 @@ reported since 2.6.2.
 
 ### Added
 
+- **Personal API keys for the cloud plan.** Mint up to five keys in the
+  account settings on lu-labs.ai and point Aider or any OpenAI-compatible
+  tool at the inference endpoint; a key spends plan tokens only and can
+  never read or change the account.
 - **Group chat.** Pick two to four models in the Plugins dropdown and they
   answer in turn inside one conversation, each seeing what the others said,
   every answer labeled with its model.
@@ -52,7 +56,7 @@ reported since 2.6.2.
 - **Your own lyrics really get sung.** The lyrics box only appears on the
   music model that accepts lyrics, a how-to next to it explains section
   markers, and bare lines are wrapped so they are sung instead of hummed.
-- **Character training works on RTX 50 cards.** The trainer routes PyTorch
+- **Character training supports RTX 50 cards.** The trainer routes PyTorch
   wheels by GPU generation (Blackwell gets cu128), and every run starts with
   a preflight that names a broken environment in plain words instead of
   dying mid-training with a raw CUDA error.
