@@ -3,8 +3,9 @@
 // animated stage on top, framer-motion in and out, backdrop and X both close.
 // Dismissing stamps the version, so it never comes back for this build.
 
+import { useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { X, Sparkles } from 'lucide-react'
+import { X, Sparkles, ChevronDown } from 'lucide-react'
 import { version as currentVersion } from '../../../package.json'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useReleaseNotesStore, shouldShowReleaseNotes } from '../../stores/releaseNotesStore'
@@ -14,6 +15,7 @@ export function ReleaseNotesModal() {
   const lastNotesVersion = useReleaseNotesStore((s) => s.lastNotesVersion)
   const markNotesSeen = useReleaseNotesStore((s) => s.markNotesSeen)
   const onboardingDone = useSettingsStore((s) => s.settings.onboardingDone)
+  const [expanded, setExpanded] = useState(false)
 
   const open = shouldShowReleaseNotes(currentVersion, lastNotesVersion, onboardingDone)
   const note = releaseNoteFor(currentVersion)
@@ -49,7 +51,7 @@ export function ReleaseNotesModal() {
               </button>
             </div>
 
-            <div className="p-4 space-y-3">
+            <div className="p-4 space-y-3 max-h-[60vh] overflow-y-auto">
               <div className="flex items-center gap-2">
                 <Sparkles size={14} className="text-violet-300" />
                 <h3 className="text-[0.85rem] font-semibold text-white">What is new</h3>
@@ -66,6 +68,39 @@ export function ReleaseNotesModal() {
                   </li>
                 ))}
               </ul>
+
+              {note.details && note.details.length > 0 && (
+                <>
+                  <button
+                    onClick={() => setExpanded(!expanded)}
+                    className="flex items-center gap-1 text-[0.62rem] text-violet-300/90 hover:text-violet-200 transition-colors"
+                    aria-expanded={expanded}
+                  >
+                    <ChevronDown size={12} className={`transition-transform ${expanded ? 'rotate-180' : ''}`} />
+                    {expanded ? 'Hide details' : 'Show all changes'}
+                  </button>
+                  {expanded && (
+                    <div className="space-y-3">
+                      {note.details.map((section) => (
+                        <div key={section.title} className="space-y-1.5">
+                          <p className="text-[0.55rem] font-semibold uppercase tracking-widest text-gray-500">
+                            {section.title}
+                          </p>
+                          <ul className="space-y-1">
+                            {section.items.map((item) => (
+                              <li key={item} className="flex gap-2 text-[0.6rem] leading-relaxed text-gray-500">
+                                <span className="mt-[0.32rem] w-1 h-1 rounded-full bg-gray-600 shrink-0" />
+                                <span>{item}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+
               <div className="flex items-center gap-2 pt-1">
                 <button
                   onClick={close}
