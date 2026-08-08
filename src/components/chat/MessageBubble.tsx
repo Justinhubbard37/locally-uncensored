@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion'
 import { User, Copy, Check, Pencil, RefreshCw, X, Wrench, Trash2 } from 'lucide-react'
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useRef, useEffect, useMemo, memo } from 'react'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ThinkingBlock } from './ThinkingBlock'
 import { ToolCallBand } from './ToolCallBand'
@@ -20,7 +20,10 @@ import { isAgentCompatible } from '../../lib/model-compatibility'
 
 interface Props {
   message: Message
-  onRegenerate?: () => void
+  /** Takes the message id rather than closing over it, so MessageList can pass
+   *  ONE stable function to every bubble — a per-message closure would be a new
+   *  prop on every render and defeat the memo() below. */
+  onRegenerate?: (messageId: string) => void
   onEdit?: (messageId: string, newContent: string) => void
   /** Tool-call id awaiting user approval. When the matching block in
    *  this message has that id, ToolCallBlock renders Approve/Reject
@@ -33,7 +36,7 @@ interface Props {
   isLast?: boolean
 }
 
-export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId, onApprove, onReject, isLast }: Props) {
+function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, onApprove, onReject, isLast }: Props) {
   const [copied, setCopied] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
   const [editContent, setEditContent] = useState('')
@@ -205,7 +208,12 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
                   (b) =>
                     b.phase === 'tool_call' ||
                     b.phase === 'reflection' ||
-                    (b.phase === 'answer' && b.content.trim()),
+                    (b.phase === 'answer' && b.content.trim()) ||
+                    // G21-2: per-round thoughts render chronologically between
+                    // the calls. The transient "Analyzing..." placeholder is a
+                    // thinking block too and shows as a live bubble until the
+                    // round's first token replaces it.
+                    (b.phase === 'thinking' && b.content.trim()),
                 )
                 .sort((a, b) => a.timestamp - b.timestamp),
             )
@@ -218,6 +226,18 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
                     <ToolCallBand
                       key={group.blocks[0].id}
                       calls={group.calls}
+                      notes={group.notes}
+                      renderNote={(block) =>
+                        block.phase === 'thinking' ? (
+                          <ThinkingBlock thinking={block.content} />
+                        ) : block.phase === 'reflection' ? (
+                          <ReflectionBlock content={block.content} />
+                        ) : (
+                          <div className="px-1 py-0.5 text-[0.7rem] leading-relaxed text-gray-500 dark:text-gray-400">
+                            <MarkdownRenderer content={cleanBlocks.get(block.id) ?? block.content} />
+                          </div>
+                        )
+                      }
                       pendingApprovalId={pendingApprovalId}
                       onApprove={onApprove}
                       onReject={onReject}
@@ -225,6 +245,11 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
                   )
                 }
                 const block = group.block
+                if (block.phase === 'thinking') {
+                  // Trailing thought (after the last call, before the final
+                  // answer) in its G14-7 bubble, collapsed, chronological.
+                  return <ThinkingBlock key={block.id} thinking={block.content} />
+                }
                 if (block.phase === 'reflection') {
                   return <ReflectionBlock key={block.id} content={block.content} />
                 }
@@ -322,26 +347,28 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
               return (
                 <div className="text-[0.78rem] leading-relaxed">
                   <MarkdownRenderer content={cleanContent} />
-                  {thoughtOnly && (
-                    thoughtOnlyToolIntent && activeModel && isAgentCompatible(activeModel) ? (
-                      <div className="mt-1 flex items-start gap-2 px-2 py-1.5 rounded-md border border-amber-400/30 bg-amber-500/10 text-[0.65rem] text-amber-700 dark:text-amber-200">
-                        <Wrench size={11} className="mt-0.5 shrink-0" />
-                        <div className="flex-1">
-                          <p className="font-medium">The model spent its whole reply deciding to call a tool, but Agent Mode is off, so it never said anything.</p>
-                          <p className="opacity-80 mt-0.5">Turn Agent Mode on and ask again to let it actually run the tool (search the web, generate media, read files). Its reasoning is in the thinking block above.</p>
-                        </div>
-                        <button
-                          onClick={() => activeConversationId && toggleAgentMode(activeConversationId)}
-                          className="shrink-0 px-2 py-0.5 rounded border border-amber-400/40 hover:bg-amber-500/20 transition-colors font-medium"
-                        >
-                          Enable Agent
-                        </button>
+                  {/* A reasoning-only reply used to print a stand-in sentence
+                      here ("The model only produced internal reasoning and no
+                      answer"). That is our text in the model's mouth (G14-3,
+                      David 2026-08-07), and on an agent surface the loop's job
+                      is to CONTINUE past such a round (G17), not to explain
+                      it. The thinking block above already shows what happened.
+                      The amber card below survives because it is a labelled
+                      app hint with an action, not prose posing as an answer. */}
+                  {thoughtOnly && thoughtOnlyToolIntent && activeModel && isAgentCompatible(activeModel) && (
+                    <div className="mt-1 flex items-start gap-2 px-2 py-1.5 rounded-md border border-amber-400/30 bg-amber-500/10 text-[0.65rem] text-amber-700 dark:text-amber-200">
+                      <Wrench size={11} className="mt-0.5 shrink-0" />
+                      <div className="flex-1">
+                        <p className="font-medium">The model spent its whole reply deciding to call a tool, but Agent Mode is off, so it never said anything.</p>
+                        <p className="opacity-80 mt-0.5">Turn Agent Mode on and ask again to let it actually run the tool (search the web, generate media, read files). Its reasoning is in the thinking block above.</p>
                       </div>
-                    ) : (
-                      <p className="mt-1 text-[0.65rem] italic text-gray-500 dark:text-gray-400">
-                        The model only produced internal reasoning and no answer. See the thinking block above, or rephrase and try again.
-                      </p>
-                    )
+                      <button
+                        onClick={() => activeConversationId && toggleAgentMode(activeConversationId)}
+                        className="shrink-0 px-2 py-0.5 rounded border border-amber-400/40 hover:bg-amber-500/20 transition-colors font-medium"
+                      >
+                        Enable Agent
+                      </button>
+                    </div>
                   )}
                   {suggestAgent && (
                     <div className="mt-2 flex items-start gap-2 px-2 py-1.5 rounded-md border border-amber-400/30 bg-amber-500/10 text-[0.65rem] text-amber-700 dark:text-amber-200">
@@ -384,7 +411,7 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
               <button onClick={startEdit} className="p-1 rounded-md text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" aria-label="Edit message" title="Edit"><Pencil size={12} /></button>
             )}
             {!isUser && onRegenerate && (
-              <button onClick={onRegenerate} className="p-1 rounded-md text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" aria-label="Regenerate response" title="Regenerate"><RefreshCw size={12} /></button>
+              <button onClick={() => onRegenerate(message.id)} className="p-1 rounded-md text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" aria-label="Regenerate response" title="Regenerate"><RefreshCw size={12} /></button>
             )}
             <button onClick={handleCopy} className="p-1 rounded-md text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" aria-label="Copy message" title={copied ? 'Copied' : 'Copy'}>
               {copied ? <Check size={12} className="text-green-500" /> : <Copy size={12} />}
@@ -411,3 +438,12 @@ export function MessageBubble({ message, onRegenerate, onEdit, pendingApprovalId
     </motion.div>
   )
 }
+
+/**
+ * Memoised (2.6.3). The streaming flush replaces ONE message object per frame,
+ * but the whole list re-rendered with it — every markdown body, every
+ * highlighted code block, in a chat that can hold hundreds of messages. Only
+ * the bubble whose `message` reference actually changed re-renders now.
+ * Requires MessageList to pass stable handlers; see the note on Props.
+ */
+export const MessageBubble = memo(MessageBubbleImpl)

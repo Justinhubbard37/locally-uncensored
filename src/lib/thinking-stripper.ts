@@ -90,6 +90,68 @@ export function stripNonCanonicalTags(content: string): string {
  * stream finishes. Catches any orphan closing `</think>` that leaked through
  * (e.g. provider restarted mid-stream, first `<think>` lost).
  */
+/**
+ * Split off a `<think>` that never got its closer.
+ *
+ * A turn can end mid-thought: the user pressed Stop, the stream died, or the
+ * model walked into the context wall. The balanced `<think>…</think>` regex in
+ * the agent loops cannot see that, and `finalStripThinkingTags` deliberately
+ * leaves canonical markers alone while the Thinking toggle is ON — so the raw
+ * opener plus the entire reasoning text landed in the answer bubble, but only
+ * with thinking ON. Found on the installed 2.6.2 build, Coding + Ollama +
+ * hermes, after stopping a run mid-turn.
+ *
+ * Returns the answer without the dangling block, and the reasoning that was in
+ * it, so the caller can route it into the thinking panel instead of dropping
+ * text the model actually produced.
+ */
+export function splitUnclosedThink(content: string): { content: string; thinking: string } {
+  if (!content) return { content, thinking: '' }
+  const open = content.lastIndexOf('<think>')
+  if (open === -1) return { content, thinking: '' }
+  // A closer after the last opener means the block is balanced, not orphaned.
+  if (content.indexOf('</think>', open) !== -1) return { content, thinking: '' }
+  return {
+    content: content.slice(0, open),
+    thinking: content.slice(open + '<think>'.length),
+  }
+}
+
+/**
+ * Split off reasoning that arrived with a closer but no opener.
+ *
+ * The mirror image of `splitUnclosedThink`, and the commoner of the two. Ollama
+ * chat templates for the Qwen3 family put the opening `<think>` in the PROMPT,
+ * so the model never emits one: what comes back over the wire is the reasoning
+ * text, then `</think>`, then the answer. The char-by-char state machine keys
+ * on seeing `<think>`, so it never switches, and everything runs through as
+ * ordinary content. With the Thinking toggle ON, `finalStripThinkingTags`
+ * deliberately leaves canonical markers alone, and the raw `</think>` lands in
+ * the answer bubble with the whole thought in front of it.
+ *
+ * Measured on the installed 2.6.2 build 2026-08-06, Coding + Ollama + hermes,
+ * hf.co/DevQuasar/huihui-ai.Qwen3-4B-abliterated-GGUF. Read off the page:
+ * "…without stopping. Let's start with the first step. </think>". David has
+ * been reporting exactly this: a visible think between the steps that is not
+ * styled as thinking.
+ *
+ * Returns the answer after the closer, and the reasoning that preceded it, so
+ * the caller routes it to the thinking panel rather than deleting text the
+ * model produced.
+ */
+export function splitOrphanCloser(content: string): { content: string; thinking: string } {
+  if (!content) return { content, thinking: '' }
+  const close = content.indexOf('</think>')
+  if (close === -1) return { content, thinking: '' }
+  // An opener anywhere before it means the block is balanced, not orphaned,
+  // and the existing paths own it.
+  if (content.lastIndexOf('<think>', close) !== -1) return { content, thinking: '' }
+  return {
+    content: content.slice(close + '</think>'.length),
+    thinking: content.slice(0, close),
+  }
+}
+
 export function finalStripThinkingTags(content: string, keepCanonicalThink = false): string {
   if (!content) return content
   let out = stripAllThinkingTags(content)

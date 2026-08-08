@@ -90,11 +90,14 @@ describe('markdown export', () => {
 
     expect(md).toContain('# Local model benchmark')
     expect(md).toContain('2026-08-01 12:00')
-    expect(md).toContain('| # | Model | Average t/s | Latest t/s | Runs |')
+    expect(md).toContain('| # | Model | Average t/s | Latest t/s | Avg tokens | Think | Correct | Runs |')
     // Ranked fastest first, same order as the leaderboard on screen.
     expect(md.indexOf('fast:3b')).toBeLessThan(md.indexOf('slow:70b'))
     expect(md).toMatch(/\| 1 \| fast:3b \| 41 \|/)
     expect(md).toMatch(/\| 2 \| slow:70b \| 4 \|/)
+    // These runs predate the economy fields, so those columns read as a dash
+    // rather than a wrong number.
+    expect(md).toMatch(/\| 1 \| fast:3b \| 41 \| 41 \| - \| - \| - \| 2 \|/)
     expect(md).toContain('3 runs across 2 models.')
   })
 

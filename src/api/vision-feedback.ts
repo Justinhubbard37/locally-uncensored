@@ -43,6 +43,11 @@ export interface VisionFeedbackMessage {
   role: 'user'
   content: string
   images: { data: string; mimeType: string }[]
+  /** G22: marks this as a loop-attached image so the run can heal itself
+   *  (strip and retry) when the vision guess turns out wrong. */
+  visionFeedback: true
+  /** G22: what the message degrades to on a text-only model. */
+  fallbackText: string
 }
 
 /**
@@ -103,5 +108,11 @@ export async function buildVisionFeedback(
       'Here is the image you just generated, shown to the user. Look at it and describe in one or two sentences what you actually see in the picture (composition, subject, colors).' +
       chain,
     images: [{ data: b64, mimeType: 'image/png' }],
+    visionFeedback: true,
+    // G22: the run swaps the attachment for this line when the model turns
+    // out to be text-only, instead of dying on the multimodal error.
+    fallbackText:
+      'The image was generated successfully and is already shown to the user in the chat. ' +
+      'You cannot view images, so do not ask for them.' + chain,
   }
 }

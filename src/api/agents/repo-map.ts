@@ -19,13 +19,28 @@ export interface FetchRepoMapInput {
 }
 
 /**
+ * Short-lived result cache (audit E4). The Bridge walk visits up to 20k
+ * files and parses up to 512 KiB each — and it ran on EVERY instruction,
+ * including the follow-up sent twenty seconds after the last one. A repo's
+ * import graph does not change meaningfully inside a minute; an agent run
+ * that edits files invalidates through the normal TTL expiry.
+ */
+const REPO_MAP_TTL_MS = 60_000
+const repoMapCache = new Map<string, { at: number; result: RepoMapResult }>()
+
+/**
  * Calls the Bridge `repo_map` command. The Bridge walks the working
  * directory, parses imports, runs PageRank, and returns the top-N ranked
- * files. Pure I/O — no caching; the caller decides when to refresh.
+ * files.
  */
 export async function fetchRepoMap(input: FetchRepoMapInput): Promise<RepoMapResult> {
   if (!input.workingDirectory) {
     return { files: [], count: 0 }
+  }
+  const cacheKey = `${input.workingDirectory}|${input.query ?? ''}|${input.limit ?? 20}`
+  const hit = repoMapCache.get(cacheKey)
+  if (hit && Date.now() - hit.at < REPO_MAP_TTL_MS) {
+    return hit.result
   }
   // The Rust `repo_map` command takes a SINGLE `args: serde_json::Value` param
   // (deserialized into RepoMapArgs) — so the payload MUST be wrapped in
@@ -40,10 +55,12 @@ export async function fetchRepoMap(input: FetchRepoMapInput): Promise<RepoMapRes
       limit: input.limit ?? 20,
     },
   })
-  return {
+  const result = {
     files: Array.isArray(out.files) ? out.files : [],
     count: typeof out.count === 'number' ? out.count : 0,
   }
+  repoMapCache.set(cacheKey, { at: Date.now(), result })
+  return result
 }
 
 /**

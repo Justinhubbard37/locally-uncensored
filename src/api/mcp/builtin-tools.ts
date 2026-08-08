@@ -3,14 +3,17 @@
 import type { MCPToolDefinition } from './types'
 import type { ToolRegistry } from './tool-registry'
 import { backendCall, fetchExternal } from '../backend'
-import { getActiveChatId, getActiveWorkspace, isChatArtifactMode, captureChatArtifact } from '../agent-context'
+import { getActiveChatId, getActiveConversationId, getActiveWorkspace, isChatArtifactMode, captureChatArtifact } from '../agent-context'
 import { useAgentWorkflowStore } from '../../stores/agentWorkflowStore'
 import { WorkflowEngine } from '../../lib/workflow-engine'
 import type { StepResult } from '../../types/agent-workflows'
 import { DELEGATE_TASK_TOOL_DEF, buildDelegateExecutor } from '../agents/sub-agent'
 import { applyUniqueEdit } from '../../lib/surgical-edit'
+import { sliceFileReadResult } from '../../lib/file-read-window'
+import { writeTodos, summarizeTodos } from '../../stores/todoStore'
 import { isMlxImageHost, generateMlxImageDataUrl, listMlxImageModels, type MlxImageModel } from '../mlx-image'
-import { getVideoStatus, listVideoModels, generateVideo as generateMlxVideo, getVideoProgress, cancelVideo, readVideoAsBlobUrl, type VideoModel } from '../mlx-video'
+import { getVideoStatus, listVideoModels, generateVideo as generateMlxVideo, getVideoProgress, cancelVideo, type VideoModel } from '../mlx-video'
+import { pathToFileUrl } from '../../lib/local-media-url'
 
 /**
  * Helper: current chat id (+ folder workspace) as a fragment to spread into
@@ -41,6 +44,40 @@ function chatCtx(): { chatId?: string; workingDirectory?: string } {
 // every one of them is classified as mutating or read-only. It parses the file
 // rather than importing it, because importing pulls in the tool-registry cycle.
 const BUILTIN_TOOLS: MCPToolDefinition[] = [
+  // Planning
+  {
+    name: 'todo_write',
+    description:
+      'Write the plan for a multi-step task and keep it up to date. The list is shown to the user live, so it is how they see what you are doing and how far along you are. '
+      + 'USE FIRST on any task that needs more than about three tool calls: write the whole plan before the first step. '
+      + 'Then call it again after each step to flip that item to completed and the next one to in_progress. '
+      + 'Send the COMPLETE list every time. It replaces the previous one, it does not merge. Exactly one item should be in_progress at a time. '
+      + 'DO NOT use it for a single-step request, and NEVER mark an item completed before the work actually succeeded.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        todos: {
+          type: 'array',
+          description: 'The complete plan, in order. Replaces the previous list.',
+          items: {
+            type: 'object',
+            properties: {
+              content: { type: 'string', description: 'What this step does, one short line' },
+              status: {
+                type: 'string',
+                enum: ['pending', 'in_progress', 'completed'],
+                description: 'pending = not started, in_progress = working on it now, completed = done and verified',
+              },
+            },
+            required: ['content', 'status'],
+          },
+        },
+      },
+      required: ['todos'],
+    },
+    category: 'system',
+    source: 'builtin',
+  },
   // Web
   {
     name: 'web_search',
@@ -84,14 +121,18 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
   {
     name: 'file_read',
     description:
-      'Read the complete contents of a file. PREFER absolute paths; relative paths resolve against the agent workspace (~/agent-workspace). '
-      + 'The entire file is returned — there is no pagination or range parameter. '
+      'Read a file. PREFER absolute paths; relative paths resolve against the agent workspace (~/agent-workspace). '
+      + 'Omitting offset/limit returns the whole file. For LARGE files pass offset (1-based start line) and limit '
+      + '(number of lines) to read a window — the response names the window and the total line count, and tells you '
+      + 'the offset for the next page. Very long whole-file reads get their middle truncated, so page large files. '
       + 'DO NOT re-read a file you just wrote with file_write; the write response already confirmed the save. '
       + 'For directory listings use file_list; for content search across many files use file_search.',
     inputSchema: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Path to the file (absolute preferred)' },
+        offset: { type: 'number', description: '1-based line to start reading from (optional)' },
+        limit: { type: 'number', description: 'Maximum number of lines to return (optional)' },
       },
       required: ['path'],
     },
@@ -184,6 +225,7 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
       'Run a shell command. PowerShell on Windows, bash on Unix. Returns stdout, stderr, exit code. '
       + 'PREFER dedicated tools where available: file_read over `cat`, file_list over `ls`/`dir`, file_search over `grep`, get_current_time over `date`. '
       + 'Use shell_execute for git, npm, cargo, docker, package managers, or platform utilities without a dedicated tool. '
+      + 'This is also how you open things on the desktop: a folder, a file, or an application. The system prompt states which OS this is and gives the exact command. '
       + 'NEVER use to permanently delete without confirmation (rm -rf, Remove-Item -Recurse, git reset --hard). '
       + 'Default timeout 120 s; set higher only for known long-running builds.',
     inputSchema: {
@@ -494,6 +536,15 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
     category: 'desktop',
     source: 'builtin',
   },
+  // Opening a folder, a file or an application is deliberately NOT a tool. It
+  // is `open` / `Invoke-Item` / `xdg-open`, so a dedicated tool would only wrap
+  // a shell command, which is the anti-pattern Anthropic names in "Writing
+  // effective tools for AI agents", and which no comparable agent ships. The
+  // two tools that used to live here cost ~478 tokens of every system prompt on
+  // a registry that already overflows a 4k-context local model, and bought no
+  // safety, since shell_execute is behind the same confirmation gate. What the
+  // model actually lacked was knowing which OS it is on: see platformPromptLine
+  // in lib/host-platform.ts. Removed 2026-08-06.
 
   // Image
   {
@@ -706,7 +757,8 @@ async function executeFileRead(args: Record<string, any>): Promise<string> {
       : Math.floor((String(data.content || '').length * 3) / 4)
     return `[binary file — ${formatBytes(bytes)}, not shown. This tool reads text only; do not write binary content back through file_write.]`
   }
-  return data.content || ''
+  // Windowed read (audit C1) — see src/lib/file-read-window.ts.
+  return sliceFileReadResult(String(data.content || ''), args)
 }
 
 /** Last path segment, defaulting to file.txt. */
@@ -1213,20 +1265,6 @@ function resolveMlxModel<T extends { id: string; name: string }>(
   )
 }
 
-/** Decode a `data:image/png;base64,...` result into a compact `blob:` URL —
- *  same b64 → Blob → createObjectURL pattern as readVideoAsBlobUrl
- *  (mlx-video.ts). Keeps the multi-hundred-KB PNG OUT of the tool-result
- *  string that gets fed back into the model's context; only the short
- *  blob: URL (which the CSP's img-src already allows) goes there. */
-function pngDataUrlToObjectUrl(dataUrl: string): string {
-  const comma = dataUrl.indexOf(',')
-  const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
-  const bin = atob(b64)
-  const bytes = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-  return URL.createObjectURL(new Blob([bytes], { type: 'image/png' }))
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
 }
@@ -1263,7 +1301,7 @@ async function executeImageGenerateMlx(prompt: string, merged: Record<string, an
   }
 
   try {
-    const { dataUrl } = await generateMlxImageDataUrl({
+    const { dataUrl, localPath } = await generateMlxImageDataUrl({
       prompt,
       model: model.id,
       steps: typeof merged.steps === 'number' ? merged.steps : undefined,
@@ -1272,9 +1310,20 @@ async function executeImageGenerateMlx(prompt: string, merged: Record<string, an
       height: typeof merged.height === 'number' ? merged.height : undefined,
       negativePrompt: typeof merged.negativePrompt === 'string' ? merged.negativePrompt : undefined,
     })
+    // B3: the result string is PERSISTED with the conversation, so what goes on
+    // this line has to outlive the window. The Rust side already wrote the PNG
+    // to disk before handing back the bytes, so the path is both stable and
+    // free. A blob: URL here used to leak (never revoked) AND die on the next
+    // launch, which quietly emptied every generated picture out of the history.
+    if (localPath) {
+      const filename = localPath.split(/[\\/]/).pop() || `mlx-${Date.now()}.png`
+      return `Image generated: ${filename} (prompt: "${prompt}")\n${pathToFileUrl(localPath)}`
+    }
+    // No path means the disk write failed on the Rust side. The bytes are still
+    // in hand, so show them rather than losing the render; a data: URL is
+    // self-contained and revokes nothing, it is only bulky.
     const filename = `mlx-${Date.now()}.png`
-    const url = pngDataUrlToObjectUrl(dataUrl)
-    return `Image generated: ${filename} (prompt: "${prompt}")\n${url}`
+    return `Image generated: ${filename} (prompt: "${prompt}")\n${dataUrl}`
   } catch (e) {
     return `Image generation failed: ${e instanceof Error ? e.message : String(e)}`
   }
@@ -1356,13 +1405,12 @@ async function executeVideoGenerateMlx(prompt: string, merged: Record<string, an
       return `Video generation failed: ${e instanceof Error ? e.message : String(e)}`
     }
     if (prog.status === 'complete') {
-      try {
-        const blobUrl = await readVideoAsBlobUrl(job.output)
-        const filename = job.output.split(/[\\/]/).pop() || `mlx-${Date.now()}.mp4`
-        return `Video generated: ${filename} (prompt: "${prompt}")\n${blobUrl}`
-      } catch (e) {
-        return `Video generation failed: could not read output — ${e instanceof Error ? e.message : String(e)}`
-      }
+      // Same rule as the image path: the file is already on disk, so the
+      // result carries its path and the viewer rebuilds a blob on demand. The
+      // old readVideoAsBlobUrl here pulled the whole clip into memory, never
+      // released it, and left a dead URL behind after a restart.
+      const filename = job.output.split(/[\\/]/).pop() || `mlx-${Date.now()}.mp4`
+      return `Video generated: ${filename} (prompt: "${prompt}")\n${pathToFileUrl(job.output)}`
     }
     if (prog.status === 'error') {
       return `Video generation failed: ${prog.error || 'mlx-video failed'}`
@@ -1370,6 +1418,23 @@ async function executeVideoGenerateMlx(prompt: string, merged: Record<string, an
   }
   try { await cancelVideo() } catch { /* already finished/gone */ }
   return 'Video generation timed out after 60 minutes; the generation was stopped.'
+}
+
+async function executeTodoWrite(args: Record<string, any>): Promise<string> {
+  // Purely conversation state: no backend call, no permission gate, nothing
+  // that can fail on a machine. The one real failure is having no conversation
+  // to attach the plan to, which happens when a tool runs outside a loop.
+  // The CONVERSATION id, not getActiveChatId(): that one is a filesystem slug
+  // derived from id + title, and PlanBar reads the plan out of chatStore by the
+  // real id. Keying by the slug wrote the plan where nothing ever looks.
+  const convId = getActiveConversationId()
+  if (!convId) return 'Error: no active conversation to attach a plan to.'
+
+  const todos = writeTodos(convId, args.todos)
+  if (todos.length === 0 && Array.isArray(args.todos) && args.todos.length > 0) {
+    return 'Error: every item needs a non-empty `content` string. Nothing was written.'
+  }
+  return summarizeTodos(todos)
 }
 
 async function executeGetCurrentTime(_args: Record<string, any>): Promise<string> {
@@ -1469,6 +1534,7 @@ function htmlToText(html: string): string {
 // ── Registration ────────────────────────────────────────────────
 
 const EXECUTOR_MAP: Record<string, (args: Record<string, any>) => Promise<string>> = {
+  todo_write: executeTodoWrite,
   web_search: executeWebSearch,
   web_fetch: executeWebFetch,
   file_read: executeFileRead,

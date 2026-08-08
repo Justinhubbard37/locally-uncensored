@@ -28,6 +28,13 @@ export interface TurnSummaryInput {
   videoGenDone: number
   /** True only when an image was fed back to a vision-capable model. */
   visionFeedbackGiven: boolean
+  /** The run's own plan, when one is open (G27). The G16 reconcile steers the
+   *  MODEL back to work, but its budget is two; once it is spent the run ends
+   *  anyway and this function writes the last thing the user reads. On R01b
+   *  (Mac, 2026-08-07) that sentence was "Task completed: 3 operations
+   *  completed." while the PlanBar beside it read 1 of 31. The closing line
+   *  must never claim completion the plan contradicts. */
+  planGap?: { done: number; total: number; next: string } | null
 }
 
 const NOTHING_AT_ALL =
@@ -39,18 +46,36 @@ const NOTHING_AT_ALL =
  * noise · David 2026-06-16).
  */
 export function summarizeTurn(input: TurnSummaryInput): string {
-  const { calls, imageGenDone, videoGenDone, visionFeedbackGiven } = input
+  const { calls, imageGenDone, videoGenDone, visionFeedbackGiven, planGap } = input
   const completed = calls.filter((c) => c.status === 'completed')
   const failed = calls.filter((c) => c.status === 'failed')
 
+  // G27: an open plan outranks every cheerful ending below. It is a SUFFIX,
+  // never a replacement: the D#81 rule that a failed picture always shows its
+  // reason stands, and a picture that landed is still worth saying. Only the
+  // claim of completion is taken away.
+  const planNote = planGap
+    ? `The run stopped with the plan unfinished: ${planGap.done} of ${planGap.total} steps done. Next open step: "${planGap.next}". Send "continue" to carry on.`
+    : ''
+  const withPlan = (text: string) => (planNote ? (text ? `${text}\n\n${planNote}` : planNote) : text)
+
+  if (planGap && imageGenDone === 0 && videoGenDone === 0) {
+    const failedMediaNow = failed.filter((c) => isMediaTool(c.toolName))
+    // A failed picture keeps its own headline (D#81); the plan note follows it.
+    if (failedMediaNow.length === 0) return planNote
+  }
+
   if (imageGenDone > 0 || videoGenDone > 0) {
-    if (!visionFeedbackGiven) return ''
+    // The empty return stays empty when the plan is done: the tool block
+    // already shows the picture and a robotic line only adds noise. With an
+    // open plan the note is the whole point, so it survives on its own.
+    if (!visionFeedbackGiven) return withPlan('')
     if (imageGenDone > 0 && videoGenDone > 0) {
-      return 'Fertig, dein Bild und dein Video sind oben. / Done, your image and video are above.'
+      return withPlan('Fertig, dein Bild und dein Video sind oben. / Done, your image and video are above.')
     }
-    return videoGenDone > 0
+    return withPlan(videoGenDone > 0
       ? 'Fertig, dein Video ist oben. / Done, your video is above.'
-      : 'Fertig, dein Bild ist oben. / Done, your image is above.'
+      : 'Fertig, dein Bild ist oben. / Done, your image is above.')
   }
 
   // Nothing landed. If a picture or clip was attempted and failed, that is the
@@ -59,9 +84,9 @@ export function summarizeTurn(input: TurnSummaryInput): string {
   if (failedMedia.length) {
     const kind = failedMedia.some((c) => c.toolName === 'video_generate') ? 'video' : 'image'
     const why = (failedMedia[0].result ?? '').trim()
-    return why
+    return withPlan(why
       ? `That ${kind} did not come out: ${why}\n\nSay "again" to retry, or change the prompt or model and send it once more.`
-      : `That ${kind} did not come out and no reason came back. Check that ComfyUI is still running, then try again.`
+      : `That ${kind} did not come out and no reason came back. Check that ComfyUI is still running, then try again.`)
   }
 
   const writes = completed.filter((c) => c.toolName === 'file_write').length

@@ -78,6 +78,38 @@ export async function getModelMaxTokens(modelName: string): Promise<number> {
 
 const KEEP_RECENT = 4 // Always keep at least the last N messages untouched
 
+/** How much of the pinned first user message survives compaction. Enough for
+ * any real instruction; a pasted 200 KB file does not ride along forever. */
+const PINNED_TASK_MAX_CHARS = 8000
+
+/** How many already-done tool names the trim notice carries. */
+const DONE_TRAIL_MAX = 40
+
+/**
+ * The tool names one assistant message asked for, in order.
+ *
+ * Two shapes, because the transports differ: the native and OpenAI paths carry
+ * `tool_calls`, the hermes path carries `<tool_call>{…}</tool_call>` in the
+ * content. Reading only the first `"name"` INSIDE each block matters, since a
+ * tool's own arguments routinely contain a `name` field of their own.
+ */
+function toolNamesIn(msg: OllamaChatMessage): string[] {
+  const out: string[] = []
+  const calls = (msg as { tool_calls?: Array<{ function?: { name?: string } }> }).tool_calls
+  if (Array.isArray(calls)) {
+    for (const tc of calls) {
+      if (typeof tc?.function?.name === 'string') out.push(tc.function.name)
+    }
+  }
+  if (msg.role === 'assistant' && typeof msg.content === 'string' && msg.content.includes('<tool_call>')) {
+    for (const block of msg.content.matchAll(/<tool_call>\s*(\{[\s\S]*?\})\s*<\/tool_call>/g)) {
+      const m = /"name"\s*:\s*"([a-zA-Z0-9_]+)"/.exec(block[1])
+      if (m) out.push(m[1])
+    }
+  }
+  return out
+}
+
 /**
  * True for a message that is a tool RESULT — either the native `tool` role or
  * a Hermes `<tool_response>` carried on a user message. Used to trim a leading
@@ -140,14 +172,33 @@ export function compactMessages(
       : m,
   )
 
+  // Pin the TASK (audit C5). The oldest message is the user's actual
+  // instruction, and the suffix window is precisely the mechanism that drops
+  // it first — after which a 30-minute run works on whatever the recent tool
+  // results imply instead of what was asked. Keep the first user message
+  // (capped) out of the drop zone, alongside the system prompt.
+  const firstUserIdx = capped.findIndex((m) => m.role === 'user')
+  const pinnedTask =
+    firstUserIdx >= 0 && typeof capped[firstUserIdx].content === 'string'
+      ? {
+          ...capped[firstUserIdx],
+          content:
+            capped[firstUserIdx].content.length > PINNED_TASK_MAX_CHARS
+              ? truncateToolResult(capped[firstUserIdx].content, PINNED_TASK_MAX_CHARS)
+              : capped[firstUserIdx].content,
+        }
+      : null
+  const pinnedTokens = pinnedTask ? estimateMessageTokens([pinnedTask]) : 0
+
   // Accumulate a recent suffix that fits, newest-first. Keep at least
   // KEEP_RECENT messages even when that exceeds budget (recent context is the
   // most valuable), otherwise stop as soon as the next message would overflow.
+  const suffixBudget = Math.max(0, budget - pinnedTokens)
   const kept: OllamaChatMessage[] = []
   let used = 0
   for (let i = capped.length - 1; i >= 0; i--) {
     const t = estimateMessageTokens([capped[i]])
-    if (used + t > budget && kept.length >= KEEP_RECENT) break
+    if (used + t > suffixBudget && kept.length >= KEEP_RECENT) break
     kept.unshift(capped[i])
     used += t
   }
@@ -158,17 +209,44 @@ export function compactMessages(
     kept.shift()
   }
 
-  const droppedCount = capped.length - kept.length
+  // The pin is only needed when the first user message did NOT survive into
+  // the suffix on its own.
+  const pinNeeded = pinnedTask !== null && !kept.includes(capped[firstUserIdx])
+
+  const droppedCount = capped.length - kept.length - (pinNeeded ? 1 : 0)
   const compacted: OllamaChatMessage[] = []
   if (systemMsg) compacted.push(systemMsg)
+  if (pinNeeded && pinnedTask) {
+    compacted.push(pinnedTask)
+  }
   if (droppedCount > 0) {
+    // What was dropped is exactly the record of the work already done, while
+    // the pin keeps the instruction alive forever. Measured on the installed
+    // build 2026-08-06, Coding + Ollama + hermes, a 30 step plan: the run
+    // walked steps 1 to 18, compaction fired, and the very next call was
+    // todo_write followed by get_current_time, system_info, process_list,
+    // file_list. It had started the plan over from the top, because the only
+    // thing it could still see was the plan itself. David watching it: "es
+    // wiederholt sich die ganze Zeit ... und er sagt immer dasselbe."
+    //
+    // So the notice carries the trail. Names only, no arguments and no
+    // results: it is the cheapest thing that answers "where was I".
+    const dropped = capped.slice(0, capped.length - kept.length)
+    const done: string[] = []
+    for (const m of dropped) done.push(...toolNamesIn(m))
+    const omitted = Math.max(0, done.length - DONE_TRAIL_MAX)
+    const trail = done.slice(done.length - DONE_TRAIL_MAX)
+    const doneLine = done.length
+      ? ` Already done in this run, in order${omitted ? ` (${omitted} earlier call${omitted === 1 ? '' : 's'} omitted)` : ''}: ${trail.join(', ')}. Carry on AFTER the last one, do not start the task again from the beginning.`
+      : ''
+
     // Wording matters here: the old notice ("Re-read any file you still need
     // with file_read.") actively FED a re-read loop — every iteration the
     // model was told to read again what it had just read. Keep the honest
     // recovery path but make it single-shot and anti-repeat.
     compacted.push({
       role: 'system',
-      content: `[${droppedCount} earlier message${droppedCount === 1 ? '' : 's'} were trimmed to fit the context window. Results you already saw still hold. If a detail is genuinely missing, re-read that specific file once; never repeat a call that already ran.]`,
+      content: `[${droppedCount} earlier message${droppedCount === 1 ? '' : 's'} were trimmed to fit the context window. The original task above still stands. Results you already saw still hold.${doneLine} If a detail is genuinely missing, re-read that specific file once; never repeat a call that already ran.]`,
     })
   }
   compacted.push(...kept)

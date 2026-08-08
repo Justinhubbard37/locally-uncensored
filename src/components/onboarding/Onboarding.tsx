@@ -17,6 +17,8 @@ import { pullModelTauri, checkConnection as checkOllama } from '../../api/ollama
 import { hfUrlToOllamaRef, hfUrlToLmStudioSubdir } from '../../lib/hf-to-provider'
 import { startBundledEngine, startBundledEmbed } from '../../api/engine'
 import { BUILTIN_BACKEND_ID, classifyOnboardingBackend, resolveOnboardingBackend } from '../../lib/onboarding-backend'
+import { version as currentVersion } from '../../../package.json'
+import { useReleaseNotesStore } from '../../stores/releaseNotesStore'
 
 // Bug (h): the dedicated 'theme' onboarding step was removed because users
 // kept ending up on Light by accident, and the project standard is "dark
@@ -340,6 +342,12 @@ export function Onboarding() {
 
   const finish = () => {
     updateSettings({ onboardingDone: true })
+    // B4: a brand new install must NOT be greeted by "what is new in 2.6.3"
+    // right after setting the app up for the first time. Stamping the current
+    // version here silently is what separates a fresh install from an upgrade:
+    // an upgrade never runs this wizard, so its flag stays null and it gets the
+    // notes. This is the ONLY place that stamps without showing anything.
+    useReleaseNotesStore.getState().markNotesSeen(currentVersion)
     // Persist to filesystem so NSIS updates don't reset onboarding
     if (isTauri) backendCall('set_onboarding_done').catch(() => {})
   }

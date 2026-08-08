@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid'
 import { useCodexStore } from '../stores/codexStore'
 import { useModelStore } from '../stores/modelStore'
 import { useSettingsStore } from '../stores/settingsStore'
-import { useChatStore } from '../stores/chatStore'
+import { useChatStore, flushChatPersist } from '../stores/chatStore'
 import { getProviderForModel, getProviderIdFromModel } from '../api/providers'
 import { markToolsUnsupported } from '../api/tool-capability'
 import { toolRegistry } from '../api/mcp'
@@ -17,7 +17,7 @@ import { CODEX_CONFIRM_TOOLS, codexConfirmEnabled } from './codexShellGate'
 import { buildHermesToolPrompt, buildHermesToolResult, parseHermesToolCalls, stripToolCallTags, hasToolCallTags } from '../api/hermes-tool-calling'
 import { streamProviderTurn, type StreamedProviderTurn } from '../lib/provider-stream'
 import { createHermesDisplayFilter } from '../lib/hermes-stream'
-import { setActiveChatId, clearActiveChatId, chatWorkspaceSlug, setActiveWorkspace, setActiveAgentModel } from '../api/agent-context'
+import { setActiveChatId, setActiveConversationId, clearActiveChatId, chatWorkspaceSlug, setActiveWorkspace, setActiveAgentModel } from '../api/agent-context'
 import { resolveWorkspace } from '../api/agents/workspace-resolve'
 import { useAgentModeStore } from '../stores/agentModeStore'
 import { loadLurules, renderRulesSection, type RulesReader } from '../lib/lurules'
@@ -27,6 +27,7 @@ import {
 } from '../lib/agent-commands'
 import { useGenerationStore } from '../stores/generationStore'
 import { backendCall, isOllamaLocal } from '../api/backend'
+import { requestGenerationCancel } from '../api/vram-handoff'
 import { planWithArchitect, renderArchitectPlanSection } from '../api/agents/architect'
 import { fetchRepoMap, renderRepoMapSection } from '../api/agents/repo-map'
 import { isLocalModelByName } from '../api/agents/model-locality'
@@ -42,13 +43,17 @@ import { useToolAuditStore } from '../stores/toolAuditStore'
 import { makeInTurnCacheLookup } from '../api/agents/in-turn-cache'
 import { explainError as explainToolError } from '../api/agents/error-hints'
 import { budgetFromSettings } from '../api/agents/budget'
-import { finalStripThinkingTags } from '../lib/thinking-stripper'
+import { finalStripThinkingTags, splitOrphanCloser, splitUnclosedThink } from '../lib/thinking-stripper'
+import { openPlanGap, planReconcileSteer, PLAN_RECONCILE_BUDGET } from '../lib/plan-reconcile'
+import { PlanStaleness, planStalenessSteer } from '../lib/plan-staleness'
+import { useTodoStore } from '../stores/todoStore'
 import { streamOllamaChatWithTools } from '../lib/ollama-stream-tools'
 import { extractToolCallsWithRanges, stripRanges } from '../lib/tool-call-repair'
 import { canonicalToolName } from '../lib/loose-tool-parse'
-import { selectRelevantTools, selectRelevantToolsAsync } from '../lib/tool-selection'
+import { selectRelevantTools, selectRelevantToolsAsync, SMALL_MODEL_MAX_TOOLS } from '../lib/tool-selection'
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
+import { toolCallCapMs, raceWithToolTimeout, SHELL_EXECUTE_DEFAULT_TIMEOUT_MS, CODE_EXECUTE_DEFAULT_TIMEOUT_MS } from '../lib/tool-timeout'
 import { compactMessages, getModelMaxTokens, estimateTokens } from '../lib/context-compaction'
 import { resolveAgentNumCtx } from '../lib/agent-num-ctx'
 import { AgentLoopGuard } from '../lib/agent-loop-guard'
@@ -76,7 +81,7 @@ const CODEX_REVIEW_SYSTEM_PROMPT = `You are the Coding Agent in REVIEW MODE, a r
 
 REVIEW MODE CONTRACT (binding):
 - You MAY call: file_read, file_list, file_search, git_status, git_log, git_diff, system_info, process_list, get_current_time, web_fetch, web_search.
-- You MUST NOT call: file_write, file_edit, shell_execute, code_execute, run_tests, git_commit, git_push, gh_pr_create, image_generate, video_generate, run_workflow, screenshot, delegate_task. If you call them, the harness will reject the call and tell the model "review-only mode", wasted budget.
+- You MUST NOT call: file_write, file_edit, shell_execute, code_execute, run_tests, git_commit, git_push, gh_pr_create, image_generate, video_generate, run_workflow, screenshot, delegate_task. They are stripped from your tool list; attempting one fails as an unknown tool and wastes the step.
 - Output format: a markdown report with sections "## Summary", "## Findings (priority order)", "## Suggested follow-ups". For each finding cite the file + line range (path:line or path:start-end).
 - Be direct. No flattery, no boilerplate. If the code is fine, say so in one sentence and stop.`
 
@@ -93,10 +98,13 @@ AUTONOMY CONTRACT (read carefully):
 
 Workflow per task:
 1. Understand the task (optional brief sentence)
-2. Explore the codebase, file_list / file_read / file_search
-3. Implement ALL required changes, file_edit to change existing files, file_write for new ones; as many calls as needed in one go
-4. Verify, shell_execute to run tests, lint, or build
-5. Only THEN write a short summary of what you did
+2. If it needs more than about three tool calls, call todo_write with the whole plan BEFORE step 3. The user sees that list live and it is how they follow a long run.
+3. Explore the codebase, file_list / file_read / file_search
+4. Implement ALL required changes, file_edit to change existing files, file_write for new ones; as many calls as needed in one go
+5. Verify, shell_execute to run tests, lint, or build
+6. Only THEN write a short summary of what you did
+
+Keeping the plan current: after each step call todo_write again with the COMPLETE list, the finished item as completed and the next one as in_progress. Exactly one item is in_progress at a time, and nothing is completed before it actually succeeded. A plan that stops updating is worse than no plan.
 
 Rules:
 - Always read a file before modifying it
@@ -118,6 +126,7 @@ Rules:
 const CODEX_SYSTEM_PROMPT_LEAN = `You are a coding agent in LU. Use tools to do the work, never guess file contents.
 
 Rules:
+- More than about three steps? Call todo_write first with the plan, and again after each step with the complete list. The user watches it.
 - Read a file before you edit it.
 - To change an existing file use file_edit (replace a unique old_string with new_string), not file_write. Use file_write only to create a new file.
 - PATHS: use relative paths (e.g. \`package.json\`, \`.\`). Never start with \`/\` or a drive letter, it escapes the workspace and fails.
@@ -134,7 +143,12 @@ const streamWithTools = streamOllamaChatWithTools
 // "Video generation auf simplen Prompt in Code und Agentmode") — they only
 // surface when the keyword router sees a creative intent in the prompt, so
 // pure coding turns keep the same lean tool list as before.
-const CODEX_CATEGORIES = ['filesystem', 'terminal', 'system', 'web', 'image', 'video'] as const
+// workflow joined with audit B11: delegate_task (the sub-agent fan-out, the
+// counterpart of Claude Code's Task tool) lived in that category and was
+// therefore unreachable from the Code tab. Local models only see it on a
+// delegate/parallel intent via the keyword router; cloud models get it in
+// the full catalog.
+const CODEX_CATEGORIES = ['filesystem', 'terminal', 'system', 'web', 'image', 'video', 'workflow'] as const
 
 
 // `.lurules` reader. MUST go through `fs_read` (the workspace-aware command)
@@ -196,6 +210,15 @@ function codexCanThink(model: string): boolean {
   return mode ? mode === 'toggle' : isThinkingCompatible(model)
 }
 
+/**
+ * The pending next /loop pass. MODULE scope, not a hook ref (audit A3): the
+ * Code view unmounts on every tab switch, and a timer parked in an unmounted
+ * instance's ref was unreachable for the remounted hook — stopCodex cleared
+ * its own (empty) ref while the old timer kept firing new passes. One shared
+ * handle means whichever instance is alive can cancel the pending pass.
+ */
+let codexLoopTimer: ReturnType<typeof setTimeout> | null = null
+
 export function useCodex() {
   const [isRunning, setIsRunning] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
@@ -203,8 +226,6 @@ export function useCodex() {
   /** True once the user pressed stop, so the /loop driver does not start
    *  another pass on the run they just killed. Cleared when a new run starts. */
   const userStoppedRef = useRef(false)
-  /** The pending next /loop pass, so stop can cancel it mid-interval. */
-  const loopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const sendInstruction = useCallback(async (
     rawInstruction: string,
@@ -262,6 +283,7 @@ export function useCodex() {
     // title is empty. Cleared in the finally block.
     const convForSlug = store.conversations.find((c) => c.id === convId)
     setActiveChatId(chatWorkspaceSlug(convId, convForSlug?.title))
+    setActiveConversationId(convId)
 
     // Multi-Repo Agent (B15) + Codex/Agent workspace unification (B17):
     // pin the resolved workspace so the bridge resolves relative paths
@@ -359,6 +381,10 @@ export function useCodex() {
     }
     useChatStore.getState().addMessage(convId, assistantMsg)
     let thinkingContent = ''
+    // G21-2 parity: true once a batch actually went to the executor. Gates
+    // whether a round's thought becomes a chronological block or stays in the
+    // classic top-of-bubble field (plain answer turns keep the old look).
+    let anyToolExecuted = false
 
     const blocks: AgentBlock[] = []
     function addBlock(block: AgentBlock) {
@@ -381,11 +407,20 @@ export function useCodex() {
     // anyway, came back 405, and the negative expired 24 h later so the user
     // paid for the same discovery again. toolStrategyFor applies the same
     // precedence the dropdown and the Agent toggle use.
-    const strategy = toolStrategyFor({
+    const pickerMeta = useModelStore.getState().models.find((m) => m.name === activeModel)
+    let strategy = toolStrategyFor({
       name: activeModel,
-      supportsTools: useModelStore.getState().models.find((m) => m.name === activeModel)?.supportsTools,
+      supportsTools: pickerMeta && pickerMeta.type === 'text' ? pickerMeta.supportsTools : undefined,
     })
     const modelToUse = activeModel.includes('::') ? activeModel.split('::')[1] : activeModel
+    // G37b (R21d wire proof, 2026-08-08): the picker row is silent for the
+    // managed built-in engine (useModels synthesizes its rows without ever
+    // running listModels), so ask the server itself before the first request.
+    // Only a hard `false` downgrades to the prompt transport; cloud endpoints
+    // answer without a network call.
+    if (strategy === 'native' && providerId === 'openai' && provider.serverToolSupport) {
+      if ((await provider.serverToolSupport(modelToUse)) === false) strategy = 'hermes_xml'
+    }
 
     // Pin the text model driving this Codex run — parity with useAgentChat.
     // The VRAM hand-off orchestrator (image/video generation in Code mode,
@@ -535,6 +570,17 @@ export function useCodex() {
     // realtime counter show only in the coding chat that's actually running,
     // not in every chat the user switches to (David 2026-06-12). Cleared below.
     useGenerationStore.getState().setGenerating(convId, true)
+    // Register the abort in the STORE, not just in hook refs (audit A2). The
+    // Code view unmounts on a tab switch and the remounted hook starts with
+    // empty refs — before this, a run that survived the switch had no working
+    // Stop button and a second instruction could start a parallel loop on the
+    // same conversation. With the store aborter, stopCodex (any instance) and
+    // chat deletion both reach the real controller. Cleared in finally.
+    useGenerationStore.getState().registerAborter(convId, () => {
+      runningRef.current = false
+      abort.abort()
+      requestGenerationCancel()
+    })
 
     // Architect / RepoMap pre-pass (B8 + B9). Both inject into the
     // system prompt BEFORE the first iteration and surface a visible
@@ -678,6 +724,14 @@ export function useCodex() {
       // stopping. Capped so a model that simply refuses to act can't loop
       // forever (budget + loop-detector are the other backstops).
       let continueNudgesRemaining = 3
+      // G16: corrective steers when the model ends its turn while its own todo
+      // list still has open items (the R31 false completion). Separate budget
+      // from the nudges above, because a nudge fires on an EMPTY turn while
+      // this fires on a turn that claims to be done.
+      let planReconcilesRemaining = PLAN_RECONCILE_BUDGET
+      // PlanBar lag: batches of real work without a todo_write while the plan
+      // has open items earn one bounded mid-run steer to report progress.
+      const planStaleness = new PlanStaleness()
       // Raised from 20 → 50 (v2.3.7): large refactors across 10+ files
       // legitimately need >20 tool calls. Budget still caps via
       // agentMaxToolCalls/agentMaxIterations.
@@ -750,20 +804,55 @@ export function useCodex() {
         // I am the Coding Agent…" line never lands in the chat. The
         // post-stream echoDetected branch then drops the buffer entirely and
         // forces a silent retry.
+        //
+        // Coalesced per animation frame (audit D1) — Chat and Agent already
+        // did this; Codex wrote the store on every token, which re-rendered
+        // the whole transcript per token on long answers. settleLivePaint()
+        // cancels the queued frame the moment the stream call returns, so a
+        // stale frame can never fire AFTER a final direct write and repaint
+        // old content over it.
+        let livePaintPending: string | null = null
+        let livePaintFrame = false
+        const settleLivePaint = () => {
+          livePaintPending = null
+        }
         const liveContent = (c: string) => {
           if (echoRetriesRemaining > 0 && isSystemPromptEcho(c)) return
-          useChatStore.getState().updateMessageContent(convId!, assistantMsg.id, fullContent ? fullContent + '\n\n' + c : c)
+          livePaintPending = fullContent ? fullContent + '\n\n' + c : c
+          if (livePaintFrame) return
+          livePaintFrame = true
+          requestAnimationFrame(() => {
+            livePaintFrame = false
+            if (livePaintPending !== null) {
+              useChatStore.getState().updateMessageContent(convId!, assistantMsg.id, livePaintPending)
+              livePaintPending = null
+            }
+          })
         }
 
         if (strategy === 'native') {
-          const lastUserMsg = messages.filter(m => m.role === 'user').pop()?.content || ''
+          // Route on the USER's instruction, never on the newest user-role
+          // message (audit B6): steers, nudges and blocked-tool notes are
+          // pushed as role 'user', and routing on those swapped the tool list
+          // mid-run to whatever the harness happened to say last. The real
+          // instruction is the routing intent for the whole run.
+          const lastUserMsg = instruction
           // CODEX_CATEGORIES filter: Codex is a CODING agent — screenshot,
           // run_workflow etc. are distractions that pollute the tool list for
           // small/3B models. Filter the registry by category BEFORE keyword
           // routing. image/video are in the set since v2.5.3, but the keyword
           // router below only surfaces them on creative intents, so plain
           // coding turns keep the lean list.
-          const codexToolsAll = toolRegistry.getAll().filter(
+          // getAvailableTools, not getAll: a category the user set to 'blocked'
+          // must never reach the model. The keyword routers below drop blocked
+          // tools themselves, but the branch for a REMOTE model hands
+          // `codexTools` to the request untouched, so getAll() there meant a
+          // blocked category was offered and, since nothing re-checks the
+          // permission at execution time on this surface, actually ran. The
+          // hermes path never had the hole (toHermesToolDefs takes permissions),
+          // which is exactly the kind of per-schema drift the 2.6.3 matrix is
+          // looking for.
+          const codexToolsAll = toolRegistry.getAvailableTools(permissions).filter(
             (t) => (CODEX_CATEGORIES as readonly string[]).includes(t.category),
           )
           // Code-Review Mode (B13): strip mutating tools so the model
@@ -777,29 +866,29 @@ export function useCodex() {
           const codexTools = (settings.codexReviewMode || readOnlyTurn)
             ? codexToolsAll.filter((t) => !MUTATING_TOOLS.has(t.name))
             : codexToolsAll
-          // Keep the tool list LEAN — exactly like the uselu reference. A small
-          // model (qwen2.5-coder:7b) handed the full ~24-tool category set every
-          // turn degrades fast: it lapses into prose narration or dumps raw
-          // tool-call JSON instead of emitting clean native tool_calls, and the
-          // ReAct loop then stops after one step. uselu narrows to a handful of
-          // keyword-relevant tools, which keeps small models on-rails; git/test
-          // operations go through shell_execute (the dedicated git_*/run_tests
-          // tools are intentionally not surfaced by the keyword router). This
-          // line is the single most important parity point with uselu — do NOT
-          // replace it with the full `codexTools` set (that was the regression).
-          // Small-Model Mode (Knob 1): give Codex the embedding router it
-          // normally lacks (it ships keyword-only) plus a hard tool cap, so a
-          // 3B-8B coding model sees a short, semantically-ranked tool list.
-          // Default mode keeps the proven keyword-only selection — uselu parity,
-          // the single most important small-model line; do NOT widen it.
+          // Tool-list sizing is a MODEL-STRENGTH decision (audit B3):
+          //  - Small-Model Mode: embedding router + hard cap, ≤6 tools. A
+          //    3B-8B model handed the full catalog degrades fast (narrates,
+          //    dumps raw JSON, stops after one step — the old regression,
+          //    LongFuncEval arXiv 2505.10570).
+          //  - Local default: keyword routing over the coding categories,
+          //    uselu parity. Kept lean on purpose; the keyword groups now
+          //    cover git/tests/background so those are reachable when asked.
+          //  - Cloud/remote model: the FULL coding catalog. A hosted model
+          //    handles 25+ tools fine (that is exactly what Claude Code
+          //    sends), and keyword-guessing its toolbox from message one
+          //    starved 30-minute runs of git_commit/run_tests/background
+          //    shell mid-way.
           const relevantDefs = settings.smallModelMode
             ? await selectRelevantToolsAsync(lastUserMsg, codexTools, permissions, {
                 embed: (texts) => generateEmbeddings(texts),
                 topN: 5,
                 embeddingThreshold: 6,
-                maxTools: 6,
+                maxTools: SMALL_MODEL_MAX_TOOLS,
               })
-            : selectRelevantTools(lastUserMsg, codexTools, permissions)
+            : !isLocalModelByName(activeModel)
+              ? codexTools
+              : selectRelevantTools(lastUserMsg, codexTools, permissions)
           const tools: ToolDefinition[] = relevantDefs.map(t => ({
             type: 'function' as const,
             function: { name: t.name, description: t.description, parameters: t.inputSchema },
@@ -877,6 +966,7 @@ export function useCodex() {
                 throw thinkErr
               }
             }
+            settleLivePaint()
             toolCalls = turn.toolCalls
             turnContent = turn.content || ''
             // Real consumed-context usage for THIS coding turn (system + tools +
@@ -972,6 +1062,7 @@ export function useCodex() {
                 throw thinkErr
               }
             }
+            settleLivePaint()
             toolCalls = turn.toolCalls
             turnContent = turn.content || ''
             if (turn.promptEvalCount || turn.evalCount) {
@@ -1022,7 +1113,10 @@ export function useCodex() {
             },
           )
           shown += display.flush()
-          if (shown) liveContent(shown)
+          // Final paint DIRECT + settle the coalesced frame, so a queued
+          // stale frame can never fire after the writes below (audit D1).
+          settleLivePaint()
+          if (shown) useChatStore.getState().updateMessageContent(convId!, assistantMsg.id, fullContent ? fullContent + '\n\n' + shown : shown)
           const raw = hermesTurn.content
           if (hasToolCallTags(raw)) {
             toolCalls = parseHermesToolCalls(raw).map(tc => ({
@@ -1049,6 +1143,29 @@ export function useCodex() {
             }
             return ''
           })
+          // The Qwen3 chat templates put the opening `<think>` in the PROMPT,
+          // so the reply starts mid-thought and closes a tag it never opened.
+          // Nothing above matches that, and with thinking ON the raw closer
+          // plus the whole thought stayed in the answer.
+          const orphanClose = splitOrphanCloser(turnContent)
+          if (orphanClose.thinking) {
+            turnContent = orphanClose.content
+            if (keepThinking) {
+              thinkingContent += (thinkingContent ? '\n\n' : '') + orphanClose.thinking
+              useChatStore.getState().updateMessageThinking(convId!, assistantMsg.id, thinkingContent)
+            }
+          }
+          // A turn cut off mid-thought leaves the opener without its closer,
+          // which the regex above cannot match. It belongs in the thinking
+          // panel, never in the answer.
+          const orphanThink = splitUnclosedThink(turnContent)
+          if (orphanThink.thinking) {
+            turnContent = orphanThink.content
+            if (keepThinking) {
+              thinkingContent += (thinkingContent ? '\n\n' : '') + orphanThink.thinking
+              useChatStore.getState().updateMessageThinking(convId!, assistantMsg.id, thinkingContent)
+            }
+          }
           turnContent = finalStripThinkingTags(turnContent, keepThinking)
         }
 
@@ -1080,6 +1197,23 @@ export function useCodex() {
           continue
         }
 
+        // G21-2 parity with the Agent loop (David 2026-08-07): this round's
+        // thought becomes its OWN chronological block, before the round's
+        // narration and calls, once the run is tool work (this round calls
+        // tools, or earlier ones did). The accumulator and the top-of-bubble
+        // field are cleared so the same thought never renders twice; a plain
+        // answer turn with no tool activity keeps the classic bubble.
+        if (thinkingContent.trim() && (toolCalls.length > 0 || anyToolExecuted)) {
+          addBlock({
+            id: uuid(),
+            phase: 'thinking',
+            content: thinkingContent,
+            timestamp: Date.now(),
+          })
+          thinkingContent = ''
+          useChatStore.getState().updateMessageThinking(convId!, assistantMsg.id, '')
+        }
+
         if (turnContent) {
           fullContent += (fullContent ? '\n\n' : '') + turnContent
           useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent)
@@ -1093,6 +1227,33 @@ export function useCodex() {
             phase: 'answer',
             content: turnContent,
             timestamp: Date.now(),
+          })
+        }
+
+        // Repair near-miss tool names before anything tries to resolve them.
+        // The chat agent has done this since 2026-06-03 (gemma4 calling
+        // `video_generation`); Code never did, so the same class of miss ended
+        // as "Unknown tool" here. Live on the ship exe 2026-07-24, gpt-oss on
+        // LU Cloud sent `file_edit<|channel|>commentary` — a harmony control
+        // token welded onto the recipient — and every write call died while the
+        // model retried the identical name for a minute before falling back to
+        // a full-file rewrite that failed the same way. canonicalToolName only
+        // rewrites a name when the repaired form is a REGISTERED tool, so a
+        // genuinely unknown tool still errors instead of being rerouted.
+        //
+        // ORDER MATTERS, and it used to be the other way round (fixed
+        // 2026-08-06). Both gates below match on the tool NAME, so running them
+        // before the repair let a decorated name walk straight through: the
+        // very case this block exists for, `file_write<|channel|>commentary`,
+        // is not in MUTATING_TOOLS and is not a registered tool, so a read-only
+        // turn passed it, and the repair then turned it into `file_write` on
+        // the way to the executor. Repair first, then judge the real name.
+        if (toolCalls.length > 0) {
+          const knownToolNames = toolRegistry.getAll().map((t) => t.name)
+          toolCalls = toolCalls.map((tc) => {
+            const raw = tc.function?.name ?? ''
+            const fixed = canonicalToolName(raw, knownToolNames)
+            return fixed === raw ? tc : { ...tc, function: { ...tc.function, name: fixed } }
           })
         }
 
@@ -1118,23 +1279,28 @@ export function useCodex() {
           }
         }
 
-        // Repair near-miss tool names before anything tries to resolve them.
-        // The chat agent has done this since 2026-06-03 (gemma4 calling
-        // `video_generation`); Code never did, so the same class of miss ended
-        // as "Unknown tool" here. Live on the ship exe 2026-07-24, gpt-oss on
-        // LU Cloud sent `file_edit<|channel|>commentary` — a harmony control
-        // token welded onto the recipient — and every write call died while the
-        // model retried the identical name for a minute before falling back to
-        // a full-file rewrite that failed the same way. canonicalToolName only
-        // rewrites a name when the repaired form is a REGISTERED tool, so a
-        // genuinely unknown tool still errors instead of being rerouted.
-        if (toolCalls.length > 0) {
-          const knownToolNames = toolRegistry.getAll().map((t) => t.name)
-          toolCalls = toolCalls.map((tc) => {
-            const raw = tc.function?.name ?? ''
-            const fixed = canonicalToolName(raw, knownToolNames)
-            return fixed === raw ? tc : { ...tc, function: { ...tc.function, name: fixed } }
-          })
+        // Same hole, second gate: a category the user set to 'blocked'.
+        //
+        // Until 2026-08-06 that setting was enforced ONLY by leaving the tool
+        // out of the offer, which the paragraph above already explains is not a
+        // gate at all on this surface. Nothing downstream re-checked it:
+        // toolRegistry.execute resolves by name, and codexConfirmEnabled is a
+        // shell confirm keyed on provider and settings, not on the permission
+        // map. So a model that named a blocked tool in prose got it run.
+        // The Agent surface never had this, because it checks the permission
+        // level again right before it executes.
+        {
+          const isBlocked = (tc: { function?: { name?: string } }) =>
+            toolRegistry.getPermissionLevel(tc.function?.name ?? '', permissions) === 'blocked'
+          const refused = toolCalls.filter(isBlocked)
+          if (refused.length) {
+            toolCalls = toolCalls.filter((tc) => !isBlocked(tc))
+            const names = [...new Set(refused.map((tc) => tc.function!.name))].join(', ')
+            messages.push({
+              role: 'user',
+              content: `${names} is switched off for this conversation in the tool permissions, so it was not run. Do not call it again. Continue with the tools you have, or say what you would need.`,
+            })
+          }
         }
 
         // No tool calls in this turn. For a strong model that means "task
@@ -1180,14 +1346,29 @@ export function useCodex() {
               role: 'user',
               // A read-only command's deliverable IS the text. Demanding "the
               // NEXT step as an actual tool call" there sent the model back for
-              // more searching until the budget ran out, and the user got
-              // "Done: 2 other operation(s) completed." instead of the answer
-              // they asked for (live /find on the ship exe, 2026-07-25).
+              // more searching until the budget ran out, and the user got a
+              // generated tool tally instead of the answer they asked for
+              // (live /find on the ship exe, 2026-07-25; that tally text
+              // itself is gone since G14-2).
               content: readOnlyTurn
                 ? 'You have read enough. Write the answer now, in text, using what you found. Do not call any more tools and do not ask me for details you can look up. If something genuinely could not be determined, say which part and why.'
                 : 'Continue working autonomously until the task is fully done. Do NOT narrate what you are about to do, and do NOT ask me for paths or details you can discover yourself — use file_list / file_search / file_read to find them. Emit the NEXT step as an actual tool call right now. Only stop once everything is finished and verified.',
             })
             continue
+          }
+          // G16: the model ended its turn, but did the PLAN end? A read-only
+          // command's deliverable is text and gets no steer. Everything else
+          // is checked against the todo list the model itself maintains; a
+          // final turn with open steps gets a bounded contradiction naming
+          // the next step (R31: "All steps completed" at PLAN 13/30).
+          if (!readOnlyTurn && convId && planReconcilesRemaining > 0) {
+            const gap = openPlanGap(useTodoStore.getState().getTodos(convId))
+            if (gap) {
+              planReconcilesRemaining--
+              void diagLog('plan-reconcile-steer', { iter: i, done: gap.done, total: gap.total, remaining: planReconcilesRemaining })
+              messages.push({ role: 'user', content: planReconcileSteer(gap) })
+              continue
+            }
           }
           void diagLog('break-no-toolcalls', { iter: i, turnContentLen: turnContent.length, fullContentLen: fullContent.length })
           break
@@ -1207,20 +1388,26 @@ export function useCodex() {
             )
         if (batchVerdict.action === 'halt') {
           void diagLog('loop-guard-halt', { iter: i, reason: batchVerdict.reason })
-          const msg = `\n\n_(halted: ${batchVerdict.reason}. The model is looping — try a stronger model for multi-step code tasks, or rephrase the instruction.)_`
+          const msg = `\n\n_(halted: ${batchVerdict.reason}. The model is looping. Try a stronger model for multi-step code tasks, or rephrase the instruction.)_`
           useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent + msg)
           break
         }
+        // Steer is appended AFTER this iteration's assistant+tool messages
+        // (audit F2). Pushed here it landed chronologically BEFORE the calls
+        // it complains about, so the history read "do not repeat this" and
+        // then showed the model doing it.
+        let pendingSteer: string | null = null
         if (batchVerdict.action === 'steer') {
           // Let this batch still run (the in-turn cache serves it instantly),
           // but put the anti-repeat instruction in front of the NEXT turn.
           void diagLog('loop-guard-steer', { iter: i })
-          messages.push({ role: 'user', content: batchVerdict.message })
+          pendingSteer = batchVerdict.message
         }
 
         type BatchEntry = { tc: typeof toolCalls[number]; ac: AgentToolCall; blockId: string; injectedArgs: Record<string, any> }
         const batch: BatchEntry[] = []
         budget.addToolCalls(toolCalls.length)
+        anyToolExecuted = true
         for (const tc of toolCalls) {
           const toolName = tc.function.name
           const toolArgs = { ...tc.function.arguments }
@@ -1238,11 +1425,11 @@ export function useCodex() {
           // own timeout to go higher/lower.
           if (toolName === 'shell_execute') {
             if (!toolArgs.cwd && hasValidWorkDir) toolArgs.cwd = workDir
-            if (!toolArgs.timeout) toolArgs.timeout = 600000
+            if (!toolArgs.timeout) toolArgs.timeout = SHELL_EXECUTE_DEFAULT_TIMEOUT_MS
           }
           if (toolName === 'code_execute') {
             if (!toolArgs.cwd && hasValidWorkDir) toolArgs.cwd = workDir
-            if (!toolArgs.timeout) toolArgs.timeout = 120000
+            if (!toolArgs.timeout) toolArgs.timeout = CODE_EXECUTE_DEFAULT_TIMEOUT_MS
           }
           // Resolve relative file paths against working directory.
           // Absolute-path detection must accept ANY drive letter (C:, D:, E:, …),
@@ -1311,45 +1498,13 @@ export function useCodex() {
             }),
         )
 
-        // 60 s per-call timeout is enforced by wrapping the executor function
-        // (keeps the original safety guard — a runaway tool cannot wedge the
-        // whole agent turn).
-        const withTimeout = (name: string, args: Record<string, any>) => {
-          // Shell/code/test/git tools enforce their OWN timeout in the Rust
-          // backend (args.timeout). A fixed 60s JS cap here used to preempt
-          // long-but-legitimate builds before the backend's timer fired — the
-          // root of "coding agent can't build anything / always times out"
-          // (David 2026-06-04). For those, set the JS race ceiling just ABOVE
-          // the tool's own timeout so the backend always wins; everything else
-          // keeps the original 60s guard.
-          //
-          // Same bug class hit the generation tools when they joined Codex in
-          // v2.5.3 (live E2E 2026-06-10: five video_generate attempts all died
-          // at "timed out (60s)" mid-VRAM-handoff). image/video generation has
-          // its own settings-driven deadline (imageGen/videoGenTimeoutMinutes,
-          // enforced in vram-handoff's poll) — set the JS ceiling above it so
-          // the generation pipeline's own timeout always wins, exactly like
-          // the shell tools.
-          const longRunning =
-            name === 'shell_execute' || name === 'code_execute' ||
-            name === 'shell_execute_background' || name === 'run_tests' ||
-            name === 'git_commit' || name === 'git_push'
-          const own = Number(args?.timeout)
-          const capMs =
-            name === 'image_generate'
-              ? (Math.max(1, Number(settings.imageGenTimeoutMinutes) || 20) * 60_000 + 120_000)
-              : name === 'video_generate'
-                ? (Math.max(1, Number(settings.videoGenTimeoutMinutes) || 60) * 60_000 + 120_000)
-                : longRunning
-                  ? (Number.isFinite(own) && own > 0 ? own + 15000 : 615000)
-                  : 60000
-          return Promise.race([
-            toolRegistry.execute(name, args),
-            new Promise<string>((_, reject) =>
-              setTimeout(() => reject(new Error(`Tool execution timed out (${Math.round(capMs / 1000)}s)`)), capMs)
-            ),
-          ])
-        }
+        // Per-call timeout backstop, shared with Agent mode since audit B8/B9
+        // (src/lib/tool-timeout.ts). The tool's own deadline always wins; the
+        // race only exists so a tool whose timer never fires cannot hold the
+        // loop forever — and the timer is cleared when the tool wins (B10),
+        // instead of parking a live closure for up to 615 s per call.
+        const withTimeout = (name: string, args: Record<string, any>) =>
+          raceWithToolTimeout(toolRegistry.execute(name, args), name, toolCallCapMs(name, args, settings))
 
         // Multi-File Stage-and-Approve (B10). When the user has codex
         // stage mode on, file_write calls don't hit the disk — they
@@ -1531,7 +1686,7 @@ export function useCodex() {
                   toolName: req.toolName,
                   command: String(a.command ?? a.code ?? a.script ?? '').slice(0, 800),
                   cloudReason: !settings.codexConfirmShell && providerId === 'lu-cloud',
-                })
+                }, abort.signal)
               }
             : undefined,
           recordAudit: (entry) => {
@@ -1572,6 +1727,38 @@ export function useCodex() {
           if (!result) continue
           applyResultToToolCall(entry.ac, result)
           const isError = result.status === 'failed'
+
+          // Unified diff for the write tools — computed BEFORE the block
+          // update so the ToolCallBlock itself can render it (audit D5; the
+          // diff used to live only on the Codex event log, so the Agent view
+          // showed raw text where a change view belonged).
+          let acDiff: string | undefined
+          if (entry.ac.toolName === 'file_write') {
+            // Pre-read above captured the on-disk version; a missing file
+            // yields an all-add hunk. Empty diff → omit.
+            const oldText = oldContents.get(entry.ac.id) ?? ''
+            const newText =
+              typeof entry.injectedArgs.content === 'string'
+                ? entry.injectedArgs.content
+                : ''
+            acDiff = computeUnifiedDiff(entry.injectedArgs.path, oldText, newText) || undefined
+          } else if (entry.ac.toolName === 'file_edit') {
+            // Surgical edit — the tool only received old_string/new_string, so
+            // reconstruct the new content from the pre-read + the unique
+            // replacement to attach a real diff. If the edit did not apply
+            // uniquely the executor already returned an error; skip the diff.
+            const oldText = oldContents.get(entry.ac.id) ?? ''
+            const applied = applyUniqueEdit(
+              oldText,
+              typeof entry.injectedArgs.old_string === 'string' ? entry.injectedArgs.old_string : '',
+              typeof entry.injectedArgs.new_string === 'string' ? entry.injectedArgs.new_string : '',
+            )
+            acDiff = applied.ok
+              ? computeUnifiedDiff(entry.injectedArgs.path, oldText, applied.content ?? '') || undefined
+              : undefined
+          }
+          if (acDiff) entry.ac.diff = acDiff
+
           updateBlockById(entry.blockId, {
             toolCall: { ...entry.ac },
             toolCalls: [{ ...entry.ac }],
@@ -1589,44 +1776,11 @@ export function useCodex() {
             codexStore.addEvent(convId, {
               id: uuid(), type: 'terminal_output', content: resultStr, timestamp: Date.now(),
             })
-          } else if (entry.ac.toolName === 'file_write') {
-            // Attach a unified diff to EVERY file_change event (not only in
-            // stage mode). Pre-read above captured the on-disk version; a
-            // missing file yields an all-add hunk. Empty diff → omit.
-            const oldText = oldContents.get(entry.ac.id) ?? ''
-            const newText =
-              typeof entry.injectedArgs.content === 'string'
-                ? entry.injectedArgs.content
-                : ''
-            const diff = computeUnifiedDiff(
-              entry.injectedArgs.path,
-              oldText,
-              newText,
-            )
+          } else if (entry.ac.toolName === 'file_write' || entry.ac.toolName === 'file_edit') {
             codexStore.addEvent(convId, {
               id: uuid(), type: 'file_change', content: resultStr,
               filePath: entry.injectedArgs.path,
-              diff: diff || undefined,
-              timestamp: Date.now(),
-            })
-          } else if (entry.ac.toolName === 'file_edit') {
-            // Surgical edit — the tool only received old_string/new_string, so
-            // reconstruct the new content from the pre-read + the unique
-            // replacement to attach a real diff. If the edit did not apply
-            // uniquely the executor already returned an error; skip the diff.
-            const oldText = oldContents.get(entry.ac.id) ?? ''
-            const applied = applyUniqueEdit(
-              oldText,
-              typeof entry.injectedArgs.old_string === 'string' ? entry.injectedArgs.old_string : '',
-              typeof entry.injectedArgs.new_string === 'string' ? entry.injectedArgs.new_string : '',
-            )
-            const diff = applied.ok
-              ? computeUnifiedDiff(entry.injectedArgs.path, oldText, applied.content ?? '')
-              : undefined
-            codexStore.addEvent(convId, {
-              id: uuid(), type: 'file_change', content: resultStr,
-              filePath: entry.injectedArgs.path,
-              diff: diff || undefined,
+              diff: acDiff,
               timestamp: Date.now(),
             })
           } else if (isError) {
@@ -1689,46 +1843,46 @@ export function useCodex() {
             messages.push({ role: 'user', content: buildHermesToolResult(entry.ac.toolName, resultTextFor(result)) })
           }
         }
-      }
 
-      // Bug fix: when the model's final turn returns empty content (all
-      // work happened via tool calls), build a fallback summary from the
-      // blocks array so the assistant bubble is never blank.
-      if (!fullContent.trim()) {
-        const completed = blocks.filter(b => b.phase === 'tool_call' && b.toolCall?.status === 'completed')
-        const failed = blocks.filter(b => b.phase === 'tool_call' && b.toolCall?.status === 'failed')
-        const writes = completed.filter(b => b.toolCall?.toolName === 'file_write')
-        const reads = completed.filter(b => b.toolCall?.toolName === 'file_read')
-
-        const parts: string[] = []
-        if (writes.length) parts.push(`${writes.length} file(s) written`)
-        if (reads.length) parts.push(`${reads.length} file(s) read`)
-        const otherCompleted = completed.length - writes.length - reads.length
-        if (otherCompleted > 0) parts.push(`${otherCompleted} other operation(s) completed`)
-        if (failed.length) parts.push(`${failed.length} operation(s) failed`)
-
-        // Be HONEST about the outcome. The old code printed "Task completed"
-        // even when the model fired a couple of shell commands that errored and
-        // then went silent — the false-success David hit (gemma4: 2x
-        // shell_execute → "Task completed 1" with nothing built, 2026-06-04).
-        // Only claim a clean finish when something actually succeeded AND
-        // nothing failed.
-        if (completed.length === 0) {
-          fullContent = failed.length
-            ? `I couldn't complete the task, ${failed.length} operation(s) failed and nothing succeeded. Check the tool errors above, then refine the instruction or try a stronger model.`
-            : `I stopped without completing the task, the model ended its turn without doing any work. Try rephrasing the instruction, or turn Think off and resend.`
-        } else if (failed.length > 0) {
-          fullContent = `Partially done: ${parts.join(', ')}. Some steps failed, see the errors above; the result may be incomplete.`
-        } else if (readOnlyTurn) {
-          // An operations count is not an answer. A read-only command was asked
-          // a question, so say plainly that the question went unanswered rather
-          // than dressing up a tool tally as success.
-          fullContent = `I looked (${parts.join(', ') || 'no steps recorded'}) but the model ended without writing the answer. Send the command again, or switch to a stronger model for this one.`
-        } else {
-          fullContent = parts.length > 0 ? `Done: ${parts.join(', ')}.` : 'Done.'
+        // Loop-detector, result side: a round where every call failed changed
+        // nothing, so a run of them is a stall the call-shape detectors above
+        // cannot see (they only look at what was asked for, and they skip
+        // shell on purpose).
+        const failVerdict = loopGuard.recordResults(
+          results.map((r) => ({ name: r.toolName, failed: r.status === 'failed', error: r.error, args: r.dispatchedArgs })),
+        )
+        if (failVerdict.action === 'halt') {
+          const msg = `\n\n_(halted: ${failVerdict.reason}. The model is looping. Try a stronger model for multi-step code tasks, or rephrase the instruction.)_`
+          useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent + msg)
+          break
         }
-        useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent)
+
+        // Now the steer sits AFTER the calls it refers to (audit F2).
+        if (pendingSteer) {
+          messages.push({ role: 'user', content: pendingSteer })
+        }
+        if (failVerdict.action === 'steer') {
+          messages.push({ role: 'user', content: failVerdict.message })
+        }
+        // PlanBar lag, parity with the Agent loop: the bar renders only what
+        // the model reports, so after enough batches of silent progress ask it
+        // to bring the list current.
+        if (convId) {
+          const staleGap = openPlanGap(useTodoStore.getState().getTodos(convId))
+          if (planStaleness.recordBatch(requests.map((r) => r.toolName), staleGap !== null) && staleGap) {
+            void diagLog('plan-staleness-steer', { iter: i, done: staleGap.done, total: staleGap.total })
+            messages.push({ role: 'user', content: planStalenessSteer(staleGap) })
+          }
+        }
       }
+
+      // The bubble carries the MODEL'S answer or nothing. This used to build
+      // a sentence out of tool counters whenever the final turn came back
+      // empty, and David read it on the running build for what it is: "Das
+      // ist ja keine LLM Antwort. Kein generischer Text von uns." (2026-08-07,
+      // G14-2, guarded by lib/__tests__/no-invented-answer.test.ts). The step
+      // band already shows every call and every failure; a sentence we
+      // authored on top only pretends the model said something it did not.
 
       // Auto-apply (2.5.10): with the user's opt-in, staged changes land on
       // disk the moment the run ends — same trusted write path as the panel's
@@ -1791,27 +1945,37 @@ export function useCodex() {
       // the chat store. On the next turn, the history builder includes
       // them in the API payload so the model sees what it did before.
       // Hidden messages are filtered out by MessageBubble rendering.
-      const toolHistory = messages.slice(messagesStartLen)
+      //
+      // Capped + batched (audit E2). Uncapped, a 200-iteration run persisted
+      // hundreds of hidden messages of up to 60k chars each — tens of MB in
+      // one conversation, reserialised on every later persist. And the old
+      // one-set()-per-message insert loop was the visible hang at run end.
+      // The most recent chain is what the next turn actually needs; older
+      // steps are summarised by the visible transcript anyway.
+      const toolHistoryAll = messages.slice(messagesStartLen)
+      const HIDDEN_HISTORY_MAX = 60
+      let toolHistory = toolHistoryAll.slice(-HIDDEN_HISTORY_MAX)
+      // Never start the kept slice on an orphan tool result — strict
+      // providers 422 a result whose call fell outside the window.
+      while (toolHistory.length > 0 && toolHistory[0].role === 'tool') toolHistory = toolHistory.slice(1)
       if (toolHistory.length > 0 && convId) {
         const store = useChatStore.getState()
         // Find the assistant message we just filled so we can insert BEFORE it
         const convNow = store.conversations.find(c => c.id === convId)
         const assistantIdx = convNow?.messages.findIndex(m => m.id === assistantMsg.id) ?? -1
         if (assistantIdx > 0) {
-          for (const tm of toolHistory) {
-            store.insertMessageBefore(convId, assistantMsg.id, {
-              id: uuid(),
-              role: tm.role as 'assistant' | 'tool',
-              content: tm.content || '',
-              timestamp: Date.now(),
-              hidden: true,
-              tool_calls: tm.tool_calls as any,
-              // Persist the tool-result linkage so the next turn's history
-              // builder can replay it — without this, follow-up turns 422 on
-              // lu-cloud (see types/chat.ts Message.tool_call_id, Bug 4).
-              tool_call_id: tm.tool_call_id,
-            })
-          }
+          store.insertMessagesBefore(convId, assistantMsg.id, toolHistory.map((tm) => ({
+            id: uuid(),
+            role: tm.role as 'assistant' | 'tool',
+            content: tm.content || '',
+            timestamp: Date.now(),
+            hidden: true,
+            tool_calls: tm.tool_calls as any,
+            // Persist the tool-result linkage so the next turn's history
+            // builder can replay it — without this, follow-up turns 422 on
+            // lu-cloud (see types/chat.ts Message.tool_call_id, Bug 4).
+            tool_call_id: tm.tool_call_id,
+          })))
         }
       }
 
@@ -1826,9 +1990,16 @@ export function useCodex() {
 
       setIsRunning(false)
       useGenerationStore.getState().setGenerating(convId, false)
+      useGenerationStore.getState().clearAborter(convId)
       runningRef.current = false
       abortRef.current = null
       clearActiveChatId()
+
+      // The turn is done, including the hidden tool history inserted above, so
+      // put it on disk now. Persistence is coalesced while the run streams
+      // (2.6.3 — see coalescedStorage), and losing the tool chain would cost
+      // the next turn its context, not just the transcript.
+      void flushChatPersist()
       codexStore.setThreadStatus(convId, 'idle')
 
       // The per-batch bump above only fires when a batch RETURNS. A user who
@@ -1870,19 +2041,34 @@ export function useCodex() {
             task: loopState.task, intervalMs: loopState.intervalMs,
             nextAt: Date.now() + loopState.intervalMs,
           })
-          loopTimerRef.current = setTimeout(() => {
-            loopTimerRef.current = null
+          const fireLoopPass = () => {
+            codexLoopTimer = null
             // Bail if the user moved on or started something else meanwhile.
-            if (runningRef.current) return
+            // Clear the loop store too — leaving it standing painted a LoopBar
+            // that promised a pass which was never coming (audit A3).
+            if (runningRef.current) {
+              useAgentLoopStore.getState().clear()
+              return
+            }
             if (useChatStore.getState().activeConversationId !== convForLoop) {
               useAgentLoopStore.getState().clear()
+              return
+            }
+            // The Code view is not on screen (other chat mode, other view):
+            // do NOT start an invisible run — the loop's own contract is
+            // "never running invisibly" (David 2026-07-25). Defer instead of
+            // cancel, so peeking at Create doesn't kill a standing loop; the
+            // pass fires within 5 s of the view coming back.
+            if (useCodexStore.getState().chatMode !== 'codex') {
+              codexLoopTimer = setTimeout(fireLoopPass, 5000)
               return
             }
             void sendRef.current?.(buildLoopRecheck(loopState.task, nextPass), {
               displayContent: cap > 0 ? `pass ${nextPass} of ${cap}` : `pass ${nextPass}`,
               loop: { ...loopState, pass: nextPass },
             })
-          }, loopState.intervalMs)
+          }
+          codexLoopTimer = setTimeout(fireLoopPass, loopState.intervalMs)
         }
       }
     }
@@ -1897,14 +2083,18 @@ export function useCodex() {
     // Stop means stop: also cancel a /loop pass that is waiting out its
     // interval, otherwise the run the user just killed comes back by itself.
     userStoppedRef.current = true
-    if (loopTimerRef.current) {
-      clearTimeout(loopTimerRef.current)
-      loopTimerRef.current = null
+    if (codexLoopTimer) {
+      clearTimeout(codexLoopTimer)
+      codexLoopTimer = null
     }
     useAgentLoopStore.getState().clear()
     runningRef.current = false
     abortRef.current?.abort()
     abortRef.current = null
+    // The run may belong to a PREVIOUS hook instance (the Code view remounts
+    // on every tab switch) whose controller this instance never saw. The
+    // store-registered aborter reaches it regardless of who started it.
+    useGenerationStore.getState().abortConversation(useChatStore.getState().activeConversationId)
     setIsRunning(false)
   }, [])
 

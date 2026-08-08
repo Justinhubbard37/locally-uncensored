@@ -92,3 +92,23 @@ export function toolStrategyFor(input: ToolSupportInput): ToolCallingStrategy {
   }
   return 'hermes_xml'
 }
+
+/**
+ * Overlay Ollama's OWN answer about a model onto a name-derived strategy
+ * (G26, R18 witness 2026-08-07): a Qwen3 abliterated GGUF passes the family
+ * heuristic, but its chat template has no tool support, so a native run died
+ * in 42 s with a terminal gate while Code drove the very same model 51 tool
+ * steps through the prompt transport. /api/show reports `capabilities`
+ * (['completion','tools',...]); when the server says there is no 'tools'
+ * capability, a native plan degrades to the prompt transport instead of
+ * gating. An empty capabilities list means the probe failed or the server
+ * predates the field, so the plan stands unchanged (optimistic, as before).
+ */
+export function applyLiveCapabilities(
+  strategy: ToolCallingStrategy,
+  capabilities: string[],
+): ToolCallingStrategy {
+  if (strategy !== 'native') return strategy
+  if (capabilities.length === 0) return strategy
+  return capabilities.includes('tools') ? 'native' : 'hermes_xml'
+}

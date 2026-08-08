@@ -753,15 +753,14 @@ function CodexAgentSettings() {
       />
       {/* Cloud arm of the same gate. Until 2.5.9 this was hard-wired on and
           invisible, so the toggle above appeared to do nothing whenever the
-          coding agent ran on a cloud model. Shown only while the toggle above is
-          off, because that is the only case where it changes anything. */}
-      {!settings.codexConfirmShell && (
-        <InlineToggle
-          label="Also confirm when the coding agent runs on an LU Cloud model (recommended)"
-          enabled={settings.codexCloudConfirmShell}
-          onChange={() => updateSettings({ codexCloudConfirmShell: !settings.codexCloudConfirmShell })}
-        />
-      )}
+          coding agent ran on a cloud model. Always shown since G15a: it also
+          governs Agent mode, which ignores the Codex-only toggle above, so
+          hiding it while that toggle is on would strand the Agent side. */}
+      <InlineToggle
+        label="Also confirm when Agent or Coding runs on an LU Cloud model (recommended)"
+        enabled={settings.codexCloudConfirmShell}
+        onChange={() => updateSettings({ codexCloudConfirmShell: !settings.codexCloudConfirmShell })}
+      />
     </div>
   )
 }
@@ -831,6 +830,11 @@ function ResetSection({ tab }: { tab: SettingsTab }) {
       resetSettingsKeys(SETTINGS_TAB_RESET_KEYS[tab])
       if (tab === 'agent') resetPermissions()
       if (tab === 'voice-remote') resetVoiceDefaults()
+      // G20: "Reset AI Backends" only reset settings KEYS and never touched
+      // the provider store, so it could not hand the openai slot back to the
+      // Built-in Engine once LM Studio had adopted it. Now it restores the
+      // shipped slots too (API keys and the cloud account flag are kept).
+      if (tab === 'backends') useProviderStore.getState().resetProvidersToDefaults()
       setDone(`${tabLabel} settings restored to defaults`)
     }
     if (doneTimer.current) window.clearTimeout(doneTimer.current)
@@ -1608,7 +1612,7 @@ export function SettingsPage() {
 // ── Update Section ──────────────────────────────────────────────
 
 function UpdateSection() {
-  const { currentVersion, latestVersion, updateAvailable, releaseNotes, dismissed, isChecking, checkForUpdate, clearDismiss, openReleasePage } = useUpdateStore()
+  const { currentVersion, latestVersion, updateAvailable, releaseNotes, dismissed, isChecking, autoDownload, checkForUpdate, clearDismiss, setAutoDownload, openReleasePage } = useUpdateStore()
   // Defensive: only treat the persisted `latestVersion` as actually newer if a
   // semver compare confirms it. Otherwise the binary was updated out-of-band
   // and the persisted value is stale (e.g. localStorage still says 2.3.8 while
@@ -1670,6 +1674,23 @@ function UpdateSection() {
             You are on the latest version.
           </div>
         )}
+
+        {/* Auto-download. Downloads only — installing always stays a click, so
+            the app never restarts under the user's hands. */}
+        <label className="flex items-start justify-between gap-3 cursor-pointer">
+          <span>
+            <span className="block text-[0.65rem] text-gray-300">Download updates automatically</span>
+            <span className="block text-[0.55rem] text-gray-600 leading-relaxed">
+              Fetches the update in the background so installing is one click. Never restarts on its own.
+            </span>
+          </span>
+          <input
+            type="checkbox"
+            checked={autoDownload}
+            onChange={(e) => setAutoDownload(e.target.checked)}
+            className="mt-0.5 accent-emerald-500"
+          />
+        </label>
 
         {/* Manual check */}
         <button

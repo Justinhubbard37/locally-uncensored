@@ -2,6 +2,7 @@ import { useCreateStore } from '../../../stores/createStore'
 import { useCreateExp } from './CreateContext'
 import { intentToJob } from '../../../lib/render/cloud-jobs'
 import { defaultCloudModel, resolveOpPick, runCredits } from '../../../stores/cloudCatalogStore'
+import { meterState } from '../../../lib/render/credits-meter'
 import { Tooltip } from '../ui/Tooltip'
 import { openExternal } from '../../../api/backend'
 import { CLOUD_BASE } from '../../../api/cloud/config'
@@ -53,84 +54,58 @@ export function CreditsMeter() {
   )
   const remaining = quota.remaining.credits
   const limit = quota.limits.credits
-  const topup = quota.topup?.credits ?? 0
-  // The 0029 caps. Video's monthly room is extended by the wallet (packs are
-  // exempt from the sub-budget); trainings are a hard count the wallet cannot
-  // buy past. Absent fields (a pre-0029 server) mean uncapped: never gate on
-  // data we do not have.
-  const isTraining = op === 'lora-train'
-  const isVideoBudget = kind === 'video' && !isTraining
-  const videoRoom = quota.video ? quota.video.remaining + topup : Infinity
-  const trainingsLeft = quota.trainings ? quota.trainings.remaining : Infinity
-  const enough = remaining >= cost
-  const videoEnough = !isVideoBudget || videoRoom >= cost
-  const trainingsEnough = !isTraining || trainingsLeft > 0
-  const pct = limit > 0 ? Math.max(0, Math.min(1, remaining / limit)) : 0
+  const state = meterState(quota, cost, kind, op)
+  // A wallet-fixable shortfall (credits, video budget) lands on the credits
+  // tab; the training count is a plan property, so that one goes to the plans.
+  const upsell = (label: string, tab?: 'credits') => (
+    <button
+      onClick={() => void openExternal(`${CLOUD_BASE}/pricing${tab ? '?tab=credits' : ''}`)}
+      className="t-control px-2 h-[var(--control-h-sm)] inline-flex items-center rounded-md bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 transition-colors"
+    >
+      {label}
+    </button>
+  )
 
-  if (!enough) {
-    return (
-      <button
-        onClick={() => void openExternal(`${CLOUD_BASE}/pricing?tab=credits`)}
-        className="t-control px-2 h-[var(--control-h-sm)] inline-flex items-center rounded-md bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 transition-colors"
-      >
-        {remaining <= 0 ? 'Out of credits, top up' : `Needs ${cost} credits (${remaining} left)`}
-      </button>
+  if (state.kind === 'insufficient') {
+    return upsell(
+      state.remaining <= 0
+        ? 'Out of credits, top up'
+        : `Needs ${state.cost} credits (${state.remaining} left)`,
+      'credits',
     )
   }
-  if (!trainingsEnough) {
-    return (
-      <button
-        onClick={() => void openExternal(`${CLOUD_BASE}/pricing`)}
-        className="t-control px-2 h-[var(--control-h-sm)] inline-flex items-center rounded-md bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 transition-colors"
-      >
-        No trainings left this month. Upgrade
-      </button>
-    )
-  }
-  if (!videoEnough) {
-    return (
-      <button
-        onClick={() => void openExternal(`${CLOUD_BASE}/pricing?tab=credits`)}
-        className="t-control px-2 h-[var(--control-h-sm)] inline-flex items-center rounded-md bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 transition-colors"
-      >
-        Video budget used up. Top up
-      </button>
-    )
-  }
+  if (state.kind === 'no-trainings') return upsell('No trainings left this month, upgrade')
+  if (state.kind === 'no-video-budget') return upsell('Video budget used up, top up', 'credits')
 
-  // "How many more like this one" is the number a person actually wants from
-  // a meter. Video counts against the smaller of the shared pool and its
-  // sub-budget; trainings show the monthly count directly.
-  const runsPool = isVideoBudget ? Math.min(remaining, videoRoom) : remaining
-  const runsLeft = isTraining
-    ? Math.min(trainingsLeft, Math.floor(runsPool / cost))
-    : Math.floor(runsPool / cost)
-  const unit = isTraining
-    ? runsLeft === 1 ? 'training' : 'trainings'
-    : kind === 'video'
-      ? runsLeft === 1 ? 'clip' : 'clips'
-      : kind === 'audio'
-        ? runsLeft === 1 ? 'track' : 'tracks'
-        : runsLeft === 1 ? 'image' : 'images'
+  const noun = op === 'lora-train' ? 'training' : kind === 'video' ? 'clip' : kind === 'audio' ? 'track' : 'image'
+  const tail = state.runsLeft === null ? '' : `, about ${state.runsLeft} more like it`
+  const videoTail =
+    state.showVideoBudget && quota.video
+      ? ` (monthly video budget: ${quota.video.remaining} of ${quota.video.limit} credits left)`
+      : ''
+  const trainingTail =
+    op === 'lora-train' && quota.trainings
+      ? ` (${quota.trainings.remaining} of ${quota.trainings.limit} trainings left)`
+      : ''
 
   return (
     <Tooltip
-      content={`${remaining} of ${limit} credits left this billing period. This ${
-        isTraining ? 'training' : kind === 'video' ? 'clip' : kind === 'audio' ? 'track' : 'image'
-      } uses ${cost}, about ${runsLeft} more like it${
-        isVideoBudget && quota.video ? ` (monthly video budget: ${quota.video.remaining} of ${quota.video.limit} credits left)` : ''
-      }${isTraining && quota.trainings ? ` (${trainingsLeft} of ${quota.trainings.limit} trainings left)` : ''}.`}
+      content={`${remaining} of ${limit} credits left this billing period. This ${noun} uses ${cost}${tail}${videoTail}${trainingTail}.`}
     >
       <div className="flex items-center gap-1.5 px-2 h-[var(--control-h-sm)] rounded-md bg-white/[0.04] text-gray-400 t-control">
         <div className="w-12 h-1 rounded-full bg-white/10 overflow-hidden">
           <div
-            className={cn('h-full rounded-full', pct > 0.25 ? 'bg-emerald-400/80' : 'bg-amber-400/80')}
-            style={{ width: `${pct * 100}%` }}
+            className={cn('h-full rounded-full', state.pct > 0.25 ? 'bg-emerald-400/80' : 'bg-amber-400/80')}
+            style={{ width: `${state.pct * 100}%` }}
           />
         </div>
         <span className="tabular-nums">{remaining}</span>
-        <span className="text-gray-600">·</span>
-        <span className="tabular-nums whitespace-nowrap">≈{runsLeft} {unit}</span>
+        {state.runsLeft !== null && (
+          <>
+            <span className="text-gray-600">·</span>
+            <span className="tabular-nums whitespace-nowrap">≈{state.runsLeft} {state.unit}</span>
+          </>
+        )}
       </div>
     </Tooltip>
   )

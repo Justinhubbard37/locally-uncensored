@@ -167,3 +167,106 @@ describe('args-validator — formatValidationErrors', () => {
     expect(out).toBe('top-level not object')
   })
 })
+
+// ── Nested schemas + array arguments (2026-08-05) ────────────────
+//
+// Every tool with an object-in-array parameter goes through here, on every
+// provider and every transport: the native OpenAI channel, the Hermes prompt
+// path small local models use, and the cloud prompt transport. `todo_write` is
+// the first such tool, so its shape is the fixture.
+
+const planSchema: JsonSchema = {
+  type: 'object',
+  properties: {
+    todos: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          content: { type: 'string' },
+          status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
+        },
+        required: ['content', 'status'],
+      },
+    },
+  },
+  required: ['todos'],
+}
+
+describe('args-validator — nested object schemas', () => {
+  it('accepts a well-formed nested list', () => {
+    const r = validateToolArgs(
+      { todos: [{ content: 'read the file', status: 'completed' }, { content: 'fix it', status: 'in_progress' }] },
+      planSchema,
+    )
+    expect(r.valid).toBe(true)
+  })
+
+  it('reports a missing required field inside an item', () => {
+    const r = validateToolArgs({ todos: [{ status: 'pending' }] }, planSchema)
+    expect(r.valid).toBe(false)
+    expect(formatValidationErrors(r.errors)).toMatch(/todos\[0\]\.content/)
+  })
+
+  it('reports a status the model invented, so it can correct itself', () => {
+    // Silently accepting 'donezo' is how a plan ends up showing work as not
+    // started with no explanation the model can act on.
+    const r = validateToolArgs({ todos: [{ content: 'x', status: 'donezo' }] }, planSchema)
+    expect(r.valid).toBe(false)
+    expect(formatValidationErrors(r.errors)).toMatch(/todos\[0\]\.status/)
+    expect(formatValidationErrors(r.errors)).toMatch(/pending/)
+  })
+
+  it('reports a wrong type inside an item', () => {
+    const r = validateToolArgs({ todos: [{ content: 42, status: 'pending' }] }, planSchema)
+    expect(r.valid).toBe(false)
+    expect(formatValidationErrors(r.errors)).toMatch(/todos\[0\]\.content/)
+  })
+
+  it('coerces inside a nested object the way it does at the top level', () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: {
+        opts: { type: 'object', properties: { retries: { type: 'integer' }, force: { type: 'boolean' } } },
+      },
+    }
+    const r = validateToolArgs({ opts: { retries: '3', force: 'false' } }, schema)
+    expect(r.valid).toBe(true)
+    expect(r.coerced?.opts).toEqual({ retries: 3, force: false })
+  })
+
+  it('keeps the coerced value of an array item instead of dropping it', () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { sizes: { type: 'array', items: { type: 'number' } } },
+    }
+    const r = validateToolArgs({ sizes: ['1', '2'] }, schema)
+    expect(r.valid).toBe(true)
+    expect(r.coerced?.sizes).toEqual([1, 2])
+  })
+})
+
+describe('args-validator — an array sent as a JSON string', () => {
+  it('parses it instead of wrapping it in a one-element array', () => {
+    const r = validateToolArgs(
+      { todos: '[{"content": "step one", "status": "pending"}]' },
+      planSchema,
+    )
+    expect(r.valid).toBe(true)
+    expect(r.coerced?.todos).toEqual([{ content: 'step one', status: 'pending' }])
+  })
+
+  it('surfaces a broken JSON array rather than smuggling the text through', () => {
+    const r = validateToolArgs({ todos: '[{"content": "step one"' }, planSchema)
+    expect(r.valid).toBe(false)
+    expect(formatValidationErrors(r.errors)).toMatch(/todos/)
+  })
+
+  it('still wraps a plain single value, which is a different mistake', () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { tags: { type: 'array', items: { type: 'string' } } },
+    }
+    expect(validateToolArgs({ tags: 'only-one' }, schema).coerced?.tags).toEqual(['only-one'])
+  })
+})

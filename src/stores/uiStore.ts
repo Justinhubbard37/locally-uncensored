@@ -22,16 +22,11 @@ interface UIState {
   cloudGateOpen: boolean
   /** CloudTeaserModal — null = closed. */
   cloudTeaser: CloudTeaserTarget | null
-  /** CloudExampleModal — the example video popup a teaser sheet's "See plans"
-   *  detours through for intent surfaces (real footage of the tool). null =
-   *  closed. Runtime only, never persisted. */
-  cloudExampleVideo: Extract<CloudTeaserTarget, { surface: 'intent' }> | null
   setView: (view: View) => void
   toggleSidebar: () => void
   setSidebarOpen: (open: boolean) => void
   setCloudGateOpen: (open: boolean) => void
   setCloudTeaser: (target: CloudTeaserTarget | null) => void
-  setCloudExampleVideo: (target: Extract<CloudTeaserTarget, { surface: 'intent' }> | null) => void
 }
 
 export const useUIStore = create<UIState>()((set) => ({
@@ -39,7 +34,6 @@ export const useUIStore = create<UIState>()((set) => ({
   sidebarOpen: true,
   cloudGateOpen: false,
   cloudTeaser: null,
-  cloudExampleVideo: null,
 
   // Sidebar visibility follows the view: it's the conversation list, which
   // only makes sense in Chat. The hamburger toggle still works on other views;
@@ -49,5 +43,4 @@ export const useUIStore = create<UIState>()((set) => ({
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
   setCloudGateOpen: (open) => set({ cloudGateOpen: open }),
   setCloudTeaser: (target) => set({ cloudTeaser: target }),
-  setCloudExampleVideo: (target) => set({ cloudExampleVideo: target }),
 }))

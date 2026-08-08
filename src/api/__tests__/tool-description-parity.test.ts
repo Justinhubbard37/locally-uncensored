@@ -73,16 +73,61 @@ function evaluateStringLiteralExpression(expr: string): string {
   return pieces.join('')
 }
 
+/**
+ * Offset of the first `key:` that sits at the TOP level of the schema object,
+ * or -1. Depth-aware on purpose: `todo_write` (2026-08-05) is the first tool
+ * whose schema nests an object, and a plain `.match(/required:/)` grabbed the
+ * ITEM's `required: ['content','status']` instead of the schema's
+ * `required: ['todos']`. Every nested-schema tool after it would have hit the
+ * same wall.
+ */
+function topLevelKeyOffset(schemaExpr: string, key: string): number {
+  let depth = 0
+  for (let i = 0; i < schemaExpr.length; i++) {
+    const c = schemaExpr[i]
+    if (c === '{' || c === '[') depth++
+    else if (c === '}' || c === ']') depth--
+    // depth 1 == directly inside the schema object's braces
+    else if (depth === 1 && schemaExpr.startsWith(key + ':', i)) return i
+  }
+  return -1
+}
+
 function extractRequiredArray(schemaExpr: string): string[] {
-  const m = schemaExpr.match(/required:\s*\[([^\]]*)\]/)
+  const at = topLevelKeyOffset(schemaExpr, 'required')
+  if (at < 0) return []
+  const m = schemaExpr.slice(at).match(/required:\s*\[([^\]]*)\]/)
   if (!m) return []
   return [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1])
 }
 
 function extractPropertiesNames(schemaExpr: string): string[] {
-  const propsBlock = schemaExpr.match(/properties:\s*\{([\s\S]*?)\}/)
-  if (!propsBlock) return []
-  return [...propsBlock[1].matchAll(/(\w+):\s*\{/g)].map((x) => x[1])
+  // Top-level `properties` only, and only its DIRECT keys — otherwise a nested
+  // object schema contributes its own field names to the parent's parameter
+  // list (todo_write would report `content` and `status` as its parameters).
+  const at = topLevelKeyOffset(schemaExpr, 'properties')
+  if (at < 0) return []
+  const open = schemaExpr.indexOf('{', at)
+  if (open < 0) return []
+  const names: string[] = []
+  let depth = 0
+  for (let i = open; i < schemaExpr.length; i++) {
+    const c = schemaExpr[i]
+    if (c === '{' || c === '[') {
+      depth++
+      continue
+    }
+    if (c === '}' || c === ']') {
+      depth--
+      if (depth === 0) break
+      continue
+    }
+    if (depth === 1) {
+      const m = /^(\w+):\s*\{/.exec(schemaExpr.slice(i))
+      if (m) names.push(m[1])
+    }
+  }
+  return names
 }
 
 // ─── Mobile extraction ───

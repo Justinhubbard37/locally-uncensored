@@ -37,11 +37,40 @@ export interface TauriMockOptions {
    */
   platform?: 'mac' | 'windows'
   /**
+   * Deliver `assistantReply` as N separate SSE frames, `replyChunkDelayMs`
+   * apart, instead of one. A real engine emits a frame per token, which is what
+   * drives the once-per-animation-frame store flush in useChat — the path that
+   * caused the 2.6.2 renderer Out of Memory. Omit for the historical
+   * single-frame behaviour.
+   */
+  replyChunks?: number
+  /** Gap between streamed frames. Default 0 (same macrotask burst). */
+  replyChunkDelayMs?: number
+  /**
    * Canned HuggingFace file tree served to `fetch_external` for exactly one
    * repo (the URL resolveHfGgufFiles queries). Lets the sharded-download flow
    * run against a byte-accurate snapshot of the real API with no network.
    */
   hfTree?: { repo: string; entries: Array<{ type: string; path: string; size: number }> }
+  /**
+   * Scripted agent turns for the Code / Agent ReAct loop. Turn N of the run is
+   * answered by entry N; the last entry repeats once the script runs out (so a
+   * text-only final entry ends the loop). Without this the mock answers every
+   * turn with plain prose, which means the loop stops after one step and no
+   * spec can drive the coding agent at all.
+   *
+   * Tool-call frames go out as OpenAI streaming deltas, the same shape the
+   * built-in engine and every openai-compat backend emit, so the provider's
+   * own accumulator is what the spec exercises.
+   */
+  agentTurns?: Array<{
+    /** Prose for this turn, streamed as content deltas. */
+    text?: string
+    /** Tool calls for this turn, streamed as tool_call deltas. */
+    toolCalls?: Array<{ name: string; args: Record<string, unknown> }>
+  }>
+  /** Canned file contents served to fs_read, keyed by path suffix. */
+  files?: Record<string, string>
 }
 
 export const DEFAULT_ASSISTANT_REPLY = 'PONG_BUILTIN_OK the built-in engine answered.'
@@ -172,6 +201,59 @@ export function tauriMockInit(opts: TauriMockOptions) {
       'data: [DONE]\n\n'
     )
   }
+
+  /** The same turn, split into `n` deliverable pieces. n=1 reproduces chatSse
+   *  byte for byte, so specs that do not opt in are unaffected. */
+  function chatSseParts(text: string, n: number): string[] {
+    if (n <= 1) return [chatSse(text)]
+    const frame = (delta: Record<string, unknown>, finish: string | null) =>
+      `data: ${JSON.stringify({
+        id: 'chatcmpl-e2e',
+        object: 'chat.completion.chunk',
+        model: opts.modelName,
+        choices: [{ index: 0, delta, finish_reason: finish }],
+      })}\n\n`
+    const size = Math.ceil(text.length / n)
+    const parts = [frame({ role: 'assistant' }, null)]
+    for (let i = 0; i < text.length; i += size) {
+      parts.push(frame({ content: text.slice(i, i + size) }, null))
+    }
+    parts.push(frame({}, 'stop') + 'data: [DONE]\n\n')
+    return parts
+  }
+
+  /**
+   * SSE frames for one scripted agent turn: prose deltas, then tool_call
+   * deltas, then the finish frame. Emitting the tool call as DELTAS (id+name
+   * first, arguments after) is deliberate — that is what a real backend does,
+   * and it is the accumulator in openai-provider that the agent specs need to
+   * exercise, not a pre-assembled call.
+   */
+  function agentTurnSse(turn: { text?: string; toolCalls?: Array<{ name: string; args: any }> }): string[] {
+    const frame = (delta: Record<string, unknown>, finish: string | null) =>
+      `data: ${JSON.stringify({
+        id: 'chatcmpl-e2e',
+        object: 'chat.completion.chunk',
+        model: opts.modelName,
+        choices: [{ index: 0, delta, finish_reason: finish }],
+      })}\n\n`
+    const parts = [frame({ role: 'assistant' }, null)]
+    const text = turn.text || ''
+    const size = Math.max(1, Math.ceil(text.length / 8))
+    for (let i = 0; i < text.length; i += size) {
+      parts.push(frame({ content: text.slice(i, i + size) }, null))
+    }
+    const calls = turn.toolCalls || []
+    calls.forEach((c, idx) => {
+      parts.push(frame({ tool_calls: [{ index: idx, id: `call_e2e_${idx}`, type: 'function', function: { name: c.name, arguments: '' } }] }, null))
+      parts.push(frame({ tool_calls: [{ index: idx, function: { arguments: JSON.stringify(c.args ?? {}) } }] }, null))
+    })
+    parts.push(frame({}, calls.length ? 'tool_calls' : 'stop') + 'data: [DONE]\n\n')
+    return parts
+  }
+
+  /** Which scripted turn the next model call gets. */
+  let agentTurnIndex = 0
 
   function router(cmd: string, args: any): Promise<any> {
     // The MLX wrappers (api/mlx-image.ts invokeMedia) nest their payload under
@@ -389,17 +471,21 @@ export function tauriMockInit(opts: TauriMockOptions) {
       // ── chat streaming: drive the onChunk Channel ─────────────────
       case 'proxy_localhost_stream_chunked': {
         const channel = args?.onChunk
-        const bytes = enc(chatSse(opts.assistantReply))
+        const script = opts.agentTurns
+        const parts = script && script.length
+          ? agentTurnSse(script[Math.min(agentTurnIndex++, script.length - 1)])
+          : chatSseParts(opts.assistantReply, opts.replyChunks ?? 1)
+        const gap = opts.replyChunkDelayMs ?? 0
         // Deliver on a macrotask so the app's `settled` promise is already
         // being awaited, mirroring the async Rust→WebView channel delivery.
+        parts.forEach((part, i) => {
+          setTimeout(() => {
+            try { channel?.onmessage?.(enc(part)) } catch { /* reader gone */ }
+          }, i * gap)
+        })
         setTimeout(() => {
-          try {
-            channel?.onmessage?.(bytes)
-            channel?.onmessage?.([]) // empty chunk = EOF marker
-          } catch {
-            /* reader gone */
-          }
-        }, 0)
+          try { channel?.onmessage?.([]) } catch { /* reader gone */ } // empty chunk = EOF
+        }, parts.length * gap)
         return Promise.resolve(null)
       }
       case 'proxy_localhost_stream':
@@ -469,6 +555,29 @@ export function tauriMockInit(opts: TauriMockOptions) {
         if (w.__E2E_SECRETS__) delete w.__E2E_SECRETS__[args?.account]
         return Promise.resolve(null)
       }
+
+      // ── agent file/shell tools ────────────────────────────────────
+      // Enough of the bridge for the ReAct loop to actually complete a step.
+      // Every call is recorded so a spec can assert WHAT the agent ran, which
+      // is the only way to prove things like "the second npm test really
+      // re-ran after the edit" (audit B1) from the outside.
+      case 'fs_read': {
+        record('__E2E_TOOL_CALLS__', { cmd, path: m?.path })
+        const files = opts.files || {}
+        const key = Object.keys(files).find((k) => String(m?.path || '').endsWith(k))
+        return Promise.resolve({ content: key ? files[key] : '', encoding: 'utf8' })
+      }
+      case 'fs_write':
+        record('__E2E_TOOL_CALLS__', { cmd, path: m?.path })
+        return Promise.resolve({ ok: true, path: m?.path })
+      case 'fs_list':
+        record('__E2E_TOOL_CALLS__', { cmd, path: m?.path })
+        return Promise.resolve({ entries: [] })
+      case 'shell_execute':
+        record('__E2E_TOOL_CALLS__', { cmd, command: m?.command, timeout: m?.timeout })
+        return Promise.resolve({ stdout: 'e2e shell ok', stderr: '', exitCode: 0, timedOut: false })
+      case 'repo_map':
+        return Promise.resolve({ files: [], count: 0 })
 
       default:
         // Record system-browser opens so specs can assert redirect targets

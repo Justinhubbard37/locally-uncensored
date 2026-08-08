@@ -16,6 +16,10 @@ interface UpdateState {
   isChecking: boolean
   lastChecked: number | null
   dismissed: string | null
+  /** Fetch the update in the background as soon as it is found, so the badge
+   *  offers a one-click Restart instead of a download the user has to sit
+   *  through. Never auto-INSTALLS: nothing restarts without a click. */
+  autoDownload: boolean
 
   downloadStatus: DownloadStatus
   downloadProgress: number
@@ -30,6 +34,7 @@ interface UpdateState {
   installAndRestart: () => Promise<void>
   dismissUpdate: () => void
   clearDismiss: () => void
+  setAutoDownload: (on: boolean) => void
   openReleasePage: () => void
 }
 
@@ -67,6 +72,7 @@ export const useUpdateStore = create<UpdateState>()(
       isChecking: false,
       lastChecked: null,
       dismissed: null,
+      autoDownload: true,
 
       downloadStatus: 'idle',
       downloadProgress: 0,
@@ -89,19 +95,39 @@ export const useUpdateStore = create<UpdateState>()(
 
             if (update) {
               _pendingUpdate = update
+              // This check repeats every 6h for as long as the user stays on the
+              // old build. Resetting the download state unconditionally would
+              // throw away a finished download and, with autoDownload on, pull
+              // the same 100 MB again on every tick. Only a DIFFERENT version
+              // invalidates what we already have.
+              const isNewTarget = get().latestVersion !== update.version
               set({
                 updateAvailable: true,
                 latestVersion: update.version,
                 releaseNotes: update.body ? truncateNotes(update.body) : null,
                 isChecking: false,
                 lastChecked: Date.now(),
-                // Reset download state for new version
-                downloadStatus: 'idle',
-                downloadProgress: 0,
-                downloadedBytes: 0,
-                totalBytes: 0,
-                errorMessage: null,
+                ...(isNewTarget
+                  ? {
+                      downloadStatus: 'idle' as DownloadStatus,
+                      downloadProgress: 0,
+                      downloadedBytes: 0,
+                      totalBytes: 0,
+                      errorMessage: null,
+                    }
+                  : {}),
               })
+
+              // Fetch it now rather than waiting for a click. Sign-ups in the
+              // app were still arriving from 2.5.5 and 2.5.6 builds weeks after
+              // 2.5.7 shipped: people were not refusing the update, they were
+              // never getting far enough to start it. Not awaited — the check
+              // must not block on a 100 MB download. Only from 'idle', so a
+              // finished, running or failed download is never restarted behind
+              // the user's back.
+              if (get().autoDownload && get().downloadStatus === 'idle') {
+                void get().downloadUpdate()
+              }
             } else {
               set({ isChecking: false, lastChecked: Date.now(), updateAvailable: false })
             }
@@ -214,6 +240,15 @@ export const useUpdateStore = create<UpdateState>()(
         set({ dismissed: null })
       },
 
+      setAutoDownload: (on: boolean) => {
+        set({ autoDownload: on })
+        // Turning it on with an update already waiting should act immediately,
+        // not at the next 6h tick.
+        if (on && get().updateAvailable && get().downloadStatus === 'idle') {
+          void get().downloadUpdate()
+        }
+      },
+
       openReleasePage: () => {
         void openExternal(`https://github.com/${GITHUB_REPO}/releases/latest`)
       },
@@ -229,6 +264,7 @@ export const useUpdateStore = create<UpdateState>()(
         latestVersion: state.latestVersion,
         updateAvailable: state.updateAvailable,
         releaseNotes: state.releaseNotes,
+        autoDownload: state.autoDownload,
       }),
       // Reset stale persisted state when the binary has been updated out-of-band
       // (e.g. user manually installed a newer .deb / .exe than what the persisted

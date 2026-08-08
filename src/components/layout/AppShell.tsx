@@ -21,6 +21,7 @@ import { useRemoteStore } from '../../stores/remoteStore'
 import { useModelHealthStore } from '../../stores/modelHealthStore'
 import { extractMemoriesFromPair } from '../../hooks/useMemory'
 import { detectLocalBackends, type DetectedBackend } from '../../lib/backend-detector'
+import { whenRunsIdle } from '../../lib/run-idle'
 import { backendCall, isTauri } from '../../api/backend'
 import { idbStorage } from '../../lib/idbStorage'
 import type { AIModel } from '../../types/models'
@@ -30,7 +31,7 @@ import { useCloudAuthStore, deriveCloudAvailable } from '../../stores/cloudAuthS
 import { useCreateStore } from '../../stores/createStore'
 import { CloudGateModal } from '../cloud/CloudGateModal'
 import { CloudTeaserModal } from '../cloud/CloudTeaserModal'
-import { CloudExampleModal } from '../cloud/CloudExampleModal'
+import { ReleaseNotesModal } from '../release/ReleaseNotesModal'
 import { ShortcutsModal } from './ShortcutsModal'
 import { CreditsExhaustedModal } from './CreditsExhaustedModal'
 import { Titlebar } from './Titlebar'
@@ -776,8 +777,14 @@ export function AppShell() {
 
       // Multiple backends detected → show selection dialog so the user can
       // change which one is the primary openai-compat provider if they want.
-      setDetectedBackends(backends)
-      setShowSelector(true)
+      // G25: never mid-run. Detection lands seconds after startup, and when a
+      // run was already streaming by then the modal stood over the chat for
+      // the rest of a 20 minute agent run (R17c). Wait until every surface
+      // (chat, agent, coding) is idle before opening it.
+      whenRunsIdle(() => {
+        setDetectedBackends(backends)
+        setShowSelector(true)
+      })
     })
   }, [onboardingDone])
 
@@ -818,9 +825,9 @@ export function AppShell() {
       {/* Cloud discovery sheet: opened by the Local-mode teaser surfaces
           (locked Create tabs, hosted model rows). */}
       <CloudTeaserModal />
-      {/* Example video popup: teaser "See plans" detours here (intent
-          surfaces only) before the gate. */}
-      <CloudExampleModal />
+      {/* What is new, once per version. Mounted inside the onboarded tree, so
+          it can never stack on top of the onboarding wizard. */}
+      <ReleaseNotesModal />
       <ShortcutsModal />
       {/* Out-of-credits purchase prompt: opens when LU Cloud answers
           code:'credits_exhausted' (monthly budget + top-up wallet empty). */}

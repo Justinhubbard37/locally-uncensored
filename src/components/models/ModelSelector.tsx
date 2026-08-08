@@ -9,8 +9,7 @@ import { useUIStore } from '../../stores/uiStore'
 import { unloadAllModels, loadModel, unloadModel, listRunningModels } from '../../api/ollama'
 import { displayModelName, getProviderIdFromModel } from '../../api/providers'
 import { activateBuiltinModel, isManagedBuiltinActive } from '../../api/engine'
-import { getToolCapability } from '../../api/tool-capability'
-import { canUseTools } from '../../lib/tool-support'
+import { canUseTools, resolveToolSupport, type ToolSupport } from '../../lib/tool-support'
 import { backendCall } from '../../api/backend'
 import { listLoadedLmStudioModels, loadLmStudioModel, unloadLmStudioModel } from '../../api/lmstudio'
 import { isLmStudioProvider } from '../../lib/hf-to-provider'
@@ -373,13 +372,21 @@ export const LMS_AUTOLOAD_CONTEXT = 16384
 // beats letting the user find out from an error after the first message.
 const TIGHT_CONTEXT = 8192
 
-export function toolBadgeTitle(model: AIModel): string {
+export function toolBadgeTitle(model: AIModel, support: ToolSupport = 'native'): string {
   const ctx =
     'contextLength' in model && typeof model.contextLength === 'number' ? model.contextLength : 0
+  // A model with no native function-calling channel is NOT a model without
+  // tools. The prompt transport drives it instead: the tool contract goes into
+  // the system prompt and the answer comes back as <tool_call> XML. That is how
+  // small Ollama models have run Agent and Code since 2.5.3, and it is the same
+  // trick LU Cloud does server-side for the unrestricted fine-tunes.
+  const how = support === 'hermes'
+    ? 'Drives tools through the prompt, because this model has no native function-calling channel. Agent and Code work'
+    : 'Supports tool calling (Agent, Code, and tools in Chat)'
   if (ctx > 0 && ctx < TIGHT_CONTEXT) {
-    return `Supports tool calling, but its ${Math.round(ctx / 1024)}k context window is too small for a full Agent or Code tool set`
+    return `${how}, but its ${Math.round(ctx / 1024)}k context window is too small for a full Agent or Code tool set`
   }
-  return 'Supports tool calling (Agent, Code, and tools in Chat)'
+  return how
 }
 
 export function lmsAutoLoadContext(model: AIModel): number {
@@ -446,6 +453,10 @@ export interface ModelSelectorProps {
 export function ModelSelector({ openUpward = false, surface = 'chat' }: ModelSelectorProps = {}) {
   const { models, activeModel, setActiveModel, fetchModels } = useModels()
   const isModelLoading = useModelStore((s) => s.isModelLoading)
+  // G20: useModels hides every local model while the app is in Cloud mode.
+  // Deliberate, but the picker never SAID so, and the silence reads as "my
+  // local models are gone" (it cost a whole repro round on 2026-08-07).
+  const appMode = useSettingsStore((s) => s.settings.appMode)
   const [open, setOpen] = useState(false)
   const [unloading, setUnloading] = useState(false)
   const [unloadDone, setUnloadDone] = useState(false)
@@ -741,6 +752,15 @@ export function ModelSelector({ openUpward = false, surface = 'chat' }: ModelSel
                 "can't choose any models i have installed" symptom. */}
             <LmStudioServerHint onStarted={fetchModels} />
 
+            {/* Same honesty as the hiddenForCode note below: in Cloud mode the
+                local models are hidden on purpose, so say so instead of
+                letting an empty local section read as a bug (G20). */}
+            {appMode === 'cloud' && (
+              <div className="px-2.5 py-1.5 border-b border-black/5 dark:border-white/[0.06] text-[0.55rem] text-gray-500">
+                Cloud mode shows hosted models only. Switch the app to Local mode to use Ollama, LM Studio or the Built-in Engine.
+              </div>
+            )}
+
             {/* Say WHY the list is shorter here than in Chat, otherwise a
                 missing favourite reads as a bug. */}
             {hiddenForCode > 0 && (
@@ -839,33 +859,52 @@ export function ModelSelector({ openUpward = false, surface = 'chat' }: ModelSel
                               {providerBadge.label}
                             </span>
                           )}
-                          {/* 2.5.8 — tool-calling capability at a glance. Ban =
-                              no function calling, so Agent/Code can't use it:
-                              either the server declared it (supports_tools ===
-                              false) or we've SEEN it reject tools at runtime
-                              (cloud 405 / ollama "does not support tools").
-                              Wrench = tool-capable. Text models only.
-                              Since 2026-07-29 the LU Cloud catalogue is
-                              wrench across the board: the unrestricted models
-                              are served through the proxy's prompt transport
-                              rather than being flagged unsupported. */}
-                          {model.type === 'text' && (
-                            (getToolCapability(model.name) === 'unsupported' || model.supportsTools === false) ? (
+                          {/* 2.5.8 — tool-calling capability at a glance. Text
+                              models only.
+
+                              David 2026-08-06: "wieso ist es nicht toolfähig?
+                              Wir haben doch Toolschema für Hermes Modelle."
+                              Exactly. The badge used to draw a ban on
+                              `supportsTools === false` and say "Agent and Code
+                              mode cannot use it", which is wrong for a LOCAL
+                              model: resolveToolSupport returns 'hermes' there,
+                              not 'none', so the prompt transport drives it and
+                              both modes work. The badge was disagreeing with
+                              the code that actually runs the turn.
+
+                              So ask resolveToolSupport, which is the one place
+                              that layers the proven-rejection cache, the
+                              server's own answer and the family heuristic.
+                              Three states, not two: native and hermes both get
+                              a wrench (they differ only in HOW, which the
+                              tooltip says), and only 'none' is a ban. 'none'
+                              is reachable for a cloud model alone, because
+                              there the translation already happens server-side
+                              and a declared no really means no. */}
+                          {model.type === 'text' && (() => {
+                            const support = resolveToolSupport({
+                              name: model.name,
+                              supportsTools: 'supportsTools' in model ? model.supportsTools : undefined,
+                            })
+                            if (support === 'none') {
+                              return (
+                                <span
+                                  className="inline-flex items-center shrink-0 text-amber-500/80"
+                                  title="This model does not support tool calling, so Agent and Code mode cannot use it"
+                                >
+                                  <Ban size={9} />
+                                </span>
+                              )
+                            }
+                            return (
                               <span
-                                className="inline-flex items-center shrink-0 text-amber-500/80"
-                                title="This model does not support tool calling, so Agent and Code mode cannot use it"
-                              >
-                                <Ban size={9} />
-                              </span>
-                            ) : model.supportsTools !== false ? (
-                              <span
-                                className="inline-flex items-center shrink-0 text-emerald-500/90"
-                                title={toolBadgeTitle(model)}
+                                className={`inline-flex items-center shrink-0 ${support === 'hermes' ? 'text-emerald-500/60' : 'text-emerald-500/90'}`}
+                                title={toolBadgeTitle(model, support)}
                               >
                                 <Wrench size={9} />
                               </span>
-                            ) : null
-                          )}
+                            )
+                          })()}
                           {/* §18 — inline load state while we auto-load this
                               LM Studio model on the way to selecting it. */}
                           {isSelectingThis && (

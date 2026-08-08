@@ -272,7 +272,12 @@ export class OpenAIProvider implements ProviderClient {
       JSON.stringify(body.messages || '').length + JSON.stringify(body.tools || '').length
     const promptTokens = Math.ceil(promptChars / 4)
     const headroom = Math.max(256, ctxLen - promptTokens - RESERVE)
-    body.max_tokens = requested > 0 ? Math.min(requested, headroom) : headroom
+    // Audit E6: an UNSET budget used to send the whole remaining window as
+    // max_tokens — six figures on a 128k model. Servers that validate
+    // max_tokens against the model's real OUTPUT limit reject that outright.
+    // 32k is beyond any single reply this app produces; an explicit user
+    // request still passes through un-capped (their server, their call).
+    body.max_tokens = requested > 0 ? Math.min(requested, headroom) : Math.min(headroom, 32768)
   }
 
   async *chatStream(
@@ -551,6 +556,14 @@ export class OpenAIProvider implements ProviderClient {
     // kann. Probes laufen parallel; bei Cloud-Providers (OpenAI/OpenRouter)
     // wuerde N+1 zu Rate-Limits fuehren, deshalb nur KNOWN_CONTEXT/Heuristik.
     if (this.isLanBackend) {
+      // G32 (R20-Mac, 2026-08-07): the standard /v1/models listing says
+      // nothing about tools, so `?? true` declared every LM Studio model
+      // tool-capable and the layered resolution downstream had nothing to
+      // downgrade on — a tool-less model got a native `tools` payload. LM
+      // Studio's enhanced listing answers it per model in `capabilities`
+      // (['tool_use', ...]); one fetch covers all models. Backends without
+      // the enhanced API leave the map empty → optimistic as before.
+      const { lanCaps, serverTools } = await this.liveToolCaps()
       return Promise.all(models.map(async m => ({
         id: m.id,
         name: m.id,
@@ -560,7 +573,9 @@ export class OpenAIProvider implements ProviderClient {
           KNOWN_CONTEXT[m.id] ??
           (await this.probeContextFromServer(m.id)) ??
           guessContextFromName(m.id),
-        supportsTools: m.supports_tools ?? true,
+        supportsTools: lanCaps.has(m.id)
+          ? lanCaps.get(m.id)!.includes('tool_use')
+          : (serverTools ?? m.supports_tools ?? true),
       })))
     }
 
@@ -619,6 +634,20 @@ export class OpenAIProvider implements ProviderClient {
   private async probeContextFromServer(model: string): Promise<number | null> {
     if (!this.isLanBackend) return null
 
+    // Probe cache (audit E5): applyMaxTokens calls getContextLength on EVERY
+    // request, and a LAN backend without a catalog entry paid one or two HTTP
+    // probes per agent iteration. A loaded model's window does not move
+    // between iterations; 5 minutes covers an LM Studio reload with changed
+    // settings. Negative answers cache too — a server that has no context
+    // endpoint will not grow one mid-run.
+    const cacheKey = `${this.baseUrl}|${model}`
+    const hit = OpenAIProvider.probeCache.get(cacheKey)
+    if (hit && Date.now() - hit.at < 300_000) return hit.ctx
+    const remember = (ctx: number | null): number | null => {
+      OpenAIProvider.probeCache.set(cacheKey, { at: Date.now(), ctx })
+      return ctx
+    }
+
     // 1. LM Studio Enhanced API: /api/v0/models/<id>
     //    Base-URL ist typischerweise http://localhost:1234/v1 — wir tauschen
     //    /v1 gegen /api/v0 aus. Wenn der Server kein LM Studio ist, kommt 404
@@ -632,7 +661,7 @@ export class OpenAIProvider implements ProviderClient {
       if (lmsRes.ok) {
         const data = await lmsRes.json()
         const max = data?.max_context_length ?? data?.context_length
-        if (max && Number(max) > 0) return Number(max)
+        if (max && Number(max) > 0) return remember(Number(max))
       }
     } catch { /* fall through */ }
 
@@ -650,11 +679,134 @@ export class OpenAIProvider implements ProviderClient {
           data?.max_model_len ??
           data?.n_ctx_train ??
           data?.context_length
-        if (ctx && Number(ctx) > 0) return Number(ctx)
+        if (ctx && Number(ctx) > 0) return remember(Number(ctx))
       }
     } catch { /* fall through */ }
 
-    return null
+    return remember(null)
+  }
+
+  /**
+   * G32: per-model tool capability from LM Studio's enhanced listing
+   * (/api/v0/models). Only entries that carry a `capabilities` array land in
+   * the map — a generic OpenAI-compat backend (vLLM, llama.cpp server) 404s
+   * or answers without the field, and an absent entry means "nobody said",
+   * which keeps the optimistic default. LAN only, same rule as the context
+   * probe: a cloud endpoint must not get an extra request per listing.
+   */
+  private async fetchLanCapabilities(): Promise<Map<string, string[]>> {
+    const map = new Map<string, string[]>()
+    const enhancedBase = this.baseUrl.replace(/\/v1\/?$/, '/api/v0')
+    if (enhancedBase === this.baseUrl) return map
+    try {
+      const res = await localFetch(`${enhancedBase}/models`, { headers: this.headers } as any)
+      if (!res.ok) return map
+      const data = await res.json()
+      for (const m of (data?.data ?? [])) {
+        if (m?.id && Array.isArray(m.capabilities)) map.set(m.id, m.capabilities)
+      }
+    } catch { /* no enhanced API on this backend */ }
+    return map
+  }
+
+  /**
+   * G37 (R21c wire proof, 2026-08-07): llama.cpp's own answer, one flag for
+   * the whole server. The bundled engine's /props reports
+   * chat_template_caps.supports_tools: false because the GGUF ships a minimal
+   * template, and a native `tools` payload is then accepted but IGNORED — no
+   * refusal to learn from, the model just never sees a tool contract. false
+   * means every model here needs the prompt transport; true means native is
+   * fine; a 404 or a props answer without the field means nobody said, and
+   * the optimistic default stands (vLLM and friends are untouched).
+   */
+  private async fetchServerToolCaps(): Promise<boolean | undefined> {
+    const propsUrl = this.baseUrl.replace(/\/v1\/?$/, '') + '/props'
+    try {
+      const res = await localFetch(propsUrl, { headers: this.headers } as any)
+      if (!res.ok) return undefined
+      const data = await res.json()
+      const flag = data?.chat_template_caps?.supports_tools
+      return typeof flag === 'boolean' ? flag : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** Probe results per endpoint+model (audit E5). Static, not an instance
+   *  field: the lu-cloud provider builds a fresh delegate per call. */
+  private static probeCache = new Map<string, { at: number; ctx: number | null }>()
+
+  /** Live tool-capability answers per endpoint (G37b). Static for the same
+   *  reason as probeCache, and TTL-bound like it: an LM Studio reload or an
+   *  engine swap with a different template lands within 5 minutes. */
+  private static toolCapsCache = new Map<string, { at: number; lanCaps: Map<string, string[]>; serverTools: boolean | undefined }>()
+
+  /**
+   * G37 (R21c, 2026-08-07): llama.cpp answers the tool question on /props,
+   * server-wide. The bundled engine loads the GGUF's template WITHOUT tool
+   * support and then silently ignores a native `tools` payload — the model
+   * never sees a tool contract and invents results for every step. /props is
+   * only asked when the enhanced listing said nothing.
+   */
+  private async liveToolCaps(): Promise<{ lanCaps: Map<string, string[]>; serverTools: boolean | undefined }> {
+    const hit = OpenAIProvider.toolCapsCache.get(this.baseUrl)
+    if (hit && Date.now() - hit.at < 300_000) return hit
+    const lanCaps = await this.fetchLanCapabilities()
+    const serverTools = lanCaps.size === 0 ? await this.fetchServerToolCaps() : undefined
+    const entry = { at: Date.now(), lanCaps, serverTools }
+    OpenAIProvider.toolCapsCache.set(this.baseUrl, entry)
+    return entry
+  }
+
+  /**
+   * G37b (R21d wire proof, 2026-08-08): the send-time answer to "can this
+   * server drive native tools". The listing-time probe (G37) never runs for
+   * the bundled engine, because useModels skips listModels for the managed
+   * built-in backend and builds the picker rows from the downloaded GGUFs
+   * instead — so the run still put a native `tools` payload on 8127 and the
+   * model narrated fiction. The strategy resolution calls this directly
+   * before each run: `false` means the prompt transport must carry the
+   * contract, `true` means native is fine, `undefined` means nobody said
+   * (vLLM and friends stay optimistic). Cloud endpoints never pay a request.
+   */
+  async serverToolSupport(model: string): Promise<boolean | undefined> {
+    if (!this.isLanBackend) return undefined
+    const { lanCaps, serverTools } = await this.liveToolCaps()
+    if (lanCaps.has(model)) return lanCaps.get(model)!.includes('tool_use')
+    return serverTools
+  }
+
+  /**
+   * R19 (LM Studio, 2026-08-07): what the server actually ALLOCATED for this
+   * model. LM Studio JIT-loads at its configured default, often far below the
+   * model's maximum, and hard-truncates any prompt beyond it — a run budgeted
+   * against max_context_length loses the middle of its own prompt, tool
+   * contract included, and dies without a usable error. The run budget clamps
+   * to this; the DISPLAY value deliberately keeps preferring the maximum
+   * (Bug K), because that is what the model could do.
+   */
+  async loadedContextLength(model: string): Promise<number | null> {
+    if (!this.isLanBackend) return null
+    const cacheKey = `loaded|${this.baseUrl}|${model}`
+    const hit = OpenAIProvider.probeCache.get(cacheKey)
+    if (hit && Date.now() - hit.at < 300_000) return hit.ctx
+    const remember = (ctx: number | null): number | null => {
+      OpenAIProvider.probeCache.set(cacheKey, { at: Date.now(), ctx })
+      return ctx
+    }
+    const lmStudioBase = this.baseUrl.replace(/\/v1\/?$/, '/api/v0')
+    if (lmStudioBase === this.baseUrl) return remember(null)
+    try {
+      const res = await localFetch(
+        `${lmStudioBase}/models/${encodeURIComponent(model)}`,
+        { headers: this.headers } as any,
+      )
+      if (!res.ok) return remember(null)
+      const data = await res.json()
+      const loaded = data?.loaded_context_length
+      if (loaded && Number(loaded) > 0) return remember(Number(loaded))
+    } catch { /* not LM Studio — no enhanced API */ }
+    return remember(null)
   }
 
   async getContextLength(model: string): Promise<number> {

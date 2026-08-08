@@ -1,4 +1,5 @@
 import { useCodex } from '../../hooks/useCodex'
+import { useAutoScroll } from '../../hooks/useAutoScroll'
 import { useCodexStore } from '../../stores/codexStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useGenerationStore } from '../../stores/generationStore'
@@ -11,18 +12,19 @@ import { MarkdownRenderer } from './MarkdownRenderer'
 import { TokenCounter } from './TokenCounter'
 import { ContextDropdown } from './ContextDropdown'
 import { SmallModelModeToggle } from './SmallModelModeToggle'
-import { RealtimeCounter } from './RealtimeCounter'
+import { WorkingAnchor } from './WorkingAnchor'
+import { useCodexConfirmStore } from '../../stores/codexConfirmStore'
 import { PluginsDropdown } from './PluginsDropdown'
 import { ModelSelector } from '../models/ModelSelector'
 import { GoalBar } from './GoalBar'
+import { PlanBar } from './PlanBar'
 import { LoopBar } from './LoopBar'
-import { TypingIndicator } from './TypingIndicator'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useModelStore } from '../../stores/modelStore'
 import { StagedChangesPanel } from './StagedChangesPanel'
 import { SlashStepsBlock } from './SlashStepsBlock'
-import { User, Code, Eye, GitBranch, Download, RefreshCw, RotateCcw, Folder, X } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { User, Code, Eye, GitBranch, Download, RefreshCw, RotateCcw, Folder } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { checkGitInstalled, openExternal, type GitStatus } from '../../api/backend'
 import { CodexConfirmDialog } from './CodexConfirmDialog'
 import { stripModelNoise } from '../../lib/strip-model-noise'
@@ -41,7 +43,6 @@ export function CodexView() {
   const activeConversationId = useChatStore((s) => s.activeConversationId)
   const conversations = useChatStore((s) => s.conversations)
   const thread = useCodexStore((s) => activeConversationId ? s.threads[activeConversationId] : undefined)
-  const scrollRef = useRef<HTMLDivElement>(null)
 
   const conversation = conversations.find(c => c.id === activeConversationId)
   const messages = conversation?.messages || []
@@ -53,27 +54,24 @@ export function CodexView() {
   // refs); the visual bits below read this conversation-scoped flag instead.
   const generatingMap = useGenerationStore((s) => s.generating)
   const codexGenerating = !!activeConversationId && !!generatingMap[activeConversationId]
+  const pendingConfirm = useCodexConfirmStore((s) => s.pending)
 
-  // Smart auto-scroll (David 2026-06-12: "kann nicht scrollen, bin locked, jumpt
-  // zurück auf ganz unten"). A scroll listener records whether the user is at the
-  // bottom; we only auto-pin when they are — so scrolling UP to read earlier
-  // output is never yanked back down, even when a chunky tool-call block streams
-  // in. Mirrors the normal chat's useAutoScroll, which already behaves this way.
-  const shouldAutoScroll = useRef(true)
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    const onScroll = () => {
-      shouldAutoScroll.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100
-    }
-    el.addEventListener('scroll', onScroll)
-    return () => el.removeEventListener('scroll', onScroll)
-  }, [])
-  useEffect(() => {
-    if (shouldAutoScroll.current && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-    }
-  }, [messages, thread?.events])
+  // G8-3 (David): "sobald er fertig gedacht hat, hakt das so komisch ab und
+  // zoomt irgendwo ganz anders hin." The hand-rolled pin here only fired on
+  // [messages, events] changes, so the height SWAP when a thinking round ends
+  // (live bubble cleared above, ThinkingBlock added below, preview collapses)
+  // landed between triggers and left the view parked mid-transcript. Same
+  // mechanism as G33 on the chat list, same cure: the shared useAutoScroll
+  // hook re-pins through a ResizeObserver on EVERY content-height change,
+  // growth and collapse alike, while the user is following. Scrolling up to
+  // read stays possible (same <100px disengage), and sending an instruction
+  // re-engages via the last user message id.
+  const lastMessage = messages[messages.length - 1]
+  const lastUserMessage = messages.filter((m) => m.role === 'user').at(-1)
+  const { ref: scrollRef, contentRef } = useAutoScroll(
+    `${lastMessage?.content ?? ''}|${thread?.events?.length ?? 0}`,
+    lastUserMessage?.id,
+  )
 
   const codexReviewMode = useSettingsStore((s) => s.settings.codexReviewMode)
   const userAvatarDataUrl = useSettingsStore((s) => s.settings.userAvatarDataUrl)
@@ -206,7 +204,7 @@ export function CodexView() {
               )}
             </div>
           ) : (
-            <div className="py-1">
+            <div ref={contentRef} className="py-1">
               {messages.filter(msg => !msg.hidden).map((msg) => {
                 // Slash commands: the user typed "/review", but msg.content holds
                 // the expanded instruction the model ran on, show displayContent.
@@ -277,7 +275,9 @@ export function CodexView() {
                                   .filter(
                                     (b) =>
                                       (b.phase === 'tool_call' && b.toolCall) ||
-                                      (b.phase === 'answer' && stripChannelTags(b.content)),
+                                      (b.phase === 'answer' && stripChannelTags(b.content)) ||
+                                      // G21-2: per-round thoughts, chronological
+                                      (b.phase === 'thinking' && b.content.trim()),
                                   )
                                   .sort((a, b) => a.timestamp - b.timestamp)
                                 // Render EVERY answer normally + visible
@@ -301,9 +301,32 @@ export function CodexView() {
                                       // collapses to "N steps" when done
                                       // (David 2026-07-31).
                                       if (group.kind === 'tools') {
-                                        return <ToolCallBand key={group.blocks[0].id} calls={group.calls} />
+                                        return (
+                                          <ToolCallBand
+                                            key={group.blocks[0].id}
+                                            calls={group.calls}
+                                            notes={group.notes}
+                                            renderNote={(block) => {
+                                              if (block.phase === 'thinking') {
+                                                return <ThinkingBlock thinking={block.content} />
+                                              }
+                                              const note = stripChannelTags(block.content)
+                                              if (!note) return null
+                                              return (
+                                                <div className="px-1 py-0.5 text-[0.7rem] leading-relaxed text-gray-500 dark:text-gray-400">
+                                                  <MarkdownRenderer content={note} />
+                                                </div>
+                                              )
+                                            }}
+                                          />
+                                        )
                                       }
                                       const block = group.block
+                                      if (block.phase === 'thinking') {
+                                        // Trailing thought before the final
+                                        // answer, in its collapsed G14-7 bubble.
+                                        return <ThinkingBlock key={block.id} thinking={block.content} />
+                                      }
                                       if (block.phase === 'answer') {
                                         const answer = stripChannelTags(block.content)
                                         if (!answer || skippedAnswers.has(block.id)) return null
@@ -439,15 +462,16 @@ export function CodexView() {
                   "ich hätte das gerne im chat, wie ein tool call"). Renders
                   nothing while no request is pending. */}
               <CodexConfirmDialog />
-              {codexGenerating && (
-                <TypingIndicator />
-              )}
+              {/* G14-6: one anchor with shimmer + clock, no dots, no floating
+                  counter. It also names an approval wait for what it is, so a
+                  blocked run never looks like a working one (G15b). */}
+              <WorkingAnchor
+                isRunning={codexGenerating}
+                label={pendingConfirm ? 'Waiting for your approval' : undefined}
+              />
             </div>
           )}
         </div>
-
-        {/* Realtime counter */}
-        <RealtimeCounter isRunning={codexGenerating} />
 
         {/* One-time "/" hint, directly above the prompt (Code view only). */}
 
@@ -455,10 +479,15 @@ export function CodexView() {
         <ChatInput
           onSend={(content) => sendInstruction(content)}
           onStop={stopCodex}
-          isGenerating={isRunning}
+          // Store flag, not the hook's local isRunning (audit A2): the view
+          // remounts on every tab switch and a fresh hook says "idle" while
+          // the old instance's loop is still running — which offered a second
+          // parallel send and no Stop button. The generating flag follows the
+          // conversation, not the hook instance.
+          isGenerating={isRunning || codexGenerating}
           slashCommands
           composerModel={<ModelSelector openUpward surface="code" />}
-          composerAbove={<><LoopBar onStop={stopCodex} /><GoalBar /></>}
+          composerAbove={<><LoopBar onStop={stopCodex} /><GoalBar /><PlanBar /></>}
           composerActions={<PluginsDropdown openUpward />}
         />
       </div>

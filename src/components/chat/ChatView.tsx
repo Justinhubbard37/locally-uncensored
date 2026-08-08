@@ -16,6 +16,7 @@ import { FileText, ChevronDown, Download, Wrench, Radio, RefreshCw, X } from 'lu
 import { PluginsDropdown } from './PluginsDropdown'
 import { ModelSelector } from '../models/ModelSelector'
 import { GoalBar } from './GoalBar'
+import { PlanBar } from './PlanBar'
 import { LoopBar } from './LoopBar'
 import { MemoryDebugToggle } from './MemoryDebugPanel'
 import { TokenCounter } from './TokenCounter'
@@ -25,7 +26,6 @@ import { ABCompare } from './ABCompare'
 import { useCompareStore } from '../../stores/compareStore'
 import { exportConversation } from '../../lib/chat-export'
 import { PermissionOverrideBar } from './PermissionOverrideBar'
-import { RealtimeCounter } from './RealtimeCounter'
 import { CodexView } from './CodexView'
 import { useCodexStore } from '../../stores/codexStore'
 import { useGenerationStore } from '../../stores/generationStore'
@@ -248,7 +248,6 @@ export function ChatView() {
                 onApprove={approveToolCall}
                 onReject={rejectToolCall}
               />
-              <RealtimeCounter isRunning={activeGenerating} />
 
               {/* Remote session banners */}
               {isThisRemoteActive && (
@@ -340,7 +339,7 @@ export function ChatView() {
                 slashCommands={isAgentActive}
                 onAttachDocs={appMode !== 'cloud' ? () => setRagPanelOpen(true) : undefined}
                 composerModel={<ModelSelector openUpward />}
-                composerAbove={<><LoopBar onStop={stopGeneration} /><GoalBar /></>}
+                composerAbove={<><LoopBar onStop={stopGeneration} /><GoalBar /><PlanBar /></>}
                 composerActions={
                   <>
                     {/* Documents (RAG) — local-embeddings only, so hide in

@@ -1,5 +1,11 @@
 // H2 security gate — shared, pure, testable.
 //
+// Consumed by BOTH loops since G15a (2026-08-07): useCodex gates on it
+// directly, and useAgentChat lifts an exec tool to pending_approval when
+// the cloud arm says so, on top of its per-tool permission levels. Before
+// that, the same cloud model that had to ask in the Code tab ran
+// shell_execute unattended on the Agent surface (R23).
+//
 // The coding agent (useCodex) auto-runs tools unattended by design. These are
 // the arbitrary-code-execution tools — the prompt-injection RCE surface (a tool
 // result or a read file steering the model into running a command). When the

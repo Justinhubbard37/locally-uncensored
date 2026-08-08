@@ -82,6 +82,14 @@ vi.mock('../agent-context', () => ({
   getActiveAgentModel: () => getActiveAgentModel(),
 }))
 
+// The real WS client would call isTauri()/WebSocket at connect time, which a
+// unit test has no business doing. Disconnected here, so the pace tracker and
+// the G24 warm-up guard stay silent and only the flat deadline applies.
+vi.mock('../comfyui-ws', () => ({
+  comfyWS: { on: () => () => {}, connect: () => Promise.resolve(), connected: false },
+  CLIENT_ID: 'lu-test-client',
+}))
+
 // settingsStore is the real module — pure, no services. The orchestrator reads
 // settings.exclusiveVramMode through it; default DEFAULT_SETTINGS = 'auto'.
 

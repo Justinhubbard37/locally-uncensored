@@ -53,6 +53,39 @@ const TOOL_GROUPS: ToolGroup[] = [
     tools: ['shell_execute', 'code_execute'],
   },
   {
+    // Audit B3: a third of the registry sat in NO group and was therefore
+    // invisible to the model forever — all git_*, run_tests, the background
+    // shell and its status tools, pr_resume, gh_pr_create, project_init.
+    // The typed git tools return parsed porcelain instead of an opaque dump,
+    // which is exactly what a small model needs for "commit this".
+    keywords: ['git', 'commit', 'push', 'branch', 'merge', 'rebase', 'stage', 'staged', 'diff', 'changelog', 'version control'],
+    tools: ['git_status', 'git_diff', 'git_log', 'git_commit', 'git_push'],
+  },
+  {
+    keywords: ['test', 'tests', 'spec', 'vitest', 'jest', 'pytest', 'cargo test', 'failing', 'make it green', 'suite'],
+    tools: ['run_tests'],
+  },
+  {
+    keywords: ['pull request', 'pull-request', 'open a pr', 'create a pr', 'the pr', 'github', 'gh pr'],
+    tools: ['gh_pr_create', 'pr_resume', 'git_status', 'git_diff'],
+  },
+  {
+    // Long-running work belongs on the background bridge: it survives the
+    // 10-minute foreground timeout and the model can poll it. The timeout
+    // hint in useCodex points at shell_execute_background, so it has to be
+    // reachable when builds/installs are on the table (audit B4).
+    keywords: ['background', 'install', 'build', 'compile', 'long running', 'long-running', 'dataset', 'refactor everything', 'task status', 'still running'],
+    tools: ['shell_execute_background', 'shell_task_status', 'shell_task_list', 'shell_task_kill'],
+  },
+  {
+    keywords: ['scaffold', 'new project', 'init a', 'initialize', 'bootstrap', 'starter'],
+    tools: ['project_init'],
+  },
+  {
+    keywords: ['delegate', 'sub-agent', 'subagent', 'fan out', 'in parallel', 'parallelize', 'split the work'],
+    tools: ['delegate_task'],
+  },
+  {
     keywords: ['system', 'os', 'cpu', 'ram', 'memory', 'process', 'running', 'hostname'],
     tools: ['system_info', 'process_list'],
   },
@@ -85,7 +118,24 @@ const TOOL_GROUPS: ToolGroup[] = [
 // a tool result reveals the user really wanted a file read). Keeping
 // `get_current_time` here means the agent NEVER has to fall back to web
 // for a trivial date question just because the keyword list missed.
-export const ALWAYS_INCLUDE = ['file_read', 'file_write', 'file_edit', 'get_current_time']
+// `todo_write` is here rather than in a keyword group on purpose: the moment a
+// task turns out to need a plan is usually mid-run, several tool results after
+// the prompt that routed the catalog. Keyword-gating it would mean the agent
+// can only plan when the user happened to say "plan".
+export const ALWAYS_INCLUDE = ['file_read', 'file_write', 'file_edit', 'get_current_time', 'todo_write']
+
+/**
+ * The tool cap Small-Model Mode sends to a 3B-8B model.
+ *
+ * Derived, not typed: ALWAYS_INCLUDE is a floor the cap cannot cut into, so a
+ * fixed number silently shrinks the router every time that set grows. It was
+ * 6 against 4 always-included tools, which left the semantic router 2 slots.
+ * Adding todo_write (2026-08-05) cut that to 1 without anyone touching the
+ * cap, and a coding turn with exactly one routed tool loses file_list AND
+ * file_search AND shell_execute. Two free slots is the number the research
+ * behind this mode was tuned on, so that is what is preserved.
+ */
+export const SMALL_MODEL_MAX_TOOLS = ALWAYS_INCLUDE.length + 2
 
 /** Tool count at which embedding-based routing becomes worth the round trip. */
 export const EMBEDDING_ROUTING_THRESHOLD = 15

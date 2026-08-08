@@ -45,6 +45,12 @@ export interface CapturedArtifact {
 }
 interface AgentCtxState {
   chatId: string | null
+  /** The conversation this loop belongs to, VERBATIM. Distinct from `chatId`,
+   *  which is a filesystem-safe workspace SLUG derived from id + title. Any UI
+   *  state a tool writes (the todo_write plan) has to be keyed by the real id,
+   *  because that is what the components read from chatStore. Keying it by the
+   *  slug means the tool writes somewhere nothing ever looks. */
+  conversationId: string | null
   workspace: AgentWorkspace | null
   model: ActiveAgentModel | null
   /** Chat-tools artifact mode: when true, file_write captures instead of
@@ -53,7 +59,7 @@ interface AgentCtxState {
   artifacts: CapturedArtifact[]
 }
 const _g = globalThis as typeof globalThis & { __LU_AGENT_CTX?: AgentCtxState }
-const ctx: AgentCtxState = _g.__LU_AGENT_CTX ?? (_g.__LU_AGENT_CTX = { chatId: null, workspace: null, model: null, artifactMode: false, artifacts: [] })
+const ctx: AgentCtxState = _g.__LU_AGENT_CTX ?? (_g.__LU_AGENT_CTX = { chatId: null, conversationId: null, workspace: null, model: null, artifactMode: false, artifacts: [] })
 
 /**
  * The text model driving the current agent loop. Pinned by useAgentChat right
@@ -83,6 +89,14 @@ export function getActiveChatId(): string | null {
   return ctx.chatId
 }
 
+export function setActiveConversationId(id: string | null | undefined): void {
+  ctx.conversationId = id ? String(id) : null
+}
+
+export function getActiveConversationId(): string | null {
+  return ctx.conversationId
+}
+
 export function setActiveAgentModel(model: ActiveAgentModel | null | undefined): void {
   ctx.model = model && model.name ? { name: model.name, providerId: model.providerId, remote: !!model.remote } : null
 }
@@ -93,6 +107,7 @@ export function getActiveAgentModel(): ActiveAgentModel | null {
 
 export function clearActiveChatId(): void {
   ctx.chatId = null
+  ctx.conversationId = null
   ctx.workspace = null
   ctx.model = null
   ctx.artifactMode = false

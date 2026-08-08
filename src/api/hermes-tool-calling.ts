@@ -16,17 +16,70 @@ import { repairJson } from '../lib/tool-call-repair'
 // Generic tool shape accepted by the prompt builder
 type ToolLike = { name: string; description: string; parameters?: any; inputSchema?: any }
 
+/**
+ * Defuse the markers this dialect is built on, everywhere text we did not write
+ * is folded into the prompt.
+ *
+ * On the native tool channel a result arrives in its own `tool` role and the
+ * chat template fences it. Here it is prose inside a user turn, so a result
+ * that literally contains `</tool_response>` closes its own fence and whatever
+ * follows reads as the conversation. That text is routinely not ours:
+ * web_fetch returns whatever a page says, shell_execute whatever a command
+ * printed, and an MCP server the user installed writes its own tool
+ * descriptions into the <tools> block.
+ *
+ * Locally this weighs more than it does in the cloud, because the tools on the
+ * other end of the injected call run on the user's own machine.
+ *
+ * A zero-width space after the opening bracket is enough: the marker stops
+ * being one for the model and for parseHermesToolCalls, while the text still
+ * reads normally to a human and to a model summarising it. Ordinary prose with
+ * a less-than sign is untouched. Mirrors apps/web/lib/chat/prompt-tools.ts.
+ */
+const TAG_MARKERS = /<(?=[|/]{0,2}(?:tool_call|tool_response|tools|tool)\b)/gi
+const ZERO_WIDTH_SPACE = '\u200B'
+
+export function neutralizeToolTags(text: string): string {
+  return text.replace(TAG_MARKERS, `<${ZERO_WIDTH_SPACE}`)
+}
+
 // ── Build System Prompt with Tool Definitions ───────────────────
 
 export function buildHermesToolPrompt(tools: (AgentToolDef | ToolLike)[]): string {
-  const toolDefs = tools.map((t) => JSON.stringify({
+  // Descriptions are not ours once an MCP server is connected: they are
+  // written by whoever wrote the server, so a description that ends the
+  // <tools> block early must not be able to append a line to the contract.
+  const toolDefs = tools.map((t) => neutralizeToolTags(JSON.stringify({
     type: 'function',
     function: {
       name: t.name,
       description: t.description,
       parameters: (t as any).inputSchema || (t as any).parameters,
     },
-  })).join('\n')
+  }))).join('\n')
+
+  // Everything below the <tools> block is about HOW to use what is in it, so
+  // each note only appears when the tool it talks about is actually offered.
+  // The old prompt closed with a fixed "Other tools: file_read, file_write,
+  // code_execute, image_generate" line that had not been updated in five
+  // releases: it named four of thirty tools and contradicted the block right
+  // above it.
+  const has = (name: string) => tools.some((t) => t.name === name)
+  const notes: string[] = []
+  if (has('todo_write')) {
+    notes.push(
+      'PLAN: for a task of more than about three calls, call todo_write FIRST with the whole plan, then again after each step with the COMPLETE list (finished item completed, next one in_progress). The user sees that list while you work.',
+    )
+  }
+  if (has('web_search') && has('web_fetch')) {
+    notes.push(
+      'IMPORTANT: web_search returns ONLY short snippets, NOT real data. You MUST ALWAYS call web_fetch on the best URL to read actual page content before answering.\nWorkflow: web_search → get URLs → web_fetch → read page → answer based on real data.',
+    )
+  }
+  if (has('file_edit')) {
+    notes.push('To change part of an existing file use file_edit with a unique old_string, not file_write.')
+  }
+  notes.push('Respond in the same language the user uses.')
 
   return `You are a function calling AI model. You are provided with function signatures within <tools></tools> XML tags. You may call one or more functions to assist with the user query. Don't make assumptions about what values to plug into functions. Ask for clarification if needed.
 
@@ -39,18 +92,18 @@ For each function call, return a json object with function name and arguments wi
 {"name": <function-name>, "arguments": <args-json-object>}
 </tool_call>
 
-IMPORTANT: web_search returns ONLY short snippets, NOT real data. You MUST ALWAYS call web_fetch on the best URL to read actual page content before answering.
-
-Workflow: web_search → get URLs → web_fetch → read page → answer based on real data.
-Other tools: file_read, file_write, code_execute, image_generate.
-Respond in the same language the user uses.`
+${notes.join('\n\n')}`
 }
 
 // ── Build Tool Result Message ───────────────────────────────────
 
 export function buildHermesToolResult(toolName: string, result: string): string {
+  // The name comes back from the model, so it goes through JSON.stringify too:
+  // interpolating it raw let a quote in an invented name break the object and
+  // spill the rest of the line into the block.
+  const body = JSON.stringify({ name: String(toolName ?? ''), content: result })
   return `<tool_response>
-{"name": "${toolName}", "content": ${JSON.stringify(result)}}
+${neutralizeToolTags(body)}
 </tool_response>`
 }
 

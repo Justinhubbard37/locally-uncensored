@@ -25,7 +25,7 @@ interface CodexConfirmState {
   pending: CodexConfirmRequest | null
   /** Resolver for the awaited approval. Null when nothing is pending. */
   resolve: ((allow: boolean) => void) | null
-  ask: (req: CodexConfirmRequest) => Promise<boolean>
+  ask: (req: CodexConfirmRequest, signal?: AbortSignal) => Promise<boolean>
   answer: (allow: boolean) => void
 }
 
@@ -33,13 +33,28 @@ export const useCodexConfirmStore = create<CodexConfirmState>((set, get) => ({
   pending: null,
   resolve: null,
 
-  ask: (req) =>
+  ask: (req, signal) =>
     new Promise<boolean>((resolve) => {
+      // Audit A4: Stop while the dialog was open never resolved this promise,
+      // so the run's finally never ran and the chat stayed wedged. An abort
+      // answers "no" and takes the dialog down with it.
+      if (signal?.aborted) {
+        resolve(false)
+        return
+      }
       // A second request while one is open would strand the first resolver and
       // hang that tool call forever. Deny the older one and take the new.
       const prev = get().resolve
       if (prev) prev(false)
       set({ pending: req, resolve })
+      signal?.addEventListener(
+        'abort',
+        () => {
+          if (get().resolve === resolve) set({ pending: null, resolve: null })
+          resolve(false)
+        },
+        { once: true },
+      )
     }),
 
   answer: (allow) => {

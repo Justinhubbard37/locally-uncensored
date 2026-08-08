@@ -16,6 +16,7 @@ import {
   selectRelevantTools,
   selectRelevantToolsAsync,
   ALWAYS_INCLUDE,
+  SMALL_MODEL_MAX_TOOLS,
 } from '../tool-selection'
 import { clearEmbeddingCache } from '../../api/agents/embedding-router'
 import { truncateToolResult } from '../truncate-tool-result'
@@ -64,6 +65,7 @@ describe('Small-Model Mode — Knob 1: applyMaxTools', () => {
     mkTool('file_write', 'write', 'filesystem'),
     mkTool('file_edit', 'edit', 'filesystem'),
     mkTool('get_current_time', 'time', 'system'),
+    mkTool('todo_write', 'plan', 'system'),
     mkTool('a', 'aaaa'),
     mkTool('b', 'bbbb'),
     mkTool('c', 'cccc'),
@@ -81,20 +83,31 @@ describe('Small-Model Mode — Knob 1: applyMaxTools', () => {
   })
 
   it('caps the list to maxTools', () => {
-    expect(applyMaxTools(tools, 4).length).toBe(4)
+    expect(applyMaxTools(tools, 8).length).toBe(8)
   })
 
   it('keeps every ALWAYS_INCLUDE tool even after the cap', () => {
-    const out = applyMaxTools(tools, 4)
+    const out = applyMaxTools(tools, 8)
     for (const name of ALWAYS_INCLUDE) {
       expect(out.some((t) => t.name === name)).toBe(true)
     }
   })
 
+  it('ALWAYS_INCLUDE is a floor the cap cannot cut into', () => {
+    // Documented overshoot: an always-included tool is never dropped, so a cap
+    // below the size of that set returns the set. ALWAYS_INCLUDE gained
+    // `todo_write` on 2026-08-05, which raised this floor from 4 to 5 — a small
+    // model asking for 3 tools now gets 5. That is deliberate: a plan is what a
+    // weak model needs most to stay on a long task.
+    const out = applyMaxTools(tools, 3)
+    expect(out.length).toBe(ALWAYS_INCLUDE.length)
+    expect(out.map((t) => t.name).sort()).toEqual([...ALWAYS_INCLUDE].sort())
+  })
+
   it('fills the non-always slots from rankOrder when provided', () => {
-    // 4 ALWAYS_INCLUDE + 1 free slot; rank puts 'f' first → 'f' wins, 'a' loses.
-    const out = applyMaxTools(tools, 5, ['f', 'e', 'd', 'c', 'b', 'a'])
-    expect(out.length).toBe(5)
+    // 5 ALWAYS_INCLUDE + 1 free slot; rank puts 'f' first → 'f' wins, 'a' loses.
+    const out = applyMaxTools(tools, 6, ['f', 'e', 'd', 'c', 'b', 'a'])
+    expect(out.length).toBe(6)
     expect(out.some((t) => t.name === 'f')).toBe(true)
     expect(out.some((t) => t.name === 'a')).toBe(false)
   })
@@ -205,5 +218,30 @@ describe('Small-Model Mode — settings default + v6→v7 migration merge', () =
     expect(merged.smallModelMode).toBe(false) // default filled in
     expect(merged.temperature).toBe(0.42) // user value preserved
     expect(merged.thinkingEnabled).toBe(false) // user value preserved
+  })
+})
+
+// ── The cap is derived from the floor (2026-08-05) ───────────────
+
+describe('Small-Model Mode — the cap cannot be strangled by the floor', () => {
+  it('leaves the semantic router exactly two slots', () => {
+    // The number the mode was tuned on. A hardcoded cap silently loses these
+    // slots every time ALWAYS_INCLUDE grows: adding todo_write took the router
+    // from 2 free slots to 1 without anyone editing the cap.
+    expect(SMALL_MODEL_MAX_TOOLS - ALWAYS_INCLUDE.length).toBe(2)
+  })
+
+  it('a capped selection really does carry two routed tools on top of the floor', () => {
+    const tools = [
+      ...ALWAYS_INCLUDE.map((n) => mkTool(n, n, 'system')),
+      mkTool('shell_execute', 'run a command', 'terminal'),
+      mkTool('file_list', 'list a directory', 'filesystem'),
+      mkTool('web_search', 'search the web', 'web'),
+    ]
+    const out = applyMaxTools(tools, SMALL_MODEL_MAX_TOOLS, ['shell_execute', 'file_list', 'web_search'])
+    expect(out).toHaveLength(SMALL_MODEL_MAX_TOOLS)
+    for (const n of ALWAYS_INCLUDE) expect(out.some((t) => t.name === n)).toBe(true)
+    expect(out.some((t) => t.name === 'shell_execute')).toBe(true)
+    expect(out.some((t) => t.name === 'file_list')).toBe(true)
   })
 })

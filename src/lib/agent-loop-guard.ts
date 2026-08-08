@@ -30,6 +30,27 @@
  *  4. Repeated narration: the model emitting the same non-trivial text 3×
  *     in a row ("Let me check the rotation engine…") halts even when its
  *     tool calls vary enough to dodge 1-3.
+ *
+ *  5. Rounds that only ever fail: detectors 1-4 look at what the model ASKED
+ *     for, never at what came back, and 2-3 are scoped to reads because a
+ *     side-effecting call may legitimately repeat. A shell command that FAILS
+ *     changes nothing, so a run of failing rounds with no success in between
+ *     is a stall no matter how the arguments wobble. Found on the installed
+ *     2.6.2 build, Coding + Ollama + hermes: after one git error the model
+ *     fired 18 `icacls` calls in a row, alternating `Everyone=RX` and
+ *     `Everyone=R,X`. Detector 1 never saw three identical in a row, and 2 and
+ *     3 skip shell entirely, so six minutes of the run burned untouched.
+ *
+ *  6. Variants of the same failing executable (G36, R18b witness 2026-08-07):
+ *     detector 5 resets the moment ANY call in the round succeeds, and a
+ *     model grinding on create-vite interleaved every retry with a file_list
+ *     that worked, so 15/30 circling minutes never tripped it. This detector
+ *     counts consecutive FAILURES per executable (first token of the shell
+ *     command, path and .exe/.cmd stripped, so `npm init vite@latest` and
+ *     `C:\nodejs\npm.cmd install -g create-vite` pool into one streak). Only
+ *     a successful MUTATING call resets the streaks, because only a mutation
+ *     can change what the retry will find; a read-only success proves
+ *     nothing. Steer at 3 per executable, halt at 6.
  */
 
 export type LoopGuardVerdict =
@@ -45,6 +66,37 @@ const READ_HALT_AT = 5
 const NARRATION_HALT_AT = 3
 /** Ignore trivial repeated lines ("Done.", "ok") — too easy to hit honestly. */
 const MIN_NARRATION_LEN = 12
+/**
+ * Failing rounds in a row, no success of any kind in between. Three is still
+ * plausible probing (wrong flag, wrong quoting, wrong path), so that only
+ * steers. Six is a model that has stopped reading its own error.
+ */
+const FAIL_STEER_AT = 3
+const FAIL_HALT_AT = 6
+/**
+ * Consecutive failures of the SAME executable (detector 6). Three variants of
+ * one command all failing is a model that argues with an error instead of
+ * reading it; six is a stall. Matches detector 5's ladder on purpose.
+ */
+const EXEC_FAIL_STEER_AT = 3
+const EXEC_FAIL_HALT_AT = 6
+
+/** Tools whose args carry a shell command whose first token names the work. */
+const EXEC_TOOLS = new Set<string>(['shell_execute', 'shell_execute_background'])
+
+/**
+ * `npm`, from any of: `npm init vite@latest`, `C:\nodejs\npm.cmd install -g
+ * create-vite`, `/usr/bin/npm ci`. Null when there is no command to key on.
+ */
+function execKeyOf(name: string, args?: Record<string, any>): string | null {
+  if (!EXEC_TOOLS.has(name)) return null
+  const command = args?.command
+  if (typeof command !== 'string') return null
+  const first = command.trim().split(/\s+/)[0] ?? ''
+  const base = first.replace(/["']/g, '').split(/[\\/]/).pop() ?? ''
+  const key = base.toLowerCase().replace(/\.(exe|cmd|bat|com)$/, '')
+  return key || null
+}
 
 /**
  * Tools whose result is a pure function of the workspace state. Only these
@@ -69,6 +121,11 @@ export class AgentLoopGuard {
   private steeredKeys = new Set<string>()
   private lastNarration = ''
   private narrationSeen = 0
+  private failingRounds = 0
+  private failSteered = false
+  /** Detector 6: consecutive failures per executable, reset by mutations. */
+  private execFailStreaks = new Map<string, number>()
+  private execSteeredKeys = new Set<string>()
 
   /**
    * Record one iteration's tool-call batch BEFORE executing it. `args` must
@@ -139,6 +196,84 @@ export class AgentLoopGuard {
       this.pureWindow = []
     }
     return steer ?? { action: 'ok' }
+  }
+
+  /**
+   * Record what one iteration's tools actually RETURNED, after they ran.
+   *
+   * A round where every call failed moved nothing: the workspace is what it
+   * was, and the next round starts from the same place. One success of any
+   * kind clears the count, so edit → test → edit → test is never touched, and
+   * neither is a model that fixes its command on the second or third try.
+   */
+  recordResults(
+    results: Array<{ name: string; failed: boolean; error?: string; args?: Record<string, any> }>,
+  ): LoopGuardVerdict {
+    if (results.length === 0) return { action: 'ok' }
+
+    // ── Detector 6: per-executable failure streaks ──
+    // The reset runs BEFORE this round's failures are counted, so a retry
+    // that follows a real fix (a successful file_edit, a successful other
+    // command) starts a fresh streak. Read-only successes keep the streaks:
+    // listing the directory again does not change what the retry will find.
+    if (results.some((r) => !r.failed && !READ_ONLY_TOOLS.has(r.name))) {
+      this.execFailStreaks.clear()
+    }
+    let execSteer: LoopGuardVerdict | null = null
+    for (const r of results) {
+      if (!r.failed) continue
+      const key = execKeyOf(r.name, r.args)
+      if (!key) continue
+      const n = (this.execFailStreaks.get(key) ?? 0) + 1
+      this.execFailStreaks.set(key, n)
+      if (n >= EXEC_FAIL_HALT_AT) {
+        return {
+          action: 'halt',
+          reason: `${n} failed '${key}' commands in a row with nothing changing the workspace in between`,
+        }
+      }
+      if (n >= EXEC_FAIL_STEER_AT && !this.execSteeredKeys.has(key)) {
+        this.execSteeredKeys.add(key)
+        execSteer = {
+          action: 'steer',
+          message:
+            `You have now tried ${n} variants of the '${key}' command and every attempt failed. ` +
+            (r.error ? `The error is still: ${r.error.slice(0, 300)}. ` : '') +
+            'Another spelling of the same command will fail the same way. ' +
+            'Write down the exact error for this step and MOVE ON to the next step.',
+        }
+      }
+    }
+
+    // ── Detector 5: rounds where every call failed ──
+    if (results.some((r) => !r.failed)) {
+      this.failingRounds = 0
+      this.failSteered = false
+      return execSteer ?? { action: 'ok' }
+    }
+
+    this.failingRounds++
+    const names = [...new Set(results.map((r) => r.name))].join(', ')
+    if (this.failingRounds >= FAIL_HALT_AT) {
+      return {
+        action: 'halt',
+        reason: `${this.failingRounds} rounds in a row where every tool call failed (${names}) and nothing changed in between`,
+      }
+    }
+    if (execSteer) return execSteer
+    if (this.failingRounds >= FAIL_STEER_AT && !this.failSteered) {
+      this.failSteered = true
+      const lastError = results.find((r) => r.error)?.error
+      return {
+        action: 'steer',
+        message:
+          `The last ${this.failingRounds} rounds all failed (${names}) and nothing in the workspace changed. ` +
+          (lastError ? `The error is still: ${lastError.slice(0, 300)}. ` : '') +
+          'Retrying the same command with a slightly different spelling will not fix it. ' +
+          'Either solve the cause, or say plainly that this step cannot be done here and move on to the next step.',
+      }
+    }
+    return { action: 'ok' }
   }
 
   /** Record the assistant text of one iteration (before its tools run). */

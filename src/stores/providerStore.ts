@@ -112,6 +112,12 @@ interface ProviderState {
   getProviderApiKey: (id: ProviderId) => string
   getEnabledProviders: () => ProviderConfig[]
   resetProvider: (id: ProviderId) => void
+  /** G20: restore EVERY slot to the shipped defaults (Built-in Engine back on
+   * the openai slot). "Reset AI Backends" never touched this store, so a user
+   * whose slot was adopted by LM Studio had no way back to the bundled engine.
+   * Keeps stored API keys and the LU Cloud enabled flag: keys are data, and
+   * cloud-enabled is account state owned by useCloudAuth, not backend config. */
+  resetProvidersToDefaults: () => void
   setHideBackendSelector: (hide: boolean) => void
   /** H5: load provider keys from the OS keychain (Win/macOS), migrating any
    * existing localStorage key into the vault. No-op / fallback elsewhere.
@@ -185,6 +191,21 @@ export const useProviderStore = create<ProviderState>()(
         if (keychainReady) {
           void secretDelete(id).catch(() => { /* vault delete best-effort */ })
         }
+        clearProviderCache()
+      },
+
+      resetProvidersToDefaults: () => {
+        set((state) => {
+          const next = {} as Record<ProviderId, ProviderConfig>
+          for (const id of Object.keys(DEFAULT_PROVIDERS) as ProviderId[]) {
+            next[id] = {
+              ...DEFAULT_PROVIDERS[id],
+              apiKey: state.providers[id]?.apiKey ?? '',
+              ...(id === 'lu-cloud' ? { enabled: state.providers[id]?.enabled ?? false } : {}),
+            }
+          }
+          return { providers: next }
+        })
         clearProviderCache()
       },
 

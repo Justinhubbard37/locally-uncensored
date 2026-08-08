@@ -1,25 +1,35 @@
-import { useRef, useState, useCallback } from 'react'
+import { useRef, useState, useCallback, useEffect } from 'react'
+import {
+  type ApprovalEntry,
+  subscribeApprovals,
+  headApproval,
+  enqueueApproval,
+  dequeueApproval,
+  removeApproval,
+  drainApprovals,
+} from '../lib/approval-queue'
 import { v4 as uuid } from 'uuid'
 import { streamProviderTurn } from '../lib/provider-stream'
-import { createHermesDisplayFilter } from '../lib/hermes-stream'
-import { setActiveChatId, clearActiveChatId, chatWorkspaceSlug, setActiveWorkspace, setActiveAgentModel, renderWorkspaceSection, setChatArtifactMode, takeChatArtifacts } from '../api/agent-context'
+import { createHermesDisplayFilter, createThinkStreamSplitter } from '../lib/hermes-stream'
+import { setActiveChatId, setActiveConversationId, clearActiveChatId, chatWorkspaceSlug, setActiveWorkspace, setActiveAgentModel, renderWorkspaceSection, setChatArtifactMode, takeChatArtifacts } from '../api/agent-context'
 import { isOllamaLocal } from '../api/backend'
 import { requestGenerationCancel } from '../api/vram-handoff'
 import { resolveWorkspace } from '../api/agents/workspace-resolve'
 import { useAgentModeStore } from '../stores/agentModeStore'
 import { streamOllamaChatWithTools } from '../lib/ollama-stream-tools'
-import { useChatStore } from '../stores/chatStore'
+import { useChatStore, flushChatPersist } from '../stores/chatStore'
 import { useGenerationStore } from '../stores/generationStore'
-import { agentVariantExists, createAgentVariant, getAgentModelName, canFixModel } from '../api/model-template-fix'
 import { useModelStore } from '../stores/modelStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useRAGStore } from '../stores/ragStore'
 import { retrieveContext } from '../api/rag'
 import { toolRegistry } from '../api/mcp'
 import { usePermissionStore } from '../stores/permissionStore'
+import { CODEX_CONFIRM_TOOLS, codexConfirmEnabled } from './codexShellGate'
 import { isThinkingCompatible, isPlainTextPlanner } from '../lib/model-compatibility'
-import { getToolCallingStrategy, isNativeToolProvider, type ToolCallingStrategy } from '../lib/model-compatibility'
+import { resolveToolCallingStrategy } from '../lib/agent-strategy'
 import { isMultimodalUnsupportedError, MULTIMODAL_UNSUPPORTED_MESSAGE } from '../lib/ollama-errors'
+import { stripVisionFeedbackMessages } from '../lib/vision-heal'
 import { log } from '../lib/logger'
 import { buildHermesToolPrompt, buildHermesToolResult, parseHermesToolCalls, stripToolCallTags, hasToolCallTags } from '../api/hermes-tool-calling'
 import { parseLooseToolCalls, stripMatchedCalls, stripToolCallText, canonicalToolName } from '../lib/loose-tool-parse'
@@ -37,13 +47,16 @@ import { buildExtractionPrompt, parseExtractionResponse } from '../lib/memory-ex
 import { useAgentWorkflowStore } from '../stores/agentWorkflowStore'
 import { WorkflowEngine } from '../lib/workflow-engine'
 import type { AgentBlock, AgentToolCall, OllamaChatMessage } from '../types/agent-mode'
-import { selectRelevantToolsAsync } from '../lib/tool-selection'
+import { selectRelevantToolsAsync, ALWAYS_INCLUDE, SMALL_MODEL_MAX_TOOLS } from '../lib/tool-selection'
+import { renderToolRoster, renderToolNames } from '../lib/tool-roster'
 import { MUTATING_TOOLS } from '../lib/mutating-tools'
 import { useAgentGoalStore, renderGoalSection } from '../stores/agentGoalStore'
 import { useAgentLoopStore } from '../stores/agentLoopStore'
 import { buildLoopRecheck, loopPassSaysDone } from '../lib/agent-commands'
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
+import { toolCallCapMs, raceWithToolTimeout, SHELL_EXECUTE_DEFAULT_TIMEOUT_MS, CODE_EXECUTE_DEFAULT_TIMEOUT_MS } from '../lib/tool-timeout'
+import { AgentLoopGuard } from '../lib/agent-loop-guard'
 import { budgetFromSettings } from '../api/agents/budget'
 import type { ChatMessage, ToolCall, ToolDefinition } from '../api/providers/types'
 import type { StepResult, WorkflowEngineCallbacks } from '../types/agent-workflows'
@@ -51,7 +64,12 @@ import { executeParallel, applyResultToToolCall, type ExecutionRequest } from '.
 import { useToolAuditStore } from '../stores/toolAuditStore'
 import { makeInTurnCacheLookup } from '../api/agents/in-turn-cache'
 import { explainError as explainToolError } from '../api/agents/error-hints'
-import { finalStripThinkingTags } from '../lib/thinking-stripper'
+import { finalStripThinkingTags, splitOrphanCloser, splitUnclosedThink } from '../lib/thinking-stripper'
+import { openPlanGap, planReconcileSteer, PLAN_RECONCILE_BUDGET } from '../lib/plan-reconcile'
+import { PlanStaleness, planStalenessSteer } from '../lib/plan-staleness'
+import { reasoningOnlyRound, REASONING_CONTINUE_BUDGET, REASONING_CONTINUE_STEER } from '../lib/reasoning-round'
+import { useTodoStore } from '../stores/todoStore'
+import { platformPromptLine } from '../lib/host-platform'
 
 // ── Standalone memory extraction (usable outside React hooks) ──
 
@@ -86,20 +104,15 @@ async function extractMemories(userMsg: string, assistantMsg: string, conversati
   }
 }
 
-// ── Approval promise management ───────────────────────────────
-//
-// Phase 5 introduced parallel tool execution via executeParallel — which
-// means multiple tools can request approval in the same batch. A single
-// `approvalRef` slot would get OVERWRITTEN by the second caller,
-// deadlocking the first. We keep a FIFO queue instead: the UI shows the
-// head of the queue, and approve/reject pops it so the next one surfaces.
-
-interface ApprovalEntry {
-  toolCall: AgentToolCall
-  resolve: (approved: boolean) => void
-}
-
 // ── Hook ──────────────────────────────────────────────────────
+
+/**
+ * The pending next /loop pass. MODULE scope, not a hook ref (audit A3): the
+ * chat view unmounts on a view switch, and a timer parked in an unmounted
+ * instance's ref was unreachable for the remounted hook — stopAgent cleared
+ * its own (empty) ref while the old timer kept firing new passes.
+ */
+let agentLoopTimer: ReturnType<typeof setTimeout> | null = null
 
 export function useAgentChat() {
   const [isAgentRunning, setIsAgentRunning] = useState(false)
@@ -109,40 +122,56 @@ export function useAgentChat() {
   /** True once the user pressed stop, so the /loop driver does not start
    *  another pass on the run they just killed. */
   const userStoppedRef = useRef(false)
-  /** The pending next /loop pass, so stop can cancel it mid-interval. */
-  const loopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const approvalQueueRef = useRef<ApprovalEntry[]>([])
   const contentRef = useRef('')
   const thinkingRef = useRef('')
   const blocksRef = useRef<AgentBlock[]>([])
   const runningRef = useRef(false)
 
   // ── Approval callbacks ────────────────────────────────────
+  //
+  // The queue lives at module scope, keyed by conversation (G29b), so what the
+  // user sees is whatever the ACTIVE conversation is waiting on, no matter how
+  // many times this view has been torn down since the run started.
 
-  const advanceApprovalQueue = useCallback(() => {
-    const next = approvalQueueRef.current[0]
-    setPendingApproval(next ? next.toolCall : null)
-  }, [])
+  const activeConversationId = useChatStore((s) => s.activeConversationId)
+
+  useEffect(() => {
+    const sync = () => setPendingApproval(headApproval(activeConversationId))
+    sync() // on mount, adopt an approval a previous instance left behind
+    return subscribeApprovals(sync)
+  }, [activeConversationId])
 
   const approveToolCall = useCallback(() => {
-    const entry = approvalQueueRef.current.shift()
-    if (entry) entry.resolve(true)
-    advanceApprovalQueue()
-  }, [advanceApprovalQueue])
+    dequeueApproval(useChatStore.getState().activeConversationId)?.resolve(true)
+  }, [])
 
   const rejectToolCall = useCallback(() => {
-    const entry = approvalQueueRef.current.shift()
-    if (entry) entry.resolve(false)
-    advanceApprovalQueue()
-  }, [advanceApprovalQueue])
+    dequeueApproval(useChatStore.getState().activeConversationId)?.resolve(false)
+  }, [])
 
   // ── Wait for user approval (enqueues; UI shows head of queue) ──
 
-  function waitForApproval(toolCall: AgentToolCall): Promise<boolean> {
+  function waitForApproval(convId: string, toolCall: AgentToolCall, signal?: AbortSignal): Promise<boolean> {
     return new Promise((resolve) => {
-      const wasEmpty = approvalQueueRef.current.length === 0
-      approvalQueueRef.current.push({ toolCall, resolve })
-      if (wasEmpty) setPendingApproval(toolCall)
+      // Audit A4: this promise used to resolve ONLY on a click. Stop while a
+      // tool sat awaiting approval meant the resolver was never called, the
+      // loop's finally never ran, and the conversation was wedged with the
+      // typing dots on forever. An abort now answers "no" for the user.
+      if (signal?.aborted) {
+        resolve(false)
+        return
+      }
+      const entry: ApprovalEntry = { toolCall, resolve }
+      enqueueApproval(convId, entry)
+      signal?.addEventListener(
+        'abort',
+        () => {
+          // False when a click already answered it, and then the promise is
+          // long settled.
+          if (removeApproval(convId, entry)) resolve(false)
+        },
+        { once: true },
+      )
     })
   }
 
@@ -263,43 +292,13 @@ export function useAgentChat() {
       }
     }
 
-    // ── Resolve provider ────────────────────────────────────
-    const providerId = getProviderIdFromModel(activeModel)
-    const { provider, modelId } = getProviderForModel(activeModel)
-
-    // ── Pre-flight: determine tool calling strategy ─────────
-    let modelToUse = modelId
-    let strategy: ToolCallingStrategy
-
-    if (isNativeToolProvider(providerId)) {
-      // Cloud providers always support native tool calling
-      strategy = 'native'
-    } else {
-      // Ollama: check model compatibility
-      strategy = getToolCallingStrategy(modelId)
-
-      if (strategy === 'template_fix') {
-        const agentName = getAgentModelName(modelId)
-        const exists = await agentVariantExists(modelId)
-
-        if (exists) {
-          modelToUse = agentName
-          strategy = 'native'
-        } else {
-          const { fixable } = await canFixModel(modelId)
-          if (fixable) {
-            try {
-              modelToUse = await createAgentVariant(modelId)
-              strategy = 'native'
-            } catch {
-              strategy = 'hermes_xml'
-            }
-          } else {
-            strategy = 'hermes_xml'
-          }
-        }
-      }
-    }
+    // ── Resolve provider + tool calling strategy ────────────
+    // G26/G32/G37b: the SAME layered resolution as Code, the Agent toggle and
+    // the workflow engine (proven capability cache > the server's own answer >
+    // family name), for EVERY provider. This block used to be an inline copy
+    // of resolveToolCallingStrategy and the copies drifted (that was G32b);
+    // now there is one resolution and every surface calls it.
+    const { strategy, modelToUse, modelId, providerId, provider } = await resolveToolCallingStrategy(activeModel)
 
     // ── Re-entry guard (double-submit) ──────────────────────────────────
     // An accidental double-send (two Enters before the React `isGenerating`
@@ -343,6 +342,7 @@ export function useAgentChat() {
     const convForSlug = useChatStore.getState().conversations.find((c) => c.id === convId)
     const slug = chatWorkspaceSlug(convId, convForSlug?.title)
     setActiveChatId(slug)
+    setActiveConversationId(convId)
 
     // Multi-Repo Agent (B15) + workspace unification (B17): pin the
     // resolved workspace so chatCtx() in builtin-tools.ts threads it
@@ -469,13 +469,23 @@ export function useAgentChat() {
     // Chat-Tools mode uses a conversational prompt (NOT the autonomous-agent
     // one) so plain chat keeps its normal voice and only reaches for a tool
     // when the user actually needs it.
+    // The roster the prompt shows comes from the same filtered registry the
+    // request draws on, so the prompt can never advertise a tool a permission
+    // blocked or omit one that was added since (audit 2026-08-05).
+    const offeredTools = toolRegistry.getAvailableTools(permissions)
+      .filter((t) => toolMatchesCurated(t.name))
     let agentSystemPrompt = strategy === 'hermes_xml'
       ? buildHermesToolPrompt(hermesToolDefs) + (systemPrompt ? `\n\n${systemPrompt}` : '')
       : opts?.chatToolsMode
         ? buildChatToolsSystemPrompt(systemPrompt)
         : settings.smallModelMode
-          ? buildAgentSystemPromptLean(systemPrompt)
-          : buildAgentSystemPrompt(systemPrompt)
+          // Lean names only what survives the 6-tool cap, which is exactly the
+          // always-included set; the rest is in the request's tool list.
+          ? buildAgentSystemPromptLean(
+              systemPrompt,
+              renderToolNames(offeredTools.filter((t) => ALWAYS_INCLUDE.includes(t.name))),
+            )
+          : buildAgentSystemPrompt(systemPrompt, renderToolRoster(offeredTools))
     // Standing goal (/goal) — same section Code injects, so the objective
     // survives a switch between the two surfaces.
     agentSystemPrompt += renderGoalSection(useAgentGoalStore.getState().getGoal(convId))
@@ -524,6 +534,10 @@ export function useAgentChat() {
           ...(m.images?.length ? { images: m.images.map(img => ({ data: img.data, mimeType: img.mimeType })) } : {}),
         })),
     ]
+
+    // G22: once the model proved it cannot read images (multimodal error on a
+    // loop-attached picture), no further vision feedback this run.
+    let visionRefused = false
 
     // Setup
     const abort = new AbortController()
@@ -605,9 +619,23 @@ export function useAgentChat() {
     let mediaSynthesized = false
     let forceNoThink = false
     let dudRetried = false
+    // G16, parity with useCodex: a final turn that leaves the model's own todo
+    // list unfinished gets a bounded contradiction instead of ending the run.
+    let planReconcilesRemaining = PLAN_RECONCILE_BUDGET
+    // G17: budget for continuing past reasoning-only rounds mid-run.
+    let reasoningContinuesRemaining = REASONING_CONTINUE_BUDGET
+    // PlanBar lag: batches of real work without a todo_write while the plan
+    // has open items earn one bounded mid-run steer to report progress.
+    const planStaleness = new PlanStaleness()
     const executedCallKeys = new Set<string>()
     const callKey = (tc: { function: { name: string; arguments: unknown } }) =>
       tc.function.name + '|' + JSON.stringify(tc.function.arguments ?? {})
+    // Loop-detection (audit follow-up): agent-loop-guard's own header says it
+    // covers "Codex + Chat agent", but only Codex ever wired it — the agent
+    // loop relied on the exact-repeat set alone, which the epoch reset (B1)
+    // rightly weakened. Windowed batch repeats, per-epoch identical reads and
+    // repeated narration now watch this loop too.
+    const loopGuard = new AgentLoopGuard()
 
     try {
       // ── Agent Loop ──────────────────────────────────────────
@@ -646,6 +674,9 @@ export function useAgentChat() {
                 ? undefined
                 : settings.thinkingEnabled === true)
             : undefined
+        // Hoisted above the transport branches (G35): the hermes stream
+        // splitter needs the same gate the end-of-turn routing uses.
+        const keepThinking = agentThinkMode === 'always' || (settings.thinkingEnabled === true && canThinkAgent)
 
         // num_ctx (David: "muss immer stimmen"). Shared resolver so the memory
         // extraction that runs after this turn sends the SAME value and Ollama
@@ -695,7 +726,11 @@ export function useAgentChat() {
           // routing once the total tool count grows past the threshold
           // (Phase 9). The embedding call is best-effort: if Ollama is
           // unreachable it silently falls back to keyword-only.
-          const lastUserMsg = agentMessages.filter(m => m.role === 'user').pop()?.content || ''
+          // Route on the USER's instruction, never on the newest user-role
+          // message (audit B6): steers, over-loop notes and read-only blocks
+          // are pushed as role 'user', and routing on those swapped the tool
+          // list mid-run to whatever the harness said last.
+          const lastUserMsg = userContent
           // Small-Model Mode (Knob 1): tighten the tool cap and force the
           // embedding router even on a modest catalog (threshold 6) so a 3B-8B
           // model sees ≤6 semantically-ranked tools. Default mode keeps the
@@ -705,7 +740,7 @@ export function useAgentChat() {
             toolRegistry.getAll().filter((t) => toolMatchesCurated(t.name)),
             permissions,
             settings.smallModelMode
-              ? { embed: (texts) => generateEmbeddings(texts), topN: 5, embeddingThreshold: 6, maxTools: 6 }
+              ? { embed: (texts) => generateEmbeddings(texts), topN: 5, embeddingThreshold: 6, maxTools: SMALL_MODEL_MAX_TOOLS }
               : { embed: (texts) => generateEmbeddings(texts) }
           )
           const tools: ToolDefinition[] = relevantDefs.map(t => ({
@@ -783,6 +818,14 @@ export function useAgentChat() {
                 )
                 break
               } catch (thinkErr: any) {
+                // G22: OUR image attachment on a model that cannot see. Strip
+                // it to its text fallback and retry — the run must survive a
+                // wrong vision guess. A user-attached image stays untouched.
+                if (isMultimodalUnsupportedError(String(thinkErr?.message ?? '')) && stripVisionFeedbackMessages(agentMessages)) {
+                  visionRefused = true
+                  log.warn('agent.vision_feedback_healed', { model: modelToUse })
+                  continue
+                }
                 if (thinkErr?.message?.includes('does not support thinking') || thinkErr?.statusCode === 400) {
                   turn = await streamOllamaChatWithTools(
                     modelToUse,
@@ -858,6 +901,14 @@ export function useAgentChat() {
                 turn = await streamProviderTurn(provider, modelToUse, agentMessages, streamOpts, onLiveContent, onLiveThinking)
                 break
               } catch (thinkErr: any) {
+                // G22 parity with the Ollama branch: heal a wrong vision
+                // guess instead of ending the run (R20 witness: LM Studio,
+                // gemma-3-4b-it-abliterated, text-only conversion).
+                if (isMultimodalUnsupportedError(String(thinkErr?.message ?? '')) && stripVisionFeedbackMessages(agentMessages)) {
+                  visionRefused = true
+                  log.warn('agent.vision_feedback_healed', { model: modelToUse, provider: providerId })
+                  continue
+                }
                 if (thinkErr?.message?.includes('does not support thinking') || thinkErr?.statusCode === 400) {
                   turn = await streamProviderTurn(provider, modelToUse, agentMessages, { ...streamOpts, thinking: undefined as unknown as boolean }, onLiveContent, () => {})
                   break
@@ -904,23 +955,33 @@ export function useAgentChat() {
           // which spoke Ollama's /api/chat and quietly mis-routed hermes
           // turns on every other provider.
           const display = createHermesDisplayFilter()
+          // G35 (David 2026-08-07): the thought streams inside the SAME
+          // bounded 3-line ThinkingBlock window as the native path, never
+          // full-height into the bubble. On this transport the reasoning
+          // arrives inline as <think> text, and the Qwen3 templates pre-open
+          // the thought in the PROMPT, so the stream begins mid-thought and
+          // only ever sends the closer — startInThink covers exactly that.
+          // With thinking OFF the thought is not shown live at all; the
+          // end-of-turn parse on the full raw text stays authoritative.
+          const splitter = createThinkStreamSplitter({ startInThink: keepThinking })
           let shown = ''
+          const feedUI = (chunk: { prose: string; thinking: string }) => {
+            if (chunk.thinking && keepThinking) {
+              thinkingRef.current += chunk.thinking.replace(/<think>/g, '')
+            }
+            if (chunk.prose) shown += chunk.prose
+            contentRef.current = shown
+            scheduleUIUpdate()
+          }
           const hermesTurn = await streamProviderTurn(
             provider,
             modelToUse,
             agentMessages.map(m => ({ role: m.role, content: m.content })),
             { ...chatOptions, thinking: undefined as unknown as boolean },
-            (_full, delta) => {
-              shown += display.feed(delta)
-              contentRef.current = shown
-              scheduleUIUpdate()
-            },
+            (_full, delta) => feedUI(splitter.feed(display.feed(delta))),
           )
-          shown += display.flush()
-          if (shown) {
-            contentRef.current = shown
-            scheduleUIUpdate()
-          }
+          feedUI(splitter.feed(display.flush()))
+          feedUI(splitter.flush())
           const rawContent = hermesTurn.content
 
           if (hasToolCallTags(rawContent)) {
@@ -939,7 +1000,6 @@ export function useAgentChat() {
         // toggled Thinking on — thinking-only models (QwQ, DeepSeek-R1)
         // emit these tags unconditionally, and we must not surface them
         // when the user asked for thinking to be OFF.
-        const keepThinking = agentThinkMode === 'always' || (settings.thinkingEnabled === true && canThinkAgent)
         turnContent = turnContent.replace(/<think>([\s\S]*?)<\/think>/g, (_match, inner) => {
           if (keepThinking) {
             turnThinking = turnThinking
@@ -948,6 +1008,31 @@ export function useAgentChat() {
           }
           return ''
         })
+        // The Qwen3 chat templates put the opening `<think>` in the PROMPT, so
+        // the reply starts mid-thought and closes a tag it never opened. With
+        // thinking ON the raw closer plus the whole thought stayed in the
+        // bubble.
+        const orphanClose = splitOrphanCloser(turnContent)
+        if (orphanClose.thinking) {
+          turnContent = orphanClose.content
+          if (keepThinking) {
+            turnThinking = turnThinking
+              ? `${turnThinking}\n\n${orphanClose.thinking}`
+              : orphanClose.thinking
+          }
+        }
+        // A turn cut off mid-thought leaves the opener without its closer,
+        // which the regex above cannot match. It belongs in the thinking
+        // block, never in the assistant bubble.
+        const orphanThink = splitUnclosedThink(turnContent)
+        if (orphanThink.thinking) {
+          turnContent = orphanThink.content
+          if (keepThinking) {
+            turnThinking = turnThinking
+              ? `${turnThinking}\n\n${orphanThink.thinking}`
+              : orphanThink.thinking
+          }
+        }
         // Strip non-canonical thinking markers (Gemma channel tags,
         // `<thought>`, `<reasoning>`, etc.) that the canonical regex above
         // doesn't catch. These never belong in the assistant bubble.
@@ -1123,12 +1208,80 @@ export function useAgentChat() {
           }
         }
         if (isFinalTurn) {
+          // G16: ending the run is only legitimate when the model's own plan
+          // is done. A read-only turn answers in text and is exempt. The
+          // steer goes through agentMessages (NOT `messages`, see the
+          // read-only guard above for the ReferenceError that name cost), and
+          // the model's claim is appended first so it argues against its own
+          // words, not against a hole in the history.
+          if (!opts?.readOnly && planReconcilesRemaining > 0) {
+            const gap = openPlanGap(useTodoStore.getState().getTodos(convId!))
+            if (gap) {
+              planReconcilesRemaining--
+              if (turnContent.trim()) {
+                agentMessages.push({ role: 'assistant', content: turnContent })
+                addBlock(convId!, assistantMessage.id, {
+                  id: uuid(),
+                  phase: 'reflection',
+                  content: turnContent,
+                  timestamp: Date.now(),
+                })
+              }
+              agentMessages.push({ role: 'user', content: planReconcileSteer(gap) })
+              continue
+            }
+          }
+          // G17: a reasoning-only round mid-run is not an ending. Layer 1 is
+          // the dud retry above (fires only before ANY tool ran), layer 2 is
+          // the G16 reconcile (needs an open plan). This is layer 3: work has
+          // started, there is no plan to lean on, and the round was thought
+          // with no words and no call. R17 died exactly here, step 1 of 31.
+          if (
+            !opts?.readOnly &&
+            executedCallKeys.size > 0 &&
+            reasoningContinuesRemaining > 0 &&
+            reasoningOnlyRound(turnContent, turnThinking)
+          ) {
+            reasoningContinuesRemaining--
+            agentMessages.push({ role: 'user', content: REASONING_CONTINUE_STEER })
+            continue
+          }
           contentRef.current = turnContent
-          thinkingRef.current = turnThinking
+          // G21-2: after tool activity the closing thought belongs in the
+          // block sequence too, in position before the final answer, not in
+          // the one top-of-bubble field. A run with NO tool activity keeps
+          // the classic bubble (plain chat look, and the tool-intent hint
+          // in MessageBubble reads message.thinking).
+          if (executedCallKeys.size > 0 && turnThinking.trim() && settings.thinkingEnabled === true) {
+            addBlock(convId!, assistantMessage.id, {
+              id: uuid(),
+              phase: 'thinking',
+              content: turnThinking,
+              timestamp: Date.now(),
+            })
+            thinkingRef.current = ''
+            useChatStore.getState().updateMessageThinking(convId!, assistantMessage.id, '')
+          } else {
+            thinkingRef.current = turnThinking
+          }
           scheduleUIUpdate()
           break
         }
 
+        // G21-2 (David 2026-08-07): each round's thought becomes its OWN block
+        // in chronological position, before this round's calls, instead of all
+        // rounds piling into the one thinking field the bubble renders on top.
+        // The top-level field is cleared so the same thought never shows twice;
+        // the next round's live stream refills it while streaming and lands
+        // here again when that round completes.
+        if (turnThinking.trim() && settings.thinkingEnabled === true) {
+          addBlock(convId!, assistantMessage.id, {
+            id: uuid(),
+            phase: 'thinking',
+            content: turnThinking,
+            timestamp: Date.now(),
+          })
+        }
         if (turnContent.trim()) {
           addBlock(convId!, assistantMessage.id, {
             id: uuid(),
@@ -1137,7 +1290,8 @@ export function useAgentChat() {
             timestamp: Date.now(),
           })
         }
-        thinkingRef.current = turnThinking
+        thinkingRef.current = ''
+        useChatStore.getState().updateMessageThinking(convId!, assistantMessage.id, '')
         scheduleUIUpdate()
 
         // Phase 5b (v2.4.0) — parallel tool execution via tool-executor.
@@ -1160,12 +1314,36 @@ export function useAgentChat() {
           if (blocked.length) {
             toolCalls = toolCalls.filter((tc) => !MUTATING_TOOLS.has(tc.function?.name ?? ''))
             const names = [...new Set(blocked.map((tc) => tc.function.name))].join(', ')
-            messages.push({
+            // `agentMessages`, not `messages` (audit follow-up): this guard was
+            // copied from useCodex, whose history array IS called messages. In
+            // this hook that name does not exist, so the first read-only turn
+            // that actually blocked a mutating call died on a ReferenceError.
+            agentMessages.push({
               role: 'user',
               content: `${names} is not available on this turn, it is a read-only command. Do not try to change anything. Finish with the written answer using what you have already read.`,
             })
           }
         }
+
+        // Loop-detector, parity with Codex: narration first (the same line
+        // re-emitted every iteration), then the batch (windowed signature
+        // repeats + identical reads against an unchanged workspace). Steer is
+        // held and appended AFTER this iteration's history (audit F2), so it
+        // never sits chronologically before the calls it refers to.
+        const narrationVerdict = loopGuard.recordNarration(turnContent)
+        const batchVerdict = narrationVerdict.action === 'halt'
+          ? narrationVerdict
+          : loopGuard.recordBatch(
+              toolCalls.map((tc) => ({ name: tc.function.name, args: JSON.stringify(tc.function.arguments ?? {}) })),
+            )
+        if (batchVerdict.action === 'halt') {
+          contentRef.current =
+            (contentRef.current ? contentRef.current + '\n\n' : '') +
+            `_(halted: ${batchVerdict.reason}. The model is looping. Try a stronger model for multi-step tasks, or rephrase the instruction.)_`
+          scheduleUIUpdate()
+          break
+        }
+        const pendingSteer = batchVerdict.action === 'steer' ? batchVerdict.message : null
 
         type BatchEntry = { tc: typeof toolCalls[number]; ac: AgentToolCall; blockId: string }
         const batch: BatchEntry[] = []
@@ -1179,11 +1357,35 @@ export function useAgentChat() {
             permissions,
             perToolOverrides
           )
-          const needsApproval = permLevel !== 'auto'
+          // G15a (decided 2026-08-07): the cloud shell rule covers BOTH
+          // surfaces. The Code tab confirms the arbitrary-exec tools on an LU
+          // Cloud model (codexShellGate); Agent mode ran the SAME tools on the
+          // SAME model unattended (R23), so the surface a casual user is more
+          // likely in had the looser rule. Same policy, same visible setting;
+          // rides ON TOP of the per-tool permission level, never loosens it.
+          const cloudShellConfirm =
+            CODEX_CONFIRM_TOOLS.has(tc.function.name) &&
+            codexConfirmEnabled({
+              confirmShell: false,
+              cloudConfirmShell: settings.codexCloudConfirmShell,
+              providerId,
+            })
+          const needsApproval = permLevel !== 'auto' || cloudShellConfirm
+          // Exec-timeout parity with the Code tab (audit B8): without an
+          // injected default the Rust side used its 120 s fallback, so the
+          // same npm install that passed in Code died here after 2 minutes.
+          // The model's own timeout still wins when it sends one.
+          const toolArgs = { ...tc.function.arguments }
+          if (tc.function.name === 'shell_execute' && !toolArgs.timeout) {
+            toolArgs.timeout = SHELL_EXECUTE_DEFAULT_TIMEOUT_MS
+          }
+          if (tc.function.name === 'code_execute' && !toolArgs.timeout) {
+            toolArgs.timeout = CODE_EXECUTE_DEFAULT_TIMEOUT_MS
+          }
           const ac: AgentToolCall = {
             id: toolCallId,
             toolName: tc.function.name,
-            args: tc.function.arguments,
+            args: toolArgs,
             status: needsApproval ? 'pending_approval' : 'running',
             timestamp: Date.now(),
           }
@@ -1212,7 +1414,11 @@ export function useAgentChat() {
             const td = toolRegistry.getToolByName(name)
             return td ? { name: td.name, inputSchema: td.inputSchema } : undefined
           },
-          execute: (name: string, args: Record<string, any>) => toolRegistry.execute(name, args),
+          // Timeout backstop shared with Codex (audit B9): before this the
+          // Agent loop had NO ceiling around a tool call, so one hung tool
+          // wedged the whole run with no way out but a restart.
+          execute: (name: string, args: Record<string, any>) =>
+            raceWithToolTimeout(toolRegistry.execute(name, args), name, toolCallCapMs(name, args, settings)),
           lookupCache: convId ? makeInTurnCacheLookup({ convId, turnStartMs }) : undefined,
           explainError: (toolName, err) => explainToolError(toolName, err),
           awaitApproval: async (req) => {
@@ -1222,7 +1428,7 @@ export function useAgentChat() {
             // creation (permission level 'auto') bypass the approval
             // gate entirely. Only 'pending_approval' tools enqueue.
             if (entry.ac.status !== 'pending_approval') return true
-            const approved = await waitForApproval(entry.ac)
+            const approved = await waitForApproval(convId!, entry.ac, abort.signal)
             if (approved) {
               entry.ac.status = 'running'
               updateBlockById(convId!, assistantMessage.id, entry.blockId, {
@@ -1299,20 +1505,25 @@ export function useAgentChat() {
             content: contentLabel,
           })
 
-          // `mediaOk` guard: without it a ComfyUI error text was written into the
-          // PERSISTENT cross-conversation memory store as a 'reference' fact.
-          if ((result.status === 'completed' || result.status === 'cached') && entry.ac.result && mediaOk) {
-            const argsShort = JSON.stringify(entry.ac.args).substring(0, 100)
-            const resultShort = entry.ac.result.substring(0, 200)
-            useMemoryStore.getState().addMemory({
-              type: 'reference',
-              title: `${entry.ac.toolName} result`,
-              description: `${entry.ac.toolName}(${argsShort.substring(0, 60)}) → ${resultShort.substring(0, 60)}`,
-              content: `${entry.ac.toolName}(${argsShort}) → ${resultShort}`,
-              tags: [`agent:${entry.ac.toolName}`],
-              source: convId || 'agent',
-            })
-          }
+          // Per-tool-call memory writes were removed here (audit E1): every
+          // successful call became a permanent 'reference' memory, so a long
+          // run left hundreds of file_read/shell entries competing for the
+          // memory budget of every FUTURE conversation, plus one embedding
+          // call each against the same backend the chat was using. The
+          // curated turn-level extractor (extractMemoriesFromPair) is the
+          // memory path; raw tool results were never memories.
+        }
+
+        // Epoch reset (audit B1). The over-loop guard blocks a call whose
+        // name+args exactly repeat one already run THIS turn. But after a
+        // mutation the same call is legitimately new: edit → test → edit →
+        // test repeats `run_tests` with identical args and MUST re-run.
+        // Same dividing line the loop guard and the in-turn cache use: any
+        // side-effecting call may change what the next identical call
+        // returns, so the repeat set starts over. Media stays capped via
+        // imageGenDone/videoGenDone, which this reset does not touch.
+        if (batch.some((e) => MUTATING_TOOLS.has(e.ac.toolName))) {
+          executedCallKeys.clear()
         }
 
         // Feed results back into LLM history. Format differs per provider:
@@ -1407,6 +1618,37 @@ export function useAgentChat() {
           }
         }
 
+        // Loop-detector, result side: a round where every call failed changed
+        // nothing, so a run of them is a stall the call-shape detectors above
+        // cannot see (they only look at what was asked for, and they skip
+        // shell on purpose).
+        const failVerdict = loopGuard.recordResults(
+          results.map((r) => ({ name: r.toolName, failed: r.status === 'failed', error: r.error, args: r.dispatchedArgs })),
+        )
+        if (failVerdict.action === 'halt') {
+          contentRef.current =
+            (contentRef.current ? contentRef.current + '\n\n' : '') +
+            `_(halted: ${failVerdict.reason}. The model is looping. Try a stronger model for multi-step tasks, or rephrase the instruction.)_`
+          scheduleUIUpdate()
+          break
+        }
+
+        // Now the steer sits AFTER the calls it refers to (audit F2).
+        if (pendingSteer) {
+          agentMessages.push({ role: 'user', content: pendingSteer })
+        }
+        if (failVerdict.action === 'steer') {
+          agentMessages.push({ role: 'user', content: failVerdict.message })
+        }
+        // PlanBar lag: the bar renders only what the model reports, so after
+        // enough batches of silent progress ask it to bring the list current.
+        {
+          const staleGap = openPlanGap(useTodoStore.getState().getTodos(convId!))
+          if (planStaleness.recordBatch(batch.map((e) => e.ac.toolName), staleGap !== null) && staleGap) {
+            agentMessages.push({ role: 'user', content: planStalenessSteer(staleGap) })
+          }
+        }
+
         // Vision feedback (David 2026-06-03): after image_generate, hand the
         // generated picture to a vision-capable model so it SEES the result and
         // can comment — and learns the filename to chain into video_generate.
@@ -1418,6 +1660,8 @@ export function useAgentChat() {
         // sent an image and made to SSE-error).
         for (const { tc, ac } of batch) {
           const result = results.find((r) => r.id === ac.id)
+          // G22: once this run proved the model text-only, stop attaching.
+          if (visionRefused) break
           if (result?.status === 'completed' && result.result) {
             try {
               const vf = await buildVisionFeedback(modelToUse, tc.function.name, result.result, providerId)
@@ -1459,6 +1703,11 @@ export function useAgentChat() {
           imageGenDone,
           videoGenDone,
           visionFeedbackGiven,
+          // G27: the reconcile steers above have a budget of two; when it is
+          // spent the run ends with the plan still open, and this line is the
+          // last thing the user reads. It may not say "completed" while the
+          // PlanBar next to it says otherwise.
+          planGap: openPlanGap(useTodoStore.getState().getTodos(convId!)),
         })
       }
 
@@ -1478,10 +1727,17 @@ export function useAgentChat() {
             MULTIMODAL_UNSUPPORTED_MESSAGE
           )
         } else if ((err as { code?: string })?.code === 'tools_unsupported' || errorMsg.includes('does not support tools')) {
+          // G26: record the refusal so the layered resolution (toolStrategyFor)
+          // routes the NEXT run through the prompt transport on a local
+          // provider. Only LU Cloud is terminal here: the server already does
+          // its own prompt translation, so its `false` means never.
           markToolsUnsupported(modelToUse)
+          const hasPromptFallback = getProviderIdFromModel(activeModel) !== 'lu-cloud'
           useChatStore.getState().updateMessageContent(
             convId!, assistantMessage.id,
-            `This model does not support tool calling, so it can't run in Agent or Code mode (and Chat has tools on).\n\nTurn tools off, or switch to a model that supports tool calling:\n• local (Ollama / LM Studio): qwen2.5:7b, llama3.1:8b, mistral:7b\n• LU Cloud: pick a model shown with the tools badge`
+            hasPromptFallback
+              ? `This model refused native tool calling, so this run could not use tools. LU has switched it to the prompt-based tool transport, the same one the Coding surface uses. Send your message again and the agent will run with tools.`
+              : `This model does not support tool calling, so it can't run in Agent mode. Pick a model shown with the tools badge, or turn tools off for plain chat.`
           )
         } else if (errorMsg.includes('does not support thinking')) {
           // Graceful message for thinking errors (shouldn't reach here after retry, but just in case)
@@ -1523,13 +1779,16 @@ export function useAgentChat() {
           capturedArtifacts.map((a) => ({ id: uuid(), name: a.name, content: a.content, mime: a.mime })),
         )
       }
+      // The run is done, including the artifacts attached just above, so put it
+      // on disk now. Persistence is coalesced while the run streams (2.6.3 —
+      // see coalescedStorage); an agent turn is long and its blocks are big, so
+      // this is where the result becomes durable.
+      void flushChatPersist()
       // Drop the per-run workspace scope so standalone tool calls from
       // other tabs don't accidentally land in this chat's folder.
       clearActiveChatId()
       // Reject any pending approvals so their promises don't hang forever
-      for (const entry of approvalQueueRef.current) entry.resolve(false)
-      approvalQueueRef.current = []
-      setPendingApproval(null)
+      drainApprovals(convId)
 
       // Auto-read the finished response when the user opted in (#77). Default
       // OFF, additionally gated on ttsEnabled; getState() so this callback never
@@ -1574,9 +1833,14 @@ export function useAgentChat() {
             task: loopState.task, intervalMs: loopState.intervalMs,
             nextAt: Date.now() + loopState.intervalMs,
           })
-          loopTimerRef.current = setTimeout(() => {
-            loopTimerRef.current = null
-            if (runningRef.current) return
+          agentLoopTimer = setTimeout(() => {
+            agentLoopTimer = null
+            // A skipped pass clears the loop store too (audit A3) — leaving
+            // it standing painted a LoopBar promising a pass that never came.
+            if (runningRef.current) {
+              useAgentLoopStore.getState().clear()
+              return
+            }
             if (useChatStore.getState().activeConversationId !== convForLoop) {
               useAgentLoopStore.getState().clear()
               return
@@ -1601,9 +1865,9 @@ export function useAgentChat() {
     // Stop means stop: also cancel a /loop pass waiting out its interval,
     // otherwise the run the user just killed comes back by itself.
     userStoppedRef.current = true
-    if (loopTimerRef.current) {
-      clearTimeout(loopTimerRef.current)
-      loopTimerRef.current = null
+    if (agentLoopTimer) {
+      clearTimeout(agentLoopTimer)
+      agentLoopTimer = null
     }
     useAgentLoopStore.getState().clear()
     runningRef.current = false
@@ -1613,9 +1877,7 @@ export function useAgentChat() {
     // the agent loop before, so a running image/video kept burning unless the user
     // happened to click the small in-chat tool Stop. Now both Stops agree.
     requestGenerationCancel()
-    for (const entry of approvalQueueRef.current) entry.resolve(false)
-    approvalQueueRef.current = []
-    setPendingApproval(null)
+    drainApprovals(useChatStore.getState().activeConversationId)
     setIsAgentRunning(false)
   }, [])
 
@@ -1657,14 +1919,20 @@ export function extractMediaPrompt(text: string): string {
   return stripped || p
 }
 
-function buildAgentSystemPrompt(basePrompt: string): string {
+function buildAgentSystemPrompt(basePrompt: string, roster: string): string {
   const agentInstructions = `You are an autonomous AI agent inside LU with full access to this computer. You execute tasks end-to-end by using tools, you do NOT just describe what to do.
 
+${platformPromptLine()}
+
 Available tools:
-- Filesystem: file_read, file_write, file_list, file_search
-- Web: web_search, web_fetch
-- System: shell_execute, code_execute, system_info, screenshot, process_list, get_current_time
-- Creative: image_generate, video_generate (text-to-video, or animate a generated image via inputImage), run_workflow
+${roster}
+
+That list is what LU can do. Your request carries the subset that fits the task at hand, and on a local model it is a subset. Only ever call a tool that is in your tool list. Calling one that is not there fails as an unknown tool and wastes a step. If you need one that is missing, name it in your answer and carry on with what you have.
+
+PLAN FIRST (todo_write):
+- Any task that needs more than about three tool calls starts with todo_write: write the whole plan before the first step. The user sees that list live, it is how they know what you are doing.
+- After each step, call todo_write again with the COMPLETE list, flipping the finished item to completed and the next one to in_progress. Exactly one item is in_progress at a time.
+- Never mark an item completed before the work actually succeeded. Skip the plan entirely for a single-step request.
 
 AUTONOMY CONTRACT (read carefully, this is the most important rule):
 - When the user asks you to BUILD, CREATE, MAKE, or WRITE something (a file, a website, a script, a folder structure), you MUST execute it via tools, typically file_write.
@@ -1686,10 +1954,11 @@ Creative tools, image_generate, video_generate:
 
 Other rules:
 - You MUST use tools — NEVER answer from memory or guess file contents.
+- To CHANGE part of an existing file use file_edit (replace a UNIQUE old_string with new_string), never file_write: rewriting a large file to change three lines truncates it and costs a fortune in tokens. file_write is for creating a new file or fully replacing one.
 - PATHS: use paths relative to your working directory (e.g. \`package.json\`, \`src/app.ts\`, \`.\` for the current folder). Never start a path with \`/\` or a drive letter (\`C:\\\`), that escapes your workspace and fails. To list the current folder, use file_list with path \`.\`.
 - For filesystem READ tasks: file_list first if needed, then file_read.
 - For web tasks: web_search → web_fetch on the best URL → answer based on real data. web_search returns ONLY short snippets, ALWAYS call web_fetch to read the page.
-- If you need to know the OS, paths, or hardware: call system_info once at the start.
+- The OS is stated above, so do not spend a call finding it out. For hardware or exact system paths: call system_info once at the start.
 - Chain multiple tools as needed. If a tool fails, try a different approach.
 - Be concise in text. All the work happens in tool calls.
 - Respond in the same language the user uses.`
@@ -1705,13 +1974,17 @@ Other rules:
 // small-model tool-calling (LongFuncEval, arXiv 2505.10570) and small models
 // have a limited instruction-following budget. Keep only what a small model
 // needs to ACT — same tool names + native call format as the full prompt.
-function buildAgentSystemPromptLean(basePrompt: string): string {
+function buildAgentSystemPromptLean(basePrompt: string, alwaysThere: string): string {
   const lean = `You are an autonomous agent in LU with tools on this computer. Do tasks by CALLING tools, do not just describe them.
 
-Tools: file_read, file_write, file_list, file_search, web_search, web_fetch, shell_execute, code_execute, system_info, get_current_time, image_generate, video_generate.
+${platformPromptLine()}
+
+You always have: ${alwaysThere}. Your request carries the other tools that fit the task. Read their names there, do not guess.
 
 Rules:
+- For a task of more than about three steps, call todo_write FIRST with the whole plan, then again after each step with the complete list (one item in_progress, finished ones completed). The user watches that list.
 - To build/create/write something, CALL the tool (usually file_write), never paste a code block and say "save this".
+- To change an existing file use file_edit with a unique old_string, not file_write.
 - PATHS: use relative paths (e.g. \`package.json\`, \`.\`). Never start with \`/\` or a drive letter, it escapes your workspace and fails.
 - Emit the tool call as your FIRST output, no "Okay, let me…" preamble. Valid JSON, one at a time. Never guess file contents, file_read first.
 - After each tool result, if a step remains, immediately call the next tool. Do not narrate "I will now…" and then stop.

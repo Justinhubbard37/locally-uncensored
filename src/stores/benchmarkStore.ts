@@ -103,19 +103,29 @@ export function toMarkdownReport(
     lines.push('No benchmark runs recorded yet.', '')
     return lines.join('\n')
   }
+  const pct = (v: number | null): string => (v === null ? '-' : `${Math.round(v * 100)}%`)
   lines.push(
-    '| # | Model | Average t/s | Latest t/s | Runs |',
-    '| --- | --- | ---: | ---: | ---: |',
+    '| # | Model | Average t/s | Latest t/s | Avg tokens | Think | Correct | Runs |',
+    '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |',
   )
   board.forEach((entry, i) => {
     const latest = getLatestSpeed(results, entry.model)
-    lines.push(`| ${i + 1} | ${entry.model} | ${entry.avgTps} | ${latest ?? '-'} | ${entry.runs} |`)
+    const tokens = entry.avgTokens === null
+      ? '-'
+      : `${entry.avgTokens}${entry.truncated > 0 ? ` (${entry.truncated} cut off)` : ''}`
+    lines.push(
+      `| ${i + 1} | ${entry.model} | ${entry.avgTps} | ${latest ?? '-'} | ${tokens} | ${pct(entry.thinkShare)} | ${pct(entry.accuracy)} | ${entry.runs} |`,
+    )
   })
   lines.push(
     '',
     `${board.reduce((s, e) => s + e.runs, 0)} runs across ${board.length} models.`,
     '',
     'Average is every recorded run. Latest is the most recent benchmark pass.',
+    'Avg tokens is the whole output including reasoning; a lower count for the',
+    'same answers is the cheaper model. Think is the share of that output spent',
+    'reasoning. Correct is how often the answer matched. A run cut off by the',
+    'token budget is marked, and its token count is a floor, not a measurement.',
     '',
   )
   return lines.join('\n')
@@ -187,13 +197,71 @@ export function computeGenerationTps(
   return (tokenCount / generationTimeMs) * 1000
 }
 
-/** Get leaderboard sorted by avg tokens/sec */
-export function getLeaderboard(results: Record<string, BenchmarkResult[]>): { model: string; avgTps: number; runs: number }[] {
+/**
+ * Average total tokens (thinking included) a model spent per prompt. This is
+ * the axis a speed-only board is blind to: two models can tie on tok/s and
+ * still differ by half again in tokens spent for the same answers (David
+ * 2026-08-05). Null for a model whose runs predate the field.
+ */
+export function getAverageTokens(results: Record<string, BenchmarkResult[]>, modelName: string): number | null {
+  const runs = (results[modelName] ?? []).filter((r) => typeof r.totalTokens === 'number')
+  if (runs.length === 0) return null
+  return Math.round(runs.reduce((s, r) => s + r.totalTokens, 0) / runs.length)
+}
+
+/**
+ * Fraction of a model's runs whose answer matched, over the runs that recorded
+ * a verdict. Null when no run carries one, which is every result from before
+ * 2.6.3 and any run of a prompt with no check.
+ */
+export function getAccuracy(results: Record<string, BenchmarkResult[]>, modelName: string): number | null {
+  const runs = (results[modelName] ?? []).filter((r) => r.correct !== undefined)
+  if (runs.length === 0) return null
+  return runs.filter((r) => r.correct).length / runs.length
+}
+
+/**
+ * Average share of output spent on reasoning, 0..1, over runs that recorded a
+ * think-token count. Null when none do. The number that explains a slow-feeling
+ * model that is not actually slow, only verbose in its thinking.
+ */
+export function getAverageThinkShare(results: Record<string, BenchmarkResult[]>, modelName: string): number | null {
+  const runs = (results[modelName] ?? []).filter((r) => r.thinkTokens !== undefined && r.totalTokens > 0)
+  if (runs.length === 0) return null
+  return runs.reduce((s, r) => s + r.thinkTokens! / r.totalTokens, 0) / runs.length
+}
+
+/**
+ * Runs that ended on the token budget rather than the model deciding it was
+ * done. Their token counts are floors and their answers may be cut off, so a
+ * benchmark that shows the count without this flag invites the wrong read.
+ */
+export function getTruncatedCount(results: Record<string, BenchmarkResult[]>, modelName: string): number {
+  return (results[modelName] ?? []).filter((r) => r.finishReason === 'length').length
+}
+
+export interface LeaderboardEntry {
+  model: string
+  avgTps: number
+  runs: number
+  avgTokens: number | null
+  accuracy: number | null
+  thinkShare: number | null
+  truncated: number
+}
+
+/** Get leaderboard sorted by avg tokens/sec, with the economy stats alongside
+ *  so speed is read next to what it cost and whether the answer was right. */
+export function getLeaderboard(results: Record<string, BenchmarkResult[]>): LeaderboardEntry[] {
   return Object.entries(results)
     .map(([model, runs]) => ({
       model,
       avgTps: Math.round((runs.reduce((s, r) => s + r.tokensPerSec, 0) / runs.length) * 10) / 10,
       runs: runs.length,
+      avgTokens: getAverageTokens(results, model),
+      accuracy: getAccuracy(results, model),
+      thinkShare: getAverageThinkShare(results, model),
+      truncated: getTruncatedCount(results, model),
     }))
     .sort((a, b) => b.avgTps - a.avgTps)
 }

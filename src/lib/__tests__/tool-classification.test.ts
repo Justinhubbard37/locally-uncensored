@@ -32,6 +32,10 @@ const BUILTIN_TOOL_NAMES = [
  * only reads, or it only reports on work that is already running.
  */
 const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
+  // Writes the plan the user sees, and nothing else. It must stay available in
+  // a read-only turn on purpose: /plan asking for a plan and then having no
+  // tool to write one with would be absurd.
+  'todo_write',
   'file_read',
   'file_list',
   'file_search',

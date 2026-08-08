@@ -15,6 +15,11 @@ export type RenderOp =
 
 // One shared compute-credit wallet — text + media draw from the same budget
 // (server shape: uselu /api/jobs/quota).
+//
+// `topup`, `video` and `trainings` have been on the wire since migration 0029;
+// they are optional here because an older server does not send them, and the
+// meter must read an absent field as "uncapped" rather than as zero. See
+// credits-meter.ts for the rule both the chip and the Create gate follow.
 export interface CloudQuota {
   tier: string
   period: string
@@ -22,10 +27,13 @@ export interface CloudQuota {
   costs: { image: number; video: number }
   used: { credits_used: number }
   remaining: { credits: number }
-  /** Top-up wallet balance, exempt from the video sub-budget. */
+  /** Non-expiring wallet, spent only after the monthly allowance. Exempt from
+   *  the video sub-budget, so it extends video room. */
   topup?: { credits: number }
-  /** 0029 caps. Absent on a pre-0029 server, and absence must never gate. */
+  /** Monthly video sub-budget. `remaining` is the MONTHLY share only. */
   video?: { limit: number; used: number; remaining: number }
+  /** Character trainings this cycle. A count, not a budget: the wallet cannot
+   *  buy past it. */
   trainings?: { limit: number; used: number; remaining: number }
 }
 

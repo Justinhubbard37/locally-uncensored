@@ -143,14 +143,41 @@ function validatePropertyValue(
     }
   }
 
-  // Array item validation (shallow).
+  // Array items. The item result is written BACK: an item schema can coerce
+  // just like a top-level one ("5" → 5), and dropping that meant an array of
+  // numbers arrived downstream as an array of strings, validated and wrong.
   if (matchesType(coerced, 'array') && schema.items && Array.isArray(coerced)) {
-    const itemErrs: ValidationError[] = []
+    const next = [...coerced]
     coerced.forEach((item, i) => {
       const r = validatePropertyValue(`${path}[${i}]`, item, schema.items as JsonSchema)
-      itemErrs.push(...r.errors)
+      errors.push(...r.errors)
+      if (r.errors.length === 0) next[i] = r.coerced
     })
-    errors.push(...itemErrs)
+    coerced = next
+  }
+
+  // Nested objects. Without this a schema could declare `properties`, `required`
+  // and `enum` one level down and none of it was ever read — the model got no
+  // correction for a wrong field, only whatever the executor made of it. The
+  // first tool to nest is `todo_write` (each plan item is {content, status}),
+  // and its status enum is exactly the kind of mistake a small model makes and
+  // needs told about.
+  if (matchesType(coerced, 'object') && schema.properties) {
+    const nested: Record<string, any> = { ...coerced }
+    if (Array.isArray(schema.required)) {
+      for (const key of schema.required) {
+        if (nested[key] === undefined || nested[key] === null) {
+          errors.push({ path: `${path}.${key}`, message: `required property '${key}' is missing` })
+        }
+      }
+    }
+    for (const [key, propSchema] of Object.entries(schema.properties)) {
+      if (!(key in nested)) continue
+      const r = validatePropertyValue(`${path}.${key}`, nested[key], propSchema)
+      errors.push(...r.errors)
+      if (r.errors.length === 0) nested[key] = r.coerced
+    }
+    coerced = nested
   }
 
   return { errors, coerced }
@@ -222,6 +249,22 @@ function tryCoerce(
     return { ok: false }
   }
   if (type === 'array') {
+    // A model that means an array often sends it as a JSON string — the same
+    // class of mistake as "true" for a boolean, and the cloud prompt transport
+    // already parses it (lib/chat/prompt-tools.ts). Wrapping it instead would
+    // hand the executor a one-element array holding JSON text, which reads as
+    // a valid array everywhere and is wrong everywhere.
+    if (typeof value === 'string' && value.trim().startsWith('[')) {
+      try {
+        const parsed = JSON.parse(value.trim())
+        if (Array.isArray(parsed)) return { ok: true, value: parsed }
+      } catch {
+        // Fall through to the error rather than wrapping: a broken array is
+        // something the model has to be told about, not something to smuggle
+        // past as `['[{"content": ...']`.
+      }
+      return { ok: false }
+    }
     // Allow single value → one-element array for array-typed params.
     if (value !== undefined && value !== null) return { ok: true, value: [value] }
     return { ok: false }

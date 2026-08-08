@@ -3,6 +3,7 @@ import { motion } from 'framer-motion'
 import { Send, Square, Paperclip, X, Brain, Terminal } from 'lucide-react'
 import { matchAgentCommands, type AgentCommand } from '../../lib/agent-commands'
 import { VoiceButton } from './VoiceButton'
+import { ApprovalDialog } from './ApprovalDialog'
 import { useVoiceStore } from '../../stores/voiceStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useModelStore } from '../../stores/modelStore'
@@ -285,6 +286,17 @@ export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApp
         {/* The standing goal sits above everything else in the composer, so an
             instruction that steers every turn is never invisible. */}
         {composerAbove}
+
+        {/* G31: the run is STOPPED until this is answered, so the answer has to
+            be where the user's eyes already are. The inline buttons on the tool
+            block are still there and still the nicer place to decide from, but
+            the list does not scroll to them, so on R01c (Mac, 2026-08-07) a run
+            sat waiting 7 minutes with nothing but a clock icon far below the
+            fold. An approval has no timeout by design, which makes being seen
+            the only thing that ends it. */}
+        {pendingApproval && onApprove && onReject && (
+          <ApprovalDialog toolCall={pendingApproval} onApprove={onApprove} onReject={onReject} />
+        )}
 
         {/* Prompt area — hints, image previews, then the textarea (buttons live
             in the action bar below, web-parity two-row composer). */}

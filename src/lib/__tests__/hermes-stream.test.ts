@@ -75,3 +75,97 @@ describe('hermes display filter', () => {
     expect(shown + f.flush()).toBe('after')
   })
 })
+
+// ── G35 (David 2026-08-07): the thought streams in the bounded ThinkingBlock
+// window on the hermes path too, never full-height into the bubble. The
+// splitter routes <think> spans into the thinking channel per delta; the
+// turn-end parse on the full raw text stays authoritative.
+import { createThinkStreamSplitter } from '../hermes-stream'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, resolve } from 'node:path'
+
+function splitRun(deltas: string[], startInThink = false) {
+  const s = createThinkStreamSplitter({ startInThink })
+  let prose = ''
+  let thinking = ''
+  for (const d of deltas) {
+    const r = s.feed(d)
+    prose += r.prose
+    thinking += r.thinking
+  }
+  const end = s.flush()
+  return { prose: prose + end.prose, thinking: thinking + end.thinking, s }
+}
+
+describe('think stream splitter', () => {
+  it('routes an explicit think span into the thinking channel', () => {
+    const r = splitRun(['<think>I should list files</think>', 'Here we go.'])
+    expect(r.thinking).toBe('I should list files')
+    expect(r.prose).toBe('Here we go.')
+  })
+
+  it('R18b witness: the Qwen3 template pre-opens the thought, only the closer arrives', () => {
+    // The live screenshot showed the whole thought streaming full-height and
+    // ending in a raw </think>. With startInThink everything before the
+    // closer belongs to the thinking channel from the first token.
+    const r = splitRun(['So after completing step 5, ', 'the next step is 6. </thi', 'nk>Done with step 6.'], true)
+    expect(r.thinking).toBe('So after completing step 5, the next step is 6. ')
+    expect(r.prose).toBe('Done with step 6.')
+  })
+
+  it('handles tags cut across delta boundaries', () => {
+    const r = splitRun(['pre <th', 'ink>hidden', ' thought</t', 'hink> post'])
+    expect(r.prose).toBe('pre  post')
+    expect(r.thinking).toBe('hidden thought')
+  })
+
+  it('a stream cut off mid-thought flushes the rest as thinking', () => {
+    const r = splitRun(['<think>never closed because the turn died'])
+    expect(r.thinking).toBe('never closed because the turn died')
+    expect(r.prose).toBe('')
+  })
+
+  // ── Negative controls ──────────────────────────────────────────────────
+
+  it('plain prose without tags is untouched, token by token', () => {
+    const r = splitRun(['Hello ', 'world, ', 'no thinking here.'])
+    expect(r.prose).toBe('Hello world, no thinking here.')
+    expect(r.thinking).toBe('')
+  })
+
+  it('a lone angle bracket or false prefix stays prose', () => {
+    const r = splitRun(['a < b and <thin air'])
+    expect(r.prose).toBe('a < b and <thin air')
+    expect(r.thinking).toBe('')
+  })
+
+  it('without startInThink an orphan closer does not eat the prose', () => {
+    // A non-reasoning hermes model never opens a thought; a stray closer in
+    // its prose must not reclassify everything before it. The literal tag
+    // passes through untouched here — cleaning it up is the job of the
+    // end-of-turn parse (splitOrphanCloser), which sees the full text.
+    const r = splitRun(['Answer text </think> more text'])
+    expect(r.prose).toBe('Answer text </think> more text')
+    expect(r.thinking).toBe('')
+  })
+})
+
+describe('the agent hermes branch is wired through the splitter', () => {
+  const src = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../hooks/useAgentChat.ts'), 'utf8')
+
+  it('display filter output feeds the splitter, gated on keepThinking', () => {
+    expect(src).toContain('createThinkStreamSplitter({ startInThink: keepThinking })')
+    expect(src).toContain('feedUI(splitter.feed(display.feed(delta)))')
+  })
+
+  it('flush order: held prose still passes the splitter before the final flush', () => {
+    expect(src).toContain('feedUI(splitter.feed(display.flush()))')
+    expect(src).toContain('feedUI(splitter.flush())')
+  })
+
+  it('NEGATIVE CONTROL: the authoritative end-of-turn parse still runs on the raw text', () => {
+    expect(src).toContain('const rawContent = hermesTurn.content')
+    expect(src).toMatch(/turnContent = turnContent\.replace\(\/<think>/)
+  })
+})

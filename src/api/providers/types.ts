@@ -203,6 +203,19 @@ export interface ProviderClient {
 
   /** Get the context window size for a model. */
   getContextLength(model: string): Promise<number>
+
+  /** G37b: the server's own live answer to "can this model take a native
+   *  `tools` payload", asked at send time. Only the OpenAI-compat provider
+   *  implements it (LM Studio enhanced listing per model, llama.cpp /props
+   *  server-wide); `false` downgrades the run to the prompt transport,
+   *  `undefined` means nobody said. */
+  serverToolSupport?(model: string): Promise<boolean | undefined>
+
+  /** R19: the context the server actually allocated for the loaded model
+   *  (LM Studio `loaded_context_length`). The agent run budget clamps to it,
+   *  because a prompt beyond the allocation is hard-truncated server-side.
+   *  `null` means the server did not say. */
+  loadedContextLength?(model: string): Promise<number | null>
 }
 
 // ── Provider Error ────────────────────────────────────────────

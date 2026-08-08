@@ -80,6 +80,15 @@ export function BenchmarkLeaderboard() {
                     style={{ width: `${barWidth}%` }}
                   />
                 </div>
+                <div className="flex items-center flex-wrap gap-x-2 mt-0.5 text-[0.5rem] font-mono text-gray-600">
+                  {entry.avgTokens !== null && <span>{entry.avgTokens} tok</span>}
+                  {entry.accuracy !== null && (
+                    <span className={entry.accuracy < 1 ? 'text-amber-400' : 'text-emerald-400'}>
+                      {Math.round(entry.accuracy * 100)}% correct
+                    </span>
+                  )}
+                  {entry.truncated > 0 && <span className="text-red-400">{entry.truncated} cut off</span>}
+                </div>
               </div>
             </div>
           )
