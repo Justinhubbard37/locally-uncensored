@@ -23,12 +23,13 @@ export interface ReleaseNote {
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
     version: '2.6.3',
-    headline: 'Sharper measurements, and an agent that can reach your desktop',
+    headline: 'Agent runs you can trust, and a lighter, faster app',
     lines: [
-      'The benchmark now shows what a model actually costs: tokens spent, how much of that went into thinking, and whether the answer was right. Two models that tie on speed rarely tie here.',
-      'A run that hit its token limit is marked as cut off, so a truncated answer is no longer blamed on the model.',
-      'The agent can open a folder or start a program when you ask it to.',
-      'Read aloud works again under the strict content policy, and ComfyUI says why it failed to start instead of going quiet.',
+      'Agent and Code mode got a deep reliability pass: runs no longer stall, loop, or invent results, small local models drive tools properly, and Stop always stops.',
+      'Long chats stopped eating memory, streaming stays smooth, and generated images now survive a restart.',
+      'Every cloud model shows its price up front, and the credits meter counts video and training budgets truthfully.',
+      'The benchmark measures cost and correctness, not just speed, and marks answers that were cut off.',
+      'New: native HiRes fix for local image generation, and the agent opens folders and programs on request.',
     ],
   },
 ]

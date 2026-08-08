@@ -188,3 +188,58 @@ test('file_read pages a large file instead of dumping it whole', async ({ page }
   await expect(block.getByText(/\[lines 100-104 of 200\]/)).toBeVisible({ timeout: 10_000 })
   await expect(block.getByText(/call file_read again with offset: 105/)).toBeVisible()
 })
+
+test('the plan the model writes shows up above the composer and tracks progress', async ({ page }) => {
+  // Audit C4. On a long run the transcript scrolls away and the user cannot
+  // tell step 2 from step 9. The model owns the list through `todo_write`; this
+  // proves the tool is actually reachable in a real run (routing, permissions,
+  // executor, store, render) and that the strip follows the model's updates.
+  await boot(page, [
+    {
+      text: 'planning first',
+      toolCalls: [{
+        name: 'todo_write',
+        args: {
+          todos: [
+            { content: 'read the config', status: 'in_progress' },
+            { content: 'patch the parser', status: 'pending' },
+            { content: 'run the suite', status: 'pending' },
+          ],
+        },
+      }],
+    },
+    {
+      text: 'config read, patching',
+      toolCalls: [{
+        name: 'todo_write',
+        args: {
+          todos: [
+            { content: 'read the config', status: 'completed' },
+            { content: 'patch the parser', status: 'in_progress' },
+            { content: 'run the suite', status: 'pending' },
+          ],
+        },
+      }],
+    },
+    { text: 'PLAN_RUN_DONE' },
+  ])
+
+  await instruct(page, 'fix the parser and prove it')
+  await expect(page.getByRole('main').getByText('PLAN_RUN_DONE')).toBeVisible({ timeout: 30_000 })
+
+  // Collapsed by default, so what must be on screen is the counter and the step
+  // that is running right now — not the whole list pushing the composer away.
+  await expect(page.getByText('plan 1/3')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByText('patch the parser').first()).toBeVisible()
+
+  // Expanding shows every step, with the finished one struck through.
+  await page.getByText('plan 1/3').click()
+  await expect(page.getByText('read the config')).toBeVisible()
+  await expect(page.getByText('run the suite')).toBeVisible()
+
+  // `todo_write` must never have gone near the Rust bridge: it is pure
+  // conversation state, and a backend round trip would mean a permission gate
+  // on writing a to-do list.
+  const calls = await toolCalls(page)
+  expect(calls.filter((c: any) => c.cmd === 'todo_write')).toEqual([])
+})

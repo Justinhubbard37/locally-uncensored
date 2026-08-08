@@ -44,14 +44,29 @@ export function UpdateBadge() {
   const isError = downloadStatus === 'error'
   const canDownload = isTauri() && downloadStatus === 'idle'
 
+  // A bare 20px icon in the corner is easy to never notice: on 2026-08-05 the
+  // in-app waitlist was still logging sign-ups from 2.5.5 and 2.5.6 builds,
+  // weeks after 2.5.7 shipped, on installs whose updater was working fine. So
+  // the badge says what it wants in words. It still collapses to the icon on a
+  // narrow window, where the header has no room for a label.
+  const label = isDownloaded
+    ? 'Restart to update'
+    : isDownloading
+      ? `Updating ${downloadProgress}%`
+      : isInstalling
+        ? 'Installing'
+        : isError
+          ? 'Update failed'
+          : `Update to v${latestVersion}`
+
   return (
     <div ref={ref} className="relative">
       {/* Badge button */}
       <button
         onClick={() => setOpen(!open)}
-        className={`relative p-1 rounded-md transition-colors ${
+        className={`relative flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[0.7rem] font-medium transition-colors ${
           isDownloaded
-            ? 'text-emerald-400 hover:bg-emerald-500/10'
+            ? 'text-emerald-300 bg-emerald-500/15 hover:bg-emerald-500/25'
             : isDownloading
               ? 'text-blue-400 hover:bg-blue-500/10'
               : isError
@@ -64,24 +79,27 @@ export function UpdateBadge() {
               : `Update available: v${latestVersion}`
         }
       >
-        {isDownloading ? (
-          <Loader2 size={20} strokeWidth={1.8} className="animate-spin" />
-        ) : (
-          <ArrowUpCircle size={20} strokeWidth={1.8} />
-        )}
-        {/* Status dot */}
-        <span className={`absolute top-0 right-0 w-2.5 h-2.5 rounded-full ${
-          isDownloaded ? 'bg-emerald-400'
-            : isDownloading ? 'bg-blue-400'
-              : isError ? 'bg-red-400'
-                : 'bg-emerald-400'
-        }`}>
-          {!isDownloaded && !isError && (
-            <span className={`absolute inset-0 rounded-full animate-ping opacity-75 ${
-              isDownloading ? 'bg-blue-400' : 'bg-emerald-400'
-            }`} />
+        <span className="relative">
+          {isDownloading || isInstalling ? (
+            <Loader2 size={20} strokeWidth={1.8} className="animate-spin" />
+          ) : (
+            <ArrowUpCircle size={20} strokeWidth={1.8} />
           )}
+          {/* Status dot */}
+          <span className={`absolute top-0 right-0 w-2.5 h-2.5 rounded-full ${
+            isDownloaded ? 'bg-emerald-400'
+              : isDownloading ? 'bg-blue-400'
+                : isError ? 'bg-red-400'
+                  : 'bg-emerald-400'
+          }`}>
+            {!isDownloaded && !isError && (
+              <span className={`absolute inset-0 rounded-full animate-ping opacity-75 ${
+                isDownloading ? 'bg-blue-400' : 'bg-emerald-400'
+              }`} />
+            )}
+          </span>
         </span>
+        <span className="hidden md:inline whitespace-nowrap pr-0.5">{label}</span>
       </button>
 
       {/* Dropdown */}
