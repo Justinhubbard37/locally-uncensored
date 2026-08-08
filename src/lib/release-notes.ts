@@ -36,9 +36,9 @@ export const RELEASE_NOTES: ReleaseNote[] = [
     headline: 'Agent runs you can trust, and a lighter, faster app',
     lines: [
       'Agent and Code mode got a deep reliability pass: runs no longer stall, loop, or invent results, small local models drive tools properly, and Stop always stops.',
-      'New: group chat with 2 to 4 local models, editable model answers, Wan native video sizes, HiRes fix, and character training on RTX 50 cards.',
+      'New: group chat with 2 to 4 local models, editable model answers, Wan native video sizes, HiRes fix, and RTX 50 support for character training.',
       'Cloud: personal API keys for the OpenAI compatible endpoint, your own lyrics really get sung, and every model shows its price up front.',
-      'Long chats stopped eating memory, streaming stays smooth, and generated images survive a restart.',
+      'Long chats got a deep memory fix, streaming stays smooth, and generated images survive a restart.',
     ],
     details: [
       {
@@ -54,11 +54,11 @@ export const RELEASE_NOTES: ReleaseNote[] = [
           'Edit any model answer in place; the conversation continues from your correction.',
           'Wan native video sizes: 480p in both orientations, a portrait or landscape flip, and ratio chips that keep the pixel budget.',
           'Native HiRes fix for local image generation.',
-          'Character training works on RTX 50 cards, and a broken trainer environment says so before the run starts.',
+          'Character training supports RTX 50 cards, and a broken trainer environment says so before the run starts.',
           'A ComfyUI that dies at startup shows the real reason instead of reinstalling in a loop.',
           'Read aloud plays again; our own security policy had blocked it.',
           'The benchmark measures cost and correctness, and answers that were cut off are marked, in the benchmark and in chat.',
-          'Long chats stopped eating memory, generated images survive a restart, and the remote tab is named AI Terminal.',
+          'Long chats got a deep memory fix, generated images survive a restart, and the remote tab is named AI Terminal.',
         ],
       },
       {
