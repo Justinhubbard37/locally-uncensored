@@ -4,6 +4,53 @@ All notable changes to Locally Uncensored are documented here.
 
 ## [Unreleased]
 
+## [2.6.3] - 2026-08-08
+
+The reliability release: a week of driving the shipped app end to end through
+Agent and Code mode and fixing what actually broke, plus the fixes customers
+reported since 2.6.2.
+
+### Fixed
+
+- **Agent runs survive.** Variants of the same failing command are detected
+  and steered instead of looping, a reasoning-only round continues the run, a
+  completion claim is checked against the plan before the app agrees with it,
+  approvals survive view switches and never scroll out of sight, Stop cancels
+  a running local render, and a finished approval can no longer leave a
+  zombie run behind.
+- **Small local models drive tools truthfully.** Every surface asks the
+  server which transport a model takes: LM Studio answers per model, a
+  llama.cpp server per instance, and both are consulted at send time. The
+  bundled engine used to accept a native tools payload, silently drop it, and
+  let the model narrate a fictional run with zero real tool calls.
+- **The run budget respects what LM Studio actually loaded**, so a model
+  JIT-loaded below its maximum stops dying on server-truncated prompts.
+- **A generated image fed back to a text-only model no longer ends the run.**
+  The loop swaps its own attachment for a text note and carries on.
+- **Long chats stopped eating memory.** Streaming no longer rewrites the
+  whole history once per animation frame, and generated images survive a
+  restart instead of pointing at dead blob URLs.
+- **The credits meter tells the truth** about video and training budgets, and
+  the Create button can never invite a run the chip is already refusing.
+- Read aloud survives the strict content security policy (#77), a ComfyUI
+  that dies at startup says why (#98), AMD on Linux gets the ROCm answer
+  instead of ZLUDA, screen capture gets a deadline, sending a message pins
+  the chat to the bottom, and visible thinking streams in a compact window on
+  every transport.
+
+### Added
+
+- **Native HiRes fix** for local image generation, contributed by Kizerfluid
+  (#97), refining at denoise 0.5 so the composition survives the second pass.
+- **The benchmark measures cost and correctness**, not just speed: think-token
+  share, cut-off detection, and an expected-answer check per prompt.
+- **Every cloud model shows its price** in the picker, and the meter says how
+  many more runs the balance buys.
+- **A whats-new sheet once per version**, and a shorter path to cloud; the
+  bundled video teasers are gone, which makes every download 7 MB smaller.
+- The agent opens folders and starts programs through the shell and is told
+  which OS it runs on, so it stops guessing.
+
 ## [2.6.2] - 2026-08-02
 
 Custom workflows are back, built on community code: Kizerfluid's PR (#94)

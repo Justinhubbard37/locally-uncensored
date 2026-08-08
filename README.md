@@ -60,7 +60,11 @@ Grab the latest release from [**Releases**](https://github.com/PurpleDoubleD/loc
 
 > **Antivirus warning?** Some engines flag unsigned NSIS installers that download other binaries — a **false positive**. The installer is built by GitHub Actions from the public source on `master`, and the auto-update channel is signed against a public minisign key. Verification steps: [SECURITY.md](SECURITY.md#antivirus--browser-false-positives).
 
-**Current release: v2.6.2** (August 2026). Portable-friendly installers for Windows and Linux (no admin rights required), under the short in-app name **LU** by LU Labs. Full history in [Releases](https://github.com/PurpleDoubleD/locally-uncensored/releases) and [CHANGELOG.md](CHANGELOG.md).
+**Current release: v2.6.3** (August 2026). Portable-friendly installers for Windows and Linux (no admin rights required), under the short in-app name **LU** by LU Labs. Full history in [Releases](https://github.com/PurpleDoubleD/locally-uncensored/releases) and [CHANGELOG.md](CHANGELOG.md).
+
+### What's new in 2.6.3
+
+The reliability release. Agent and Code mode were driven end to end on the shipped build for a week and fixed where they actually broke: runs no longer stall, loop, or invent results, small local models get the tool transport their server really supports (the bundled engine used to swallow tool definitions silently), approvals stay visible, Stop always stops, and the run budget respects what LM Studio actually loaded. Long chats stopped eating memory and generated images survive a restart. The credits meter counts video and training budgets truthfully, every cloud model shows its price in the picker, and the benchmark now measures cost and correctness instead of just speed. New: native HiRes fix for local image generation (community PR #97 by Kizerfluid) and a whats-new sheet once per version. Every download is 7 MB smaller.
 
 ### What's new in 2.6.2
 
