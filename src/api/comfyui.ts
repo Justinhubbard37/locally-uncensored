@@ -1,5 +1,6 @@
 import { comfyuiUrl, localFetch, fetchLocalhostBytes, isTauri, backendCall } from "./backend"
 import { log } from "../lib/logger"
+import { LU_CLIENT_PREFIX } from "./comfyui-ws"
 
 // ─── Control-plane fetch timeouts ───
 //
@@ -1109,6 +1110,76 @@ export async function clearComfyQueue(): Promise<void> {
       timeoutMs: COMFY_STATS_TIMEOUT_MS,
     })
   } catch { /* best effort */ }
+}
+
+/**
+ * Abandon ONE prompt without touching anyone else's work (G19-1). A blanket
+ * /interrupt kills whatever is CURRENTLY executing, which is the wrong job
+ * whenever ours still sits in the pending queue (R32: our render was number 4
+ * in line). So: delete ours from pending first, then interrupt only if ours is
+ * the one running. Best-effort on every leg.
+ */
+export async function abandonPrompt(promptId: string): Promise<void> {
+  try {
+    await localFetch(comfyuiUrl('/queue'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ delete: [promptId] }),
+      timeoutMs: COMFY_STATS_TIMEOUT_MS,
+    })
+  } catch { /* best effort */ }
+  try {
+    const res = await localFetch(comfyuiUrl('/queue'), { timeoutMs: COMFY_STATS_TIMEOUT_MS })
+    if (!res.ok) return
+    const q = await res.json()
+    const running = Array.isArray(q.queue_running)
+      && q.queue_running.some((e: unknown) => Array.isArray(e) && e[1] === promptId)
+    if (running) await cancelGeneration()
+  } catch { /* best effort */ }
+}
+
+/**
+ * Clean up jobs a DEAD LU session left in ComfyUI (G19-3): a killed app cannot
+ * cancel its render, so the job keeps burning the GPU with no owner and every
+ * new generation queues behind it (R32 sat at queue position 4). Every LU
+ * submission carries an `lu-` client id; anything wearing that prefix under a
+ * DIFFERENT id than ours belongs to a session that no longer exists. Pending
+ * orphans are deleted, a running orphan is interrupted. Foreign clients (a
+ * user's own ComfyUI tab) never carry the prefix and are never touched.
+ * Returns how many jobs were cleaned, 0 on any error (best effort).
+ */
+export async function sweepOrphanedLuJobs(currentClientId: string): Promise<number> {
+  try {
+    const res = await localFetch(comfyuiUrl('/queue'), { timeoutMs: COMFY_STATS_TIMEOUT_MS })
+    if (!res.ok) return 0
+    const q = await res.json()
+    // Queue entries are [number, prompt_id, prompt, extra_data, ...] tuples.
+    const staleId = (e: unknown): string | null => {
+      if (!Array.isArray(e) || typeof e[1] !== 'string') return null
+      const owner = (e[3] as Record<string, unknown> | undefined)?.client_id
+      return typeof owner === 'string' && owner.startsWith(LU_CLIENT_PREFIX) && owner !== currentClientId
+        ? e[1]
+        : null
+    }
+    const pending = (Array.isArray(q.queue_pending) ? q.queue_pending : [])
+      .map(staleId)
+      .filter((id: string | null): id is string => id !== null)
+    if (pending.length > 0) {
+      await localFetch(comfyuiUrl('/queue'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ delete: pending }),
+        timeoutMs: COMFY_STATS_TIMEOUT_MS,
+      })
+    }
+    const runningStale = (Array.isArray(q.queue_running) ? q.queue_running : []).some((e: unknown) => staleId(e) !== null)
+    if (runningStale) await cancelGeneration()
+    const cleaned = pending.length + (runningStale ? 1 : 0)
+    if (cleaned > 0) log.info('comfyui.orphan_sweep', { cleaned, pending: pending.length, runningStale })
+    return cleaned
+  } catch {
+    return 0
+  }
 }
 
 export async function freeMemory(): Promise<void> {

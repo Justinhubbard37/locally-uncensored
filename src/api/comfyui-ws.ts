@@ -43,8 +43,14 @@ export const DECODE_NODES = new Set([
   'VAEDecode', 'VAEDecodeTiled',
 ])
 
+/** Every LU submission carries a client id with this prefix, so a later LU
+ *  session can recognise a dead session's job in ComfyUI's queue and clean it
+ *  up (G19-3: a killed app left its render burning the GPU, queued four deep).
+ *  Foreign clients (a user's own ComfyUI tab) never carry it. */
+export const LU_CLIENT_PREFIX = 'lu-'
+
 /** Shared client ID used for both WS connection and workflow submission */
-export const CLIENT_ID = uuid()
+export const CLIENT_ID = `${LU_CLIENT_PREFIX}${uuid()}`
 
 class ComfyWSClient {
   private ws: WebSocket | null = null

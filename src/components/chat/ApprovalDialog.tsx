@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { ChevronDown } from 'lucide-react'
 import type { AgentToolCall } from '../../types/agent-mode'
 
@@ -19,26 +19,15 @@ interface Props {
  * focus into a modal — readable at a glance, dismissible without breaking
  * flow.
  *
- * Keyboard shortcuts: Enter → approve, Escape → reject. Args expand inline
- * via the chevron button if the user wants to inspect what the agent is
- * about to run.
+ * Keyboard shortcuts (Enter approves, Escape rejects) are NOT bound here.
+ * ChatView owns that layer so the shortcuts also work while the inline
+ * buttons on the tool block are off screen; a second listener here would
+ * answer TWO queued approvals on one keypress, silently approving a tool the
+ * user never saw. Args expand inline via the chevron button if the user wants
+ * to inspect what the agent is about to run.
  */
 export function ApprovalDialog({ toolCall, onApprove, onReject }: Props) {
   const [argsOpen, setArgsOpen] = useState(false)
-
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault()
-        onApprove()
-      } else if (e.key === 'Escape') {
-        e.preventDefault()
-        onReject()
-      }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [onApprove, onReject])
 
   return (
     <AnimatePresence mode="wait">
@@ -76,7 +65,6 @@ export function ApprovalDialog({ toolCall, onApprove, onReject }: Props) {
             </button>
             <button
               onClick={onApprove}
-              autoFocus
               className="px-2 py-0.5 rounded text-[0.6rem] text-gray-800 dark:text-gray-100 bg-gray-100 dark:bg-white/10 hover:bg-gray-200 dark:hover:bg-white/15 border border-gray-300 dark:border-white/15 transition-colors font-medium"
             >
               Approve

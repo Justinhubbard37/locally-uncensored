@@ -117,3 +117,101 @@ describe('summarizeTurn', () => {
     })
   })
 })
+
+// G27, witnessed on the fresh Mac build 2026-08-07 (R01b): the run stopped
+// after three of thirty-one steps and the closing line read "Task completed:
+// 3 operations completed." while the PlanBar right beside it read 1 of 31.
+// The G16 reconcile steers the MODEL, with a budget of two; when that budget
+// is spent the run ends anyway, and THIS function writes the sentence the
+// user is left with.
+describe('an open plan outranks a cheerful ending (G27)', () => {
+  const threeOk: TurnToolCall[] = [
+    { toolName: 'todo_write', status: 'completed' },
+    { toolName: 'get_current_time', status: 'completed' },
+    { toolName: 'system_info', status: 'completed' },
+  ]
+  const gap = { done: 1, total: 31, next: 'Use system_info to report the operating system' }
+
+  it('R01b: never says completed while the plan says 1 of 31', () => {
+    const text = summarizeTurn({
+      calls: threeOk, imageGenDone: 0, videoGenDone: 0, visionFeedbackGiven: false, planGap: gap,
+    })
+    expect(text).not.toContain('Task completed')
+    expect(text).toContain('1 of 31')
+    expect(text).toContain('Use system_info to report the operating system')
+    expect(text).toContain('continue')
+  })
+
+  it('a picture that landed is still reported, with the caveat', () => {
+    const text = summarizeTurn({
+      calls: threeOk, imageGenDone: 1, videoGenDone: 0, visionFeedbackGiven: true, planGap: gap,
+    })
+    expect(text).toContain('your image is above')
+    expect(text).toContain('1 of 31')
+  })
+
+  it('NEGATIVE CONTROL: no plan at all leaves every wording untouched', () => {
+    const text = summarizeTurn({
+      calls: threeOk, imageGenDone: 0, videoGenDone: 0, visionFeedbackGiven: false, planGap: null,
+    })
+    expect(text).toBe('Task completed: 3 operations completed.')
+    // omitting the field entirely behaves the same as passing null
+    expect(summarizeTurn({
+      calls: threeOk, imageGenDone: 0, videoGenDone: 0, visionFeedbackGiven: false,
+    })).toBe(text)
+  })
+
+  it('NEGATIVE CONTROL: a FINISHED plan is not a gap, so the run may say completed', () => {
+    // openPlanGap returns null once every item is done; this asserts the
+    // contract from this side, so a future caller cannot pass a done plan in.
+    const text = summarizeTurn({
+      calls: threeOk, imageGenDone: 0, videoGenDone: 0, visionFeedbackGiven: false, planGap: null,
+    })
+    expect(text).toContain('Task completed')
+  })
+
+  it('NEGATIVE CONTROL: a failed picture still explains itself, plan or not', () => {
+    const text = summarizeTurn({
+      calls: [failedImage('Image generation failed: ComfyUI rejected workflow: 400 Bad Request')],
+      imageGenDone: 0, videoGenDone: 0, visionFeedbackGiven: false, planGap: null,
+    })
+    expect(text).toContain('400 Bad Request')
+  })
+})
+
+// The plan note is a SUFFIX, never a replacement. Written after the first cut
+// of the G27 fix returned the note ALONE for a failed picture, which would
+// have re-opened D#81 (the user sees "the run stopped" and never learns the
+// generation failed or why).
+describe('G27 must not eat the D#81 explanation', () => {
+  const gap = { done: 2, total: 10, next: 'Use video_generate for a two second clip' }
+
+  it('a failed picture keeps its reason AND gains the plan note', () => {
+    const text = summarizeTurn({
+      calls: [failedImage('Image generation failed: ComfyUI rejected workflow: 400 Bad Request')],
+      imageGenDone: 0, videoGenDone: 0, visionFeedbackGiven: false, planGap: gap,
+    })
+    expect(text).toContain('400 Bad Request')
+    expect(text).toContain('did not come out')
+    expect(text).toContain('2 of 10')
+  })
+
+  it('a picture that landed but was not fed back still surfaces the open plan', () => {
+    // Without a plan this case returns '' on purpose (the block shows the
+    // picture). With one, the note is the only thing worth saying.
+    const text = summarizeTurn({
+      calls: [], imageGenDone: 1, videoGenDone: 0, visionFeedbackGiven: false, planGap: gap,
+    })
+    expect(text).toContain('2 of 10')
+    expect(summarizeTurn({
+      calls: [], imageGenDone: 1, videoGenDone: 0, visionFeedbackGiven: false, planGap: null,
+    })).toBe('')
+  })
+
+  it('NEGATIVE CONTROL: nothing ran at all, plan open, the hint is not lost', () => {
+    const text = summarizeTurn({
+      calls: [], imageGenDone: 0, videoGenDone: 0, visionFeedbackGiven: false, planGap: gap,
+    })
+    expect(text).toContain('2 of 10')
+  })
+})

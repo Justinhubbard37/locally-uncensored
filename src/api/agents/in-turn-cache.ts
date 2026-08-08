@@ -48,6 +48,29 @@ const NON_CACHEABLE_TOOLS = new Set<string>([
   'shell_execute_background',
   'code_execute',
   'run_tests',
+  // Writes the plan the user watches. Today it is idempotent, so a cache hit
+  // would do no visible harm, but a write served from cache never reaches the
+  // store — and a plan that silently stops updating is the one failure mode
+  // that makes the whole feature untrustworthy.
+  'todo_write',
+])
+
+/**
+ * Of the non-cacheable tools, the ones that touch the WORKSPACE. Only these
+ * invalidate a cached read.
+ *
+ * The two sets used to be one, which was right while every non-cacheable tool
+ * also wrote to disk. todo_write broke that: it must always really run, but it
+ * changes no file. Folding it into one set would throw away every cached
+ * file_read on each plan update — and the plan updates after every step.
+ */
+const WORKSPACE_MUTATING_TOOLS = new Set<string>([
+  'file_write',
+  'file_edit',
+  'shell_execute',
+  'shell_execute_background',
+  'code_execute',
+  'run_tests',
 ])
 
 /** Reads whose cached payload is invalidated by a later workspace mutation. */
@@ -57,9 +80,9 @@ function isNonCacheableTool(name: string): boolean {
   return NON_CACHEABLE_TOOLS.has(name) || name.startsWith('git_')
 }
 
-/** A workspace-mutating call — same set that is non-cacheable, plus git_*. */
+/** A workspace-mutating call — the disk-touching subset, plus git_*. */
 function isMutatingTool(name: string): boolean {
-  return NON_CACHEABLE_TOOLS.has(name) || name.startsWith('git_')
+  return WORKSPACE_MUTATING_TOOLS.has(name) || name.startsWith('git_')
 }
 
 /**

@@ -209,3 +209,50 @@ describe('in-turn-cache — serves the FULL result, not the panel preview (#9)',
     expect(lookup(req('r2', 'file_read', args), stableArgsHash(args))).toBeUndefined()
   })
 })
+
+// ── A write is never served from cache, but only disk writes go stale ──
+//
+// The two ideas used to be one set, which held while every non-cacheable tool
+// also touched disk. todo_write broke that: it must always really run (it
+// writes the plan the user is watching) while changing no file at all.
+
+describe('in-turn-cache — todo_write', () => {
+  beforeEach(() => {
+    useToolAuditStore.getState().clearAll()
+  })
+
+  const recordDone = (toolName: string, args: Record<string, any>, at: number, result: string) => {
+    const s = useToolAuditStore.getState()
+    const id = s.record({ convId: 'c1', toolCallId: `prior-${toolName}-${at}`, toolName, args, startedAt: at })
+    s.complete(id, { status: 'completed', completedAt: at + 10, resultPreview: result })
+  }
+
+  it('is never served from cache, even on an identical repeat', () => {
+    const args = { todos: [{ content: 'step', status: 'pending' }] }
+    recordDone('todo_write', args, 1000, 'stale summary')
+
+    const lookup = makeInTurnCacheLookup({ convId: 'c1', turnStartMs: 500 })
+    expect(lookup(req('new', 'todo_write', args), stableArgsHash(args))).toBeUndefined()
+  })
+
+  it('does not invalidate a cached file_read the way a real write does', () => {
+    // The plan updates after every step. If it counted as a workspace mutation
+    // it would throw away every cached read on each update, which is the
+    // opposite of what this cache is for.
+    const readArgs = { path: 'src/app.ts' }
+    recordDone('file_read', readArgs, 1000, 'file contents')
+    recordDone('todo_write', { todos: [] }, 2000, 'Plan cleared.')
+
+    const lookup = makeInTurnCacheLookup({ convId: 'c1', turnStartMs: 500 })
+    expect(lookup(req('new', 'file_read', readArgs), stableArgsHash(readArgs))).toBe('file contents')
+  })
+
+  it('a real write still invalidates that same cached read', () => {
+    const readArgs = { path: 'src/app.ts' }
+    recordDone('file_read', readArgs, 1000, 'file contents')
+    recordDone('file_write', { path: 'src/app.ts', content: 'x' }, 2000, 'written')
+
+    const lookup = makeInTurnCacheLookup({ convId: 'c1', turnStartMs: 500 })
+    expect(lookup(req('new', 'file_read', readArgs), stableArgsHash(readArgs))).toBeUndefined()
+  })
+})

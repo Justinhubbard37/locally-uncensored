@@ -57,6 +57,8 @@ import {
   freeMemory,
   cancelGeneration,
   clearComfyQueue,
+  abandonPrompt,
+  sweepOrphanedLuJobs,
   extractComfyOutputFiles,
   getImageUrl,
   classifyModel,
@@ -70,6 +72,8 @@ import {
 } from './comfyui'
 import type { ModelCapabilities } from './comfyui-nodes'
 import { getActiveAgentModel } from './agent-context'
+import { comfyWS, CLIENT_ID } from './comfyui-ws'
+import { PaceTracker, overBudget, renderBudgetNotice, renderTimeoutNotice, warmupExceeded, swapWarmupNotice } from '../lib/render-budget'
 import { log } from '../lib/logger'
 
 /**
@@ -873,6 +877,12 @@ async function runHandoff(kind: 'image' | 'video', args: VramHandoffArgs, seq: n
       return 'Error: ComfyUI did not start within 90s. Start it from the Create tab and try again.'
     }
 
+    // A dead LU session cannot cancel its render, so clean its leftovers out
+    // of the queue BEFORE we submit ours (G19-3): otherwise our job waits
+    // behind an ownerless render burning the GPU (R32 sat at position 4).
+    // Best effort and cheap (one GET /queue when nothing is stale).
+    await sweepOrphanedLuJobs(CLIENT_ID)
+
     emitHandoff('generating', { kind, detail: targetModel })
 
     // Race the WHOLE generation against the cancel signal — not just the poll
@@ -1022,7 +1032,7 @@ async function generateImage(prompt: string, model: string, args: VramHandoffArg
     // (/prompt). Both are now timeout-bounded, so neither can strand the
     // hand-off with the text model unloaded — these logs just pinpoint where.
     log.info('vram_handoff.image.submit', { model, i2i: !!inputImage })
-    const promptId = await submitWorkflow(workflow)
+    const promptId = await submitWorkflow(workflow, CLIENT_ID)
     log.info('vram_handoff.image.submitted', { promptId })
     const result = await pollAndExtract(promptId, prompt, label('image'), getImageTimeoutMs())
     // Remember the produced filename so a follow-up "animate it" video call can
@@ -1123,7 +1133,7 @@ async function generateVideo(
         type,
       )
       log.info('vram_handoff.video.submit', { model, mode: inputImage ? 'i2v' : 't2v', wan22: true, steps: tunSteps, cfg: tunCfg })
-      const promptId = await submitWorkflow(workflow)
+      const promptId = await submitWorkflow(workflow, CLIENT_ID)
       log.info('vram_handoff.video.submitted', { promptId })
       return await pollAndExtract(promptId, prompt, label('video'), getVideoTimeoutMs())
     }
@@ -1192,7 +1202,7 @@ async function generateVideo(
         type,
       )
       log.info('vram_handoff.video.submit', { model, i2v: true })
-      const promptId = await submitWorkflow(workflow)
+      const promptId = await submitWorkflow(workflow, CLIENT_ID)
       log.info('vram_handoff.video.submitted', { promptId })
       return await pollAndExtract(promptId, prompt, label('video'), getVideoTimeoutMs())
     }
@@ -1230,7 +1240,7 @@ async function generateVideo(
       backend,
     )
     log.info('vram_handoff.video.submit', { model, i2v: false, backend })
-    const promptId = await submitWorkflow(workflow)
+    const promptId = await submitWorkflow(workflow, CLIENT_ID)
     log.info('vram_handoff.video.submitted', { promptId })
     return await pollAndExtract(promptId, prompt, label('video'), getVideoTimeoutMs())
   } catch (err) {
@@ -1246,44 +1256,85 @@ async function generateVideo(
  */
 async function pollAndExtract(promptId: string, prompt: string, kindLabel: string, timeoutMs: number): Promise<string> {
   const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    // User hit the in-chat cancel button — ComfyUI was already sent /interrupt
-    // + queue-clear by requestGenerationCancel(); stop polling so runHandoff's
-    // finally can restore the text model into VRAM instead of waiting out the
-    // timeout. RACE both the sleep AND the getHistory against the cancel signal
-    // (bug B): a cold checkpoint load makes getHistory block for up to its 15 s
-    // cap, so a between-ticks-only check kept "stopping…" on screen for seconds.
-    if (_genCancelRequested) return `${kindLabel} generation cancelled.`
-    if ((await raceCancel(sleep(1000))) === CANCELLED) return `${kindLabel} generation cancelled.`
-    const history = await raceCancel(getHistory(promptId))
-    if (history === CANCELLED) return `${kindLabel} generation cancelled.`
-    if (history?.status?.completed) {
-      const outputs = history.outputs ?? {}
-      for (const nodeId of Object.keys(outputs)) {
-        const files = extractComfyOutputFiles(outputs[nodeId])
-        if (files.length > 0) {
-          const f = files[0]
-          const url = getImageUrl(f.filename, f.subfolder ?? '', f.type ?? 'output')
-          return `${kindLabel} generated: ${f.filename} (prompt: "${prompt}")\n${url}`
-        }
+  // G19-1 render budget: read the pace off ComfyUI's own progress events and
+  // give up EARLY, with the job cancelled, once the projection says the render
+  // cannot land inside the budget (R32: a 30 to 60 minute Wan job burned the
+  // GPU for the full deadline and was then orphaned by the timeout). No WS is
+  // fine: the pace stays empty and only the flat deadline applies.
+  const pace = new PaceTracker()
+  // G24: the swap/model-load phase emits NO progress events, so the pace
+  // tracker stays silent through it and a generous user timeout never ends it
+  // (R17c: 19 minutes of "loading model into VRAM"). Track whether ANY prompt
+  // progressed; if the WS is alive and nothing on the GPU has moved for the
+  // whole warm-up budget, the load is wedged and the job gets abandoned.
+  const startedAt = Date.now()
+  let sawAnyProgress = false
+  const offProgress = comfyWS.on((ev) => {
+    if (ev.type === 'progress') {
+      sawAnyProgress = true
+      if (ev.data.prompt_id === promptId) {
+        pace.tick(ev.data.value, ev.data.max, Date.now())
       }
-      return `${kindLabel} generation completed but no output produced.`
     }
-    if (history?.status?.status_str === 'error') {
-      // Pull the richest detail ComfyUI gives us: an execution_error carries
-      // node_type + exception_type + exception_message (the plain `message`
-      // field is usually empty for node errors — David 2026-06-11, FramePack).
-      const errEntry = history.status.messages?.find((m: any) => m?.[0] === 'execution_error')?.[1]
-      const rawMsg = errEntry?.exception_message
-        || history.status.messages?.map((m: any) => m?.[1]?.message).filter(Boolean).join(' | ')
-        || history.status.messages?.[0]?.[1]?.message
-        || 'Unknown ComfyUI error'
-      const hint = comfyErrorHint(errEntry?.node_type, errEntry?.exception_type, String(rawMsg))
-      return `${kindLabel} generation failed: ${rawMsg}${hint ? `\n\n${hint}` : ''}`
+  })
+  void comfyWS.connect().catch(() => { /* degrade to the flat deadline */ })
+  try {
+    while (Date.now() < deadline) {
+      // User hit the in-chat cancel button — ComfyUI was already sent /interrupt
+      // + queue-clear by requestGenerationCancel(); stop polling so runHandoff's
+      // finally can restore the text model into VRAM instead of waiting out the
+      // timeout. RACE both the sleep AND the getHistory against the cancel signal
+      // (bug B): a cold checkpoint load makes getHistory block for up to its 15 s
+      // cap, so a between-ticks-only check kept "stopping…" on screen for seconds.
+      if (_genCancelRequested) return `${kindLabel} generation cancelled.`
+      if ((await raceCancel(sleep(1000))) === CANCELLED) return `${kindLabel} generation cancelled.`
+      const history = await raceCancel(getHistory(promptId))
+      if (history === CANCELLED) return `${kindLabel} generation cancelled.`
+      if (history?.status?.completed) {
+        const outputs = history.outputs ?? {}
+        for (const nodeId of Object.keys(outputs)) {
+          const files = extractComfyOutputFiles(outputs[nodeId])
+          if (files.length > 0) {
+            const f = files[0]
+            const url = getImageUrl(f.filename, f.subfolder ?? '', f.type ?? 'output')
+            return `${kindLabel} generated: ${f.filename} (prompt: "${prompt}")\n${url}`
+          }
+        }
+        return `${kindLabel} generation completed but no output produced.`
+      }
+      if (history?.status?.status_str === 'error') {
+        // Pull the richest detail ComfyUI gives us: an execution_error carries
+        // node_type + exception_type + exception_message (the plain `message`
+        // field is usually empty for node errors — David 2026-06-11, FramePack).
+        const errEntry = history.status.messages?.find((m: any) => m?.[0] === 'execution_error')?.[1]
+        const rawMsg = errEntry?.exception_message
+          || history.status.messages?.map((m: any) => m?.[1]?.message).filter(Boolean).join(' | ')
+          || history.status.messages?.[0]?.[1]?.message
+          || 'Unknown ComfyUI error'
+        const hint = comfyErrorHint(errEntry?.node_type, errEntry?.exception_type, String(rawMsg))
+        return `${kindLabel} generation failed: ${rawMsg}${hint ? `\n\n${hint}` : ''}`
+      }
+      const projected = pace.projectedTotalMs()
+      if (overBudget(projected, timeoutMs)) {
+        log.warn('vram_handoff.render_budget_abort', { promptId, projectedMs: Math.round(projected!), budgetMs: timeoutMs })
+        await abandonPrompt(promptId)
+        return renderBudgetNotice(kindLabel, projected!, timeoutMs)
+      }
+      const warmupElapsed = Date.now() - startedAt
+      if (warmupExceeded(sawAnyProgress, comfyWS.connected, warmupElapsed)) {
+        log.warn('vram_handoff.swap_warmup_abort', { promptId, elapsedMs: warmupElapsed })
+        await abandonPrompt(promptId)
+        return swapWarmupNotice(kindLabel, warmupElapsed)
+      }
     }
+    // Deadline reached: the wait ends AND the job ends. The old return here
+    // walked away and left the render burning the GPU with no owner.
+    log.warn('vram_handoff.render_timeout_abort', { promptId, budgetMs: timeoutMs })
+    await abandonPrompt(promptId)
+    return renderTimeoutNotice(kindLabel, timeoutMs)
+  } finally {
+    offProgress()
   }
-  const mins = Math.round(timeoutMs / 60000)
-  return `${kindLabel} generation timed out after ${mins} minutes.`
 }
 
 // ── Small helpers ─────────────────────────────────────────────────
