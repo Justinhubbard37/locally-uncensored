@@ -56,9 +56,11 @@ import { MCPServerSettings } from './MCPServerSettings'
 import { WorkflowList } from '../agents/WorkflowList'
 import { WorkflowBuilder } from '../agents/WorkflowBuilder'
 import { useUpdateStore, isNewerVersion } from '../../stores/updateStore'
-import { backendCall } from '../../api/backend'
+import { backendCall, isTauri, openExternal } from '../../api/backend'
 import { isMlxImageHost } from '../../api/mlx-image'
-import { ArrowUpCircle } from 'lucide-react'
+import { ArrowUpCircle, KeyRound, RefreshCw } from 'lucide-react'
+import { CLOUD_BASE } from '../../api/cloud/config'
+import { formatBytes } from '../../lib/formatters'
 
 // ── User profile picture (Appearance) ───────────────────────────
 // Self-contained like HfDownloadPathSetting. Stores the picture as a
@@ -1098,6 +1100,21 @@ export function SettingsPage() {
               </button>
             </div>
           </Section>
+          {/* Keys are minted and revoked on lu-labs.ai only; the desktop app
+              never sees the plaintext, so this section just points there. */}
+          <Section title="Cloud API Keys">
+            <p className="text-[0.6rem] text-gray-500 leading-relaxed">
+              Use the chat models of your plan from Aider, LibreChat or any OpenAI-compatible tool.
+              Base URL <code className="font-mono select-text text-gray-700 dark:text-gray-300">{CLOUD_BASE}/api/inference/v1</code>, your key as the API key.
+              A key spends plan tokens only; it can never read or change the account.
+            </p>
+            <button
+              onClick={() => void openExternal(`${CLOUD_BASE}/account`)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[0.65rem] font-medium bg-violet-500/15 text-violet-500 dark:text-violet-300 hover:bg-violet-500/25 transition-colors"
+            >
+              <KeyRound size={11} /> Generate API key on lu-labs.ai
+            </button>
+          </Section>
           <Section title="Appearance">
             <div className="flex items-center justify-between">
               <span className="text-[0.7rem] text-gray-700 dark:text-gray-400">Theme</span>
@@ -1612,7 +1629,7 @@ export function SettingsPage() {
 // ── Update Section ──────────────────────────────────────────────
 
 function UpdateSection() {
-  const { currentVersion, latestVersion, updateAvailable, releaseNotes, dismissed, isChecking, autoDownload, checkForUpdate, clearDismiss, setAutoDownload, openReleasePage } = useUpdateStore()
+  const { currentVersion, latestVersion, updateAvailable, releaseNotes, dismissed, isChecking, autoDownload, downloadStatus, downloadProgress, downloadedBytes, totalBytes, errorMessage, checkForUpdate, downloadUpdate, installAndRestart, clearDismiss, setAutoDownload, openReleasePage } = useUpdateStore()
   // Defensive: only treat the persisted `latestVersion` as actually newer if a
   // semver compare confirms it. Otherwise the binary was updated out-of-band
   // and the persisted value is stale (e.g. localStorage still says 2.3.8 while
@@ -1641,23 +1658,82 @@ function UpdateSection() {
           </div>
         )}
 
-        {/* Status */}
+        {/* Status. Same pipeline as the header badge: in-app download, then a
+            click to restart. openReleasePage survives only as the dev-mode
+            fallback, there is no updater outside Tauri. */}
         {showUpdate ? (
           <div className="rounded-lg bg-emerald-500/[0.08] border border-emerald-500/20 p-3">
             <div className="flex items-center gap-2 mb-2">
               <ArrowUpCircle size={14} className="text-emerald-400" />
               <span className="text-[0.65rem] font-medium text-emerald-400">Update available!</span>
             </div>
-            {releaseNotes && (
+            {releaseNotes && downloadStatus !== 'downloading' && downloadStatus !== 'downloaded' && (
               <p className="text-[0.55rem] text-gray-500 leading-relaxed mb-2.5 line-clamp-4 whitespace-pre-line">{releaseNotes}</p>
             )}
+
+            {(downloadStatus === 'downloading' || downloadStatus === 'downloaded') && (
+              <div className="mb-2.5">
+                <div className="w-full h-1 rounded-full bg-white/[0.06] overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-300 ${downloadStatus === 'downloaded' ? 'bg-emerald-500' : 'bg-blue-500'}`}
+                    style={{ width: `${downloadProgress}%` }}
+                  />
+                </div>
+                <div className="flex items-center justify-between mt-1">
+                  <span className="text-[0.55rem] text-gray-500">
+                    {downloadStatus === 'downloaded' ? 'Download complete' : `${downloadProgress}%`}
+                  </span>
+                  {totalBytes > 0 && (
+                    <span className="text-[0.55rem] text-gray-600">
+                      {formatBytes(downloadedBytes)} / {formatBytes(totalBytes)}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {downloadStatus === 'error' && errorMessage && (
+              <p className="text-[0.6rem] text-red-400/80 leading-relaxed mb-2.5">{errorMessage}</p>
+            )}
+
             <div className="flex gap-2">
-              <button
-                onClick={openReleasePage}
-                className="px-3 py-1.5 rounded-md text-[0.6rem] font-medium bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 transition-colors"
-              >
-                Download Update
-              </button>
+              {!isTauri() ? (
+                <button
+                  onClick={openReleasePage}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[0.6rem] font-medium bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 transition-colors"
+                >
+                  <Download size={11} /> View Release
+                </button>
+              ) : downloadStatus === 'idle' ? (
+                <button
+                  onClick={() => { void downloadUpdate() }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[0.6rem] font-medium bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 transition-colors"
+                >
+                  <Download size={11} /> Download Update
+                </button>
+              ) : downloadStatus === 'downloading' ? (
+                <span className="flex items-center gap-1.5 px-3 py-1.5 text-[0.6rem] text-blue-400/80">
+                  <Loader2 size={11} className="animate-spin" /> Downloading...
+                </span>
+              ) : downloadStatus === 'downloaded' ? (
+                <button
+                  onClick={() => { void installAndRestart() }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[0.6rem] font-medium bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 transition-colors"
+                >
+                  <RefreshCw size={11} /> Restart Now
+                </button>
+              ) : downloadStatus === 'installing' ? (
+                <span className="flex items-center gap-1.5 px-3 py-1.5 text-[0.6rem] text-emerald-400/80">
+                  <Loader2 size={11} className="animate-spin" /> Installing...
+                </span>
+              ) : (
+                <button
+                  onClick={() => { void downloadUpdate() }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[0.6rem] font-medium bg-red-500/15 text-red-400 hover:bg-red-500/25 transition-colors"
+                >
+                  <RotateCcw size={11} /> Retry
+                </button>
+              )}
               {dismissed === displayLatestVersion && (
                 <button
                   onClick={clearDismiss}
