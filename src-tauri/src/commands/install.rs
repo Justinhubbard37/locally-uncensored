@@ -99,7 +99,7 @@ fn cancel_comfyui_install_blocking(state: &AppState) -> Result<serde_json::Value
 /// satisfies every card on the box (cu128 wheels still run on Ampere etc.).
 /// Returns None when nvidia-smi is absent or the parse fails; the caller
 /// falls back to the previous default index URL.
-fn parse_compute_cap_output(s: &str) -> Option<u32> {
+pub(crate) fn parse_compute_cap_output(s: &str) -> Option<u32> {
     let mut max_major: Option<u32> = None;
     for line in s.lines() {
         let trimmed = line.trim();
@@ -114,7 +114,7 @@ fn parse_compute_cap_output(s: &str) -> Option<u32> {
     max_major
 }
 
-fn detect_nvidia_compute_cap_major() -> Option<u32> {
+pub(crate) fn detect_nvidia_compute_cap_major() -> Option<u32> {
     let mut cmd = Command::new("nvidia-smi");
     cmd.args(["--query-gpu=compute_cap", "--format=csv,noheader,nounits"])
         .stdout(Stdio::piped())
