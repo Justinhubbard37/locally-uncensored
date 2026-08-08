@@ -15,7 +15,8 @@
  */
 
 import { getModelContextCached } from '../api/ollama'
-import { effectiveContextWindow } from './context-window'
+import { getProviderForModel } from '../api/providers'
+import { AGENT_CONTEXT_CAP, effectiveContextWindow } from './context-window'
 import { getModelMaxTokens } from './context-compaction'
 
 /**
@@ -26,8 +27,16 @@ import { getModelMaxTokens } from './context-compaction'
  *                      to resolve a cloud model's real window from the catalog
  *
  * The override wins outright. Without one, Ollama models get their REAL context
- * capped for VRAM, floored at 8192 so feeding a generated image back for vision
- * feedback never overflows a 4096-default model.
+ * capped at AGENT_CONTEXT_CAP, floored at 8192 so feeding a generated image back
+ * for vision feedback never overflows a 4096-default model.
+ *
+ * The agent ceiling, not the chat one: this resolver only ever runs for a turn
+ * that carries the tool catalogue, and that catalogue measured 8488 tokens on
+ * the installed build, which is 52% of the chat cap before the work starts. A
+ * run under the chat cap reached step 18 of 30, compacted, and restarted its
+ * own plan (David, 2026-08-06: "Du kannst nicht eine Riesencoding Aufgabe in
+ * 'nem sechzehn k Kontext rausschicken"). See context-window.ts for the VRAM
+ * measurement that says the larger ceiling offloads rather than OOMs.
  *
  * Cloud models resolve their REAL window from the model catalog. They used to
  * fall through to the flat 8192 — there is no KV-cache/VRAM cost on our side,
@@ -46,13 +55,27 @@ export async function resolveAgentNumCtx(
   if (!override) {
     if (providerId === 'ollama') {
       try {
-        ctx = Math.max(effectiveContextWindow(await getModelContextCached(modelId), 0), 8192)
+        ctx = Math.max(
+          effectiveContextWindow(await getModelContextCached(modelId), 0, AGENT_CONTEXT_CAP),
+          8192,
+        )
       } catch { /* keep the 8192 floor on failure */ }
     } else {
       try {
         const real = await getModelMaxTokens(fullModelName ?? modelId)
         if (typeof real === 'number' && Number.isFinite(real) && real > 0) {
           ctx = Math.max(real, 8192)
+        }
+        // R19 (LM Studio, twice the cause of a run death): the KV cache is
+        // allocated at JIT-load time and a prompt beyond it is hard-truncated
+        // server-side, tool contract included. When the server says what it
+        // actually loaded, that number IS the budget — even below the 8192
+        // floor, because the floor cannot grow an allocation we do not
+        // control. Ollama is different: there num_ctx sets the allocation.
+        if (providerId === 'openai') {
+          const { provider, modelId: rawId } = getProviderForModel(fullModelName ?? modelId)
+          const loaded = await provider.loadedContextLength?.(rawId)
+          if (typeof loaded === 'number' && loaded > 0 && loaded < ctx) ctx = loaded
         }
       } catch { /* keep the 8192 floor on failure */ }
     }
