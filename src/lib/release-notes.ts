@@ -30,6 +30,8 @@ export const RELEASE_NOTES: ReleaseNote[] = [
       'Every cloud model shows its price up front, and the credits meter counts video and training budgets truthfully.',
       'The benchmark measures cost and correctness, not just speed, and marks answers that were cut off.',
       'New: native HiRes fix for local image generation, and the agent opens folders and programs on request.',
+      'New: group chat with up to four models answering in turn, an edit pencil on the model answers, Wan-native video sizes with a portrait flip and ratio chips, and a lyrics box that really gets your words sung.',
+      'Character training now works on RTX 50 cards, and a broken training environment says so up front instead of dying mid-run.',
     ],
   },
 ]

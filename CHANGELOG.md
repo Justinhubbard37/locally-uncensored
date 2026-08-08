@@ -40,6 +40,24 @@ reported since 2.6.2.
 
 ### Added
 
+- **Group chat.** Pick two to four models in the Plugins dropdown and they
+  answer in turn inside one conversation, each seeing what the others said,
+  every answer labeled with its model.
+- **Edit the model's answer.** Every assistant message has a pencil next to
+  regenerate: fix a detail in place and the conversation continues from the
+  corrected text, no resend.
+- **Wan-native video sizes.** One-click 480p (832x480 and 720x480) and 720p
+  chips, a portrait/landscape flip, and ratio chips (16:9, 9:16, 4:3, 3:4,
+  1:1) that keep your pixel budget.
+- **Your own lyrics really get sung.** The lyrics box only appears on the
+  music model that accepts lyrics, a how-to next to it explains section
+  markers, and bare lines are wrapped so they are sung instead of hummed.
+- **Character training works on RTX 50 cards.** The trainer routes PyTorch
+  wheels by GPU generation (Blackwell gets cu128), and every run starts with
+  a preflight that names a broken environment in plain words instead of
+  dying mid-training with a raw CUDA error.
+- **The remote page's browser tab reads "AI Terminal"** so a bystander
+  learns nothing from a glance.
 - **Native HiRes fix** for local image generation, contributed by Kizerfluid
   (#97), refining at denoise 0.5 so the composition survives the second pass.
 - **The benchmark measures cost and correctness**, not just speed: think-token
