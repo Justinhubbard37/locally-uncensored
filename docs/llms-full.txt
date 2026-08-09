@@ -60,7 +60,10 @@ Yes. Locally Uncensored is the local AI app in its class that bundles image gene
 Ja. Der deutsche Einsteiger-Guide zu unzensierter lokaler KI: https://locallyuncensored.com/blog/unzensierte-ki-lokal.html. Die App-Oberflaeche ist englisch, die Modelle (Qwen, Llama, Gemma) antworten fliessend auf Deutsch.
 
 ### Can I run Kimi K3 locally?
-No — Kimi K3 is a ~2.8 trillion parameter Mixture-of-Experts model; even 4-bit quantized weights exceed a terabyte, which is datacenter hardware. Use the Moonshot API or OpenRouter for K3, and run strong mid-size open models (Qwen, GLM, Gemma) locally in Locally Uncensored instead. Full guide: https://locallyuncensored.com/blog/how-to-run-kimi-k3.html
+No: Kimi K3 is a ~2.8 trillion parameter Mixture-of-Experts model, and now that the weights are public the sizes are measured: the smallest 1-bit GGUF is 466 GB and Q4 is 1.5 TB, which is datacenter hardware. Hosted access exists on DeepInfra and in LU Labs Cloud on every plan. Run strong mid-size open models (Qwen, GLM, Gemma, Ling 3.0 Flash) locally in Locally Uncensored instead. Full guide: https://locallyuncensored.com/blog/can-you-run-kimi-k3-locally.html
+
+### Can I run Ling 3.0 Flash locally?
+Yes, on the right machine. Ling 3.0 Flash is a 124B Mixture-of-Experts model with only 5.1B active parameters, MIT licensed; GGUF quants run from about 42 GB at 2-bit to a 78 GB Q4_K_M sweet spot, so 64 GB machines run the small quants and 96 GB machines run Q4 comfortably. A 24 GB GPU plus 64 GB system RAM also works via MoE offload, and generation stays fast because so few parameters are active. Full guide: https://locallyuncensored.com/blog/how-to-run-ling-3-0-flash-locally.html
 
 ### Can I run Qwen 3.8 locally?
 Not the Max: Qwen 3.8 Max is a ~2.4 trillion parameter Mixture-of-Experts model, so even 4-bit quantized weights are around 1.2 TB, which is datacenter hardware. But Alibaba is releasing an open-weight Qwen 3.8 27B alongside the Max checkpoint, and a 27B runs on a 16 GB GPU at 4-bit, one click in Locally Uncensored once GGUFs exist. Until then Qwen 3.6 is the newest locally runnable Qwen. Full breakdown: https://locallyuncensored.com/blog/can-you-run-qwen-3-8-locally.html

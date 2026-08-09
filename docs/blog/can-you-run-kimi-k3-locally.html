@@ -26,7 +26,7 @@
 <meta name="theme-color" content="#0a0a0a">
 <link rel="icon" href="../favicon.png">
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"BlogPosting","headline":"Can You Run Kimi K3 Locally? The Honest Hardware Math","description":"The real numbers on running Moonshot's 2.8 trillion parameter Kimi K3 on your own hardware: quantization math, what the July 27, 2026 open weights release changes, and the local models actually worth running today.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-07-17","dateModified":"2026-07-17","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/can-you-run-kimi-k3-locally.html"},"keywords":"run kimi k3 locally, kimi k3 local, kimi k3 gguf, kimi k3 hardware requirements, kimi k3 vram"}
+{"@context":"https://schema.org","@type":"BlogPosting","headline":"Can You Run Kimi K3 Locally? The Honest Hardware Math","description":"The real numbers on running Moonshot's 2.8 trillion parameter Kimi K3 on your own hardware: quantization math, what the July 27, 2026 open weights release changes, and the local models actually worth running today.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-07-17","dateModified":"2026-08-09","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/can-you-run-kimi-k3-locally.html"},"keywords":"run kimi k3 locally, kimi k3 local, kimi k3 gguf, kimi k3 hardware requirements, kimi k3 vram"}
 </script>
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Can you run Kimi K3 on a normal PC?","acceptedAnswer":{"@type":"Answer","text":"No. At roughly 2.8 trillion parameters, a 4 bit quantization of Kimi K3 is around 1.4 terabytes of weights before any KV cache. The largest consumer machines top out around 512 GB of unified memory, which is less than half of what the weights alone need."}},{"@type":"Question","name":"Will there be a Kimi K3 GGUF?","acceptedAnswer":{"@type":"Answer","text":"Almost certainly, once the weights land (promised by July 27, 2026). The community produced GGUF quantizations of the 1T parameter K2 within days. But a GGUF does not shrink the model into consumer range: even an extreme 2 bit quantization of K3 would sit around 700 GB."}},{"@type":"Question","name":"What hardware would Kimi K3 actually need?","acceptedAnswer":{"@type":"Answer","text":"Multi node datacenter hardware: think a cluster of 8 or more modern accelerators with pooled memory in the terabytes, or an exotic homelab like four or more 512 GB Mac Studios linked together. Technically fascinating, practically a five figure electricity fed hobby."}},{"@type":"Question","name":"What should I run locally instead of Kimi K3?","acceptedAnswer":{"@type":"Answer","text":"The sweet spot for local hardware in 2026 is 8B to 70B open weight models. An abliterated Llama 3.1 8B runs on 6 GB of VRAM, Qwen 3.6 class models run on 12 GB, and they cover most chat, writing, and coding needs privately and without refusals."}},{"@type":"Question","name":"How do I use Kimi class models without a datacenter?","acceptedAnswer":{"@type":"Answer","text":"Run smaller models locally for private everyday work, and use hosted access for frontier class quality when a task genuinely needs it. Kimi K2.6, K3's very capable smaller sibling, is already available through hosted providers, including LU Labs Cloud from the team behind Locally Uncensored."}}]}
@@ -65,13 +65,16 @@
 
   <div class="post-meta">
     <span class="post-tag">Guide</span>
-    <span>July 17, 2026</span>
+    <span>Updated August 9, 2026</span>
     <span>·</span>
     <span>9 min read</span>
   </div>
 
   <article>
     <h1>Can You Run Kimi K3 Locally? The Honest Hardware Math</h1>
+
+    
+    <p><strong>Update, August 9, 2026:</strong> the weights are public, so the math below is measured now, not projected, and the answer for consumer hardware is still no. The smallest usable GGUF (unsloth's 1-bit UD-Q1_0) is 466 GB on disk, the 2-bit is 861 GB, and Q4 is 1.5 TB. Expert-pruned REAP conversions aim at the 512 GB server class, and abliterated builds exist for those machines. What DID change: hosted access got real. DeepInfra serves K3 at $2.85 per million input and $14.25 per million output, and it is live in <a href="https://lu-labs.ai/pricing">LU Labs Cloud</a> on every plan, image input and all.</p>
 
     <p>Moonshot's <a href="kimi-k3-explained.html">Kimi K3</a> launched on July 16 with a promise that gets local AI people excited: open weights by July 27, 2026. The question everyone is typing into a search box right now is whether a 2.8 trillion parameter model can run on hardware a human being owns.</p>
 

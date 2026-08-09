@@ -23,7 +23,7 @@
 <meta name="theme-color" content="#0a0a0a">
 <link rel="icon" href="../favicon.png">
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"BlogPosting","headline":"How to Run Kimi K3: Every Option That Actually Works","description":"Practical guide to running Kimi K3: the Moonshot API (OpenAI-compatible, $3/$15 per million tokens), OpenRouter, the Kimi app, and why local hosting waits for the July 27 weights release. Includes working code and hardware math.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-07-17","dateModified":"2026-07-17","inLanguage":"en","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/how-to-run-kimi-k3.html"},"keywords":"how to run kimi k3, kimi k3 api, kimi k3 openrouter, kimi k3 setup, run kimi k3, kimi k3 tutorial, kimi k3 python, moonshot api kimi k3"}
+{"@context":"https://schema.org","@type":"BlogPosting","headline":"How to Run Kimi K3: Every Option That Actually Works","description":"Practical guide to running Kimi K3: the Moonshot API (OpenAI-compatible, $3/$15 per million tokens), OpenRouter, the Kimi app, and why local hosting waits for the July 27 weights release. Includes working code and hardware math.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-07-17","dateModified":"2026-08-09","inLanguage":"en","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/how-to-run-kimi-k3.html"},"keywords":"how to run kimi k3, kimi k3 api, kimi k3 openrouter, kimi k3 setup, run kimi k3, kimi k3 tutorial, kimi k3 python, moonshot api kimi k3"}
 </script>
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"How can I use Kimi K3 right now?","acceptedAnswer":{"@type":"Answer","text":"Three ways: the Moonshot open platform API (OpenAI-compatible, $3 per million input tokens and $15 per million output), OpenRouter (same model, one line of code changed, requests still forwarded to Moonshot), or the Kimi app and Kimi Code with a subscription. Local hosting is not possible yet because the weights have not been released."}},{"@type":"Question","name":"Can I run Kimi K3 on my own PC?","acceptedAnswer":{"@type":"Answer","text":"Not realistically. Kimi K3 is a ~2.8 trillion parameter Mixture-of-Experts model; even at aggressive 4-bit quantization the weights alone are well over a terabyte, which is server territory, not a gaming PC. For local use, run smaller open-weight models like Qwen or GLM in a local AI studio instead."}},{"@type":"Question","name":"How much does the Kimi K3 API cost?","acceptedAnswer":{"@type":"Answer","text":"$3 per million input tokens ($0.30 on cache hits) and $15 per million output tokens, reasoning tokens included. That is cheaper than most Western frontier models but noticeably pricier than the Kimi K2 series was at launch."}},{"@type":"Question","name":"When will Kimi K3 open weights be released?","acceptedAnswer":{"@type":"Answer","text":"Moonshot has promised the full weights on Hugging Face by July 27, 2026. Once they land, independent hosts can serve the model, prices typically drop, and quantized community versions usually follow within days."}}]}
@@ -62,13 +62,16 @@
 
   <div class="post-meta">
     <span class="post-tag">Model Guide</span>
-    <span>July 17, 2026</span>
+    <span>Updated August 9, 2026</span>
     <span>·</span>
     <span>8 min read</span>
   </div>
 
   <article>
     <h1>How to Run Kimi K3: Every Option That Actually Works</h1>
+
+    
+    <p><strong>Update, August 9, 2026:</strong> the weights are out and the options below have changed shape. Independent hosting is live: DeepInfra serves K3 at $2.85 per million input and $14.25 per million output, slightly undercutting Moonshot's own API. K3 is also in <a href="https://lu-labs.ai/pricing">LU Labs Cloud</a> on every plan as of today, with image input verified working and reasoning as a toggle you can switch off. Local hosting is now technically possible but starts at a 466 GB 1-bit GGUF; the honest breakdown lives in <a href="can-you-run-kimi-k3-locally.html">Can You Run Kimi K3 Locally</a>, and yes, the first <a href="abliterated-models-guide.html">abliterated</a> conversions have appeared for the RAM-rich.</p>
 
     <p>Kimi K3 launched on July 16, 2026, and the first question everyone asks after the benchmarks is the practical one: <strong>how do I actually run this thing?</strong> Here is every working option as of today, with real setup steps, real prices, and the honest answer on local hosting. (New to the model itself? Start with our <a href="kimi-k3-explained.html">Kimi K3 explainer</a>.)</p>
 

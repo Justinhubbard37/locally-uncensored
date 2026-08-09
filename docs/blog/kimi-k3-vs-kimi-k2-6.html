@@ -26,7 +26,7 @@
 <meta name="theme-color" content="#0a0a0a">
 <link rel="icon" href="../favicon.png">
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"BlogPosting","headline":"Kimi K3 vs Kimi K2.6: What Actually Changed","description":"A practical comparison of Moonshot's Kimi K3 (2.8T parameters, 1M context, released July 16, 2026) and Kimi K2.6 (1T parameters): architecture, benchmarks, API pricing, open weights status, and which one you can actually use today.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-07-17","dateModified":"2026-07-17","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/kimi-k3-vs-kimi-k2-6.html"},"keywords":"kimi k3 vs k2.6, kimi k3 vs kimi k2, kimi k3 comparison, kimi k2.6"}
+{"@context":"https://schema.org","@type":"BlogPosting","headline":"Kimi K3 vs Kimi K2.6: What Actually Changed","description":"A practical comparison of Moonshot's Kimi K3 (2.8T parameters, 1M context, released July 16, 2026) and Kimi K2.6 (1T parameters): architecture, benchmarks, API pricing, open weights status, and which one you can actually use today.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-07-17","dateModified":"2026-08-09","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/kimi-k3-vs-kimi-k2-6.html"},"keywords":"kimi k3 vs k2.6, kimi k3 vs kimi k2, kimi k3 comparison, kimi k2.6"}
 </script>
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"What is the main difference between Kimi K3 and K2.6?","acceptedAnswer":{"@type":"Answer","text":"Scale and context. K3 is roughly 2.8 trillion parameters with a 1 million token context window and image input; K2.6 is about 1 trillion parameters with a smaller context. K3 targets frontier level coding and agent work; K2.6 remains an excellent, cheaper, widely hosted general model."}},{"@type":"Question","name":"Is Kimi K3 available right now?","acceptedAnswer":{"@type":"Answer","text":"Yes, but only through Moonshot itself: the Kimi app, Kimi Code, and the Moonshot API (OpenRouter forwards to Moonshot too). Independent providers cannot host K3 until the open weights land, promised by July 27, 2026. K2.6 by contrast is already served by many independent providers."}},{"@type":"Question","name":"Which is cheaper, K3 or K2.6?","acceptedAnswer":{"@type":"Answer","text":"K2.6 by a wide margin. K3 costs 3 dollars per million input tokens and 15 dollars per million output tokens at launch. K2.6 runs about 1 dollar or less per million input tokens on independent hosts, and flat rate plans that include K2.6 avoid per token billing entirely."}},{"@type":"Question","name":"Can I run either model locally?","acceptedAnswer":{"@type":"Answer","text":"Practically, no. K2.6 at 1T parameters needs around 550 GB at 4 bit; K3 needs around 1.4 TB. Both are datacenter models. For local use, the 8B to 70B open weight class is the realistic range, and it is very good in 2026."}},{"@type":"Question","name":"Should I wait for K3 or use K2.6 today?","acceptedAnswer":{"@type":"Answer","text":"Use K2.6 today if you want Kimi's agentic strength at sane prices; it is available on independent hosts now, including LU Labs Cloud. Watch the July 27 weights release for K3: once independent hosting exists and prices settle, upgrading becomes a one line model switch."}}]}
@@ -65,13 +65,16 @@
 
   <div class="post-meta">
     <span class="post-tag">Comparison</span>
-    <span>July 17, 2026</span>
+    <span>Updated August 9, 2026</span>
     <span>·</span>
     <span>7 min read</span>
   </div>
 
   <article>
     <h1>Kimi K3 vs Kimi K2.6: What Actually Changed</h1>
+
+    
+    <p><strong>Update, August 9, 2026:</strong> the comparison has aged in K3's favor. Its weights are public, independent hosting is live, and the observed price on DeepInfra is $2.85 in and $14.25 out per million versus K2.6 at $0.75 and $3.50. Both models are now in <a href="https://lu-labs.ai/pricing">LU Labs Cloud</a> on every plan, so trying the difference is one model picker away: K2.6 remains the value pick for agent loops, K3 takes the jobs that need the 1M context or image input.</p>
 
     <p>Moonshot's <a href="kimi-k3-explained.html">Kimi K3</a> arrived on July 16, 2026 with frontier sized claims. But its smaller sibling K2.6 has spent months becoming one of the most widely hosted open models in the world, and unlike K3, you can use it today anywhere you like, at a fraction of the price. Here is the honest comparison.</p>
 

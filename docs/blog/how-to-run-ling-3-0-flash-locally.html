@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>How to Run Ling 3.0 Flash Locally: Real GGUF Sizes and Hardware Math</title>
+<meta name="description" content="Ling 3.0 Flash is a 124B MoE with only 5.1B active parameters, MIT licensed. Real GGUF sizes from 27 GB to 136 GB, which machines run it, and the hosted fallback.">
+<meta name="keywords" content="how to run ling 3.0 flash locally, ling 3.0 flash gguf, ling 3.0 flash hardware requirements, inclusionai ling 3.0, ling 3.0 flash llama.cpp, ling 3.0 flash mac, run ling 3.0 flash">
+<meta property="og:title" content="How to Run Ling 3.0 Flash Locally: Real GGUF Sizes and Hardware Math">
+<meta property="og:description" content="Real GGUF sizes, the 5.1B-active hardware math, llama.cpp flags, and every hosted option.">
+<meta property="og:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<meta property="og:url" content="https://locallyuncensored.com/blog/how-to-run-ling-3-0-flash-locally.html">
+<meta property="og:type" content="article">
+<meta property="article:published_time" content="2026-08-09">
+<meta property="article:author" content="PurpleDoubleD">
+<meta property="article:tag" content="AI">
+<meta property="article:tag" content="Ling 3.0">
+<meta property="article:tag" content="Tutorial">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="How to Run Ling 3.0 Flash Locally: Real GGUF Sizes and Hardware Math">
+<meta name="twitter:description" content="Real GGUF sizes, the 5.1B-active hardware math, llama.cpp flags, and every hosted option.">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<link rel="canonical" href="https://locallyuncensored.com/blog/how-to-run-ling-3-0-flash-locally.html">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="../favicon.png">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BlogPosting","headline":"How to Run Ling 3.0 Flash Locally: Real GGUF Sizes and Hardware Math","description":"Practical guide to running inclusionAI's Ling 3.0 Flash locally: measured GGUF sizes from 27 GB to 136 GB, hardware recommendations for Apple Silicon and GPU plus RAM hybrids, llama.cpp MoE offload, and hosted alternatives.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-08-09","dateModified":"2026-08-09","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/how-to-run-ling-3-0-flash-locally.html"},"keywords":"how to run ling 3.0 flash locally, ling 3.0 flash gguf, ling 3.0 flash hardware requirements, inclusionai ling"}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"What hardware do I need to run Ling 3.0 Flash locally?","acceptedAnswer":{"@type":"Answer","text":"The 2-bit GGUF quants are 42 to 43 GB and want 48 to 64 GB of RAM or unified memory. The Q4_K_M sweet spot is 78 GB on disk and runs well on 96 GB machines, or on a 24 GB GPU with 64 GB or more system RAM using MoE offload."}},{"@type":"Question","name":"How fast is Ling 3.0 Flash on local hardware?","acceptedAnswer":{"@type":"Answer","text":"Only 5.1B of its 124B parameters are active per token, so once the weights fit in memory, generation speed resembles a small model: double-digit tokens per second on Apple Silicon at Q4 and on GPU plus RAM hybrid setups."}},{"@type":"Question","name":"What license does Ling 3.0 Flash use?","acceptedAnswer":{"@type":"Answer","text":"MIT. The weights are on Hugging Face under inclusionAI/Ling-3.0-flash, including official fp8, fp4 and int4 variants, and community GGUF conversions from roughly 27 GB to 136 GB."}},{"@type":"Question","name":"Can I use Ling 3.0 Flash without buying hardware?","acceptedAnswer":{"@type":"Answer","text":"Yes. It is in the LU Labs Cloud catalog on every plan, DeepInfra serves it at 0.03 dollars per million input and 0.07 dollars per million output tokens, and OpenRouter lists a free tier."}},{"@type":"Question","name":"Is Ling 3.0 Flash uncensored?","acceptedAnswer":{"@type":"Answer","text":"The stock model carries standard alignment. Its MIT license makes community finetunes and abliterated builds fully legal to create and share, but none exist yet as of August 2026."}}]}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/lu.css">
+<script defer src="/assets/lu.js"></script>
+  <script data-goatcounter="https://lu-uncensored.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<nav class="lu-nav">
+  <a class="lu-nav-brand" href="/" aria-label="Locally Uncensored">
+    <span class="lu-mono" data-mono="nav" data-size="40" aria-hidden="true"></span>
+    <span class="lu-nav-word">Locally <span class="accent">Uncensored</span></span>
+  </a>
+  <div class="lu-nav-links" id="lu-nav-links">
+    <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/blog/">Blog</a>
+    <a class="lu-nav-link" href="/guide/">Guide</a>
+    <a class="lu-nav-link" href="/remote-access/">Remote</a>
+  </div>
+  <div class="lu-nav-right">
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">1000+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">430+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <span class="lu-nav-sep"></span>
+    <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
+    <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</nav>
+<div class="container lu-doc">
+  <div class="breadcrumb"><a href="../">Locally Uncensored</a> / <a href="./">Blog</a> / This Post</div>
+
+  <div class="post-meta">
+    <span class="post-tag">Model Guide</span>
+    <span>August 9, 2026</span>
+    <span>&middot;</span>
+    <span>8 min read</span>
+  </div>
+
+  <article>
+    <h1>How to Run Ling 3.0 Flash Locally: Real GGUF Sizes and Hardware Math</h1>
+
+    <p>Ling 3.0 Flash is the sleeper release of the summer: a 124B parameter Mixture of Experts model from Ant Group's inclusionAI that activates only <strong>5.1B parameters per token</strong>, matches models many times its active size on coding and agent benchmarks, and ships under a straight <strong>MIT license</strong>. Unlike the trillion-parameter monsters in the headlines, this one actually fits on enthusiast hardware. Here is exactly what it takes, with real file sizes from the GGUF repos, not projections.</p>
+
+    <h2>The Model in One Paragraph</h2>
+
+    <p>Ling 3.0 Flash is a hybrid linear attention MoE: 35 Kimi Delta Attention layers alternate with 7 gated MLA layers, and a 1/64 sparse expert layout (512 routed experts, 8 active plus 1 shared) keeps the per-token compute at 5.1B parameters. inclusionAI trained it on a context schedule up to 256K tokens, and it is a native hybrid reasoner: it thinks before answering when you let it, and skips the thinking pass when you switch that off. If you want the benchmark story and architecture details, read the <a href="ling-3-0-flash-explained.html">Ling 3.0 Flash explainer</a> first.</p>
+
+    <h2>Real GGUF Sizes (Measured, Not Guessed)</h2>
+
+    <p>Community GGUF conversions are already up on Hugging Face. These are the actual file sizes on disk today:</p>
+
+    <table>
+      <thead><tr><th>Quant</th><th>Size on disk</th><th>Realistic minimum machine</th></tr></thead>
+      <tbody>
+        <tr><td>IQ1_S / IQ1_M</td><td>27 to 30 GB</td><td>36 GB RAM, quality visibly bruised</td></tr>
+        <tr><td>IQ2_M / Q2_K_XL</td><td>42 to 43 GB</td><td>48 to 64 GB RAM</td></tr>
+        <tr><td>IQ3_XXS</td><td>51 GB</td><td>64 GB RAM</td></tr>
+        <tr><td>Q4_K_M (the sweet spot)</td><td>78 GB</td><td>96 GB RAM or unified memory</td></tr>
+        <tr><td>Q5_K_M</td><td>92 GB</td><td>128 GB</td></tr>
+        <tr><td>Q6_K</td><td>105 GB</td><td>128 GB</td></tr>
+        <tr><td>Q8_0</td><td>136 GB</td><td>192 GB</td></tr>
+      </tbody>
+    </table>
+
+    <p>Add a few GB on top of each row for context cache and the OS. The linear-attention layers keep long-context memory growth mild compared to a classic transformer, which is one of this model's quiet advantages.</p>
+
+    <h2>Why 5.1B Active Changes the Hardware Question</h2>
+
+    <p>With a dense 124B model, memory capacity and memory bandwidth both punish you. With Ling 3.0 Flash, only 5.1B parameters do work per token, so the moment the weights fit somewhere, generation speed looks like a small model, not a 124B one. That makes two setups surprisingly viable:</p>
+
+    <ul>
+      <li><strong>Apple Silicon with 64 GB or more unified memory:</strong> IQ2/IQ3 quants run whole on a 64 GB machine; a 96 GB or 128 GB Mac runs Q4_K_M comfortably and fast. This is the easiest path.</li>
+      <li><strong>A gaming GPU plus lots of system RAM:</strong> llama.cpp can keep the attention layers and shared expert on the GPU and park the routed experts in system RAM (the MoE offload flag, <code>--n-cpu-moe</code>). A 24 GB card plus 64 to 96 GB of DDR5 runs Q4_K_M at usable speeds, because only a sliver of the experts is touched per token.</li>
+    </ul>
+
+    <p>If your machine has 32 GB or less, be honest with yourself: the IQ1 quants exist, but you will have a better time with a <a href="best-local-ai-apps-2026.html">smaller model that fits properly</a>.</p>
+
+    <h2>Step by Step with Locally Uncensored</h2>
+
+    <p>The shortest path from zero to chatting:</p>
+
+    <pre><code>git clone https://github.com/PurpleDoubleD/locally-uncensored.git
+cd locally-uncensored
+# Windows: setup.bat | Linux: ./setup.sh</code></pre>
+
+    <p>Or grab the installer from the <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest">releases page</a>. Then:</p>
+
+    <ol>
+      <li>Open the Model Manager and paste the Hugging Face repo of a Ling 3.0 Flash GGUF (several conversions exist; pick a quant from the table above that fits your memory).</li>
+      <li>Let the download finish, select the model, and chat. The app's engine handles the hybrid attention layout via llama.cpp, no flags to learn.</li>
+      <li>On a GPU plus RAM setup, use the offload slider to keep experts in system memory if the file does not fit in VRAM.</li>
+    </ol>
+
+    <p>Everything stays on your machine: prompts, chats, and the model file. No account, no telemetry, no cloud in the loop.</p>
+
+    <h2>Running It with Plain llama.cpp</h2>
+
+    <p>If you prefer the terminal:</p>
+
+    <pre><code>llama-server -m Ling-3.0-flash-Q4_K_M.gguf \
+  --ctx-size 32768 \
+  --n-gpu-layers 99 \
+  --n-cpu-moe 40   # park routed experts in RAM if VRAM is tight</code></pre>
+
+    <p>Start with a modest context size; the model supports very long contexts, but every extra token of window costs memory you might want for a better quant instead.</p>
+
+    <h2>No Big Machine? The Hosted Options</h2>
+
+    <p>Ling 3.0 Flash is so cheap to serve that hosted access is nearly free. DeepInfra lists it at $0.03 per million input tokens and $0.07 per million output tokens, which rounds to pocket lint. It is also in the <a href="https://lu-labs.ai/pricing">LU Labs Cloud</a> catalog on every plan as of today, with the same thinking toggle the local app exposes, plus native tool calling for agent work. And OpenRouter carries a free tier of the model if you just want to poke it.</p>
+
+    <h2>What About Uncensored Use?</h2>
+
+    <p>The stock model carries standard alignment. The interesting part is the license: MIT means finetunes and <a href="abliterated-models-guide.html">abliterated builds</a> are fully legal to make and share, and a 5.1B-active MoE is cheap enough to finetune that community variants are likely. None exist yet as of this writing; we will cover them when they do, as we did for <a href="deepseek-v4-flash-abliterated.html">DeepSeek V4 Flash</a>.</p>
+
+    <h2>FAQ</h2>
+
+    <h3>What hardware do I need for Ling 3.0 Flash?</h3>
+    <p>Realistic floor: 48 to 64 GB of RAM or unified memory for the 2-bit quants. Sweet spot: 96 GB and the 78 GB Q4_K_M. A 24 GB GPU plus 64 GB system RAM also works via MoE offload.</p>
+
+    <h3>How fast is it?</h3>
+    <p>Because only 5.1B parameters are active per token, generation speed resembles a small model once the weights fit. Expect double-digit tokens per second on Apple Silicon at Q4 and on GPU plus RAM hybrids.</p>
+
+    <h3>Is it any good compared to bigger models?</h3>
+    <p>inclusionAI positions it against their own previous 1T-class flagship and reports parity or wins on SWE-Bench Pro, agentic tool benchmarks, and long-context tasks. Treat vendor numbers as vendor numbers, but the architecture math (124B of knowledge, 5.1B of compute) is real.</p>
+
+    <h3>What license is it?</h3>
+    <p>MIT. Weights are on Hugging Face (inclusionAI/Ling-3.0-flash), including official fp8, fp4, and int4 variants.</p>
+
+    <h3>Can I run it without a monster PC?</h3>
+    <p>Yes, hosted: it is in LU Labs Cloud on every plan, on DeepInfra for fractions of a cent, and OpenRouter has a free tier.</p>
+
+    <hr>
+
+    <p><em>Locally Uncensored is AGPL-3.0 licensed and free to use. Built by <a href="https://github.com/PurpleDoubleD">PurpleDoubleD</a>.</em></p>
+  </article>
+
+  <div class="post-footer">
+    <p>Run the models that actually fit your machine, privately and uncensored.</p>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored" class="cta-btn" target="_blank">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+      Get Started on GitHub
+    </a>
+  </div>
+</div>
+
+<footer>
+  <div class="footer-row footer-meta"><span>&copy; 2026 &middot; Locally Uncensored &middot; AGPL-3.0</span></div>
+  <div class="footer-row footer-links">
+    <a href="https://locallyuncensored.com/blog/">Blog</a>
+    <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
+    <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions">Discussions</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
+    <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
+    <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+  </div>
+</footer>
+</body>
+</html>
