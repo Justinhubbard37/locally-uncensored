@@ -31,6 +31,9 @@ function CloudModelChip() {
   const setCloudImageModel = useCreateStore((s) => s.setCloudImageModel)
   const setCloudVideoModel = useCreateStore((s) => s.setCloudVideoModel)
   const setCloudOpModel = useCreateStore((s) => s.setCloudOpModel)
+  // Subscribed, not read once: the music sublabel must follow the length
+  // slider live so the shown price is the billed price (A3, sockenmonster).
+  const musicDuration = useCreateStore((s) => s.musicDuration)
   const models = useCloudCatalogStore((s) => s.models)
 
   const isVideo = mode === 'video'
@@ -76,7 +79,7 @@ function CloudModelChip() {
   const options: SelectOption[] = list.map((m) => ({
     value: m.id,
     label: m.label,
-    sublabel: modelCostHint(m, op),
+    sublabel: modelCostHint(m, op, op === 'music' ? musicDuration : undefined),
     badge: CLOUD_BADGE,
   }))
 

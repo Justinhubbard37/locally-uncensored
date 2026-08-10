@@ -203,12 +203,18 @@ export function shortCount(n: number): string {
 
 /** One run's wallet draw as a picker sublabel. The single biggest cost lever
  *  (wan-2.2-720p costs 5x wan-2.2-fast) was invisible before picking. Music
- *  quotes the 60 s default, video the short clip; the meter refines both to
- *  the exact run. Undefined when the entry carries no price (seed/offline). */
-export function modelCostHint(m: CloudModel, op: RenderOp): string | undefined {
+ *  prices the CURRENT length-slider value, not a static 60 s quote: the old
+ *  hint said 1,800 cr while a 3:10 run really billed 5,700, which read as a
+ *  hidden price hike (sockenmonster, bug-reports 2026-08-08). Video quotes the
+ *  short clip; the meter refines it to the exact run. Undefined when the entry
+ *  carries no price (seed/offline). */
+export function modelCostHint(m: CloudModel, op: RenderOp, seconds?: number): string | undefined {
   const c = m.credits
   if (!c) return undefined
-  const cr = op === 'music' && c.per_s !== undefined ? Math.ceil(c.per_s * 60) : c.base
+  const cr =
+    op === 'music' && c.per_s !== undefined
+      ? Math.ceil(c.per_s * (seconds && seconds > 0 ? seconds : 60))
+      : c.base
   return `${shortCount(cr)} cr`
 }
 

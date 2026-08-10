@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import {
   useCloudCatalogStore,
+  modelCostHint,
   cloudModelsFor,
   defaultCloudModel,
   defaultEditModel,
@@ -211,6 +212,29 @@ describe('cloudCatalogStore', () => {
       expect(modelForOp('image', 'edit', 'dual')).toBe('flux-9')
       // a non-video, non-edit op keeps the pick
       expect(modelForOp('image', 'generate', 'flux-9')).toBe('flux-9')
+    })
+  })
+
+  describe('modelCostHint (A3: the shown price is the billed price)', () => {
+    const ace = {
+      id: 'ace-step-1.5', label: 'ACE-Step 1.5', kind: 'audio' as const,
+      ops: ['music' as const], credits: { base: 1800, per_s: 30 },
+    }
+
+    it('music follows the length slider, not a static 60 s quote', () => {
+      // sockenmonster's exact run: 3:10 = 190 s at 30 cr/s.
+      expect(modelCostHint(ace, 'music', 190)).toBe('5,700 cr')
+      expect(modelCostHint(ace, 'music', 60)).toBe('1,800 cr')
+    })
+
+    it('NEGATIVE CONTROL: without a duration the 60 s default still prices', () => {
+      expect(modelCostHint(ace, 'music')).toBe('1,800 cr')
+      expect(modelCostHint(ace, 'music', 0)).toBe('1,800 cr')
+    })
+
+    it('non-music ops ignore the duration and quote base', () => {
+      const flux = { id: 'flux-9', label: 'Flux 9', kind: 'image' as const, credits: { base: 300 } }
+      expect(modelCostHint(flux, 'generate', 190)).toBe('300 cr')
     })
   })
 })
