@@ -389,8 +389,21 @@ function LocalTrainControls() {
         </span>
       </div>
       {!isGenerating && (
-        <div className="t-label text-gray-600">
-          Runs on your GPU and takes a while ({trainSteps} steps). The character lands in your local LoRAs.
+        <div className="t-label text-gray-600 flex items-center gap-1.5">
+          <span>Runs on your GPU and takes a while ({trainSteps} steps). The character lands in your local LoRAs.</span>
+          {/* The run repairs its own environment now (A2), so this is no
+              longer the only way out of a broken install. It stays because
+              the button used to render ONLY while the environment counted as
+              not ready, which is exactly when a customer with a stale torch
+              build could not reach it (bob80817, D#102). */}
+          <button
+            type="button"
+            onClick={startInstall}
+            disabled={busy === 'install'}
+            className="underline underline-offset-2 text-gray-500 hover:text-gray-300 disabled:opacity-50 transition-colors"
+          >
+            {busy === 'install' ? 'Reinstalling…' : 'Reinstall trainer'}
+          </button>
         </div>
       )}
     </div>

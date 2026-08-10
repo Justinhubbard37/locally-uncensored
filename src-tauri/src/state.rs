@@ -53,6 +53,12 @@ pub struct BundledEngine {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct InstallState {
     pub status: String,
+    /// The current headline, i.e. the last line a caller passed to set_status,
+    /// kept apart from `logs`. The log tail is whatever the child process
+    /// printed last (pip chatter), so a UI reading only the tail cannot tell
+    /// the user which phase is running and falls back to a dead spinner.
+    #[serde(default)]
+    pub phase: String,
     pub logs: Vec<String>,
     pub download_progress: u64,
     pub download_total: u64,
@@ -63,6 +69,7 @@ impl Default for InstallState {
     fn default() -> Self {
         Self {
             status: "idle".to_string(),
+            phase: String::new(),
             logs: Vec::new(),
             download_progress: 0,
             download_total: 0,

@@ -382,8 +382,13 @@ export function useCreate() {
           if (s.totalSteps > 0) {
             setProgress(Math.min(95, 10 + Math.round((s.step / s.totalSteps) * 85)), `Training ${s.step}/${s.totalSteps}...`)
           } else {
+            // Before the step counter exists the run is checking, possibly
+            // repairing, and then caching. Those phases last minutes, so show
+            // the phase the backend reports rather than a fixed line that
+            // reads as a hang (A2: the repair must be visible while it runs).
             const last = s.logs[s.logs.length - 1] ?? ''
-            setProgress(10, /Step \d\/4/.test(last) ? last : 'Preparing training data...')
+            const headline = s.phase || (/Step \d\/4/.test(last) ? last : '')
+            setProgress(10, headline || 'Preparing training data...')
           }
         } else if (s.status === 'complete') {
           setProgress(100, 'Character ready!')

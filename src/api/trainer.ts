@@ -22,6 +22,10 @@ export interface TrainerStatus {
 
 export interface TrainingRunStatus {
   status: 'idle' | 'running' | 'complete' | 'error' | 'cancelled' | string
+  /** The current headline (environment check, repair step, training step).
+   *  `logs` ends in whatever the child printed last, which is pip chatter for
+   *  minutes at a time, so the progress line reads this instead. */
+  phase?: string
   logs: string[]
   step: number
   totalSteps: number

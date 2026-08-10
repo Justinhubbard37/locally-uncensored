@@ -140,6 +140,7 @@ fn push_log(state: &Arc<Mutex<crate::state::InstallState>>, msg: &str) {
 fn set_status(state: &Arc<Mutex<crate::state::InstallState>>, status: &str, msg: &str) {
     if let Ok(mut s) = state.lock() {
         s.status = status.to_string();
+        s.phase = msg.to_string();
         s.logs.push(msg.to_string());
     }
 }
@@ -189,29 +190,93 @@ fn torch_index_for_cap(cap_major: Option<u32>) -> &'static str {
     }
 }
 
+/// Every site-packages of the trainer venv. Windows puts one at
+/// `venv/Lib/site-packages`, POSIX one per python version under `venv/lib`.
+fn site_packages_dirs(root: &Path) -> Vec<PathBuf> {
+    let venv = root.join("venv");
+    let mut dirs = vec![venv.join("Lib").join("site-packages")];
+    if let Ok(entries) = fs::read_dir(venv.join("lib")) {
+        dirs.extend(entries.filter_map(Result::ok).map(|e| e.path().join("site-packages")));
+    }
+    dirs.into_iter().filter(|d| d.is_dir()).collect()
+}
+
 /// venv + repo on disk proved nothing: an aborted torch download passed as
 /// "ready" and died in the first training step. The cheapest honest signal
 /// is torch's package marker inside the venv's site-packages.
 fn torch_installed(root: &Path) -> bool {
-    let venv = root.join("venv");
-    if venv.join("Lib").join("site-packages").join("torch").join("version.py").exists() {
-        return true;
-    }
-    let Ok(entries) = fs::read_dir(venv.join("lib")) else { return false };
-    entries.filter_map(Result::ok).any(|e| {
-        e.path().join("site-packages").join("torch").join("version.py").exists()
+    site_packages_dirs(root)
+        .iter()
+        .any(|d| d.join("torch").join("version.py").exists())
+}
+
+/// The trainer package itself, which "venv + repo + torch" never covered:
+/// sockenmonster's install died after torch and before `pip install -e .`, so
+/// the studio called the environment ready and every run hit
+/// `No module named musubi_tuner`. Installed editable, so the marker is a
+/// dist-info directory or the `__editable__` .pth pip drops next to it. File
+/// names only, no python spawn, because this runs on every status poll.
+fn musubi_installed(root: &Path) -> bool {
+    site_packages_dirs(root).iter().any(|d| {
+        d.join("musubi_tuner").is_dir()
+            || fs::read_dir(d).map(|entries| {
+                entries.filter_map(Result::ok).any(|e| {
+                    let name = e.file_name().to_string_lossy().to_lowercase();
+                    name.starts_with("musubi_tuner-") || name.contains("__editable__.musubi_tuner")
+                })
+            }).unwrap_or(false)
     })
 }
 
 /// Runs inside the trainer venv. Keep the printed markers in sync with
-/// preflight_verdict below.
-const TORCH_PREFLIGHT_PY: &str = "import torch\nprint('TORCH_OK', torch.__version__)\nif torch.cuda.is_available():\n    cap = torch.cuda.get_device_capability(0)\n    print('CAP', cap[0], cap[1])\n    print('ARCHS', ' '.join(torch.cuda.get_arch_list()))\n";
+/// preflight_verdict below. The trainer package is probed with find_spec
+/// rather than a real import: importing it pulls the whole training stack and
+/// would turn a cheap check into seconds of work and a second CUDA context.
+const TORCH_PREFLIGHT_PY: &str = "import importlib.util\nimport torch\nprint('TORCH_OK', torch.__version__)\nif torch.cuda.is_available():\n    cap = torch.cuda.get_device_capability(0)\n    print('CAP', cap[0], cap[1])\n    print('ARCHS', ' '.join(torch.cuda.get_arch_list()))\nif importlib.util.find_spec('musubi_tuner') is not None:\n    print('MUSUBI_OK')\n";
 
-/// Two failure classes that both used to surface as a raw CUDA error deep in
-/// the latent cache: torch not importable (half install), and a build whose
-/// kernel list stops below the GPU's compute capability (cu121 on Blackwell,
-/// which imports fine and even reports CUDA as available).
-fn preflight_verdict(exit_ok: bool, stdout: &str, stderr: &str) -> Result<(), String> {
+/// What the preflight found. Three failure classes that all used to surface as
+/// a raw error deep inside the run: torch not importable (half install), a
+/// torch build whose kernel list stops below the GPU's compute capability
+/// (cu121 on Blackwell, which imports fine and even reports CUDA as
+/// available), and the trainer package missing (an install that died after
+/// torch). Each one is repairable, which is why they are distinguished rather
+/// than collapsed into one error string.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Preflight {
+    Ok,
+    TorchBroken(String),
+    KernelsTooOld { cap: u32, max: u32 },
+    PackageMissing,
+}
+
+impl Preflight {
+    pub(crate) fn is_ok(&self) -> bool {
+        matches!(self, Preflight::Ok)
+    }
+
+    /// Only a wrong-kernel torch has to be pushed out of the way; the other
+    /// two classes install into what is missing.
+    pub(crate) fn needs_torch_reinstall(&self) -> bool {
+        matches!(self, Preflight::TorchBroken(_) | Preflight::KernelsTooOld { .. })
+    }
+
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Preflight::Ok => String::new(),
+            Preflight::TorchBroken(tail) => format!(
+                "PyTorch is missing or broken in the trainer environment. ({tail})"
+            ),
+            Preflight::KernelsTooOld { cap, max } => format!(
+                "This PyTorch build has no kernels for your GPU (compute capability {cap}.x, the build stops at {max}.x). An RTX 50 card on the old cu121 build does exactly this."
+            ),
+            Preflight::PackageMissing => {
+                "The trainer package (musubi_tuner) is not installed in the trainer environment.".to_string()
+            }
+        }
+    }
+}
+
+fn preflight_verdict(exit_ok: bool, stdout: &str, stderr: &str) -> Preflight {
     if !exit_ok || !stdout.contains("TORCH_OK") {
         let tail = stderr
             .lines()
@@ -220,9 +285,7 @@ fn preflight_verdict(exit_ok: bool, stdout: &str, stderr: &str) -> Result<(), St
             .next_back()
             .unwrap_or("no detail from python")
             .to_string();
-        return Err(format!(
-            "PyTorch is missing or broken in the trainer environment. Run the trainer install again from Character Studio. ({tail})"
-        ));
+        return Preflight::TorchBroken(tail);
     }
     let mut cap_major: Option<u32> = None;
     let mut arch_max: Option<u32> = None;
@@ -243,12 +306,13 @@ fn preflight_verdict(exit_ok: bool, stdout: &str, stderr: &str) -> Result<(), St
     }
     if let (Some(cap), Some(max)) = (cap_major, arch_max) {
         if cap > max {
-            return Err(format!(
-                "This PyTorch build has no kernels for your GPU (compute capability {cap}.x, the build stops at {max}.x). An RTX 50 card on the old cu121 build does exactly this. Run the trainer install again from Character Studio, it now picks the matching build."
-            ));
+            return Preflight::KernelsTooOld { cap, max };
         }
     }
-    Ok(())
+    if !stdout.contains("MUSUBI_OK") {
+        return Preflight::PackageMissing;
+    }
+    Preflight::Ok
 }
 
 /// Run one child to completion, streaming stdout+stderr lines into the run
@@ -412,71 +476,88 @@ pub fn install_character_trainer(
     cancel.store(false, Ordering::SeqCst);
 
     std::thread::spawn(move || {
-        let _ = fs::create_dir_all(root.join("models"));
-
-        // 1) pinned clone (releases are the project's own stability advice)
-        if !repo_dir(&root).join(".git").exists() {
-            set_status(&install, "installing", &format!("Step 1/4: Getting musubi tuner {MUSUBI_TAG}..."));
-            let mut clone = Command::new("git");
-            clone.args(["clone", "--branch", MUSUBI_TAG, "--depth", "1", MUSUBI_REPO])
-                .arg(repo_dir(&root));
-            if let Err(e) = run_streamed(clone, "git clone", &install, &cancel, &pid_slot) {
-                set_status(&install, if e == "cancelled" { "cancelled" } else { "error" }, &e);
-                return;
-            }
-        } else {
-            push_log(&install, "musubi tuner already present, keeping the pinned checkout.");
+        match provision_trainer_env(&root, &python_bin, false, &install, "installing", &cancel, &pid_slot) {
+            Ok(()) => set_status(&install, "complete", "Trainer environment ready."),
+            Err(e) => set_status(&install, if e == "cancelled" { "cancelled" } else { "error" }, &e),
         }
-
-        // 2) venv
-        if !venv_python(&root).exists() {
-            set_status(&install, "installing", "Step 2/4: Creating the training environment (venv)...");
-            let mut venv = Command::new(&python_bin);
-            venv.args(["-m", "venv"]).arg(root.join("venv"));
-            if let Err(e) = run_streamed(venv, "venv create", &install, &cancel, &pid_slot) {
-                set_status(&install, if e == "cancelled" { "cancelled" } else { "error" }, &e);
-                return;
-            }
-        }
-        let vpy = venv_python(&root).to_string_lossy().to_string();
-
-        // 3) torch, routed by the same nvidia-smi probe the ComfyUI installer
-        // uses (D#37): Blackwell gets cu128, everything else keeps cu121.
-        set_status(&install, "installing", "Step 3/4: Installing PyTorch into the trainer venv (~2.5 GB, one time)...");
-        let cap = crate::commands::install::detect_nvidia_compute_cap_major();
-        let torch_index = torch_index_for_cap(cap);
-        push_log(&install, &format!(
-            "GPU compute capability: {}, PyTorch wheels: {torch_index}",
-            cap.map_or("unknown".to_string(), |c| format!("{c}.x")),
-        ));
-        let mut torch = Command::new(&vpy);
-        let mut torch_args = vec!["-m", "pip", "install", "--progress-bar", "off", "--no-input"];
-        if cap.is_some_and(|c| c >= 12) {
-            // A finished cu121 install satisfies pip on a Blackwell box and
-            // would never be replaced; force the matching build in.
-            torch_args.push("--force-reinstall");
-        }
-        torch_args.extend(["torch", "torchvision", "--index-url", torch_index]);
-        torch.args(&torch_args);
-        if let Err(e) = run_streamed(torch, "torch install", &install, &cancel, &pid_slot) {
-            set_status(&install, if e == "cancelled" { "cancelled" } else { "error" }, &e);
-            return;
-        }
-
-        // 4) musubi + deps
-        set_status(&install, "installing", "Step 4/4: Installing the trainer package...");
-        let mut pkg = Command::new(&vpy);
-        pkg.args(["-m", "pip", "install", "--progress-bar", "off", "--no-input", "-e", "."])
-            .current_dir(repo_dir(&root));
-        if let Err(e) = run_streamed(pkg, "musubi install", &install, &cancel, &pid_slot) {
-            set_status(&install, if e == "cancelled" { "cancelled" } else { "error" }, &e);
-            return;
-        }
-
-        set_status(&install, "complete", "Trainer environment ready.");
     });
 
     Ok(serde_json::json!({"status": "installing"}))
+}
+
+/// The four install steps, idempotent by design: an existing checkout and an
+/// existing venv are kept, the two pip steps always run. One function because
+/// the training run repairs its own environment with it (A2), and a repair
+/// that drifted from the install would be a second, untested installer.
+///
+/// It only ever writes into `<root>/venv` and `<root>/musubi-tuner`. The
+/// customer's datasets (`<root>/train`) and the multi-GB base models
+/// (`<root>/models`) are never touched, which is why repair can run
+/// unattended in the middle of a training start.
+///
+/// `status_kind` is the status the caller's state machine uses ("installing"
+/// for the Set up button, "running" for a repair inside a training run) so
+/// neither surface sees a status it cannot render.
+#[allow(clippy::too_many_arguments)]
+fn provision_trainer_env(
+    root: &Path,
+    python_bin: &str,
+    repairing: bool,
+    state: &Arc<Mutex<crate::state::InstallState>>,
+    status_kind: &str,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+    pid_slot: &Arc<Mutex<Option<u32>>>,
+) -> Result<(), String> {
+    let tag = if repairing { "Repairing the trainer environment" } else { "Setting up the trainer" };
+    let _ = fs::create_dir_all(root.join("models"));
+
+    // 1) pinned clone (releases are the project's own stability advice)
+    if !repo_dir(root).join(".git").exists() {
+        set_status(state, status_kind, &format!("{tag} (1/4): getting musubi tuner {MUSUBI_TAG}..."));
+        let mut clone = Command::new("git");
+        clone.args(["clone", "--branch", MUSUBI_TAG, "--depth", "1", MUSUBI_REPO])
+            .arg(repo_dir(root));
+        run_streamed(clone, "git clone", state, cancel, pid_slot)?;
+    } else {
+        push_log(state, "musubi tuner already present, keeping the pinned checkout.");
+    }
+
+    // 2) venv
+    if !venv_python(root).exists() {
+        set_status(state, status_kind, &format!("{tag} (2/4): creating the training environment (venv)..."));
+        let mut venv = Command::new(python_bin);
+        venv.args(["-m", "venv"]).arg(root.join("venv"));
+        run_streamed(venv, "venv create", state, cancel, pid_slot)?;
+    }
+    let vpy = venv_python(root).to_string_lossy().to_string();
+
+    // 3) torch, routed by the same nvidia-smi probe the ComfyUI installer
+    // uses (D#37): Blackwell gets cu128, everything else keeps cu121.
+    set_status(state, status_kind, &format!("{tag} (3/4): installing PyTorch into the trainer venv (~2.5 GB, one time)..."));
+    let cap = crate::commands::install::detect_nvidia_compute_cap_major();
+    let torch_index = torch_index_for_cap(cap);
+    push_log(state, &format!(
+        "GPU compute capability: {}, PyTorch wheels: {torch_index}",
+        cap.map_or("unknown".to_string(), |c| format!("{c}.x")),
+    ));
+    let mut torch = Command::new(&vpy);
+    let mut torch_args = vec!["-m", "pip", "install", "--progress-bar", "off", "--no-input"];
+    // A finished but WRONG torch satisfies pip and would never be replaced:
+    // cu121 on a Blackwell box, or the half install a repair was called for.
+    if cap.is_some_and(|c| c >= 12) || repairing {
+        torch_args.push("--force-reinstall");
+    }
+    torch_args.extend(["torch", "torchvision", "--index-url", torch_index]);
+    torch.args(&torch_args);
+    run_streamed(torch, "torch install", state, cancel, pid_slot)?;
+
+    // 4) musubi + deps
+    set_status(state, status_kind, &format!("{tag} (4/4): installing the trainer package..."));
+    let mut pkg = Command::new(&vpy);
+    pkg.args(["-m", "pip", "install", "--progress-bar", "off", "--no-input", "-e", "."])
+        .current_dir(repo_dir(root));
+    run_streamed(pkg, "musubi install", state, cancel, pid_slot)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -488,7 +569,8 @@ pub fn character_trainer_status(
     let comfy = active_comfy_dir(state.inner());
     let env_ready = venv_python(&root).exists()
         && repo_dir(&root).join("src").exists()
-        && torch_installed(&root);
+        && torch_installed(&root)
+        && musubi_installed(&root);
     let dit = resolve_base_file(&root, comfy.as_deref(), DIT_CANDIDATES, "diffusion_models");
     let te = resolve_base_file(&root, comfy.as_deref(), TE_CANDIDATES, "text_encoders");
     let vae = resolve_base_file(&root, comfy.as_deref(), VAE_CANDIDATES, "vae");
@@ -599,6 +681,9 @@ pub fn start_character_training(
         set_status(&state.trainer_run, "error", "Trainer environment is missing. Run the trainer install first.");
         return Err("trainer_not_installed".to_string());
     }
+    // Held for the run's own repair path below: rebuilding the venv needs the
+    // system python, not the venv one that may be the broken part.
+    let python_bin = state.python_bin.lock().unwrap().clone();
     let (Some(dit), Some(te), Some(vae)) = (
         resolve_base_file(&root, comfy.as_deref(), DIT_CANDIDATES, "diffusion_models"),
         resolve_base_file(&root, comfy.as_deref(), TE_CANDIDATES, "text_encoders"),
@@ -665,25 +750,55 @@ pub fn start_character_training(
         let te_s = te.to_string_lossy().to_string();
         let vae_s = vae.to_string_lossy().to_string();
 
-        // 0) preflight. Both failure classes used to pass every disk check
-        // and die mid-run as a raw CUDA error the UI could not explain.
-        set_status(&run, "running", "Checking the training environment...");
-        let mut probe = Command::new(&vpy_s);
-        probe.args(["-c", TORCH_PREFLIGHT_PY]);
-        force_python_utf8(&mut probe);
-        #[cfg(target_os = "windows")]
-        probe.creation_flags(CREATE_NO_WINDOW);
-        let verdict = match probe.output() {
-            Ok(out) => preflight_verdict(
-                out.status.success(),
-                &String::from_utf8_lossy(&out.stdout),
-                &String::from_utf8_lossy(&out.stderr),
-            ),
-            Err(e) => Err(format!("could not run the trainer python: {e}")),
+        // 0) preflight, and then repair rather than refuse. All three failure
+        // classes used to pass every disk check and die mid-run as a raw error
+        // the UI could not explain, and the only cure we offered was a Set up
+        // button that did not render once the environment counted as ready
+        // (bob80817 D#102 with a stale cu121 torch, sockenmonster with an
+        // install that stopped before the trainer package). The customer
+        // should not need install instructions, so the run fixes its own
+        // environment and carries on.
+        let probe_env = |label: &str| -> Preflight {
+            let mut probe = Command::new(&vpy_s);
+            probe.args(["-c", TORCH_PREFLIGHT_PY]);
+            force_python_utf8(&mut probe);
+            #[cfg(target_os = "windows")]
+            probe.creation_flags(CREATE_NO_WINDOW);
+            match probe.output() {
+                Ok(out) => preflight_verdict(
+                    out.status.success(),
+                    &String::from_utf8_lossy(&out.stdout),
+                    &String::from_utf8_lossy(&out.stderr),
+                ),
+                Err(e) => Preflight::TorchBroken(format!("could not run the trainer python ({label}): {e}")),
+            }
         };
-        if let Err(msg) = verdict {
-            set_status(&run, "error", &msg);
-            return;
+
+        set_status(&run, "running", "Checking the training environment...");
+        let verdict = probe_env("first check");
+        if !verdict.is_ok() {
+            push_log(&run, &verdict.message());
+            push_log(&run, "Repairing it now, no action needed. Your training images and base models are left alone.");
+            let force = verdict.needs_torch_reinstall();
+            if let Err(e) = provision_trainer_env(&root, &python_bin, force, &run, "running", &cancel, &pid_slot) {
+                set_status(&run, if e == "cancelled" { "cancelled" } else { "error" }, &e);
+                return;
+            }
+            // Only a SECOND failure is a dead end. Report what is still wrong
+            // plus the tail of the repair log, so the message names the cause
+            // instead of the symptom.
+            let after = probe_env("after repair");
+            if !after.is_ok() {
+                let tail = run.lock().ok()
+                    .map(|st| st.logs.iter().rev().take(8).rev().cloned().collect::<Vec<_>>().join(" | "))
+                    .unwrap_or_default();
+                set_status(&run, "error", &format!(
+                    "{} The automatic repair did not fix it. Last steps: {tail}",
+                    after.message(),
+                ));
+                return;
+            }
+            push_log(&run, "Trainer environment repaired, starting the run.");
         }
 
         // 1) latent cache
@@ -795,6 +910,7 @@ pub fn character_training_status(state: State<'_, AppState>) -> Result<serde_jso
     let run = state.trainer_run.lock().unwrap();
     Ok(serde_json::json!({
         "status": run.status,
+        "phase": run.phase,
         "logs": run.logs.iter().rev().take(30).rev().collect::<Vec<_>>(),
         "step": run.download_progress,
         "totalSteps": run.download_total,
@@ -860,32 +976,108 @@ mod tests {
 
     #[test]
     fn preflight_fails_loud_when_torch_does_not_import() {
-        use super::preflight_verdict;
-        let msg = preflight_verdict(
+        use super::{preflight_verdict, Preflight};
+        let v = preflight_verdict(
             false,
             "",
             "Traceback (most recent call last):\nModuleNotFoundError: No module named 'torch'",
-        )
-        .unwrap_err();
-        assert!(msg.contains("Run the trainer install again"));
-        assert!(msg.contains("No module named 'torch'"));
+        );
+        assert_eq!(
+            v,
+            Preflight::TorchBroken("ModuleNotFoundError: No module named 'torch'".into())
+        );
+        assert!(v.message().contains("No module named 'torch'"));
+        assert!(v.needs_torch_reinstall());
     }
 
     #[test]
     fn preflight_names_the_kernel_gap_on_blackwell_with_cu121() {
-        use super::preflight_verdict;
-        let out = "TORCH_OK 2.3.1+cu121\nCAP 12 0\nARCHS sm_50 sm_60 sm_70 sm_75 sm_80 sm_86 sm_90\n";
-        let msg = preflight_verdict(true, out, "").unwrap_err();
-        assert!(msg.contains("compute capability 12.x"));
-        assert!(msg.contains("no kernels"));
+        use super::{preflight_verdict, Preflight};
+        let out = "TORCH_OK 2.3.1+cu121\nCAP 12 0\nARCHS sm_50 sm_60 sm_70 sm_75 sm_80 sm_86 sm_90\nMUSUBI_OK\n";
+        let v = preflight_verdict(true, out, "");
+        assert_eq!(v, Preflight::KernelsTooOld { cap: 12, max: 9 });
+        assert!(v.message().contains("compute capability 12.x"));
+        assert!(v.message().contains("no kernels"));
+        // The wrong build is already installed, so pip has to be forced.
+        assert!(v.needs_torch_reinstall());
+    }
+
+    #[test]
+    fn preflight_catches_the_trainer_package_a_healthy_torch_hides() {
+        use super::{preflight_verdict, Preflight};
+        // sockenmonster: the install died between torch and `pip install -e .`.
+        // torch imports, CUDA is fine, and the run still cannot start.
+        let out = "TORCH_OK 2.7.0+cu128\nCAP 8 6\nARCHS sm_80 sm_86 sm_90\n";
+        let v = preflight_verdict(true, out, "");
+        assert_eq!(v, Preflight::PackageMissing);
+        assert!(v.message().contains("musubi_tuner"));
+        // Nothing is wrong with torch here, so it must not be reinstalled.
+        assert!(!v.needs_torch_reinstall());
     }
 
     #[test]
     fn preflight_passes_on_a_matching_build_and_on_cpu_only() {
         use super::preflight_verdict;
-        let ok = "TORCH_OK 2.7.0+cu128\nCAP 12 0\nARCHS sm_80 sm_90 sm_100 sm_120 compute_120\n";
+        let ok = "TORCH_OK 2.7.0+cu128\nCAP 12 0\nARCHS sm_80 sm_90 sm_100 sm_120 compute_120\nMUSUBI_OK\n";
         assert!(preflight_verdict(true, ok, "").is_ok());
-        assert!(preflight_verdict(true, "TORCH_OK 2.3.1\n", "").is_ok());
+        assert!(preflight_verdict(true, "TORCH_OK 2.3.1\nMUSUBI_OK\n", "").is_ok());
+    }
+
+    #[test]
+    fn negative_control_the_old_verdict_called_the_package_gap_healthy() {
+        use super::{preflight_verdict, Preflight};
+        // The old rule was "torch imports and the kernels fit, therefore ready".
+        // Replayed on sockenmonster's environment it says ready; the new one
+        // does not. This is the whole of the bug in two lines.
+        let out = "TORCH_OK 2.7.0+cu128\nCAP 8 6\nARCHS sm_80 sm_86 sm_90\n";
+        let old_rule_says_ready = out.contains("TORCH_OK");
+        assert!(old_rule_says_ready);
+        assert_ne!(preflight_verdict(true, out, ""), Preflight::Ok);
+    }
+
+    #[test]
+    fn the_probe_script_prints_every_marker_the_verdict_reads() {
+        use super::TORCH_PREFLIGHT_PY;
+        // A marker renamed on one side only would silently turn every run into
+        // a repair loop, so the two are pinned against each other here.
+        for marker in ["TORCH_OK", "CAP", "ARCHS", "MUSUBI_OK"] {
+            assert!(TORCH_PREFLIGHT_PY.contains(marker), "probe never prints {marker}");
+        }
+        // find_spec, not import: importing pulls the whole training stack.
+        assert!(TORCH_PREFLIGHT_PY.contains("find_spec('musubi_tuner')"));
+    }
+
+    #[test]
+    fn env_is_not_ready_until_the_trainer_package_is_there_too() {
+        use super::{musubi_installed, torch_installed};
+        use std::fs;
+        let root = std::env::temp_dir().join(format!("lu-trainer-musubi-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let sp = root.join("venv").join("Lib").join("site-packages");
+        fs::create_dir_all(&sp).unwrap();
+
+        // torch landed, the trainer package did not: counted as ready before.
+        let torch = sp.join("torch");
+        fs::create_dir_all(&torch).unwrap();
+        fs::write(torch.join("version.py"), "__version__ = '2.7.0'").unwrap();
+        assert!(torch_installed(&root));
+        assert!(!musubi_installed(&root));
+
+        // `pip install -e .` leaves a dist-info plus an __editable__ .pth,
+        // never a package directory, so the marker has to accept those.
+        fs::create_dir_all(sp.join("musubi_tuner-0.1.0.dist-info")).unwrap();
+        assert!(musubi_installed(&root));
+
+        let root2 = std::env::temp_dir().join(format!("lu-trainer-musubi-pth-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root2);
+        let sp2 = root2.join("venv").join("lib").join("python3.11").join("site-packages");
+        fs::create_dir_all(&sp2).unwrap();
+        assert!(!musubi_installed(&root2));
+        fs::write(sp2.join("__editable__.musubi_tuner-0.1.0.pth"), "/src").unwrap();
+        assert!(musubi_installed(&root2));
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&root2);
     }
 
     #[test]
