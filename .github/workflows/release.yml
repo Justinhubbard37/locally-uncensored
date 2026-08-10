@@ -172,7 +172,17 @@ jobs:
 
             **Linux:** Download the `.AppImage`, make it executable (`chmod +x`), and run. No installation needed.
 
-            > All versions are portable-friendly — no admin rights required. LU by LU Labs.
+            > All versions are portable-friendly, no admin rights required. LU by LU Labs.
           releaseDraft: false
-          prerelease: false
+          # A build is not a decision. This workflow used to publish straight to
+          # a full release, so the moment CI finished, GitHub's `latest` pointed
+          # at binaries nobody had opened yet, the download routes followed it,
+          # and every installed app's updater offered it. On 2026-08-10 that put
+          # 2.6.4 in front of users for several minutes before a single check
+          # had run, and it had to be pushed back to prerelease by hand.
+          #
+          # Prerelease keeps `releases/latest` on the last verified version.
+          # Flipping to Latest is the separate, deliberate step that happens
+          # after the build is installed and checked on a real machine.
+          prerelease: true
           args: ${{ matrix.args }}
