@@ -22,6 +22,7 @@ import { useAgentModeStore } from "../stores/agentModeStore"
 import { useGenerationStore } from "../stores/generationStore"
 import { resolveChatToolRoute, CHAT_TOOLS, type ChatToolRouteMsg } from "../lib/chat-tool-intent"
 import { getProviderForModel, getProviderIdFromModel } from "../api/providers"
+import { modelOutOfMode } from "../lib/modeGate"
 import { syncOllamaHealthFromError } from "../lib/sync-ollama-health"
 import { isThinkingCompatible, isPlainTextPlanner } from "../lib/model-compatibility"
 import { stripNonCanonicalTags, finalStripThinkingTags } from "../lib/thinking-stripper"
@@ -252,6 +253,18 @@ export function useChat() {
     const { settings } = useSettingsStore.getState()
     const store = useChatStore.getState()
     const persona = useSettingsStore.getState().getActivePersona()
+
+    // The Cloud switch is a MONEY gate, so the send path enforces it itself
+    // instead of trusting the AppShell reselect effect: when that effect found
+    // no in-mode fallback (Ollama down, engine off), the old mode's model
+    // silently stayed active and every chat kept billing cloud credits with
+    // the switch on Local (Discord bug-reports 2026-08-09, helpslowlydying).
+    // A model from the wrong mode never reaches a provider: clear it and let
+    // the picker's empty state ask for a real selection.
+    if (modelOutOfMode(activeModel, settings.appMode)) {
+      useModelStore.getState().setActiveModel(null)
+      return
+    }
 
     // Agent mode delegation: if active for this conversation, use agent chat.
     //

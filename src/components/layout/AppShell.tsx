@@ -118,7 +118,12 @@ export function AppShell() {
     const fallback = allModels.find((m) =>
       chatCapable(m) && (appMode === 'cloud' ? m.provider === 'lu-cloud' : m.provider !== 'lu-cloud'),
     )
-    if (fallback) setActiveModel(fallback.name)
+    // No in-mode model to fall back to? Then the selection must CLEAR, not
+    // silently stay on the old mode's model: a lu-cloud model left active in
+    // Local mode kept billing credits after the switch said Local (Discord
+    // bug-reports 2026-08-09, helpslowlydying). The send path refuses the
+    // mismatch too, this just keeps the header honest.
+    if (activeModel !== null || fallback) setActiveModel(fallback ? fallback.name : null)
   }, [appMode, allModels])
 
   // Local-hardware views (Models/Benchmark) don't exist in cloud mode — the

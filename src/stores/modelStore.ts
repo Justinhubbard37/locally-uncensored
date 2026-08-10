@@ -22,7 +22,7 @@ interface ModelState {
   isModelLoading: boolean
   categoryFilter: ModelCategory
   setModels: (models: AIModel[]) => void
-  setActiveModel: (name: string) => void
+  setActiveModel: (name: string | null) => void
   startPull: (name: string, controller: AbortController) => void
   updatePullProgress: (name: string, progress: PullProgress) => void
   pausePull: (name: string) => void
@@ -104,14 +104,16 @@ export const useModelStore = create<ModelState>()(
             backendCall('stop_bundled_engine').catch((e) =>
               log.warn('[modelStore] failed to stop built-in engine on switch-away', { err: e }),
             )
-          } else {
+          } else if (name) {
             // built-in → DIFFERENT built-in: llama-server serves exactly ONE
             // gguf and ignores the request's model field, and the send-path
             // self-heal only revives a DEAD server — so without a swap right
             // here, a pick on the Models page would keep every chat silently
             // answering from the OLD model. The composer picker awaits this
             // same call itself before setting the store; Rust's argv
-            // idempotence turns that double-swap into a no-op.
+            // idempotence turns that double-swap into a no-op. (A cleared
+            // selection, name = null, has nothing to swap to; nextIsBuiltin
+            // is false then anyway, this branch just spells it out for tsc.)
             activateBuiltinModel(name).catch((e) =>
               log.warn('[modelStore] failed to swap built-in engine to the picked model', { model: name, err: e }),
             )
