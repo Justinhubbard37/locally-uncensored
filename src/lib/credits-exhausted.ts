@@ -15,3 +15,17 @@ export function signalCreditsExhausted(): void {
     window.dispatchEvent(new Event(CREDITS_EXHAUSTED_EVENT))
   }
 }
+
+/**
+ * What the transcript says. The dialog above opens on top of the answer, but a
+ * dismissed dialog leaves nothing behind, and on a long agent run the last line
+ * in the chat is the only thing the user still reads minutes later (Morgan,
+ * 2026-08-10: an out-of-credits run read as "it is still cycling"). Every
+ * surface renders this instead of a generic error line.
+ */
+export const CREDITS_EXHAUSTED_MESSAGE =
+  "You're out of credits, so the server refused this request.\n\n" +
+  'Plan credits refill on your renewal date. Top-up credits are one-time, never ' +
+  'expire, and are only used once the plan credits are gone. Load up at ' +
+  TOPUP_URL +
+  '.'

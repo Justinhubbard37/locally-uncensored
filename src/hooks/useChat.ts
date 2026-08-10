@@ -31,6 +31,7 @@ import type { ImageAttachment, Message } from "../types/chat"
 import { isGroupChat, groupSystemPrompt, groupHistory, stripImpersonatedSpeakers } from "../lib/group-chat"
 import { emptyAnswerExplanation } from "../lib/answer-notes"
 import { log } from "../lib/logger"
+import { CREDITS_EXHAUSTED_MESSAGE } from '../lib/credits-exhausted'
 
 /**
  * Pull the most recent media generation (image/video) out of an assistant
@@ -763,6 +764,14 @@ export function useChat() {
             convId!,
             assistantMessage.id,
             MULTIMODAL_UNSUPPORTED_MESSAGE
+          )
+        // An empty wallet gets the same plain explanation everywhere, next to
+        // the dialog that offers the top-up (lib/credits-exhausted.ts).
+        } else if ((err as { code?: string })?.code === 'credits_exhausted') {
+          useChatStore.getState().updateMessageContent(
+            convId!,
+            assistantMessage.id,
+            (contentRef.current ? contentRef.current + '\n\n' : '') + CREDITS_EXHAUSTED_MESSAGE
           )
         // Show user-friendly message for thinking errors
         } else if (errorMsg.includes('does not support thinking')) {

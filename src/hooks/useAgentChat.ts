@@ -70,6 +70,8 @@ import { PlanStaleness, planStalenessSteer } from '../lib/plan-staleness'
 import { reasoningOnlyRound, REASONING_CONTINUE_BUDGET, REASONING_CONTINUE_STEER } from '../lib/reasoning-round'
 import { useTodoStore } from '../stores/todoStore'
 import { platformPromptLine } from '../lib/host-platform'
+import { httpStatusOf, isTerminalModelError } from '../lib/http-status'
+import { CREDITS_EXHAUSTED_MESSAGE } from '../lib/credits-exhausted'
 
 // ── Standalone memory extraction (usable outside React hooks) ──
 
@@ -826,7 +828,7 @@ export function useAgentChat() {
                   log.warn('agent.vision_feedback_healed', { model: modelToUse })
                   continue
                 }
-                if (thinkErr?.message?.includes('does not support thinking') || thinkErr?.statusCode === 400) {
+                if (thinkErr?.message?.includes('does not support thinking') || httpStatusOf(thinkErr) === 400) {
                   turn = await streamOllamaChatWithTools(
                     modelToUse,
                     agentMessages,
@@ -847,10 +849,10 @@ export function useAgentChat() {
                   )
                   break
                 }
-                // Retry ONLY transient failures. A 4xx (e.g. context overflow) is
-                // deterministic — retrying just repeats it, so let it surface.
-                const sc = typeof thinkErr?.statusCode === 'number' ? thinkErr.statusCode : 0
-                const transient = thinkErr?.name !== 'AbortError' && !(sc >= 400 && sc < 500)
+                // Retry ONLY transient failures. A deterministic client error
+                // (context overflow, empty wallet) repeats itself, so it has to
+                // surface at once instead of costing the user two backoffs.
+                const transient = thinkErr?.name !== 'AbortError' && !isTerminalModelError(thinkErr)
                 if (transient && connRetries < 2) {
                   connRetries++
                   log.warn('agent.model_call_retry', { attempt: connRetries, err: String(thinkErr?.message || thinkErr) })
@@ -909,12 +911,11 @@ export function useAgentChat() {
                   log.warn('agent.vision_feedback_healed', { model: modelToUse, provider: providerId })
                   continue
                 }
-                if (thinkErr?.message?.includes('does not support thinking') || thinkErr?.statusCode === 400) {
+                if (thinkErr?.message?.includes('does not support thinking') || httpStatusOf(thinkErr) === 400) {
                   turn = await streamProviderTurn(provider, modelToUse, agentMessages, { ...streamOpts, thinking: undefined as unknown as boolean }, onLiveContent, () => {})
                   break
                 }
-                const sc = typeof thinkErr?.statusCode === 'number' ? thinkErr.statusCode : 0
-                const transient = thinkErr?.name !== 'AbortError' && !(sc >= 400 && sc < 500)
+                const transient = thinkErr?.name !== 'AbortError' && !isTerminalModelError(thinkErr)
                 if (transient && connRetries < 2) {
                   connRetries++
                   log.warn('agent.model_call_retry', { attempt: connRetries, provider: providerId, err: String(thinkErr?.message || thinkErr) })
@@ -1744,6 +1745,20 @@ export function useAgentChat() {
           useChatStore.getState().updateMessageContent(
             convId!, assistantMessage.id,
             `This model does not support thinking mode. Disable the Think button or switch to a compatible model (Qwen 3, DeepSeek-R1, Gemma 4).`
+          )
+        } else if ((err as { code?: string })?.code === 'credits_exhausted') {
+          // No retry fixes an empty wallet, and on a long run this line is the
+          // only thing left on screen once the dialog is dismissed. Name where
+          // the plan stopped, so "it froze" reads as "it was refused" (Morgan,
+          // 2026-08-10), and say how to resume without paying twice.
+          const todos = useTodoStore.getState().getTodos(convId!)
+          const done = todos.filter((t) => t.status === 'completed').length
+          const planLine = todos.length
+            ? `\n\nThe plan stopped at ${done} of ${todos.length}. Everything finished so far stays in this chat. Once you top up, send a new message naming only what is still left, rather than the original prompt, so the finished steps are not paid for twice.`
+            : ''
+          useChatStore.getState().updateMessageContent(
+            convId!, assistantMessage.id,
+            (contentRef.current ? contentRef.current + '\n\n' : '') + CREDITS_EXHAUSTED_MESSAGE + planLine
           )
         } else if (/failed to fetch|connection refused|connection reset|error sending request|proxy_localhost|network ?error|timed out|timeout|tcp connect|llama runner process|backend unreachable|HTTP 5\d\d/i.test(errorMsg)) {
           // Connection-class failure — after the transient retries above this

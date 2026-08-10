@@ -47,6 +47,8 @@ import { finalStripThinkingTags, splitOrphanCloser, splitUnclosedThink } from '.
 import { openPlanGap, planReconcileSteer, PLAN_RECONCILE_BUDGET } from '../lib/plan-reconcile'
 import { PlanStaleness, planStalenessSteer } from '../lib/plan-staleness'
 import { useTodoStore } from '../stores/todoStore'
+import { httpStatusOf } from '../lib/http-status'
+import { CREDITS_EXHAUSTED_MESSAGE } from '../lib/credits-exhausted'
 import { streamOllamaChatWithTools } from '../lib/ollama-stream-tools'
 import { extractToolCallsWithRanges, stripRanges } from '../lib/tool-call-repair'
 import { canonicalToolName } from '../lib/loose-tool-parse'
@@ -950,11 +952,11 @@ export function useCodex() {
             } catch (thinkErr: any) {
               void diagLog('streamWithTools-catch', {
                 iter: i,
-                statusCode: thinkErr?.statusCode,
+                status: httpStatusOf(thinkErr),
                 messageHead: (thinkErr?.message || String(thinkErr)).slice(0, 400),
                 name: thinkErr?.name,
               })
-              if (thinkErr?.statusCode === 400 || thinkErr?.message?.includes('does not support thinking')) {
+              if (httpStatusOf(thinkErr) === 400 || thinkErr?.message?.includes('does not support thinking')) {
                 turn = await streamWithTools(
                   modelToUse, messages, tools,
                   { temperature: 0.1, thinking: undefined, maxTokens: chatOptions.maxTokens, contextWindow: numCtx, signal: abort.signal },
@@ -1056,7 +1058,7 @@ export function useCodex() {
             try {
               turn = await streamProviderTurn(provider, modelToUse, messages, streamOpts, liveContent, liveThinking)
             } catch (thinkErr: any) {
-              if (thinkErr?.message?.includes('does not support thinking') || thinkErr?.statusCode === 400) {
+              if (thinkErr?.message?.includes('does not support thinking') || httpStatusOf(thinkErr) === 400) {
                 turn = await streamProviderTurn(provider, modelToUse, messages, { ...streamOpts, thinking: undefined as unknown as boolean }, liveContent, () => {})
               } else {
                 throw thinkErr
@@ -1912,13 +1914,14 @@ export function useCodex() {
       void diagLog('outer-catch', {
         name: (err as Error)?.name,
         message: (err as Error)?.message?.slice(0, 400),
-        statusCode: (err as any)?.statusCode,
+        status: httpStatusOf(err),
       })
       if ((err as Error).name !== 'AbortError') {
         const e = err as any
         const parts: string[] = []
         if (e?.code) parts.push(`[${e.code}]`)
-        if (typeof e?.statusCode === 'number') parts.push(`HTTP ${e.statusCode}`)
+        const status = httpStatusOf(e)
+        if (status) parts.push(`HTTP ${status}`)
         parts.push(e?.message || String(err) || 'Coding Agent error')
         const msg = parts.join(' ')
         // Surface common causes so the user can see WHY it failed instead of
@@ -1932,6 +1935,16 @@ export function useCodex() {
           hint = '\n\nHint: this model does not support tool calling, so Code mode cannot use it. Pick a model that supports tool calling (Qwen 3, Llama 3.1+, Gemma 4) or an LU Cloud model shown with the tools badge.'
         } else if (/timed out/i.test(msg)) {
           hint = '\n\nHint: a tool call exceeded its time budget. For long builds, raise the command timeout, split the work, or run it via shell_execute_background.'
+        }
+        // An empty wallet is not a crash and no retry fixes it. Replace the
+        // status-code line with the plain explanation the other surfaces use.
+        if (e?.code === 'credits_exhausted') {
+          fullContent += `\n\n${CREDITS_EXHAUSTED_MESSAGE}\n\nThe work finished so far stays in this chat. Once you top up, send a new message naming only what is still left.`
+          useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent)
+          codexStore.addEvent(convId, {
+            id: uuid(), type: 'error', content: 'Out of credits.', timestamp: Date.now(),
+          })
+          return
         }
         fullContent += `\n\nError: ${msg}${hint}`
         useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent)
