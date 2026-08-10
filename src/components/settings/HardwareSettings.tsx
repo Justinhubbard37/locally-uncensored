@@ -15,6 +15,8 @@ interface DetectedGpu {
   name: string
   memory_mib: number | null
   source: string
+  /** Set when the card was found but its compute stack was not. */
+  note?: string | null
 }
 
 type GpuVendor = 'auto' | 'nvidia' | 'amd' | 'intel'
@@ -29,7 +31,7 @@ const VENDOR_LABELS: Record<GpuVendor, string> = {
 const VENDOR_HELP: Record<GpuVendor, string> = {
   auto: 'No env-var set. Ollama / ComfyUI use whatever the driver picks first. This matches pre-v2.5.0 behaviour.',
   nvidia: 'Forwards CUDA_VISIBLE_DEVICES. Use on NVIDIA-only or NVIDIA+iGPU setups.',
-  amd: 'Forwards HIP_VISIBLE_DEVICES + ROCR_VISIBLE_DEVICES. Works on ROCm Linux + ROCm-on-Windows.',
+  amd: 'Forwards HIP_VISIBLE_DEVICES + ROCR_VISIBLE_DEVICES. Works on ROCm Linux, ROCm-on-Windows and ZLUDA. The ROCm command line tools are not required for the card to be listed here.',
   intel: 'Forwards ONEAPI_DEVICE_SELECTOR. For Intel Arc / Iris with IPEX-LLM. Ollama support is limited, verify your engine first.',
 }
 
@@ -175,6 +177,13 @@ export function HardwareSettings() {
                       {g.memory_mib ? ` · ${(g.memory_mib / 1024).toFixed(1)} GB` : ''}
                       {` · via ${g.source}`}
                     </div>
+                    {/* An honest state beats a silent one: the card is listed
+                        and selectable, and the line says what LU could not
+                        verify, so nobody rebuilds a working install chasing
+                        a driver problem that is not there (numbrain). */}
+                    {g.note && (
+                      <div className="text-[0.55rem] text-amber-500/80 mt-0.5 leading-relaxed">{g.note}</div>
+                    )}
                   </div>
                 </label>
               )

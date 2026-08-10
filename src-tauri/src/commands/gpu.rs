@@ -41,6 +41,12 @@ pub struct DetectedGpu {
     /// Probe source that produced this entry. Useful for the UI tooltip
     /// ("from nvidia-smi" / "from rocm-smi" / "from lspci").
     pub source: String,
+    /// Set when the card was found but its compute stack was not, so the
+    /// settings can say that instead of showing a card as if it were ready.
+    /// numbrain (forum help-image-gen) had a correctly configured RX 9070 XT
+    /// the picker did not list at all, and spent days breaking his install
+    /// trying to fix what looked like a driver problem.
+    pub note: Option<String>,
 }
 
 fn run_cmd(program: &str, args: &[&str]) -> Option<String> {
@@ -77,6 +83,7 @@ fn detect_nvidia() -> Vec<DetectedGpu> {
                 name,
                 memory_mib,
                 source: "nvidia-smi".into(),
+                note: None,
             })
         })
         .collect()
@@ -121,14 +128,29 @@ fn detect_amd() -> Vec<DetectedGpu> {
                 name,
                 memory_mib,
                 source: "rocm-smi".into(),
+                note: None,
             });
         }
     }
     gpus
 }
 
+/// Why a card shows up without its vendor tool. Only AMD gets one today: the
+/// NVIDIA fallback path is unreachable (nvidia-smi ships with the driver) and
+/// Intel never had a CLI probe to begin with.
+fn note_for(vendor: &str) -> Option<String> {
+    if vendor == "amd" {
+        Some(
+            "Found without ROCm tools, so LU cannot confirm the compute backend. Ollama and ComfyUI can still use the card if their ROCm or ZLUDA build is installed."
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 #[cfg(target_os = "linux")]
-fn detect_other_via_lspci() -> Vec<DetectedGpu> {
+fn detect_other_via_lspci(have_rocm: bool) -> Vec<DetectedGpu> {
     // Best-effort fallback for Intel iGPUs / Intel Arc / Apple-Silicon-in-VM
     // when neither nvidia-smi nor rocm-smi cover them. `lspci -nn | grep VGA`
     // gives "00:02.0 VGA compatible controller [0300]: Intel Corporation
@@ -139,8 +161,20 @@ fn detect_other_via_lspci() -> Vec<DetectedGpu> {
         Some(s) => s,
         None => return vec![],
     };
-    let mut gpus = Vec::new();
-    let mut idx_intel: u32 = 0;
+    detect_other_via_lspci_from(&raw, have_rocm)
+}
+
+/// The parser, split from the command so it can be run against real captured
+/// `lspci -nn` output instead of whatever the build machine happens to have.
+/// Deliberately NOT gated on Linux: a parser that only compiles on the target
+/// is a parser only the target ever proves, and the CI runners are not Linux.
+fn detect_other_via_lspci_from(raw: &str, have_rocm: bool) -> Vec<DetectedGpu> {
+    let mut gpus: Vec<DetectedGpu> = Vec::new();
+    // Per-vendor counters: HIP_VISIBLE_DEVICES and ONEAPI_DEVICE_SELECTOR are
+    // both vendor-scoped, so a machine with an Intel iGPU and an AMD card must
+    // not hand the AMD card the iGPU's number. The old code counted Intel only
+    // and would have given every AMD card index 0.
+    let mut next: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
     for line in raw.lines() {
         let lower = line.to_lowercase();
         if !(lower.contains("vga") || lower.contains("3d controller") || lower.contains("display controller")) { continue }
@@ -148,26 +182,64 @@ fn detect_other_via_lspci() -> Vec<DetectedGpu> {
                      else if lower.contains("[10de:") { "nvidia" }
                      else if lower.contains("[1002:") { "amd" }
                      else { "unknown" };
-        // Skip NVIDIA / AMD here because nvidia-smi / rocm-smi already
-        // produce better entries with memory info.
-        if vendor == "nvidia" || vendor == "amd" { continue }
-        // Extract the bracketed name (text between [...] just before the
-        // vendor:device ID at the end).
-        let name = line.split(':').last().unwrap_or(line).trim().to_string();
+        // nvidia-smi ships with the driver, so its entry is always the better
+        // one. rocm-smi does NOT: it comes with the ROCm dev packages, which a
+        // customer running a ROCm Ollama or a ZLUDA ComfyUI has no reason to
+        // install. Skipping AMD unconditionally is why numbrain's RX 9070 XT
+        // was invisible in the picker while his system reported it correctly.
+        if vendor == "nvidia" { continue }
+        if vendor == "amd" && have_rocm { continue }
+        let index = next.entry(vendor).or_insert(0);
         gpus.push(DetectedGpu {
-            index: idx_intel,
+            index: *index,
             vendor: vendor.into(),
-            name,
+            name: lspci_device_name(line),
             memory_mib: None,
             source: "lspci".into(),
+            note: note_for(vendor),
         });
-        if vendor == "intel" { idx_intel += 1; }
+        *index += 1;
     }
     gpus
 }
 
+/// The human name out of one `lspci -nn` line.
+///
+/// ```text
+/// 03:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. \
+///   [AMD/ATI] Navi 48 [Radeon RX 9070 XT] [1002:7550] (rev c0)
+/// ```
+///
+/// Splitting on ':' and taking the last field (what this did while the branch
+/// was Intel-only) yields "7550] (rev c0)". Harmless when nobody reached the
+/// branch, useless the moment AMD cards flow through it, so the model name is
+/// parsed properly: drop everything up to the class-code colon, then drop the
+/// trailing `[vendor:device]` and revision.
+fn lspci_device_name(line: &str) -> String {
+    let after_class = line
+        .find("]: ")
+        .map(|i| &line[i + 3..])
+        .unwrap_or(line);
+    let mut name = after_class;
+    if let Some(i) = name.rfind(" (rev ") {
+        name = &name[..i];
+    }
+    // The id bracket is the LAST one and always `[hhhh:hhhh]`; a marketing
+    // bracket like "[Radeon RX 9070 XT]" has no colon and must survive.
+    let trimmed = name.trim();
+    if trimmed.ends_with(']') {
+        if let Some(open) = trimmed.rfind('[') {
+            if trimmed[open..].contains(':') {
+                name = &trimmed[..open];
+            }
+        }
+    }
+    let out = name.trim().trim_end_matches(',').trim().to_string();
+    if out.is_empty() { "GPU".to_string() } else { out }
+}
+
 #[cfg(not(target_os = "linux"))]
-fn detect_other_via_lspci() -> Vec<DetectedGpu> { vec![] }
+fn detect_other_via_lspci(_have_rocm: bool) -> Vec<DetectedGpu> { vec![] }
 
 #[cfg(target_os = "macos")]
 fn detect_macos() -> Vec<DetectedGpu> {
@@ -183,6 +255,7 @@ fn detect_macos() -> Vec<DetectedGpu> {
         name,
         memory_mib: None,
         source: "system".into(),
+        note: None,
     }]
 }
 
@@ -190,7 +263,7 @@ fn detect_macos() -> Vec<DetectedGpu> {
 fn detect_macos() -> Vec<DetectedGpu> { vec![] }
 
 #[cfg(target_os = "windows")]
-fn detect_other_via_wmic() -> Vec<DetectedGpu> {
+fn detect_other_via_wmic(have_rocm: bool) -> Vec<DetectedGpu> {
     // Windows fallback for Intel Arc and other GPUs that don't surface via
     // nvidia-smi / rocm-smi. Modern PowerShell deprecated wmic.exe but it's
     // still on Win10/11 Home for the time being. We probe it but treat
@@ -222,8 +295,11 @@ fn detect_other_via_wmic() -> Vec<DetectedGpu> {
                      else if lname.contains("amd") || lname.contains("radeon") { "amd" }
                      else if lname.contains("nvidia") || lname.contains("geforce") || lname.contains("rtx") || lname.contains("gtx") { "nvidia" }
                      else { "unknown" };
-        // Skip NVIDIA / AMD here — nvidia-smi / rocm-smi produce better entries with memory.total
-        if vendor == "nvidia" || vendor == "amd" { continue }
+        // See the lspci path: rocm-smi is not part of the AMD driver, so an
+        // AMD card must survive its absence. ROCm on Windows is rare and ZLUDA
+        // users have no rocm-smi at all (lapbo, Win11 + ZLUDA).
+        if vendor == "nvidia" { continue }
+        if vendor == "amd" && have_rocm { continue }
         let from_registry = registry_vram
             .iter()
             .find(|(n, _)| n.eq_ignore_ascii_case(&name))
@@ -244,6 +320,7 @@ fn detect_other_via_wmic() -> Vec<DetectedGpu> {
             name,
             memory_mib,
             source: source.into(),
+            note: note_for(vendor),
         });
         idx += 1;
     }
@@ -251,7 +328,7 @@ fn detect_other_via_wmic() -> Vec<DetectedGpu> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn detect_other_via_wmic() -> Vec<DetectedGpu> { vec![] }
+fn detect_other_via_wmic(_have_rocm: bool) -> Vec<DetectedGpu> { vec![] }
 
 /// Class GUID of the display-adapter registry branch. Every installed GPU
 /// driver gets a numbered subkey (0000, 0001, …) under it.
@@ -358,9 +435,14 @@ fn join_name_and_size(names: &[(String, String)], sizes: &[(String, String)]) ->
 pub fn detect_gpus() -> Result<Vec<DetectedGpu>, String> {
     let mut gpus = Vec::new();
     gpus.extend(detect_nvidia());
-    gpus.extend(detect_amd());
-    gpus.extend(detect_other_via_lspci());
-    gpus.extend(detect_other_via_wmic());
+    let amd = detect_amd();
+    // The fallbacks list AMD cards only when rocm-smi produced nothing, so a
+    // machine WITH ROCm keeps the richer entry (it carries VRAM) and a machine
+    // without it still sees its card instead of an empty picker.
+    let have_rocm = !amd.is_empty();
+    gpus.extend(amd);
+    gpus.extend(detect_other_via_lspci(have_rocm));
+    gpus.extend(detect_other_via_wmic(have_rocm));
     gpus.extend(detect_macos());
     Ok(gpus)
 }
@@ -538,6 +620,88 @@ End of search: 2 match(es) found.
         apply_gpu_env(&mut cmd, &sel);
         let sycl = cmd.get_envs().any(|(k, v)| k == "ONEAPI_DEVICE_SELECTOR" && v.map(|s| s == "level_zero:0,level_zero:1").unwrap_or(false));
         assert!(sycl, "ONEAPI_DEVICE_SELECTOR should be set to level_zero:0,level_zero:1");
+    }
+
+
+    // ── AMD without ROCm tools (numbrain forum help-image-gen, lapbo Win11 +
+    // ZLUDA, nosferatue412 asking before buying a 9060 XT) ────────────────
+    //
+    // numbrain's RX 9070 XT was reported correctly by his system and did not
+    // appear in LU's picker at all, so he spent days rebuilding his install
+    // chasing a driver problem that was not there. rocm-smi is not part of the
+    // AMD driver; it ships with the ROCm dev packages, which nobody running a
+    // prebuilt ROCm Ollama or a ZLUDA ComfyUI has a reason to install.
+
+    /// numbrain's card, in the exact shape `lspci -nn` prints it.
+    const LSPCI_AMD: &str = "03:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. [AMD/ATI] Navi 48 [Radeon RX 9070 XT] [1002:7550] (rev c0)";
+    const LSPCI_INTEL: &str = "00:02.0 VGA compatible controller [0300]: Intel Corporation AlderLake-S GT1 [Intel UHD Graphics 770] [8086:4680]";
+    const LSPCI_NVIDIA: &str = "01:00.0 VGA compatible controller [0300]: NVIDIA Corporation GA104 [GeForce RTX 3060] [10de:2487] (rev a1)";
+
+    #[test]
+    fn the_card_gets_its_marketing_name_not_the_pci_id() {
+        use super::lspci_device_name;
+        // NEGATIVE CONTROL: the old expression, which was fine while only
+        // Intel reached this branch and is nonsense for anything else.
+        let old_rule = LSPCI_AMD.split(':').last().unwrap();
+        assert_eq!(old_rule.trim(), "7550] (rev c0)");
+
+        assert_eq!(
+            lspci_device_name(LSPCI_AMD),
+            "Advanced Micro Devices, Inc. [AMD/ATI] Navi 48 [Radeon RX 9070 XT]"
+        );
+        assert_eq!(
+            lspci_device_name(LSPCI_INTEL),
+            "Intel Corporation AlderLake-S GT1 [Intel UHD Graphics 770]"
+        );
+        assert_eq!(
+            lspci_device_name(LSPCI_NVIDIA),
+            "NVIDIA Corporation GA104 [GeForce RTX 3060]"
+        );
+    }
+
+    #[test]
+    fn a_line_in_an_unexpected_shape_never_yields_an_empty_name() {
+        use super::lspci_device_name;
+        assert_eq!(lspci_device_name("garbage"), "garbage");
+        assert_eq!(lspci_device_name("00:02.0 VGA compatible controller [0300]: [1002:7550]"), "GPU");
+    }
+
+    #[test]
+    fn an_amd_card_found_without_rocm_says_so_and_an_nvidia_one_has_nothing_to_say() {
+        use super::note_for;
+        let note = note_for("amd").expect("amd needs a note");
+        assert!(note.contains("ROCm"));
+        // It must not read as "your card does not work": ROCm Ollama and ZLUDA
+        // ComfyUI both drive the card fine without rocm-smi anywhere.
+        assert!(note.contains("can still use the card"));
+        assert!(note_for("nvidia").is_none());
+        assert!(note_for("intel").is_none());
+    }
+
+    #[test]
+    fn lspci_lists_the_amd_card_when_rocm_smi_answered_nothing() {
+        use super::detect_other_via_lspci_from;
+        let raw = format!("{LSPCI_NVIDIA}\n{LSPCI_AMD}\n{LSPCI_INTEL}\n");
+
+        // No rocm-smi: the AMD card MUST show up, or the picker is empty and
+        // the customer concludes LU cannot see his hardware.
+        let found = detect_other_via_lspci_from(&raw, false);
+        let amd: Vec<_> = found.iter().filter(|g| g.vendor == "amd").collect();
+        assert_eq!(amd.len(), 1);
+        assert!(amd[0].name.contains("9070 XT"));
+        assert!(amd[0].note.is_some());
+        // Vendor-scoped indices: the AMD card is HIP device 0 even though the
+        // Intel iGPU came first in the list.
+        assert_eq!(amd[0].index, 0);
+        assert_eq!(found.iter().find(|g| g.vendor == "intel").unwrap().index, 0);
+
+        // rocm-smi answered: its entry carries VRAM, so this one would be a
+        // worse duplicate.
+        let deduped = detect_other_via_lspci_from(&raw, true);
+        assert!(!deduped.iter().any(|g| g.vendor == "amd"));
+
+        // nvidia-smi ships with the driver, so NVIDIA is never taken from here.
+        assert!(!found.iter().any(|g| g.vendor == "nvidia"));
     }
 
     #[test]
