@@ -417,7 +417,7 @@ export const COMPONENT_REGISTRY: Record<string, ComponentRequirements> = {
   },
   framepack: {
     loader: 'UNETLoader', needsSeparateVAE: true, needsSeparateCLIP: true, clipType: 'wan',
-    vae: { matchPatterns: ['hunyuan', 'wan'], downloadFilename: 'hunyuanvideo15_vae_fp16.safetensors' },
+    vae: { matchPatterns: ['hunyuan_video_vae', 'hunyuan'], downloadFilename: 'hunyuan_video_vae_bf16.safetensors' },
     clip: { matchPatterns: ['llava', 'qwen', 'umt5'], downloadFilename: 'llava_llama3_fp8_scaled.safetensors' },
   },
   pyramidflow: {
@@ -820,6 +820,13 @@ export async function detectVideoBackend(): Promise<VideoBackend> {
 
 // ─── Auto-find matching VAE/CLIP for a model ───
 
+/** HunyuanVideo 1.5 VAE (32-channel). FramePack and every other 1.0-era
+ *  model must never be handed one. Matches `hunyuanvideo15_vae_fp16` as well
+ *  as spaced-out spellings like `hunyuan_video_1.5_vae`. */
+function isHunyuan15Vae(name: string): boolean {
+  return /hunyuan[._-]?video[._-]?1[._-]?5/.test(name.toLowerCase())
+}
+
 export async function findMatchingVAE(modelType: ModelType): Promise<string> {
   const vaes = await getVAEModels()
   if (vaes.length === 0) throw new Error('No VAE models found. Download a VAE for your model type from the Model Manager.')
@@ -864,9 +871,12 @@ export async function findMatchingVAE(modelType: ModelType): Promise<string> {
     // .includes('wan') hit broke every Wan 2.1 generation. Prefer the 2.1 file
     // explicitly and never fall into a 2.2 one.
     const isWan22Vae = (v: string) => /wan[._]?2[._]?2/.test(lower(v))
+    // Same reason the HunyuanVideo 1.5 VAE is excluded here: it is 32-channel,
+    // so the last-resort hunyuan fallback would trade a missing-file message
+    // for the tensor crash FramePack was dying with (bob80817, D#104).
     const match = vaes.find(v => /wan[._]?2[._]?1/.test(lower(v)))
       || vaes.find(v => lower(v).includes('wan') && !isWan22Vae(v))
-      || vaes.find(v => lower(v).includes('hunyuan'))
+      || vaes.find(v => lower(v).includes('hunyuan') && !isHunyuan15Vae(v))
     if (match) return match
     throw new Error(`No Wan VAE found. Download "wan_2.1_vae.safetensors" from the Model Manager.`)
   }
@@ -898,9 +908,13 @@ export async function findMatchingVAE(modelType: ModelType): Promise<string> {
     throw new Error(`No CogVideoX VAE found. Download "cogvideox_vae_bf16.safetensors" from the Model Manager.`)
   }
   if (modelType === 'framepack') {
-    const match = vaes.find(v => lower(v).includes('hunyuan') || lower(v).includes('wan'))
+    // 16-channel latents (HunyuanVideo 1.0). The 1.5 VAE is 32-channel and
+    // crashes the sampler, so it is excluded rather than merely deprioritised:
+    // on a disk holding both, first-hit order decided which one a run got.
+    const match = vaes.find(v => lower(v).includes('hunyuan') && !isHunyuan15Vae(v))
+      || vaes.find(v => lower(v).includes('wan'))
     if (match) return match
-    throw new Error(`No FramePack VAE found. Download "hunyuanvideo15_vae_fp16.safetensors" from the Model Manager.`)
+    throw new Error(`No FramePack VAE found. Download "hunyuan_video_vae_bf16.safetensors" from the Model Manager.`)
   }
   if (modelType === 'pyramidflow') {
     const match = vaes.find(v => lower(v).includes('pyramid'))

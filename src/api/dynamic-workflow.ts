@@ -427,7 +427,7 @@ export async function buildDynamicWorkflow(
     return buildWan22Workflow(params as VideoParams, seed, nodes, allNodes)
   }
   if (strategy === 'framepack') {
-    return buildFramePackWorkflow(params as VideoParams, seed, nodes)
+    return await buildFramePackWorkflow(params as VideoParams, seed, nodes)
   }
 
   // ─── Standard Strategies (UNET/Checkpoint → CLIP → Latent → KSampler → VAEDecode) ───
@@ -1610,7 +1610,7 @@ export async function buildLocalOpWorkflow(params: LocalOpParams): Promise<Recor
   }
 }
 
-function buildFramePackWorkflow(params: VideoParams, seed: number, nodes: CategorizedNodes): Record<string, any> {
+async function buildFramePackWorkflow(params: VideoParams, seed: number, nodes: CategorizedNodes): Promise<Record<string, any>> {
   const workflow: Record<string, any> = {}
   let n = 1
 
@@ -1637,7 +1637,17 @@ function buildFramePackWorkflow(params: VideoParams, seed: number, nodes: Catego
   // but llava_llama3 has 128320 tokens, causing state_dict size mismatch. DualCLIPLoader handles both correctly.
   workflow[clipId] = { class_type: 'DualCLIPLoader', inputs: { clip_name1: 'clip_l.safetensors', clip_name2: 'llava_llama3_fp8_scaled.safetensors', type: 'hunyuan_video' } }
   workflow[clipVisionId] = { class_type: 'CLIPVisionLoader', inputs: { clip_name: 'sigclip_vision_patch14_384.safetensors' } }
-  workflow[vaeId] = { class_type: 'VAELoader', inputs: { vae_name: 'hunyuanvideo15_vae_fp16.safetensors' } }
+  // FramePack is a HunyuanVideo 1.0 model. Its sampler allocates the history
+  // buffer with 16 latent channels, and the HunyuanVideo 1.5 VAE encodes 32, so
+  // pairing the two dies at the first section with "Expected size 32 but got
+  // size 16" (bob80817, D#104). `6fb83d31` pinned this to the 1.5 file while
+  // fixing unrelated filename typos, which broke every FramePack run since.
+  //
+  // Resolved against the disk rather than pinned again: the resolver refuses a
+  // 1.5 VAE outright and names the file to fetch, so a customer whose bundle
+  // predates this fix reads "download hunyuan_video_vae_bf16" instead of a raw
+  // ComfyUI "value not in list" for a filename he never chose.
+  workflow[vaeId] = { class_type: 'VAELoader', inputs: { vae_name: await findMatchingVAE('framepack') } }
   workflow[imageId] = { class_type: 'LoadImage', inputs: { image: params.inputImage || 'input_image.png' } }
   // Scale the source to the resolved generation size before encoding (David
   // 2026-06-11). FramePack otherwise samples at the full source resolution

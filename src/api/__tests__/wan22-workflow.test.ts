@@ -207,12 +207,22 @@ describe('findMatchingVAE — Wan 2.1 vs 2.2 (48-channel regression)', () => {
   it("'wan22' picks the 2.2 VAE", async () => {
     expect(await findMatchingVAE('wan22')).toBe('wan2.2_vae.safetensors')
   })
-  it("'wan' without a 2.1 file still refuses the 2.2 VAE (falls to hunyuan)", async () => {
+  it("'wan' without a 2.1 file falls to a 16-channel hunyuan VAE, never the 1.5 one", async () => {
+    // The 1.5 VAE is 32-channel and would crash Wan 2.1 exactly the way it
+    // crashed FramePack (bob80817, D#104), so it is not a fallback at all.
+    vi.mocked(localFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({ VAELoader: { input: { required: { vae_name: [['wan2.2_vae.safetensors', 'hunyuanvideo15_vae_fp16.safetensors', 'hunyuan_video_vae_bf16.safetensors']] } } } }),
+    } as never)
+    expect(await findMatchingVAE('wan')).toBe('hunyuan_video_vae_bf16.safetensors')
+  })
+
+  it("'wan' with ONLY a 32-channel VAE on disk refuses instead of crashing later", async () => {
     vi.mocked(localFetch).mockResolvedValue({
       ok: true,
       json: async () => ({ VAELoader: { input: { required: { vae_name: [['wan2.2_vae.safetensors', 'hunyuanvideo15_vae_fp16.safetensors']] } } } }),
     } as never)
-    expect(await findMatchingVAE('wan')).toBe('hunyuanvideo15_vae_fp16.safetensors')
+    await expect(findMatchingVAE('wan')).rejects.toThrow('No Wan VAE found')
   })
 })
 

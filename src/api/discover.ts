@@ -439,7 +439,7 @@ export const COMPONENT_REGISTRY: Record<string, ComponentRequirements> = {
   svd: { loader: 'ImageOnlyCheckpointLoader', needsSeparateVAE: false, needsSeparateCLIP: false },
   framepack: {
     loader: 'UNETLoader',
-    vae: { patterns: ['hunyuan', 'wan'], downloadName: 'hunyuanvideo15_vae_fp16.safetensors', downloadUrl: 'https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/vae/hunyuanvideo15_vae_fp16.safetensors', subfolder: 'vae' },
+    vae: { patterns: ['hunyuan_video_vae', 'hunyuan'], downloadName: 'hunyuan_video_vae_bf16.safetensors', downloadUrl: 'https://huggingface.co/Comfy-Org/HunyuanVideo_repackaged/resolve/main/split_files/vae/hunyuan_video_vae_bf16.safetensors', subfolder: 'vae' },
     clip: { patterns: ['llava', 'qwen'], downloadName: 'llava_llama3_fp8_scaled.safetensors', downloadUrl: 'https://huggingface.co/Comfy-Org/HunyuanVideo_repackaged/resolve/main/split_files/text_encoders/llava_llama3_fp8_scaled.safetensors', subfolder: 'text_encoders' },
     needsSeparateVAE: true, needsSeparateCLIP: true,
   },
@@ -1697,10 +1697,10 @@ export function getVideoBundles(): ModelBundle[] {
         },
         {
           name: 'HunyuanVideo VAE',
-          description: 'Required video encoder/decoder (shared with HunyuanVideo).',
-          pulls: '', tags: ['VAE', '2.3 GB'], updated: '',
-          downloadUrl: 'https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/vae/hunyuanvideo15_vae_fp16.safetensors',
-          filename: 'hunyuanvideo15_vae_fp16.safetensors', subfolder: 'vae', sizeGB: 2.3,
+          description: 'Required video encoder/decoder (HunyuanVideo 1.0, the backbone FramePack was trained on).',
+          pulls: '', tags: ['VAE', '493 MB'], updated: '',
+          downloadUrl: 'https://huggingface.co/Comfy-Org/HunyuanVideo_repackaged/resolve/main/split_files/vae/hunyuan_video_vae_bf16.safetensors',
+          filename: 'hunyuan_video_vae_bf16.safetensors', subfolder: 'vae', sizeGB: 0.5,
         },
         {
           name: 'CLIP-L Text Encoder',
