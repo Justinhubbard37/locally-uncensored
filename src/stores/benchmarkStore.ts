@@ -240,6 +240,16 @@ export function getTruncatedCount(results: Record<string, BenchmarkResult[]>, mo
   return (results[modelName] ?? []).filter((r) => r.finishReason === 'length').length
 }
 
+/**
+ * Runs the emergency brake stopped: a model looping instead of answering
+ * (ElBiggus, issue #106). Separate from `truncated`, which is an honest run
+ * that met the token budget with the answer still coming.
+ */
+export function getRunawayCount(results: Record<string, BenchmarkResult[]>, modelName: string): number {
+  return (results[modelName] ?? [])
+    .filter((r) => r.finishReason === 'runaway' || r.finishReason === 'timeout').length
+}
+
 export interface LeaderboardEntry {
   model: string
   avgTps: number
@@ -248,20 +258,49 @@ export interface LeaderboardEntry {
   accuracy: number | null
   thinkShare: number | null
   truncated: number
+  runaway: number
+  /** What the board is ordered by. See rankingScore. */
+  score: number
 }
 
-/** Get leaderboard sorted by avg tokens/sec, with the economy stats alongside
- *  so speed is read next to what it cost and whether the answer was right. */
+/**
+ * Speed weighted by how often the answer was right, in tokens per second.
+ *
+ * Ordering by raw tok/s alone was the second half of ElBiggus's report
+ * (issue #106): it puts a model that answers wrong twice as fast above one
+ * that answers correctly, and the number carries no hint that correctness was
+ * even measured. Multiplying is the honest reading of "useful throughput": at
+ * 50% accuracy half the tokens were wasted, so the model earns half its rate.
+ *
+ * A model whose runs predate correctness scoring keeps its raw rate rather
+ * than being pushed to the bottom by a missing field, and the board shows the
+ * accuracy column empty so the gap is visible instead of silently assumed.
+ */
+export function rankingScore(avgTps: number, accuracy: number | null): number {
+  return Math.round(avgTps * (accuracy ?? 1) * 10) / 10
+}
+
+/** The leaderboard, ordered by useful throughput (rankingScore) with every
+ *  input to it visible alongside, so the ranking can be checked by eye rather
+ *  than taken on faith. */
 export function getLeaderboard(results: Record<string, BenchmarkResult[]>): LeaderboardEntry[] {
   return Object.entries(results)
-    .map(([model, runs]) => ({
-      model,
-      avgTps: Math.round((runs.reduce((s, r) => s + r.tokensPerSec, 0) / runs.length) * 10) / 10,
-      runs: runs.length,
-      avgTokens: getAverageTokens(results, model),
-      accuracy: getAccuracy(results, model),
-      thinkShare: getAverageThinkShare(results, model),
-      truncated: getTruncatedCount(results, model),
-    }))
-    .sort((a, b) => b.avgTps - a.avgTps)
+    .map(([model, runs]) => {
+      const avgTps = Math.round((runs.reduce((s, r) => s + r.tokensPerSec, 0) / runs.length) * 10) / 10
+      const accuracy = getAccuracy(results, model)
+      return {
+        model,
+        avgTps,
+        runs: runs.length,
+        avgTokens: getAverageTokens(results, model),
+        accuracy,
+        thinkShare: getAverageThinkShare(results, model),
+        truncated: getTruncatedCount(results, model),
+        runaway: getRunawayCount(results, model),
+        score: rankingScore(avgTps, accuracy),
+      }
+    })
+    // Raw speed breaks a tie, so two models with the same useful throughput
+    // still sort deterministically.
+    .sort((a, b) => b.score - a.score || b.avgTps - a.avgTps)
 }

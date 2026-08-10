@@ -35,7 +35,13 @@ export function useBenchmark() {
           signal: abortRef.current.signal,
         })
 
-        const m = await measureRun(stream, prompt.check)
+        // The brake aborts the request itself, not just our reading of it:
+        // dropping the stream would leave the model generating into nothing,
+        // still holding the GPU (ElBiggus, issue #106).
+        const controller = abortRef.current
+        const m = await measureRun(stream, prompt.check, {
+          onLimit: () => controller.abort(),
+        })
 
         store.addResult({
           modelName,

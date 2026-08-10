@@ -125,8 +125,11 @@ export function BenchmarkView() {
             </h2>
             <div className="space-y-2">
               {leaderboard.map((entry, i) => {
-                const maxTps = leaderboard[0].avgTps
-                const barWidth = maxTps > 0 ? (entry.avgTps / maxTps) * 100 : 0
+                // The bar follows the ranking, so the picture and the order
+                // cannot disagree (issue #106: a board sorted one way and
+                // drawn another is where "black box" comes from).
+                const topScore = leaderboard[0].score
+                const barWidth = topScore > 0 ? (entry.score / topScore) * 100 : 0
 
                 return (
                   <div key={entry.model} className="flex items-center gap-3">
@@ -138,7 +141,14 @@ export function BenchmarkView() {
                         <span className="text-[0.7rem] text-gray-800 dark:text-gray-200 truncate font-medium">{entry.model}</span>
                         <span className="text-[0.65rem] text-gray-600 dark:text-gray-400 font-mono shrink-0 ml-2 flex items-center gap-1">
                           <Zap size={10} className="text-amber-400" />
-                          {entry.avgTps} t/s
+                          <span title="Useful throughput: the average rate multiplied by how often the answer was right. This is what the board is ordered by.">
+                            {entry.score} t/s useful
+                          </span>
+                          {entry.score !== entry.avgTps && (
+                            <span className="text-gray-500" title="Raw average rate, correct answers and wrong ones counted alike">
+                              ({entry.avgTps} raw)
+                            </span>
+                          )}
                         </span>
                       </div>
                       <div className="w-full h-1.5 rounded-full bg-gray-200 dark:bg-white/5 overflow-hidden">
@@ -173,6 +183,11 @@ export function BenchmarkView() {
                             {entry.truncated} cut off
                           </span>
                         )}
+                        {entry.runaway > 0 && (
+                          <span title="Runs stopped by the emergency brake: the model kept generating far past anything the task needs, so it was aborted and counted as wrong." className="text-red-500">
+                            {entry.runaway} ran away
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -180,7 +195,9 @@ export function BenchmarkView() {
               })}
             </div>
             <p className="text-[0.55rem] text-gray-500 mt-3">
-              {leaderboard.reduce((s, e) => s + e.runs, 0)} total runs across {leaderboard.length} models
+              {leaderboard.reduce((s, e) => s + e.runs, 0)} total runs across {leaderboard.length} models.
+              {' '}Ordered by average tokens per second multiplied by how often the answer was right,
+              so a fast model that answers wrong does not outrank a slower one that answers correctly.
             </p>
           </div>
         )}

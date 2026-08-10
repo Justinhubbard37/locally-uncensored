@@ -40,7 +40,7 @@ describe('measureRun', () => {
         { done: true, finishReason: 'length', evalCount: 300, evalDurationMs: 6000 },
       ]),
       check('reasoning'),
-      steppedClock(0, 200, 6200),
+      { clock: steppedClock(0, 200, 6200) },
     )
     expect(m.correct).toBe(false) // the answer was never printed
     expect(m.finishReason).toBe('length') // and this says why
@@ -59,7 +59,7 @@ describe('measureRun', () => {
         { done: true, finishReason: 'stop', evalCount: 40, evalDurationMs: 1000 },
       ]),
       check('reasoning'),
-      steppedClock(0, 120, 1120),
+      { clock: steppedClock(0, 120, 1120) },
     )
     expect(m.correct).toBe(true)
     expect(m.finishReason).toBe('stop')
@@ -77,7 +77,7 @@ describe('measureRun', () => {
         { done: true, finishReason: 'stop' },
       ]),
       check('code'),
-      steppedClock(0, 100, 1100),
+      { clock: steppedClock(0, 100, 1100) },
     )
     expect(m.thinkTokens).toBe(0)
     expect(m.totalTokens).toBe(2) // two content chunks, JS fallback (no API metrics)
@@ -92,7 +92,7 @@ describe('measureRun', () => {
     const m = await measureRun(
       streamOf([{ content: 'nine' }, { done: true, finishReason: 'stop' }]),
       check('reasoning'),
-      steppedClock(0, 10, 60),
+      { clock: steppedClock(0, 10, 60) },
     )
     expect(m.correct).toBe(true) // spelled-out answer
     expect(m.tokensPerSec).toBeCloseTo((1 / 60) * 1000, 3)
@@ -102,7 +102,7 @@ describe('measureRun', () => {
     const m = await measureRun(
       streamOf([{ content: 'partial ans' }, { done: true, finishReason: 'disconnect' }]),
       check('code'),
-      steppedClock(0, 50, 550),
+      { clock: steppedClock(0, 50, 550) },
     )
     expect(m.finishReason).toBe('disconnect')
     expect(m.correct).toBe(false)

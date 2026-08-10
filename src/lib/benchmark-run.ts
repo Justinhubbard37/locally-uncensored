@@ -22,11 +22,42 @@ export interface RunMeasurement {
   correct: boolean
 }
 
+/**
+ * The emergency brake (ElBiggus, issue #106, RTX 5080 / Win11 25h2): a model
+ * that derails into a loop emits two orders of magnitude more tokens than the
+ * task needs and the benchmark simply stops moving, with no way to tell a
+ * long run from a dead one. The longest honest answer here is fifty numbers
+ * on their own lines plus some reasoning, so a few hundred tokens; 8000 is far
+ * outside anything the three prompts can legitimately produce.
+ *
+ * The wall clock is the second half of the brake, for a machine so slow that
+ * a runaway would still be under the token cap an hour in. It is deliberately
+ * generous: a big model on CPU is slow, not broken.
+ */
+export const RUNAWAY_TOKEN_CAP = 8000
+export const RUNAWAY_MS_CAP = 300_000
+
+export interface MeasureOptions {
+  /** Injected so a test can make timing deterministic. */
+  clock?: () => number
+  maxTokens?: number
+  maxMs?: number
+  /** Called the moment a cap trips, so the caller can abort the upstream
+   *  request rather than leave the model generating into a dropped stream. */
+  onLimit?: (reason: 'runaway' | 'timeout') => void
+}
+
 export async function measureRun(
   stream: AsyncIterable<ChatStreamChunk>,
   check: (answer: string) => boolean,
-  clock: () => number = () => performance.now(),
+  options: MeasureOptions = {},
 ): Promise<RunMeasurement> {
+  const {
+    clock = () => performance.now(),
+    maxTokens = RUNAWAY_TOKEN_CAP,
+    maxMs = RUNAWAY_MS_CAP,
+    onLimit,
+  } = options
   const startTime = clock()
   let firstTokenTime = 0
   let contentCount = 0
@@ -60,6 +91,25 @@ export async function measureRun(
     if (chunk.evalDurationMs !== undefined && chunk.evalDurationMs > 0) {
       apiEvalDurationMs = chunk.evalDurationMs
     }
+
+    // The brake. Breaking out closes the generator; onLimit fires AFTER the
+    // loop, because aborting mid-iteration would race the generator's own
+    // cleanup and could turn a recorded result into a thrown AbortError. The
+    // run is still recorded either way: a model that ran away is a result
+    // about that model, and dropping it would leave the board blank exactly
+    // where the answer is "it derailed".
+    const limit = contentCount + thinkCount > maxTokens
+      ? 'runaway' as const
+      : clock() - startTime > maxMs
+        ? 'timeout' as const
+        : null
+    if (limit) {
+      finishReason = limit
+      break
+    }
+  }
+  if (finishReason === 'runaway' || finishReason === 'timeout') {
+    onLimit?.(finishReason)
   }
 
   const totalTime = clock() - startTime
@@ -111,7 +161,8 @@ export async function measureRun(
     finishReason,
     // The answer is the visible output only. A model that reasoned its way to
     // the right number but never printed it fails here, which is the whole
-    // point of measuring correctness next to speed.
-    correct: check(answerText),
+    // point of measuring correctness next to speed. A run the brake stopped is
+    // wrong by definition, whatever happens to sit in the partial text.
+    correct: finishReason === 'runaway' || finishReason === 'timeout' ? false : check(answerText),
   }
 }
