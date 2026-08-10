@@ -32,6 +32,14 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: '2.6.4',
+    headline: 'What you see is what you pay',
+    lines: [
+      'Cloud off means cloud off: with no local model running, the switch used to keep the cloud model silently active and chats kept billing credits. The app now refuses any model from the wrong mode.',
+      'The music price in the picker follows the length slider live. Billing was always per second, but the label quoted 1 minute, so a 3 minute song looked three times cheaper than it was.',
+    ],
+  },
+  {
     version: '2.6.3',
     headline: 'Agent runs you can trust, and a lighter, faster app',
     lines: [

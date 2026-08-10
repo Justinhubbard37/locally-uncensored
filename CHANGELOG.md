@@ -4,6 +4,23 @@ All notable changes to Locally Uncensored are documented here.
 
 ## [Unreleased]
 
+## [2.6.4] - 2026-08-09
+
+Two money fixes, straight from bug-reports: what the app shows is what you
+pay, and the Cloud switch really means off.
+
+### Fixed
+
+- **Cloud off means cloud off.** Flipping the switch to Local while no local
+  model was installed or running silently kept the cloud model active, and
+  chats kept billing credits. The send path now refuses any model from the
+  wrong mode, and the selection clears instead of lying, so the picker asks
+  for a real local model.
+- **The music price follows the length slider.** The model picker quoted a
+  fixed 1 minute price while billing runs per second, so a 3 minute song
+  cost three times the shown number. The price next to each music model now
+  updates live as you move the length slider: what you see is what you pay.
+
 ## [2.6.3] - 2026-08-08
 
 The reliability release: a week of driving the shipped app end to end through
