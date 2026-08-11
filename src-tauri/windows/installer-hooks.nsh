@@ -73,7 +73,53 @@
   ${EndIf}
 !macroend
 
+; Free the bundled engine before the new files land. Live in EVERY build.
+;
+; aldrich_ironhart, 2026-08-10: the update stopped at "Error opening file for
+; writing: D:\Locally Uncensored\llama-server.exe" with Abort, Retry, Ignore.
+; llama-server.exe is our own sidecar (externalBin), and Windows locks a running
+; image against writes, so the copy cannot succeed while it lives. Rust kills it
+; on every orderly exit (state.rs shutdown_subprocesses), which is exactly why
+; the installer never accounted for the cases that are left: the app still open
+; during a manual install, or a sidecar orphaned by a crash. Retry then loops on
+; the same lock and Ignore is worse than it looks, it leaves the new app running
+; last release's engine.
+;
+; The test is the write itself, not a process list: if the file opens for
+; writing, nothing holds it and we touch nothing.
+!macro LU_FREE_SIDECAR
+  Push $R3
+  Push $R4
+  Push $R9
+  StrCpy $R4 0
+  ${Do}
+    ${IfNot} ${FileExists} "$INSTDIR\llama-server.exe"
+      ${ExitDo}
+    ${EndIf}
+    ClearErrors
+    FileOpen $R3 "$INSTDIR\llama-server.exe" a
+    ${IfNot} ${Errors}
+      FileClose $R3
+      ${ExitDo}
+    ${EndIf}
+    ${If} $R4 >= 4
+      ; Still locked after four rounds. Fall through and let the stock error
+      ; dialog appear rather than spin here forever.
+      ${ExitDo}
+    ${EndIf}
+    IntOp $R4 $R4 + 1
+    nsExec::Exec '"$SYSDIR\taskkill.exe" /F /T /IM "llama-server.exe"'
+    Pop $R9
+    Sleep 800
+  ${Loop}
+  Pop $R9
+  Pop $R4
+  Pop $R3
+!macroend
+
 !macro NSIS_HOOK_PREINSTALL
+  !insertmacro LU_FREE_SIDECAR
+
 !if "${PRODUCTNAME}" != "Locally Uncensored"
   !insertmacro LU_REMOVE_OLD_NSIS HKCU
   !insertmacro LU_REMOVE_OLD_NSIS HKLM
