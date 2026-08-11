@@ -1,6 +1,9 @@
 import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
 import { v4 as uuid } from 'uuid'
 import { normalizeStagedPath } from '../lib/staged-overlay'
+import { idbStorage } from '../lib/idbStorage'
+import { coalescedJSONStorage } from '../lib/coalescedStorage'
 
 export interface StagedChange {
   /** Stable id assigned at stage-time so the UI can key + remove safely. */
@@ -71,7 +74,68 @@ function sameFile(a: Pick<StagedChange, 'path' | 'resolvedPath'>, b: Pick<Staged
   )
 }
 
-export const useStagedChangesStore = create<StagedChangesState>()((set, get) => ({
+/**
+ * The queue holds approved work that is not on disk yet, so it must survive a
+ * restart. It did not: the store lived in memory only, and an update (which is
+ * a restart) silently emptied it. Morgan lost a full run that way on
+ * 2026-08-11, on top of the applies that were refused.
+ *
+ * IndexedDB, not localStorage: an entry carries the file twice, before and
+ * after, and a handful of source files blows past the ~5 MB cap. The write is
+ * coalesced for the same reason the chat history is (2026-08-03: a per-set
+ * write serialised multi-megabyte state on every frame and took the renderer's
+ * memory with it).
+ */
+const stagedStorage = coalescedJSONStorage<StagedChangesState>(idbStorage)
+
+/** Force the queue out now instead of waiting for the coalescing window. The
+ *  end of a run is the honest durability point, an IndexedDB write cannot
+ *  finish during unload. */
+export function flushStagedPersist(): Promise<void> {
+  return stagedStorage.flush()
+}
+
+if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+  window.addEventListener('pagehide', () => { void stagedStorage.flush() })
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') void stagedStorage.flush()
+  })
+}
+
+/** Two weeks. A pending change older than that is measured against a project
+ *  that has moved on, and keeping it forever only grows the database. */
+const MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000
+
+/**
+ * What comes back from disk is data, not state we control: an older build, a
+ * half written record, a hand edited database. Keep every entry that still
+ * looks like one and is not ancient, drop the rest. An entry whose age cannot
+ * be read is KEPT, because throwing away work we merely cannot date would be
+ * the very failure this persistence exists to prevent.
+ */
+export function pruneStagedQueues(
+  persisted: unknown,
+  now: number,
+): Record<string, StagedChange[]> {
+  const source = (persisted as Record<string, unknown> | null | undefined) ?? {}
+  if (typeof source !== 'object') return {}
+  const out: Record<string, StagedChange[]> = {}
+  for (const [chatId, raw] of Object.entries(source)) {
+    if (!Array.isArray(raw)) continue
+    const kept = raw.filter((c): c is StagedChange => {
+      if (!c || typeof c !== 'object') return false
+      const entry = c as Partial<StagedChange>
+      if (typeof entry.id !== 'string' || typeof entry.path !== 'string') return false
+      if (typeof entry.newContent !== 'string') return false
+      if (typeof entry.stagedAt !== 'number' || !Number.isFinite(entry.stagedAt)) return true
+      return now - entry.stagedAt < MAX_AGE_MS
+    })
+    if (kept.length > 0) out[chatId] = kept
+  }
+  return out
+}
+
+export const useStagedChangesStore = create<StagedChangesState>()(persist((set, get) => ({
   byChat: {},
 
   stage: (chatId, change) => {
@@ -118,4 +182,12 @@ export const useStagedChangesStore = create<StagedChangesState>()((set, get) => 
   list: (chatId) => get().byChat[chatId] ?? [],
 
   get: (chatId, id) => (get().byChat[chatId] ?? []).find((c) => c.id === id),
+}), {
+  name: 'staged-changes',
+  storage: stagedStorage,
+  partialize: (state) => ({ byChat: state.byChat }) as StagedChangesState,
+  merge: (persisted, current) => ({
+    ...current,
+    byChat: pruneStagedQueues((persisted as { byChat?: unknown } | null)?.byChat, Date.now()),
+  }),
 }))

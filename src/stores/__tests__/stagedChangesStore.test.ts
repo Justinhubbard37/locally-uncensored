@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { useStagedChangesStore } from '../stagedChangesStore'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, resolve } from 'node:path'
+import { useStagedChangesStore, pruneStagedQueues } from '../stagedChangesStore'
 
 describe('stagedChangesStore', () => {
   beforeEach(() => {
@@ -145,5 +148,63 @@ describe('stagedChangesStore', () => {
     const found = useStagedChangesStore.getState().get('c1', id)
     expect(found?.path).toBe('a')
     expect(useStagedChangesStore.getState().get('c1', 'unknown')).toBeUndefined()
+  })
+})
+
+// The queue holds approved work that is not on disk yet. It used to live in
+// memory only, so a restart, and therefore every update, emptied it silently
+// (Morgan, 2026-08-11). What comes back from disk is data, not trusted state.
+describe('the queue survives a restart', () => {
+  const NOW = 1_786_500_000_000
+  const DAY = 24 * 60 * 60 * 1000
+  const entry = (over: Record<string, unknown> = {}) => ({
+    id: 'e1',
+    path: 'src/main.py',
+    resolvedPath: '/proj/src/main.py',
+    oldContent: 'before',
+    newContent: 'after',
+    diff: '',
+    stagedAt: NOW - DAY,
+    ...over,
+  })
+
+  it('keeps a pending change that is still recent', () => {
+    const out = pruneStagedQueues({ c1: [entry()] }, NOW)
+    expect(out.c1).toHaveLength(1)
+    expect(out.c1[0].newContent).toBe('after')
+  })
+
+  it('drops what a project has long moved past, and empty chats with it', () => {
+    const out = pruneStagedQueues(
+      { c1: [entry({ stagedAt: NOW - 15 * DAY })], c2: [entry({ id: 'e2' })] },
+      NOW,
+    )
+    expect(out.c1).toBeUndefined()
+    expect(out.c2).toHaveLength(1)
+  })
+
+  it('keeps an entry whose age cannot be read, losing work is the worse failure', () => {
+    const out = pruneStagedQueues({ c1: [entry({ stagedAt: undefined })] }, NOW)
+    expect(out.c1).toHaveLength(1)
+  })
+
+  it('ignores anything that is not a staged change', () => {
+    expect(pruneStagedQueues(undefined, NOW)).toEqual({})
+    expect(pruneStagedQueues({ c1: 'not an array' }, NOW)).toEqual({})
+    expect(pruneStagedQueues({ c1: [null, 42, { id: 'x' }] }, NOW)).toEqual({})
+    // A record with the right shape but no content is not a change either.
+    expect(pruneStagedQueues({ c1: [{ id: 'x', path: 'a' }] }, NOW)).toEqual({})
+  })
+
+  it('writes to IndexedDB through the coalescing wrapper, never to localStorage', () => {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const src = readFileSync(resolve(here, '../stagedChangesStore.ts'), 'utf8')
+    // An entry carries the file twice, so the ~5 MB localStorage cap is not an
+    // option, and a write per set() is what took the renderer's memory out on
+    // 2026-08-03.
+    expect(src).toMatch(/coalescedJSONStorage<StagedChangesState>\(idbStorage\)/)
+    // The word appears in the comment explaining why; the API must not.
+    expect(src).not.toMatch(/localStorage\s*[.[]/)
+    expect(src).toMatch(/export function flushStagedPersist/)
   })
 })

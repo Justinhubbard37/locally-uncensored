@@ -31,7 +31,7 @@ import { requestGenerationCancel } from '../api/vram-handoff'
 import { planWithArchitect, renderArchitectPlanSection } from '../api/agents/architect'
 import { fetchRepoMap, renderRepoMapSection } from '../api/agents/repo-map'
 import { isLocalModelByName } from '../api/agents/model-locality'
-import { useStagedChangesStore } from '../stores/stagedChangesStore'
+import { useStagedChangesStore, flushStagedPersist } from '../stores/stagedChangesStore'
 import { computeUnifiedDiff } from '../lib/diff'
 import { applyUniqueEdit } from '../lib/surgical-edit'
 import { log } from '../lib/logger'
@@ -2013,6 +2013,10 @@ export function useCodex() {
       // (2.6.3 — see coalescedStorage), and losing the tool chain would cost
       // the next turn its context, not just the transcript.
       void flushChatPersist()
+      // Same reasoning for the approval queue: what is still pending is work
+      // the user paid for and has not seen land yet. It has to be on disk
+      // before the app can be closed or updated (2026-08-11).
+      void flushStagedPersist()
       codexStore.setThreadStatus(convId, 'idle')
 
       // The per-batch bump above only fires when a batch RETURNS. A user who
