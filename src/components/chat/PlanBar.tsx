@@ -14,11 +14,25 @@ import { useState } from 'react'
 import { CheckCircle2, Circle, ChevronDown, ChevronRight, Loader2, ListTodo, X } from 'lucide-react'
 import { useTodoStore } from '../../stores/todoStore'
 import { useChatStore } from '../../stores/chatStore'
+import { useStagedChangesStore } from '../../stores/stagedChangesStore'
+
+/** What the collapsed bar says once the model ticked off every step. Ticking
+ *  off a step is not the same as the change being on disk. */
+export function planDoneLabel(pendingChanges: number): string {
+  if (pendingChanges <= 0) return 'every step done'
+  return `every step done, ${pendingChanges} change${pendingChanges === 1 ? '' : 's'} still waiting for your approval`
+}
 
 export function PlanBar() {
   const activeConversationId = useChatStore((s) => s.activeConversationId)
   const todos = useTodoStore((s) =>
     activeConversationId ? s.byConversation[activeConversationId] : undefined,
+  )
+  // Ticking off every step is not the same as the work being on disk. In
+  // Stage-and-Approve the writes wait in the queue, and Morgan read "every step
+  // done" on a run whose six file changes had all been refused (2026-08-11).
+  const pending = useStagedChangesStore((s) =>
+    activeConversationId ? (s.byChat[activeConversationId]?.length ?? 0) : 0,
   )
   const clearTodos = useTodoStore((s) => s.clearTodos)
   const [expanded, setExpanded] = useState(false)
@@ -98,9 +112,16 @@ export function PlanBar() {
         )}
 
         {!expanded && allDone && (
-          <div className="px-2 pb-1 flex items-center gap-1.5">
-            <CheckCircle2 size={9} className="text-emerald-400 shrink-0" />
-            <span className="text-[0.55rem] text-emerald-400/80">every step done</span>
+          <div className="px-2 pb-1 flex items-center gap-1.5" data-testid="plan-all-done">
+            <CheckCircle2
+              size={9}
+              className={`${pending > 0 ? 'text-amber-400' : 'text-emerald-400'} shrink-0`}
+            />
+            <span
+              className={`text-[0.55rem] ${pending > 0 ? 'text-amber-400/90' : 'text-emerald-400/80'}`}
+            >
+              {planDoneLabel(pending)}
+            </span>
           </div>
         )}
       </div>

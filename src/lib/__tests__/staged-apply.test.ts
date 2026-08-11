@@ -150,6 +150,46 @@ describe('applyStagedChange refuses to overwrite a file that moved on', () => {
     expect(useStagedChangesStore.getState().list(CHAT)).toHaveLength(0)
   })
 
+  // Refusing was too blunt: in Morgan's run (2026-08-11) every file had moved
+  // on, so a finished plan wrote nothing at all. A foreign edit somewhere else
+  // in the file is not a reason to drop work the user approved.
+  it('merges a foreign edit elsewhere in the file and says so', async () => {
+    route('a\nb\nc\nadded by another tool')
+    stage('a.py', {
+      resolvedPath: '/proj/a.py',
+      workingDirectory: '/proj',
+      oldContent: 'a\nb\nc',
+      newContent: 'a\nCHANGED\nc',
+    })
+    await applyStagedChange(CHAT, useStagedChangesStore.getState().list(CHAT)[0])
+
+    expect(fsWrite).toHaveBeenCalledWith('fs_write', {
+      path: '/proj/a.py',
+      content: 'a\nCHANGED\nc\nadded by another tool',
+      chatId: CHAT,
+      workingDirectory: '/proj',
+    })
+    expect(useStagedChangesStore.getState().list(CHAT)).toHaveLength(0)
+    expect(addMessage.mock.calls[0][1].content).toMatch(/merged with 1 change made on disk/)
+  })
+
+  it('counts an already-applied file as done instead of failing it', async () => {
+    route('a\nCHANGED\nc')
+    stage('a.py', { oldContent: 'a\nb\nc', newContent: 'a\nCHANGED\nc' })
+    await applyStagedChange(CHAT, useStagedChangesStore.getState().list(CHAT)[0])
+    expect(useStagedChangesStore.getState().list(CHAT)).toHaveLength(0)
+    expect(addMessage.mock.calls[0][1].content).not.toMatch(/merged/)
+  })
+
+  it('names the collision when the same lines moved on both sides', async () => {
+    route('a\nTHEIRS\nc')
+    stage('a.py', { oldContent: 'a\nb\nc', newContent: 'a\nOURS\nc' })
+    await expect(
+      applyStagedChange(CHAT, useStagedChangesStore.getState().list(CHAT)[0]),
+    ).rejects.toThrow(/same place this edit touches/)
+    expect(fsWrite).not.toHaveBeenCalledWith('fs_write', expect.anything())
+  })
+
   it('one drifted file never blocks the rest of an apply-all', async () => {
     stage('good.py', { oldContent: 'base' })
     stage('drifted.py', { oldContent: 'base' })

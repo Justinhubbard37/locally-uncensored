@@ -203,7 +203,10 @@ export function parseUnifiedDiff(diff: string): ParsedDiff {
 
 // ── internals ──────────────────────────────────────────────────────
 
-type Op =
+/** One run of lines that are equal, added or removed. Exported with
+ *  `diffLines` so the three-way merge works off the same line diff the user
+ *  reviewed, instead of a second implementation that could disagree with it. */
+export type Op =
   | { kind: 'equal'; text: string[] }
   | { kind: 'add'; text: string[] }
   | { kind: 'remove'; text: string[] }
@@ -218,7 +221,7 @@ type Op =
 const MAX_LCS_CELLS = 4_000_000
 
 /** LCS-based line diff. Grouped into op runs for a compact unified format. */
-function diffLines(a: string[], b: string[]): Op[] {
+export function diffLines(a: string[], b: string[]): Op[] {
   let head = 0
   while (head < a.length && head < b.length && a[head] === b[head]) head++
   let tail = 0

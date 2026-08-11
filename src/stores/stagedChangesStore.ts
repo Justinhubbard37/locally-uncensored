@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { v4 as uuid } from 'uuid'
+import { normalizeStagedPath } from '../lib/staged-overlay'
 
 export interface StagedChange {
   /** Stable id assigned at stage-time so the UI can key + remove safely. */
@@ -39,7 +40,7 @@ export interface StagedChange {
 interface StagedChangesState {
   /** Per-conversation queue. Cleared on apply-all / reject-all / chat reset. */
   byChat: Record<string, StagedChange[]>
-  /** Adds a change, returns the assigned id. Identical paths overwrite the prior entry — the model usually means the latest write to win. */
+  /** Adds a change, returns the assigned id. The same file overwrites its prior entry, the model usually means the latest write to win. */
   stage: (
     chatId: string,
     change: Omit<StagedChange, 'id' | 'stagedAt'>,
@@ -54,6 +55,22 @@ interface StagedChangesState {
   get: (chatId: string, id: string) => StagedChange | undefined
 }
 
+/**
+ * One file, one entry. The queue used to dedupe on the raw `path` string while
+ * every reader (findStagedForPath, the overlay) matches normalized and also on
+ * `resolvedPath`. A model that writes `main.py` once and `C:\proj\main.py` the
+ * next time therefore left TWO entries for one file, both anchored on the same
+ * disk baseline. Applying them wrote the older version first, and the newer one
+ * then hit the drift guard and refused: the customer lost the edit he approved
+ * and kept the one he did not (Morgan, 2026-08-11).
+ */
+function sameFile(a: Pick<StagedChange, 'path' | 'resolvedPath'>, b: Pick<StagedChange, 'path' | 'resolvedPath'>): boolean {
+  return (
+    normalizeStagedPath(a.path) === normalizeStagedPath(b.path) ||
+    normalizeStagedPath(a.resolvedPath || a.path) === normalizeStagedPath(b.resolvedPath || b.path)
+  )
+}
+
 export const useStagedChangesStore = create<StagedChangesState>()((set, get) => ({
   byChat: {},
 
@@ -61,8 +78,8 @@ export const useStagedChangesStore = create<StagedChangesState>()((set, get) => 
     const id = uuid()
     set((state) => {
       const prev = state.byChat[chatId] ?? []
-      // Same path — replace, don't dupe. The diff carries the latest intent.
-      const without = prev.filter((c) => c.path !== change.path)
+      // Same file, replace, don't dupe. The diff carries the latest intent.
+      const without = prev.filter((c) => !sameFile(c, change))
       return {
         byChat: {
           ...state.byChat,

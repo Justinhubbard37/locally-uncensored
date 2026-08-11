@@ -43,6 +43,39 @@ describe('stagedChangesStore', () => {
     expect(list[0].newContent).toBe('v2')
   })
 
+  // The queue used to dedupe on the raw string while every reader matches
+  // normalized and on resolvedPath too. One file then sat in the queue twice,
+  // the older entry was written first, and the newer one died in the drift
+  // guard: the user lost the edit he approved (Morgan, 2026-08-11).
+  it('one file is one entry, whatever spelling the model used', () => {
+    const stage = (path: string, resolvedPath: string, newContent: string) =>
+      useStagedChangesStore.getState().stage('c1', {
+        path,
+        resolvedPath,
+        oldContent: 'base',
+        newContent,
+        diff: '',
+      })
+
+    stage('main.py', 'C:/proj/main.py', 'v1')
+    stage('C:\\proj\\main.py', 'C:\\proj\\main.py', 'v2')
+    stage('./main.py', 'C:/PROJ/main.py', 'v3')
+
+    const list = useStagedChangesStore.getState().list('c1')
+    expect(list).toHaveLength(1)
+    expect(list[0].newContent).toBe('v3')
+  })
+
+  it('keeps two genuinely different files apart', () => {
+    useStagedChangesStore.getState().stage('c1', {
+      path: 'src/a.ts', resolvedPath: '/proj/src/a.ts', oldContent: '', newContent: 'x', diff: '',
+    })
+    useStagedChangesStore.getState().stage('c1', {
+      path: 'lib/a.ts', resolvedPath: '/proj/lib/a.ts', oldContent: '', newContent: 'y', diff: '',
+    })
+    expect(useStagedChangesStore.getState().list('c1')).toHaveLength(2)
+  })
+
   it('queues across chats are isolated', () => {
     useStagedChangesStore.getState().stage('c1', {
       path: 'a',
