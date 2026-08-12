@@ -30,6 +30,7 @@ import {
   cloudMediaLive,
 } from '../stores/cloudCatalogStore'
 import { checkPromptSafety, SAFETY_BLOCK_MESSAGE } from '../lib/render/safety'
+import { resolveRunSeed } from '../lib/run-seed'
 
 // Character-Studio generation endpoint per trained-LoRA family (fast default;
 // mirrors uselu's LORA_GEN_FAMILY — ltx-2 video characters have no image-gen
@@ -196,6 +197,11 @@ export function useCloudCreate(opts: { onQuotaChange?: () => void } = {}) {
     const ac = new AbortController()
     activeAbort = ac
 
+    // Same rule as the local path (#110): throw the dice here, send that exact
+    // number, record that exact number. Leaving the seed out let the provider
+    // roll one we never learn, and the gallery wrote 0 for it.
+    const runSeed = resolveRunSeed(s.seed)
+
     try {
       // Utility endpoints (removebg/upscale/eraser) and the 2.5.8 specialized
       // ops take no generation knobs — send only what the op consumes so the
@@ -211,7 +217,7 @@ export function useCloudCreate(opts: { onQuotaChange?: () => void } = {}) {
             height: s.height,
             steps: s.steps,
             cfg: s.cfgScale,
-            seed: s.seed === -1 ? undefined : s.seed,
+            seed: runSeed,
           }
       if (kind === 'video' && !bare) {
         params.frames = s.frames
@@ -351,7 +357,7 @@ export function useCloudCreate(opts: { onQuotaChange?: () => void } = {}) {
           negativePrompt: s.negativePrompt,
           model,
           modelType: 'unknown',
-          seed: s.seed === -1 ? 0 : s.seed,
+          seed: runSeed,
           steps: s.steps,
           cfgScale: s.cfgScale,
           sampler: s.sampler,

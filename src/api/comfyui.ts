@@ -1,6 +1,7 @@
 import { comfyuiUrl, localFetch, fetchLocalhostBytes, isTauri, backendCall } from "./backend"
 import { log } from "../lib/logger"
 import { LU_CLIENT_PREFIX } from "./comfyui-ws"
+import { resolveRunSeed } from '../lib/run-seed'
 
 // ─── Control-plane fetch timeouts ───
 //
@@ -1435,7 +1436,7 @@ function validateVideoParams(params: VideoParams) {
 }
 
 function getSeed(seed: number): number {
-  return seed === -1 ? Math.floor(Math.random() * 2147483647) : Math.floor(seed)
+  return resolveRunSeed(seed)
 }
 
 // ─── Snap video dimensions to valid values ───

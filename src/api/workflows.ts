@@ -4,6 +4,7 @@ import type { GenerateParams, VideoParams } from './comfyui'
 import { findMatchingVAE, findMatchingCLIP } from './comfyui'
 import { fetchExternal, fetchExternalBytes } from './backend'
 import { log } from '../lib/logger'
+import { resolveRunSeed } from '../lib/run-seed'
 import type {
   WorkflowTemplate,
   WorkflowSearchResult,
@@ -335,7 +336,7 @@ export async function injectParameters(
   inject(paramMap.model, params.model)
   inject(paramMap.positivePrompt, params.prompt)
   inject(paramMap.negativePrompt, params.negativePrompt || '')
-  inject(paramMap.seed, params.seed === -1 ? Math.floor(Math.random() * 2147483647) : params.seed)
+  inject(paramMap.seed, resolveRunSeed(params.seed))
   inject(paramMap.steps, params.steps)
   inject(paramMap.cfgScale, params.cfgScale)
   let widthMapping = paramMap.width

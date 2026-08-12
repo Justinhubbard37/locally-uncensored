@@ -1,6 +1,7 @@
 import { classifyModel, findMatchingVAE, findMatchingCLIP, findFluxCLIPPair } from './comfyui'
 import type { ModelType, GenerateParams, VideoParams } from './comfyui'
 import { log } from '../lib/logger'
+import { resolveRunSeed } from '../lib/run-seed'
 import {
   getAllNodeInfo,
   categorizeNodes,
@@ -416,7 +417,7 @@ export async function buildDynamicWorkflow(
     )
   }
 
-  const seed = params.seed === -1 ? Math.floor(Math.random() * 2147483647) : params.seed
+  const seed = resolveRunSeed(params.seed)
 
   // ─── Wrapper Strategies (custom node pipelines — completely different node chains) ───
 
@@ -1602,7 +1603,7 @@ export function buildMotionWorkflow(params: LocalOpParams, seed: number, allNode
  *  catalogue once and dispatches to the lane's builder. */
 export async function buildLocalOpWorkflow(params: LocalOpParams): Promise<Record<string, any>> {
   const allNodes = await getAllNodeInfo()
-  const seed = params.seed === -1 ? Math.floor(Math.random() * 2147483647) : params.seed
+  const seed = resolveRunSeed(params.seed)
   switch (params.op) {
     case 'music': return buildMusicWorkflow(params, seed, allNodes)
     case 'lipsync': return buildS2VWorkflow(params, seed, allNodes)

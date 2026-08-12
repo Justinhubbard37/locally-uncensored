@@ -41,6 +41,7 @@ import { getAllNodeInfo, clearNodeCache } from '../api/comfyui-nodes'
 import { installCustomNodes } from '../api/discover'
 import { backendCall } from '../api/backend'
 import { checkPromptSafety, SAFETY_BLOCK_MESSAGE } from '../lib/render/safety'
+import { resolveRunSeed } from '../lib/run-seed'
 import {
   clearTrainingSet, stageTrainingImage, startCharacterTraining,
   characterTrainingStatus, cancelCharacterTraining,
@@ -444,6 +445,12 @@ export function useCreate() {
       setIsGenerating, setProgress, setCurrentPromptId, setError, addToGallery, addToPromptHistory,
     } = state
 
+    // The dice are thrown here, once, and the number travels with the run.
+    // Every builder used to roll its own -1 internally and keep the result to
+    // itself, so the gallery wrote 0 and no image could ever be reproduced
+    // (#110). A concrete seed also stops those builders from re-rolling.
+    const runSeed = resolveRunSeed(seed)
+
     const isI2I = mode === 'image' && state.imageSubMode === 'img2img'
     // Which redesign intent produced this run (gallery tag).
     const intent = state.intent()
@@ -502,7 +509,7 @@ export function useCreate() {
         state.setProgressPhase('sampling')
         setProgress(40, 'Generating with MLX...')
         const { dataUrl, width: outW, height: outH, localPath } = await generateMlxImageDataUrl({
-          prompt, steps, seed, width, height,
+          prompt, steps, seed: runSeed, width, height,
           model: mlxModelIdFor(effImageModel),
           negativePrompt: negativePrompt || undefined,
         })
@@ -515,7 +522,7 @@ export function useCreate() {
           // localPath is what survives the restart: partialize strips dataUrl,
           // and there is no ComfyUI /view to fall back to on a Mac.
           dataUrl, localPath, prompt, negativePrompt, model: imageModel, modelType: 'unknown',
-          seed: seed === -1 ? 0 : seed, steps, cfgScale, sampler, scheduler,
+          seed: runSeed, steps, cfgScale, sampler, scheduler,
           width: outW || width, height: outH || height, batchSize: 1,
           createdAt: Date.now(), builderUsed: 'dynamic', intent,
         })
@@ -567,7 +574,7 @@ export function useCreate() {
           prompt,
           seconds: Math.max(0.5, frames / Math.max(1, fps)),
           fps,
-          seed: seed === -1 ? undefined : seed,
+          seed: runSeed,
         })
       } catch (e) {
         useCreateStore.getState().setError(`Failed to start: ${e instanceof Error ? e.message : String(e)}`)
@@ -621,7 +628,7 @@ export function useCreate() {
                   // download-to-disk path that wants to reference it directly.
                   localPath: result.output,
                   prompt, negativePrompt, model: videoModel, modelType: 'wan',
-                  seed: seed === -1 ? 0 : seed, steps, cfgScale, sampler, scheduler,
+                  seed: runSeed, steps, cfgScale, sampler, scheduler,
                   width, height, batchSize: 1,
                   createdAt: Date.now(), builderUsed: 'dynamic', intent,
                 })
@@ -781,7 +788,7 @@ export function useCreate() {
       let outputWidth = width
       let outputHeight = height
       const baseParams = {
-        prompt, negativePrompt, model: activeModel, sampler, scheduler, steps, cfgScale, width, height, seed, batchSize,
+        prompt, negativePrompt, model: activeModel, sampler, scheduler, steps, cfgScale, width, height, seed: runSeed, batchSize,
         ...(isRemoveBg && effInputImage ? { removebg: true, inputImage: effInputImage } : {}),
         ...(isI2I && !isRemoveBg && effInputImage ? { inputImage: effInputImage, denoise } : {}),
         ...(!isRemoveBg && maskFilename ? { maskImage: maskFilename, growMaskBy } : {}),
@@ -837,7 +844,7 @@ export function useCreate() {
           model: activeModel,
           prompt,
           negativePrompt,
-          seed, steps, cfgScale, sampler, scheduler,
+          seed: runSeed, steps, cfgScale, sampler, scheduler,
           // The shared width/height/frames sliders follow the picked model via
           // setLocalOpModel; fall back to the architecture defaults when a
           // stale persisted value would be off-grid for the lane.
@@ -1116,7 +1123,7 @@ export function useCreate() {
                       filename: file.filename, subfolder: file.subfolder ?? '', comfyType: file.type ?? 'output',
                       prompt, negativePrompt, model: activeModel,
                       modelType: mode === 'image' ? imageModelType : (videoModelsList.find(m => m.name === activeModel)?.type ?? 'wan'),
-                      seed: seed === -1 ? 0 : seed,
+                      seed: runSeed,
                       steps, cfgScale, sampler, scheduler, width: outputWidth, height: outputHeight, batchSize,
                       createdAt: Date.now(), builderUsed, intent,
                     })
@@ -1214,7 +1221,7 @@ export function useCreate() {
                         filename: file.filename, subfolder: file.subfolder ?? '', comfyType: file.type ?? 'output',
                         prompt, negativePrompt, model: activeModel,
                         modelType: mode === 'image' ? imageModelType : (videoModelsList.find(m => m.name === activeModel)?.type ?? 'wan'),
-                        seed: seed === -1 ? 0 : seed,
+                        seed: runSeed,
                         steps, cfgScale, sampler, scheduler, width: outputWidth, height: outputHeight, batchSize,
                         createdAt: Date.now(), builderUsed,
                       })
@@ -1321,7 +1328,7 @@ export function useCreate() {
                       filename: file.filename, subfolder: file.subfolder ?? '', comfyType: file.type ?? 'output',
                       prompt, negativePrompt, model: activeModel,
                       modelType: mode === 'image' ? imageModelType : (videoModelsList.find(m => m.name === activeModel)?.type ?? 'wan'),
-                      seed: seed === -1 ? 0 : seed,
+                      seed: runSeed,
                       steps, cfgScale, sampler, scheduler, width: outputWidth, height: outputHeight, batchSize,
                       createdAt: Date.now(), builderUsed, intent,
                     })
