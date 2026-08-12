@@ -4,6 +4,56 @@ All notable changes to Locally Uncensored are documented here.
 
 ## [Unreleased]
 
+## [2.6.5] - 2026-08-12
+
+The release that makes updating possible again, plus the work you already
+started surviving that update, and the Create tab telling the truth about
+what it is doing.
+
+### Fixed
+
+- **The update no longer trips over our own engine.** The installer stopped
+  at a locked `llama-server.exe` and rolled back, which meant an app that
+  could not be updated at all, every time, until you killed the process by
+  hand. The installer shuts the engine down first. This one blocks every
+  later update, so it is the reason to install this build.
+- **An approved change actually lands, or says exactly why it cannot.** The
+  approval queue deduplicated on a raw path, the drift guard could only ever
+  reject, and the plan bar lied about progress. Approvals also survive a
+  restart now, which matters because installing an update is a restart: work
+  waiting for your yes is no longer thrown away by the thing meant to rescue
+  it.
+- **A refused tool call ends the run at once and says why**, instead of the
+  agent carrying on as if it had permission.
+- **The trainer repairs its own environment** instead of refusing to start,
+  and FramePack gets back the VAE it was trained with, so image-to-video
+  stops producing mush.
+- **An AMD card shows up without the ROCm command line tools installed.**
+- **The benchmark has a brake.** A model that goes off script can no longer
+  wedge the run, and the board says what it is actually ranking (#106).
+- **The gallery reports the seed you actually rendered with** (#110,
+  ElBiggus). Four different places rolled their own random seed and kept the
+  number to themselves, so every random run was filed as seed 0 and no image
+  you liked could be reproduced. The dice are thrown once per run now, and
+  that number reaches the sampler and the gallery. Cloud runs carry their
+  seed too, instead of letting the provider roll one nobody learns.
+- **Help tooltips are readable again** (#107, ElBiggus). The latent-upscale
+  help text was clipped to about two words by the card it sat in. Tooltips
+  now float above the whole window, flip away from the screen edge and keep
+  pointing at what they explain, everywhere in the app.
+- **The Music tab stops printing cloud facts at local users** (#108,
+  ElBiggus). Running locally it hid the lyrics box while claiming the model
+  writes its own lyrics, described a box that was not on screen, implied more
+  music models were downloadable, and said the length slider bills per second
+  on a machine where nothing is billed. It also offered width and height for
+  audio. All of that is gone: local music always takes your lyrics, and the
+  Music tab has no canvas.
+
+### Changed
+
+- **A build is not a decision.** Release builds land as prereleases and
+  become the update everyone gets only after they have been verified.
+
 ## [2.6.4] - 2026-08-09
 
 Two money fixes, straight from bug-reports: what the app shows is what you
