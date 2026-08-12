@@ -21,6 +21,7 @@ import {
 import { startModelDownload, getDownloadProgress } from '../../../api/discover'
 import { useDownloadStore } from '../../../stores/downloadStore'
 import { getLoraModels } from '../../../api/comfyui'
+import { musicTakesLyrics, musicHowtoLines } from '../../../lib/render/music-ui'
 import { useCreateExp } from './CreateContext'
 import { loadImageRef } from './loadImage'
 import { fetchGalleryItemBlob } from './galleryUrl'
@@ -692,10 +693,20 @@ function MusicControls() {
   const musicLyrics = useCreateStore((s) => s.musicLyrics)
   const setMusicLyrics = useCreateStore((s) => s.setMusicLyrics)
   const cloudOpModel = useCreateStore((s) => s.cloudOpModel)
-  // Only ace-step-1.5 has a lyrics input on the wire (catalog `lyrics` flag);
-  // the other music endpoints write their own lyrics from the prompt, so
-  // offering the box there would be a lie.
-  const canLyrics = cloudModelById(modelForOp('audio', 'music', cloudOpModel))?.lyrics === true
+  const isCloud = useCreateStore((s) => s.backend) === 'cloud'
+  // Cloud: only ace-step-1.5 has a lyrics input on the wire (catalog `lyrics`
+  // flag); the other music endpoints write their own lyrics from the prompt,
+  // so offering the box there would be a lie.
+  // Local: every music checkpoint runs through buildMusicWorkflow, which feeds
+  // `lyrics` straight into the ACE-Step encoder. Asking the CLOUD catalog about
+  // a local checkpoint returns undefined, which is how the local tab ended up
+  // hiding the lyrics box and claiming the model writes its own, while sitting
+  // on the one model that sings yours (#108, ElBiggus).
+  const canLyrics = musicTakesLyrics(
+    isCloud ? 'cloud' : 'local',
+    cloudModelById(modelForOp('audio', 'music', cloudOpModel))?.lyrics === true,
+  )
+  const howtoLines = musicHowtoLines(isCloud ? 'cloud' : 'local')
   const musicHowtoSeen = useCreateStore((s) => s.musicHowtoSeen)
   const setMusicHowtoSeen = useCreateStore((s) => s.setMusicHowtoSeen)
   const [lyricsOpen, setLyricsOpen] = useState(musicLyrics.length > 0)
@@ -761,12 +772,12 @@ function MusicControls() {
             className="overflow-hidden"
           >
             <div className="t-control px-3 py-2 rounded-md bg-white/[0.03] border border-white/[0.06] text-gray-400 space-y-1 text-left">
-              <p className="text-gray-200">Make it sing your words</p>
-              <p>The prompt sets the style: comma-separated tags like slow jazz, smoky female vocals, upright bass.</p>
-              <p>Only ACE-Step 1.5 sings your own lyrics. The other music models write theirs from the prompt.</p>
-              <p>Structure your lines with [Verse], [Chorus] and [Bridge] markers so the model sings them. Plain lines get wrapped in a [Verse] for you.</p>
-              <p>Leave the lyrics box empty for an instrumental track, and write in the language you want sung.</p>
-              <p>The length slider bills per second, tracks can run up to 4 minutes.</p>
+              {/* Copy lives in music-ui.ts so the claims are asserted, not
+                  eyeballed. The local panel used to promise other downloadable
+                  models and per-second billing (#108). */}
+              {howtoLines.map((line, i) => (
+                <p key={i} className={i === 0 ? 'text-gray-200' : undefined}>{line}</p>
+              ))}
             </div>
           </motion.div>
         )}

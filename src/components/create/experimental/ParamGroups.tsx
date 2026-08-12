@@ -33,6 +33,11 @@ export function ParamGroups() {
   const isVideo = meta.isVideo
   const isEdit = meta.id === 'edit'
   const isCloud = s.backend === 'cloud'
+  // Music has no canvas. The size fields, the resolution chips and the
+  // orientation flip all sat on the Music tab doing nothing, which is the first
+  // oddity in #108 ("width and height options which make no sense for audio").
+  // Length lives on the Music controls, where it belongs.
+  const isAudio = meta.id === 'music'
   // The Mac's MLX pipeline only honours prompt/steps/seed/size/negative — every
   // Expert knob (sampler, scheduler, VAE, clip-skip; LoRA has no list without
   // ComfyUI, and denoise/mask belong to intents that aren't local there) is
@@ -77,13 +82,16 @@ export function ParamGroups() {
       >
         {showSteps && <Slider label="Steps" min={1} max={60} step={1} value={s.steps} onChange={s.setSteps} />}
         {showCfg && <Slider label={isVideo ? 'Guidance' : 'CFG scale'} min={0} max={30} step={0.5} value={s.cfgScale} onChange={s.setCfgScale} format={(v) => v.toFixed(1)} />}
+        {!isAudio && (
         <div className="grid grid-cols-2 gap-2">
           <NumberField label="Width" value={s.width} min={64} max={4096} step={64} mono onChange={(v) => s.setSize(v, s.height)} suffix="px" />
           <NumberField label="Height" value={s.height} min={64} max={4096} step={64} mono onChange={(v) => s.setSize(s.width, v)} suffix="px" />
         </div>
+        )}
         {/* D#93 (stasicby): Wan's native sizes as one-click chips, an
             orientation flip, and ratio chips that respend the current pixel
             budget. Everything just writes the same width/height fields. */}
+        {!isAudio && (
         <div className="flex flex-wrap items-center gap-1 pt-1">
           {isVideo && VIDEO_RES_PRESETS.map((p) => (
             <button
@@ -114,6 +122,7 @@ export function ParamGroups() {
             >{r.label}</button>
           ))}
         </div>
+        )}
         {showHiresFix && (
           <div className={cn(
             'overflow-hidden rounded-lg border transition-colors',
