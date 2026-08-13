@@ -13,6 +13,9 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { useReleaseNotesStore, shouldShowReleaseNotes } from '../releaseNotesStore'
 import { RELEASE_NOTES, releaseNoteFor } from '../../lib/release-notes'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, resolve } from 'node:path'
 
 /** A version that really has notes, read from the table rather than hardcoded. */
 const KNOWN = RELEASE_NOTES[0].version
@@ -38,6 +41,20 @@ describe('the notes table', () => {
   it('no version appears twice', () => {
     const versions = RELEASE_NOTES.map((n) => n.version)
     expect(new Set(versions).size).toBe(versions.length)
+  })
+
+  it('THE version being shipped has an entry, and it is the newest one', () => {
+    // The table's own rule is that a version without an entry shows no popup.
+    // That rule is honest and it is also a trap: the release goes out silent
+    // and nobody notices, because nothing fails. 2.6.5 was bumped everywhere
+    // on 2026-08-12 while this table still ended at 2.6.4, and the only thing
+    // that would have caught it was someone remembering. So the version in
+    // package.json is now part of the suite.
+    const shipping = JSON.parse(
+      readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../package.json'), 'utf8'),
+    ).version as string
+    expect(releaseNoteFor(shipping), `no release note for ${shipping}`).toBeDefined()
+    expect(RELEASE_NOTES[0].version, 'the shipping version belongs at the top').toBe(shipping)
   })
 
   it('2.6.3 carries full details with a Local and a Cloud section', () => {

@@ -32,6 +32,42 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: '2.6.5',
+    headline: 'Updating works again, and the work you started survives it',
+    lines: [
+      'The installer used to stop at our own running engine and roll the whole update back, so the app could not be updated at all without killing the process by hand. That is fixed, and it is the reason to install this build.',
+      'In Code mode an approved change actually lands now, or says exactly why it cannot, and anything still waiting for your yes survives a restart. Installing an update is a restart, so this used to throw away the work it was meant to rescue.',
+      'Create tells the truth about what it is doing: Download and install finishes instead of freezing on "Refreshing the model list", the gallery reports the seed you really rendered with, help tooltips are readable, and the Music tab stops quoting cloud prices at local users.',
+      'Dropping files into the app works again on Windows, the trainer repairs its own environment, FramePack stops producing mush, and an AMD card shows up without the ROCm tools installed.',
+    ],
+    details: [
+      {
+        title: 'Local',
+        items: [
+          'The installer shuts our engine down before writing, instead of rolling the update back at a locked llama-server.exe.',
+          'An approved change lands, or names the conflict. Changes waiting for approval are kept across a restart, and the plan bar no longer claims to be finished while writes are still queued.',
+          'A refused tool call ends the run at once and says why, instead of the agent carrying on as if it had permission.',
+          'Dragging files onto the Character Studio board, the chat composer or the RAG panel works again on Windows.',
+          'Download and install waits for ComfyUI to actually list the new model, counts the seconds, restarts the engine once if the scan stalls, and explains itself if that still does not help.',
+          'Character training repairs its own environment instead of refusing to start, and FramePack got back the VAE it was trained with.',
+          'An AMD card is listed even without the ROCm command line tools, and says plainly what could not be verified.',
+          'The gallery reports the seed the image was really made with, so a run can be repeated.',
+          'Help tooltips float above the window instead of being clipped to two words, everywhere in the app.',
+          'The Music tab in local mode has no canvas, no per-second billing line, and always takes your lyrics.',
+          'The benchmark has a brake for a model that goes off script, and the board says what it ranks.',
+        ],
+      },
+      {
+        title: 'Cloud',
+        items: [
+          'Turning thinking off now turns it off on servers you configure yourself, not just here.',
+          'Running out of credits says so immediately and offers the top up, instead of retrying a request that cannot succeed.',
+          'A coding step no longer carries the image and video generators unless the task asks for them, which is about a third of the tool budget on every step.',
+        ],
+      },
+    ],
+  },
+  {
     version: '2.6.4',
     headline: 'What you see is what you pay',
     lines: [

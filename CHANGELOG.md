@@ -4,7 +4,7 @@ All notable changes to Locally Uncensored are documented here.
 
 ## [Unreleased]
 
-## [2.6.5] - 2026-08-12
+## [2.6.5] - 2026-08-13
 
 The release that makes updating possible again, plus the work you already
 started surviving that update, and the Create tab telling the truth about
@@ -12,6 +12,27 @@ what it is doing.
 
 ### Fixed
 
+- **Dragging files into the app works again on Windows** (#111, ElBiggus).
+  Dropping photos on the Character Studio board did nothing while picking the
+  same files through the dialog worked. The window framework had claimed drag
+  and drop for itself, so the page never saw the drop. That silently affected
+  three places, not just the one that got reported: the training board, the
+  chat composer and the RAG panel.
+- **Download and install finishes instead of sitting on "Refreshing the model
+  list"** (Voxyl AI and Aldrich Ironhart). On Extend Video and Animate Image
+  the transfer ran to the end and the card then never moved again. The files
+  were on disk the whole time; ComfyUI was still scanning its folders, and
+  nothing waited for it. The install now waits for the models to actually show
+  up, counts the seconds so you can tell a wait from a hang, restarts the
+  engine once if the scan never catches up, and if even that fails it says
+  what is wrong instead of freezing.
+- **Turning thinking off now turns it off on your own server too** (#112,
+  kevinmlynch, who sent the diagnosis and a patch). We asked for the smallest
+  amount of reasoning the OpenAI API allows, which some servers read as the
+  largest, so the switch did the opposite of what it says. LU Cloud was never
+  affected. The value walks down until the server accepts it, and how far it
+  had to walk is remembered per model, so this costs one request and not one
+  per message.
 - **The update no longer trips over our own engine.** The installer stopped
   at a locked `llama-server.exe` and rolled back, which meant an app that
   could not be updated at all, every time, until you killed the process by
@@ -51,6 +72,12 @@ what it is doing.
 
 ### Changed
 
+- **A coding step stops paying for the image and video generators.** Cloud
+  coding runs carried the image, video and workflow tools on every single
+  step, whether or not the task had anything to do with them, which is about a
+  third of the tool budget on the surface that bills per token. They now
+  appear exactly when the request asks for them, which is what local models
+  have always done. Ask for a hero image and they are back.
 - **A build is not a decision.** Release builds land as prereleases and
   become the update everyone gets only after they have been verified.
 
