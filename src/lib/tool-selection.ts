@@ -13,6 +13,37 @@ interface ToolGroup {
   tools: string[]
 }
 
+// Creative image/video. Surface BOTH generators for any creative request so
+// the model can chain image → video in one conversation (David: "ein Video
+// aus dem Bild soll die LLM auch machen können"). Without video_generate
+// here the keyword path dropped it (it was in no group + not ALWAYS_INCLUDE),
+// so a "now animate it" follow-up had no tool to call.
+//
+// Named constants rather than inline literals because gateCreateTools() below
+// has to ask the SAME question on the cloud path. Two copies of this list would
+// drift, and the failure mode of a drifted copy is a model that is told it can
+// draw and then gets "unknown tool".
+//
+// The nouns beyond image/video (logo, icon, banner…) were added 2026-08-12 with
+// the gate: on the local path a missed keyword only meant a slightly leaner
+// list, on the cloud path it means a capability the user had yesterday is gone.
+// A false positive here costs tokens, a false negative costs the feature, so
+// the list leans generous.
+const MEDIA_KEYWORDS = [
+  'image', 'picture', 'generate image', 'draw', 'create image', 'bild', 'foto', 'zeichne',
+  'logo', 'icon', 'thumbnail', 'banner', 'illustration', 'avatar', 'artwork', 'grafik', 'poster',
+  'video', 'animate', 'animation', 'clip', 'mp4', 'make a video', 'turn into a video', 'movie', 'gif', 'animiere',
+]
+const WORKFLOW_KEYWORDS = ['workflow', 'run workflow', 'automate']
+
+/**
+ * The three tools that draw, film and automate. Everything else in the coding
+ * catalog earns its place on every turn; these three cost 1.963 of the 6.186
+ * tokens a coding step sends (measured 2026-08-12 through the real registry
+ * against the model's own tokenizer) and a coding turn almost never wants them.
+ */
+export const CREATE_TOOLS = ['image_generate', 'video_generate', 'run_workflow']
+
 const TOOL_GROUPS: ToolGroup[] = [
   {
     // Web search intents. Only EXPLICIT web cues route here. Bare 'search',
@@ -94,17 +125,11 @@ const TOOL_GROUPS: ToolGroup[] = [
     tools: ['screenshot'],
   },
   {
-    // Creative image/video. Surface BOTH generators for any creative request so
-    // the model can chain image → video in one conversation (David: "ein Video
-    // aus dem Bild soll die LLM auch machen können"). Without video_generate
-    // here the keyword path dropped it (it was in no group + not ALWAYS_INCLUDE),
-    // so a "now animate it" follow-up had no tool to call.
-    keywords: ['image', 'picture', 'generate image', 'draw', 'create image', 'bild', 'foto', 'zeichne',
-      'video', 'animate', 'animation', 'clip', 'mp4', 'make a video', 'turn into a video', 'movie', 'gif', 'animiere'],
+    keywords: MEDIA_KEYWORDS,
     tools: ['image_generate', 'video_generate'],
   },
   {
-    keywords: ['workflow', 'run workflow', 'automate'],
+    keywords: WORKFLOW_KEYWORDS,
     tools: ['run_workflow'],
   },
   {
@@ -218,6 +243,49 @@ export function selectRelevantTools(
   // Small-Model Mode (Knob 1): cap the catalog when maxTools is set. No-op
   // (returns `selected` unchanged) when unset — default behaviour preserved.
   return applyMaxTools(selected, maxTools, undefined, mentionedToolNames(userMessage, allTools))
+}
+
+/**
+ * Drop the create tools unless this instruction actually asks for them.
+ *
+ * The keyword router already does this for local models. A CLOUD model gets
+ * the coding catalog untouched (useCodex.ts: a hosted model handles 25+ tools
+ * fine, and guessing its toolbox from message one starved long runs of
+ * git_commit mid-way), so image_generate + video_generate + run_workflow rode
+ * along on every step of every paid coding run: 2.160 tokens per step for
+ * three tools a refactor never calls. This closes exactly that gap and leaves
+ * the rest of the catalog alone.
+ *
+ * Gated per tool, not as a block, so the behaviour matches TOOL_GROUPS above:
+ * a creative intent surfaces the two generators, a workflow intent surfaces
+ * run_workflow, and naming a tool verbatim always wins.
+ *
+ * Honest limit: the decision is made once from the run's instruction. A model
+ * that discovers halfway through that it wants a placeholder image will not
+ * have the tool. That is already how the local path behaves, and the system
+ * prompt only promises asset generation when the gate opened, so the model is
+ * never told it can do something it cannot.
+ */
+export function gateCreateTools<T extends { name: string }>(defs: T[], userMessage: string): T[] {
+  const msg = userMessage.toLowerCase()
+  const wantsMedia = MEDIA_KEYWORDS.some((k) => msg.includes(k))
+  const wantsFlow = WORKFLOW_KEYWORDS.some((k) => msg.includes(k))
+  return defs.filter((t) => {
+    if (!CREATE_TOOLS.includes(t.name)) return true
+    if (msg.includes(t.name)) return true
+    return t.name === 'run_workflow' ? wantsFlow : wantsMedia
+  })
+}
+
+/** True when the instruction asks for a picture or a clip. Drives the asset
+ *  line in the Codex system prompt so the prompt and the tool list agree. */
+export function wantsMediaTools(userMessage: string): boolean {
+  const msg = userMessage.toLowerCase()
+  return (
+    MEDIA_KEYWORDS.some((k) => msg.includes(k)) ||
+    msg.includes('image_generate') ||
+    msg.includes('video_generate')
+  )
 }
 
 /** Names of tools the message mentions verbatim (case-insensitive). */

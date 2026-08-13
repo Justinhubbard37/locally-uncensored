@@ -1,0 +1,173 @@
+/**
+ * The create tools ride along on every coding step, and on the cloud path
+ * nothing ever asked whether the turn wanted them.
+ *
+ * CODEX_CATEGORIES has carried this comment since v2.5.3: image and video
+ * "only surface when the keyword router sees a creative intent in the prompt,
+ * so pure coding turns keep the same lean tool list as before". That was true
+ * for a LOCAL model, which goes through selectRelevantTools. A cloud model gets
+ * `codexTools` handed straight to the request, so image_generate,
+ * video_generate and run_workflow shipped on every step of every paid run.
+ *
+ * Measured 2026-08-12 against the model's own tokenizer (DeepSeek V4 Flash
+ * 0731), serialised the way toOpenAITools puts it on the wire:
+ *
+ *   coding catalog today          30 tools   6.186 tokens per step
+ *   without the three generators  27 tools   4.223 tokens per step
+ *
+ * 1.963 tokens per step, on the surface that bills per token, for three tools
+ * a refactor never calls. Nothing is deleted: the same keyword weiche that has
+ * always guarded them locally now guards them everywhere.
+ *
+ * The second half of this file is the part that makes it safe. A gated tool
+ * list plus a system prompt that still promises asset generation is worse than
+ * no gate at all: the model calls a tool it was told it has, gets "unknown
+ * tool", and burns a step. Prompt and catalog answer the same question here.
+ *
+ * Run: npx vitest run src/hooks/__tests__/codex-create-tool-gate.test.ts
+ */
+import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, resolve } from 'node:path'
+import { gateCreateTools, wantsMediaTools, CREATE_TOOLS } from '../../lib/tool-selection'
+import { toolRegistry, DEFAULT_PERMISSIONS } from '../../api/mcp'
+
+const src = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), '../useCodex.ts'),
+  'utf8',
+)
+
+// Mirrors CODEX_CATEGORIES in useCodex.ts, same reason as the sibling test:
+// the point is to notice the constant moving without this file moving with it.
+const CODEX_CATEGORIES = ['filesystem', 'terminal', 'system', 'web', 'image', 'video', 'workflow']
+const codingCatalog = () =>
+  toolRegistry.getAvailableTools(DEFAULT_PERMISSIONS).filter((t) => CODEX_CATEGORIES.includes(t.category))
+
+const names = <T extends { name: string }>(ts: T[]) => ts.map((t) => t.name)
+
+describe('a plain coding turn does not carry the generators', () => {
+  it('drops all three on a refactor', () => {
+    const out = names(gateCreateTools(codingCatalog(), 'refactor the auth guard and run the tests'))
+    expect(out).not.toContain('image_generate')
+    expect(out).not.toContain('video_generate')
+    expect(out).not.toContain('run_workflow')
+  })
+
+  it('is a filter and not a wipe', () => {
+    const out = names(gateCreateTools(codingCatalog(), 'refactor the auth guard and run the tests'))
+    expect(out).toContain('file_read')
+    expect(out).toContain('shell_execute')
+    expect(out).toContain('git_status')
+    expect(out).toContain('todo_write')
+  })
+
+  it('removes exactly three tools from the real coding catalog and nothing else', () => {
+    const before = names(codingCatalog())
+    const after = names(gateCreateTools(codingCatalog(), 'fix the failing test in parser.ts'))
+    expect(before.length - after.length).toBe(3)
+    expect(before.filter((n) => !after.includes(n)).sort()).toEqual([...CREATE_TOOLS].sort())
+  })
+
+  it('leaves delegate_task alone, which shares the workflow category', () => {
+    // The naive version of this gate filters by category. delegate_task is
+    // category 'workflow' (sub-agent.ts) and joined the Code tab in audit B11
+    // precisely because it was unreachable; a category filter would take the
+    // sub-agent fan-out out again by accident.
+    const out = names(gateCreateTools(codingCatalog(), 'refactor the auth guard'))
+    expect(out).toContain('delegate_task')
+  })
+})
+
+describe('a creative turn keeps exactly what it asked for', () => {
+  const gate = (msg: string) => names(gateCreateTools(codingCatalog(), msg))
+
+  it('an image request keeps both generators, so image can still chain into video', () => {
+    const out = gate('add a hero image to the landing page')
+    expect(out).toContain('image_generate')
+    expect(out).toContain('video_generate')
+  })
+
+  it('a video request keeps them too', () => {
+    expect(gate('turn that into a video')).toContain('video_generate')
+  })
+
+  it('a workflow request keeps run_workflow and not the generators', () => {
+    const out = gate('run the workflow that syncs the docs')
+    expect(out).toContain('run_workflow')
+    expect(out).not.toContain('image_generate')
+  })
+
+  it('an image request does not drag run_workflow in with it', () => {
+    // Parity with TOOL_GROUPS: the two groups are separate there, so they stay
+    // separate here. Otherwise the gate would quietly be more generous than the
+    // router it is supposed to mirror.
+    expect(gate('draw me a logo')).not.toContain('run_workflow')
+  })
+
+  it('German asks work, they are half our users', () => {
+    expect(gate('zeichne mir ein Logo fuer die Startseite')).toContain('image_generate')
+    expect(gate('animiere das Bild')).toContain('video_generate')
+    expect(gate('bau mir eine Grafik dafuer')).toContain('image_generate')
+  })
+
+  it('naming the tool verbatim always wins, even with no other cue', () => {
+    expect(gate('call video_generate with inputImage set')).toContain('video_generate')
+    expect(gate('use run_workflow for this')).toContain('run_workflow')
+  })
+
+  it('the words that arrived with the gate are covered', () => {
+    // These were NOT in TOOL_GROUPS before 2026-08-12. On the local path a miss
+    // only meant a leaner list; with the gate on the cloud path a miss means a
+    // capability the user had yesterday is gone, so they are pinned.
+    for (const ask of ['make a logo', 'design an icon', 'a banner for the top', 'an avatar image', 'a poster', 'a thumbnail for it']) {
+      expect(gate(ask), ask).toContain('image_generate')
+    }
+  })
+})
+
+describe('the prompt and the tool list answer the same question', () => {
+  // The whole risk of this change in one property: the model must never be told
+  // it can generate assets on a turn where the gate removed the tool.
+  const asks = [
+    'refactor the auth guard',
+    'add a hero image to the landing page',
+    'run the tests and commit',
+    'zeichne mir ein Logo',
+    'turn the screenshot into a video',
+    'run the workflow that syncs the docs',
+  ]
+
+  it('the asset line is promised exactly when the generators survive the gate', () => {
+    for (const ask of asks) {
+      const kept = names(gateCreateTools(codingCatalog(), ask)).includes('image_generate')
+      expect(wantsMediaTools(ask), ask).toBe(kept)
+    }
+  })
+})
+
+describe('the wiring in useCodex', () => {
+  it('the gate runs on the routed list, so it covers all three branches', () => {
+    expect(src).toMatch(/const relevantDefs = gateCreateTools\(routedDefs, lastUserMsg\)/)
+  })
+
+  it('the hermes fallback is gated too, it carries the weakest models', () => {
+    expect(src).toMatch(/gateCreateTools\(\s*\n?\s*toolRegistry\.toHermesToolDefs\(permissions\), instruction,/)
+  })
+
+  it('the asset line is conditional and never fires in review mode', () => {
+    expect(src).toMatch(/!reviewMode && !settings\.smallModelMode && wantsMediaTools\(instruction\)/)
+  })
+
+  it('the asset promise left the always-on prompt body', () => {
+    const body = src.slice(src.indexOf('const CODEX_SYSTEM_PROMPT ='), src.indexOf('const CODEX_ASSET_LINE'))
+    expect(body).not.toContain('- Asset generation:')
+    expect(src).toContain('const CODEX_ASSET_LINE')
+  })
+
+  it('the remote branch still hands the routed list through untouched', () => {
+    // The gate is deliberately the LAST step, not a rewrite of the branch: a
+    // hosted model keeps the full coding catalog, minus the three.
+    expect(src).toMatch(/!isLocalModelByName\(activeModel\)\s*\n?\s*\?\s*codexTools/)
+  })
+})

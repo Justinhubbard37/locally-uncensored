@@ -52,7 +52,7 @@ import { CREDITS_EXHAUSTED_MESSAGE } from '../lib/credits-exhausted'
 import { streamOllamaChatWithTools } from '../lib/ollama-stream-tools'
 import { extractToolCallsWithRanges, stripRanges } from '../lib/tool-call-repair'
 import { canonicalToolName } from '../lib/loose-tool-parse'
-import { selectRelevantTools, selectRelevantToolsAsync, SMALL_MODEL_MAX_TOOLS } from '../lib/tool-selection'
+import { selectRelevantTools, selectRelevantToolsAsync, SMALL_MODEL_MAX_TOOLS, gateCreateTools, wantsMediaTools } from '../lib/tool-selection'
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
 import { toolCallCapMs, raceWithToolTimeout, SHELL_EXECUTE_DEFAULT_TIMEOUT_MS, CODE_EXECUTE_DEFAULT_TIMEOUT_MS } from '../lib/tool-timeout'
@@ -115,8 +115,14 @@ Rules:
 - Chain tool calls: after each tool result, if there is another step left, IMMEDIATELY call the next tool
 - If a command fails, diagnose and retry with a different approach, don't hand back to the user unless truly stuck
 - Be concise in text. All the work happens in tool calls.
-- Asset generation: when the task needs an image or a short video (placeholder art, hero image, demo clip), call image_generate / video_generate as a real tool call, they run on-device (Apple MLX on macOS, ComfyUI elsewhere). To animate a generated image, call video_generate with inputImage set to that image's filename.
 - FINISH with a short natural-language sentence summarising what you did or found. NEVER end your turn with only a raw JSON object or a bare code block, the user needs a human-readable answer, not a data dump.`
+
+// Appended only when the run's instruction asks for a picture or a clip
+// (wantsMediaTools), because that is exactly when gateCreateTools leaves the
+// two generators in the catalog. It used to sit inside the prompt above and
+// promised a tool the local keyword router had already removed, which is a
+// wasted step: the model calls it and gets "unknown tool".
+const CODEX_ASSET_LINE = `- Asset generation: when the task needs an image or a short video (placeholder art, hero image, demo clip), call image_generate / video_generate as a real tool call, they run on-device (Apple MLX on macOS, ComfyUI elsewhere). To animate a generated image, call video_generate with inputImage set to that image's filename.`
 
 // Small-Model Mode (Knob 2): a lean Codex prompt (~500 chars vs ~1700 above)
 // for 3B-8B models. Research (LongFuncEval, arXiv 2505.10570) shows long
@@ -450,6 +456,13 @@ export function useCodex() {
       : settings.smallModelMode
         ? CODEX_SYSTEM_PROMPT_LEAN
         : CODEX_SYSTEM_PROMPT
+    // The prompt promises asset generation only while the tool list carries it.
+    // Same question, same helper as the gate on the catalog below, so the two
+    // cannot disagree. Never in review mode, which generates nothing.
+    const assetLine =
+      !reviewMode && !settings.smallModelMode && wantsMediaTools(instruction)
+        ? `\n${CODEX_ASSET_LINE}`
+        : ''
     // Ground the model in its cwd. In sandbox mode (workDir '.') say so
     // concretely + repeat the relative-path rule, since a bare "." led small
     // models to fall back to drive-root absolute paths (e.g. /package.json).
@@ -457,7 +470,7 @@ export function useCodex() {
       workDir && workDir !== '.'
         ? `Working directory: ${workDir}\nUse paths relative to it (e.g. \`package.json\`); do not prefix with \`/\` or a drive letter.`
         : 'Working directory: your private sandbox folder. Use relative paths only (e.g. `package.json`, `.`); never a leading `/` or a drive letter like `C:\\`.'
-    let systemPrompt = `${baseCodexPrompt}\n\n${workDirLine}`
+    let systemPrompt = `${baseCodexPrompt}${assetLine}\n\n${workDirLine}`
     // Standing goal (/goal) — ahead of the rules and the repo map so it frames
     // everything that follows instead of reading as an afterthought.
     systemPrompt += renderGoalSection(useAgentGoalStore.getState().getGoal(convId))
@@ -881,7 +894,17 @@ export function useCodex() {
           //    sends), and keyword-guessing its toolbox from message one
           //    starved 30-minute runs of git_commit/run_tests/background
           //    shell mid-way.
-          const relevantDefs = settings.smallModelMode
+          //
+          // gateCreateTools runs on ALL THREE, last: image_generate,
+          // video_generate and run_workflow are the one group a coding turn
+          // truly never wants, and the CODEX_CATEGORIES comment above has
+          // claimed since v2.5.3 that they "only surface when the keyword
+          // router sees a creative intent". That was true for local models and
+          // false for cloud ones, which got all three on every step: 6.186
+          // tokens instead of 4.223, measured 2026-08-12 against the model's
+          // own tokenizer. Nothing is removed, the keyword weiche just now
+          // decides on both paths.
+          const routedDefs = settings.smallModelMode
             ? await selectRelevantToolsAsync(lastUserMsg, codexTools, permissions, {
                 embed: (texts) => generateEmbeddings(texts),
                 topN: 5,
@@ -891,6 +914,7 @@ export function useCodex() {
             : !isLocalModelByName(activeModel)
               ? codexTools
               : selectRelevantTools(lastUserMsg, codexTools, permissions)
+          const relevantDefs = gateCreateTools(routedDefs, lastUserMsg)
           const tools: ToolDefinition[] = relevantDefs.map(t => ({
             type: 'function' as const,
             function: { name: t.name, description: t.description, parameters: t.inputSchema },
@@ -1083,8 +1107,15 @@ export function useCodex() {
         } else {
           // Hermes-XML fallback — also restrict tools to coding categories
           // so the model doesn't see image_generate / screenshot etc.
-          // Same review-mode filter as the native path (B13).
-          const hermesTools = toolRegistry.toHermesToolDefs(permissions).filter(
+          // Same review-mode filter as the native path (B13), and the same
+          // create-tool gate: this path carries the weakest models in the
+          // fleet and was the one still shipping all three generators in every
+          // prompt, the exact catalog length LongFuncEval says they choke on.
+          // `instruction`, not the newest user-role message: same reason as the
+          // native path above, steers and nudges are pushed as role 'user'.
+          const hermesTools = gateCreateTools(
+            toolRegistry.toHermesToolDefs(permissions), instruction,
+          ).filter(
             (t) => {
               const def = toolRegistry.getToolByName(t.name)
               if (!def) return true
