@@ -1,0 +1,126 @@
+/**
+ * A finished download is not a finished install.
+ *
+ * Voxyl AI, Discord #general 2026-08-13 17:00 UTC with a screenshot, confirmed
+ * five minutes later by Aldrich Ironhart: on Extend Video and Animate Image the
+ * Download and install button runs to the end and then sits on "Refreshing the
+ * model list…" for good. Both have ComfyUI.
+ *
+ * Nothing was hanging. installModelBundle refreshed the list once, returned
+ * happy, and Stage keeps the install card up until the model lists actually
+ * refill. ComfyUI's directory scan was still running, so the lists came back
+ * without the new file. That is not an error, which is why the retry loop in
+ * useCreate (guarded on modelLoadError) never engaged either. Two dead ends
+ * meeting at one frozen line of text. Image bundles fit through the old window
+ * because they are a fraction of the size.
+ *
+ * This file covers the loop that was missing. The engine-facing half is
+ * asserted at the source level below, the same way the codex gate test does it:
+ * a React context around a live ComfyUI is not what should be mocked here.
+ *
+ * Run: npx vitest run src/lib/__tests__/model-visible-wait.test.ts
+ */
+import { describe, it, expect, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, resolve } from 'node:path'
+import { waitForModelsVisible, InstallCancelled } from '../bundle-install'
+
+const WANTED = ['wan2.2_s2v_14B_fp8.safetensors', 'wav2vec2_large_english.safetensors']
+
+/** A ComfyUI whose scan finishes after `rounds` refreshes. */
+function engine(rounds: number, missing = WANTED) {
+  let seen = 0
+  return {
+    refresh: vi.fn(async () => { seen++ }),
+    missing: vi.fn(async () => (seen >= rounds ? [] : missing)),
+  }
+}
+
+describe('waiting for ComfyUI to list what was just downloaded', () => {
+  it('returns at once when the files are already there', async () => {
+    const e = engine(0)
+    const left = await waitForModelsVisible({ missing: e.missing, refresh: e.refresh, delayMs: 1 })
+    expect(left).toEqual([])
+    expect(e.refresh).not.toHaveBeenCalled()
+  })
+
+  it('keeps refreshing until the scan catches up', async () => {
+    const e = engine(3)
+    const left = await waitForModelsVisible({ missing: e.missing, refresh: e.refresh, delayMs: 1 })
+    expect(left).toEqual([])
+    expect(e.refresh).toHaveBeenCalledTimes(3)
+  })
+
+  it('gives up after the attempt budget instead of spinning forever', async () => {
+    const e = engine(999)
+    const left = await waitForModelsVisible({ missing: e.missing, refresh: e.refresh, delayMs: 1, attempts: 4 })
+    expect(left).toEqual(WANTED)
+    expect(e.refresh).toHaveBeenCalledTimes(4)
+  })
+
+  it('reports only what is still missing, not the whole bundle', async () => {
+    const e = engine(999, [WANTED[1]])
+    const left = await waitForModelsVisible({ missing: e.missing, refresh: e.refresh, delayMs: 1, attempts: 2 })
+    expect(left).toEqual([WANTED[1]])
+  })
+
+  it('the status line counts up, which is the whole point of the fix', async () => {
+    // The bug the user saw was a line of text that never changed again. A
+    // wait that says nothing is indistinguishable from a hang.
+    const e = engine(3)
+    const seen: string[] = []
+    await waitForModelsVisible({ missing: e.missing, refresh: e.refresh, delayMs: 1000, onStatus: (m) => seen.push(m) })
+    expect(seen).toEqual([
+      'Waiting for ComfyUI to list the new files… 0s',
+      'Waiting for ComfyUI to list the new files… 1s',
+      'Waiting for ComfyUI to list the new files… 2s',
+    ])
+  })
+
+  it('cancel gets out of the wait, it does not have to sit out the timer', async () => {
+    const e = engine(999)
+    const ac = new AbortController()
+    const p = waitForModelsVisible({ missing: e.missing, refresh: e.refresh, delayMs: 60_000, signal: ac.signal })
+    ac.abort()
+    await expect(p).rejects.toBeInstanceOf(InstallCancelled)
+  })
+})
+
+describe('the install path uses it, and says something honest when it runs out', () => {
+  const src = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '../../components/create/experimental/CreateContext.tsx'),
+    'utf8',
+  )
+
+  it('only the subfolders ComfyUI enumerates are checked', () => {
+    // loras and upscale models never show up in these enums, so demanding
+    // them would turn every install into a failure.
+    expect(src).toMatch(/files\.filter\(\(f\) => ENUM_SUBFOLDERS\.has\(f\.subfolder!\)\)/)
+  })
+
+  it('an engine it cannot reach counts as nothing confirmed', () => {
+    expect(src).toMatch(/catch \{\s*\n\s*return wanted/)
+  })
+
+  it('it restarts the engine once before giving up', () => {
+    // Self-heal before complaining: a restart rebuilds the model index for
+    // certain. The old code had no second move at all.
+    const wait = src.indexOf('waitForModelsVisible')
+    const restart = src.indexOf('Restarting ComfyUI so it picks up the new files')
+    const give = src.indexOf('but ComfyUI still does not list')
+    expect(wait).toBeGreaterThan(-1)
+    expect(restart).toBeGreaterThan(wait)
+    expect(give).toBeGreaterThan(restart)
+  })
+
+  it('the last word is a thrown error, so the card turns red instead of freezing', () => {
+    expect(src).toMatch(/throw new Error\(\s*\n\s*`The files downloaded fine, but ComfyUI still does not list/)
+  })
+
+  it('the error names the two things that actually cause it', () => {
+    expect(src).toContain('reading a different model folder')
+    expect(src).toContain('started ')
+    expect(src).toContain('outside LU')
+  })
+})

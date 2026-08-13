@@ -3,13 +3,13 @@ import { useCreate } from '../../../hooks/useCreate'
 import { useCloudCreate, hasActiveCloudRun } from '../../../hooks/useCloudCreate'
 import { useCloudSession } from '../../../hooks/useCloudSession'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
-import { getLoraModels, getVAEModels, checkComfyConnection, refreshComfyModels } from '../../../api/comfyui'
+import { getLoraModels, getVAEModels, getCheckpoints, getDiffusionModels, getCLIPModels, checkComfyConnection, refreshComfyModels } from '../../../api/comfyui'
 import { getAllNodeInfo, clearNodeCache } from '../../../api/comfyui-nodes'
-import { installCustomNodes, getImageBundles, getVideoBundles, getAudioBundles, getLipsyncBundles, getMotionBundles, startModelDownload, getDownloadProgress } from '../../../api/discover'
+import { installCustomNodes, getImageBundles, getVideoBundles, getAudioBundles, getLipsyncBundles, getMotionBundles, startModelDownload, getDownloadProgress, normalizeModelBase, ENUM_SUBFOLDERS } from '../../../api/discover'
 import { backendCall, isMacOS } from '../../../api/backend'
 import { installMlxStack } from '../../../api/mlx-install'
 import { useDownloadStore } from '../../../stores/downloadStore'
-import { downloadBundleFiles, waitOrAbort } from '../../../lib/bundle-install'
+import { downloadBundleFiles, waitOrAbort, waitForModelsVisible } from '../../../lib/bundle-install'
 import { ensureLocalFilename } from './loadImage'
 import { comfyStartupError } from './comfyError'
 import type { CloudQuota } from '../../../lib/render/cloud-jobs'
@@ -369,9 +369,52 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
       },
     )
     onProgress?.('Refreshing the model list…')
-    await refreshComfyModels().catch(() => false)
-    clearNodeCache()
-    await fetchModels()
+    const refreshLists = async () => {
+      await refreshComfyModels().catch(() => false)
+      clearNodeCache()
+      await fetchModels()
+    }
+    await refreshLists()
+
+    // A finished download is not a finished install. ComfyUI only offers what
+    // its own directory scan has picked up, and on the big video bundles that
+    // scan is still running when the last byte lands. Without this the card
+    // stayed on "Refreshing the model list…" forever (C8, Voxyl AI and Aldrich
+    // Ironhart 2026-08-13): the install returned happy, and Stage keeps the
+    // card up until the lists refill.
+    const enumFiles = files.filter((f) => ENUM_SUBFOLDERS.has(f.subfolder!))
+    if (enumFiles.length > 0) {
+      const wanted = enumFiles.map((f) => f.filename!)
+      const stillMissing = async (): Promise<string[]> => {
+        try {
+          const lists = await Promise.all([getCheckpoints(), getDiffusionModels(), getVAEModels(), getCLIPModels()])
+          const visible = new Set(lists.flat().map(normalizeModelBase))
+          return wanted.filter((n) => !visible.has(normalizeModelBase(n)))
+        } catch {
+          return wanted // engine unreachable, so it has confirmed nothing
+        }
+      }
+      let missing = await waitForModelsVisible({
+        missing: stillMissing, refresh: refreshLists, onStatus: onProgress, signal,
+      })
+      if (missing.length > 0) {
+        // Heal before complaining: a restart rebuilds the model index for
+        // certain, and it is the same move that registers a new node pack.
+        onProgress?.('Restarting ComfyUI so it picks up the new files…')
+        await restartComfyForNewNodes().catch(() => { /* diagnosed below */ })
+        missing = await waitForModelsVisible({
+          missing: stillMissing, refresh: refreshLists, onStatus: onProgress, signal, attempts: 10,
+        })
+      }
+      if (missing.length > 0) {
+        throw new Error(
+          `The files downloaded fine, but ComfyUI still does not list ${missing.join(', ')}. ` +
+          'Either it is reading a different model folder than LU writes to, or it was started ' +
+          'outside LU and cannot be restarted from here. The Model Manager shows where the ' +
+          'files landed.',
+        )
+      }
+    }
   }, [ensureComfyRunning, fetchModels])
 
   const value: CreateExpValue = {

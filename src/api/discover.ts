@@ -195,7 +195,7 @@ export async function checkBundlesInstalled(bundles: ModelBundle[]): Promise<Rec
 /** Subfolders whose contents ComfyUI enumerates via object_info — the only
  *  ones the visibility check can reason about (loras/upscale etc. stay on the
  *  pure size check). */
-const ENUM_SUBFOLDERS = new Set(['checkpoints', 'diffusion_models', 'vae', 'text_encoders'])
+export const ENUM_SUBFOLDERS = new Set(['checkpoints', 'diffusion_models', 'vae', 'text_encoders'])
 
 /** Base identity of a model file: basename only (ComfyUI enums can carry
  *  nested-subdir prefixes), lowercase, extension and common quant suffixes

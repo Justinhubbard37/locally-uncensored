@@ -206,3 +206,43 @@ export async function downloadBundleFiles(files: BundleFile[], deps: DownloadDep
     }
   }
 }
+
+/**
+ * Wait until the running ComfyUI actually LISTS the files that were just
+ * downloaded, and report what is still missing when it does not.
+ *
+ * Voxyl AI and Aldrich Ironhart, Discord 2026-08-13, both on Extend Video and
+ * Animate Image: the download runs to the end and the card then sits on
+ * "Refreshing the model list…" for good. Nothing was hanging. The install
+ * refreshed once, called itself done, and left the card on its last status
+ * line, because the card only disappears when the model lists refill and
+ * ComfyUI had not finished its directory scan yet. A fetch that succeeds but
+ * simply does not contain the new model is not an error either, so the retry
+ * loop in useCreate never engaged: two dead ends meeting at a frozen line of
+ * text. Image bundles fit through the old window because they are a fraction
+ * of the size; the two lanes that broke carry the biggest files we ship.
+ *
+ * This knows nothing about ComfyUI on purpose. The caller says what is still
+ * missing and how to refresh, which keeps every branch testable without a live
+ * engine. `missing` must report everything as missing when it cannot reach the
+ * engine at all: an answer we could not get is not a file we have seen.
+ */
+export async function waitForModelsVisible(opts: {
+  missing: () => Promise<string[]>
+  refresh: () => Promise<unknown>
+  onStatus?: (msg: string) => void
+  signal?: AbortSignal
+  attempts?: number
+  delayMs?: number
+}): Promise<string[]> {
+  const { missing, refresh, onStatus, signal, attempts = 20, delayMs = 3000 } = opts
+  let left = await missing()
+  const step = Math.max(1, Math.round(delayMs / 1000))
+  for (let i = 0; left.length > 0 && i < attempts; i++) {
+    onStatus?.(`Waiting for ComfyUI to list the new files… ${i * step}s`)
+    await waitOrAbort(delayMs, signal)
+    await refresh()
+    left = await missing()
+  }
+  return left
+}
