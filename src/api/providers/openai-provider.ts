@@ -229,6 +229,74 @@ export class OpenAIProvider implements ProviderClient {
     }
   }
 
+  /**
+   * The thinking knob for this request, or undefined to leave it out.
+   *
+   * Toggle OFF used to send 'minimal', the least the OpenAI API itself allows.
+   * kevinmlynch traced what that means elsewhere (#112, 2026-08-13): DwarfStar
+   * reads 'minimal' as think_mode high, so our OFF switch turned thinking ON
+   * and his tool workflows paid the latency he had just disabled. Only 'none'
+   * really disables it. Our own cloud proxy already translates minimal to
+   * none, so this never showed up on LU Cloud, only on servers users point us
+   * at themselves.
+   *
+   * 'none' is younger than 'minimal' though, and an endpoint that predates it
+   * answers 400. So sendChat walks the knob down instead of swapping it, and
+   * remembers how far it had to walk, per endpoint and model.
+   */
+  private thinkingEffort(model: string, thinking: boolean | undefined): string | undefined {
+    if (thinking === undefined) return undefined
+    const floor = OpenAIProvider.effortMemory.get(this.catalogKey(model))
+    if (floor === 'omit') return undefined
+    if (thinking === true) return 'high'
+    return floor === 'minimal' ? 'minimal' : 'none'
+  }
+
+  /**
+   * POST a chat body, stepping the thinking knob down rather than dropping it
+   * at the first complaint: 'none', then 'minimal', then gone. The last step
+   * also drops stream_options, the other field an endpoint that predates both
+   * rejects. The LU Cloud proxy deliberately passes upstream 400 AND 422
+   * (DeepInfra's bad-parameter status) through so this path can engage.
+   *
+   * Only a request that then SUCCEEDS teaches us anything. A 400 for an
+   * unrelated reason (an overlong context is the common one) walks the same
+   * ladder and must not leave a memory behind, or one oversized message would
+   * cost the user their thinking switch for the rest of the session.
+   */
+  private async sendChat(
+    model: string,
+    body: Record<string, any>,
+    signal: AbortSignal | undefined,
+    fetcher: (url: string, init: any) => Promise<Response>,
+  ): Promise<Response> {
+    const post = () => fetcher(`${this.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: this.headers,
+      body: JSON.stringify(body),
+      signal,
+    })
+    const refused = (res: Response) => !res.ok && (res.status === 400 || res.status === 422)
+
+    let res = await this.sendOrExplain(post)
+
+    if (refused(res) && body.reasoning_effort === 'none') {
+      body.reasoning_effort = 'minimal'
+      res = await post()
+      if (res.ok) OpenAIProvider.effortMemory.set(this.catalogKey(model), 'minimal')
+    }
+
+    if (refused(res) && ('reasoning_effort' in body || 'stream_options' in body)) {
+      const hadEffort = 'reasoning_effort' in body
+      delete body.reasoning_effort
+      delete body.stream_options
+      res = await post()
+      if (res.ok && hadEffort) OpenAIProvider.effortMemory.set(this.catalogKey(model), 'omit')
+    }
+
+    return res
+  }
+
   private get headers(): Record<string, string> {
     const h: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -300,12 +368,11 @@ export class OpenAIProvider implements ProviderClient {
       body.tool_choice = 'auto'
     }
     await this.applyMaxTokens(model, body, options)
-    // Reasoning-model knob (o1, o3, gpt-5-thinking, etc.). Toggle OFF →
-    // "minimal" (least reasoning the API allows). Toggle ON → "high".
-    // Non-reasoning models simply ignore this field; older APIs may 400 on
-    // it — we handle that with a retry below.
-    if (options?.thinking === true) body.reasoning_effort = 'high'
-    else if (options?.thinking === false) body.reasoning_effort = 'minimal'
+    // Reasoning-model knob (o1, o3, gpt-5-thinking, etc.). Toggle ON → "high",
+    // toggle OFF → "none". Non-reasoning models simply ignore the field; an
+    // endpoint that rejects it is handled by the ladder in sendChat.
+    const effort = this.thinkingEffort(model, options?.thinking)
+    if (effort) body.reasoning_effort = effort
     // Ask the server for REAL token usage in a final stream chunk
     // (choices:[] + usage:{...}). OpenAI, DeepInfra (LU Cloud), Groq, vLLM and
     // LM Studio all honor stream_options; an endpoint that rejects unknown
@@ -321,26 +388,7 @@ export class OpenAIProvider implements ProviderClient {
 
     if (this.useLocalProxy) await ensureProxyAllowsHost(this.baseUrl)
     const fetcher = this.useLocalProxy ? localFetchStream : fetch
-    let res = await this.sendOrExplain(() => fetcher(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: this.headers,
-      body: JSON.stringify(body),
-      signal: options?.signal,
-    } as any))
-
-    // Retry without reasoning_effort if the model/endpoint rejects it. The LU
-    // Cloud proxy deliberately passes upstream 400 AND 422 (DeepInfra's
-    // bad-parameter status) through so this path can engage.
-    if (!res.ok && (res.status === 400 || res.status === 422) && ('reasoning_effort' in body || 'stream_options' in body)) {
-      delete body.reasoning_effort
-      delete body.stream_options
-      res = await fetcher(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: this.headers,
-        body: JSON.stringify(body),
-        signal: options?.signal,
-      } as any)
-    }
+    const res = await this.sendChat(model, body, options?.signal, fetcher as any)
 
     if (!res.ok) {
       throw await this.parseError(res)
@@ -484,8 +532,8 @@ export class OpenAIProvider implements ProviderClient {
     if (options?.topP !== undefined) body.top_p = options.topP
     await this.applyMaxTokens(model, body, options)
     // Same reasoning_effort gate as chatStream.
-    if (options?.thinking === true) body.reasoning_effort = 'high'
-    else if (options?.thinking === false) body.reasoning_effort = 'minimal'
+    const effort = this.thinkingEffort(model, options?.thinking)
+    if (effort) body.reasoning_effort = effort
 
     // Same self-heal as chatStream: agent/tool turns after a Create render
     // must revive the offloaded built-in engine before hitting its port.
@@ -493,23 +541,7 @@ export class OpenAIProvider implements ProviderClient {
 
     if (this.useLocalProxy) await ensureProxyAllowsHost(this.baseUrl)
     const fetcher = this.useLocalProxy ? localFetch : fetch
-    let res = await this.sendOrExplain(() => fetcher(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: this.headers,
-      body: JSON.stringify(body),
-      signal: options?.signal,
-    } as any))
-
-    if (!res.ok && (res.status === 400 || res.status === 422) && ('reasoning_effort' in body || 'stream_options' in body)) {
-      delete body.reasoning_effort
-      delete body.stream_options
-      res = await fetcher(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: this.headers,
-        body: JSON.stringify(body),
-        signal: options?.signal,
-      } as any)
-    }
+    const res = await this.sendChat(model, body, options?.signal, fetcher as any)
 
     if (!res.ok) {
       throw await this.parseError(res, tools.length > 0)
@@ -735,6 +767,14 @@ export class OpenAIProvider implements ProviderClient {
   /** Probe results per endpoint+model (audit E5). Static, not an instance
    *  field: the lu-cloud provider builds a fresh delegate per call. */
   private static probeCache = new Map<string, { at: number; ctx: number | null }>()
+
+  /**
+   * How far the thinking knob had to be walked down for an endpoint and model,
+   * keyed like probeCache. Absent means 'none' has never been refused here, so
+   * a new endpoint always gets the value that actually disables thinking.
+   * Only a successful request writes to this (see sendChat).
+   */
+  private static effortMemory = new Map<string, 'minimal' | 'omit'>()
 
   /** Live tool-capability answers per endpoint (G37b). Static for the same
    *  reason as probeCache, and TTL-bound like it: an LM Studio reload or an
