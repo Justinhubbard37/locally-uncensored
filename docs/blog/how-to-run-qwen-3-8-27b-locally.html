@@ -28,7 +28,7 @@
 {"@context":"https://schema.org","@type":"BlogPosting","headline":"How to Run Qwen 3.8 27B Locally: VRAM, Quants and the Template Trap","description":"A measured guide to running Qwen 3.8 27B on your own GPU after the August 13, 2026 weight drop under Apache 2.0: real GGUF file sizes, the KV cache math the hybrid attention layout changes, the official chat template bug that truncates multi turn conversations, vision setup with mmproj, and thinking control.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-08-14","dateModified":"2026-08-14","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/how-to-run-qwen-3-8-27b-locally.html"},"keywords":"how to run qwen 3.8 27b locally, qwen 3.8 27b gguf, qwen 3.8 27b vram, qwen 3.8 27b llama.cpp"}
 </script>
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"How much VRAM does Qwen 3.8 27B need?","acceptedAnswer":{"@type":"Answer","text":"The Q4_K_M GGUF is 16.6 GB, which fits a 24 GB card with room for a long context. On 12 GB you need Q2_K at 10.7 GB and you will still offload part of the context to system RAM. Q8_0 is 28.6 GB and wants 32 GB or a split across two cards."}},{"@type":"Question","name":"Does Qwen 3.8 27B fit on a 12 GB card like an RTX 3060?","acceptedAnswer":{"@type":"Answer","text":"Only at Q2_K, which is 10.7 GB. That leaves about 1 GB for context, so expect to offload layers. A 3060 runs it, slowly. If you want speed at 12 GB, the 27B is the wrong size and Qwen 3.6 or a smaller Qwen 3.5 is the better answer."}},{"@type":"Question","name":"Is Qwen 3.8 27B really Apache 2.0?","acceptedAnswer":{"@type":"Answer","text":"Yes. The Hugging Face repository Qwen/Qwen3.8-27B carries license: apache-2.0, the same as previous open Qwen releases. Commercial use, fine tuning and redistribution are all allowed."}},{"@type":"Question","name":"Why does my Qwen 3.8 chat get cut off after a few turns?","acceptedAnswer":{"@type":"Answer","text":"The official jinja chat template wraps every assistant turn in a think block even when the reasoning is empty, then opens another one when generation starts. In a multi turn conversation that nests and truncates the history. Several GGUF packs ship a corrected template. If you converted the weights yourself, replace chat_template.jinja before blaming the quantization."}},{"@type":"Question","name":"Can Qwen 3.8 27B see images?","acceptedAnswer":{"@type":"Answer","text":"Yes, it is a native vision language model that handles images and video. In GGUF form the vision encoder is a separate mmproj file of about 0.9 GB that you load alongside the language weights. A text only GGUF pack without an mmproj will answer text and silently ignore pictures."}},{"@type":"Question","name":"How do I turn thinking off?","acceptedAnswer":{"@type":"Answer","text":"Thinking is on by default. Pass chat_template_kwargs with enable_thinking set to false for a direct answer, or leave it on and lower reasoning_effort from the default xhigh to medium or low. On a local card the difference is minutes, not cents."}}]}
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"How much VRAM does Qwen 3.8 27B need?","acceptedAnswer":{"@type":"Answer","text":"The Q4_K_M GGUF is 17.1 GB, which fits a 24 GB card with room for a long context. On 12 GB you need a 2-bit quant at about 10.7 GB and you will still offload part of the context to system RAM. Q8_0 is 29.0 GB and wants 32 GB or a split across two cards."}},{"@type":"Question","name":"Does Qwen 3.8 27B fit on a 12 GB card like an RTX 3060?","acceptedAnswer":{"@type":"Answer","text":"Only at a 2-bit quant, about 10.7 GB. That leaves about 1 GB for context, so expect to offload layers. A 3060 runs it, slowly. If you want speed at 12 GB, the 27B is the wrong size and Qwen 3.6 or a smaller Qwen 3.5 is the better answer."}},{"@type":"Question","name":"Is Qwen 3.8 27B really Apache 2.0?","acceptedAnswer":{"@type":"Answer","text":"Yes. The Hugging Face repository Qwen/Qwen3.8-27B carries license: apache-2.0, the same as previous open Qwen releases. Commercial use, fine tuning and redistribution are all allowed."}},{"@type":"Question","name":"Why does my Qwen 3.8 chat get cut off after a few turns?","acceptedAnswer":{"@type":"Answer","text":"The official jinja chat template wraps every assistant turn in a think block even when the reasoning is empty, then opens another one when generation starts. In a multi turn conversation that nests and truncates the history. Several GGUF packs ship a corrected template. If you converted the weights yourself, replace chat_template.jinja before blaming the quantization."}},{"@type":"Question","name":"Can Qwen 3.8 27B see images?","acceptedAnswer":{"@type":"Answer","text":"Yes, it is a native vision language model that handles images and video. In GGUF form the vision encoder is a separate mmproj file of about 0.9 GB that you load alongside the language weights. A text only GGUF pack without an mmproj will answer text and silently ignore pictures."}},{"@type":"Question","name":"How do I turn thinking off?","acceptedAnswer":{"@type":"Answer","text":"Thinking is on by default. Pass chat_template_kwargs with enable_thinking set to false for a direct answer, or leave it on and lower reasoning_effort from the default xhigh to medium or low. On a local card the difference is minutes, not cents."}}]}
 </script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -96,18 +96,21 @@
 
     <h2>Will It Fit? Real File Sizes</h2>
 
-    <p>These are measured from published GGUF packs on the day of release, not projected:</p>
+    <p>Every number below is the file size Hugging Face reports for <a href="https://huggingface.co/unsloth/Qwen3.8-27B-GGUF" target="_blank" rel="noopener"><code>unsloth/Qwen3.8-27B-GGUF</code></a>, read on August 14, 2026. Sizes differ by a few hundred megabytes between packs, so check the repo you actually download from rather than trusting any table, including this one.</p>
 
     <table>
       <thead><tr><th>Quant</th><th>Size</th><th>Practical home</th></tr></thead>
       <tbody>
-        <tr><td>Q2_K</td><td>10.7 GB</td><td>12 GB cards, tight, quality drop is real</td></tr>
-        <tr><td>Q3_K_M</td><td>13.3 GB</td><td>16 GB cards</td></tr>
-        <tr><td><strong>Q4_K_M</strong></td><td><strong>16.6 GB</strong></td><td><strong>24 GB cards, the sweet spot</strong></td></tr>
-        <tr><td>Q5_K_M</td><td>19.2 GB</td><td>24 GB, less context headroom</td></tr>
-        <tr><td>Q6_K</td><td>22.1 GB</td><td>24 GB, barely, or 32 GB</td></tr>
-        <tr><td>Q8_0</td><td>28.6 GB</td><td>32 GB or a two card split</td></tr>
-        <tr><td>BF16</td><td>54.7 GB</td><td>Server cards or CPU with a lot of patience</td></tr>
+        <tr><td>UD-IQ2_XXS</td><td>9.0 GB</td><td>12 GB cards, quality drop is real</td></tr>
+        <tr><td>UD-Q2_K_XL</td><td>10.7 GB</td><td>12 GB cards, tight, almost no context left</td></tr>
+        <tr><td>UD-Q3_K_XL</td><td>13.4 GB</td><td>16 GB cards</td></tr>
+        <tr><td>Q3_K_M</td><td>13.8 GB</td><td>16 GB cards</td></tr>
+        <tr><td>IQ4_XS</td><td>15.7 GB</td><td>16 GB cards, the last one that fits whole</td></tr>
+        <tr><td><strong>Q4_K_M</strong></td><td><strong>17.1 GB</strong></td><td><strong>24 GB cards, the sweet spot</strong></td></tr>
+        <tr><td>Q5_K_M</td><td>19.8 GB</td><td>24 GB, less context headroom</td></tr>
+        <tr><td>Q6_K</td><td>22.9 GB</td><td>24 GB, barely, or 32 GB</td></tr>
+        <tr><td>Q8_0</td><td>29.0 GB</td><td>32 GB or a two card split</td></tr>
+        <tr><td>BF16</td><td>53.8 GB</td><td>From <code>ggml-org</code>, server cards or CPU with patience</td></tr>
         <tr><td>mmproj (vision)</td><td>0.9 GB</td><td>Add this if you want it to see pictures</td></tr>
       </tbody>
     </table>
@@ -121,10 +124,10 @@
     <table>
       <thead><tr><th>Context</th><th>KV cache</th><th>Q4_K_M total</th></tr></thead>
       <tbody>
-        <tr><td>8K</td><td>0.5 GB</td><td>17.1 GB</td></tr>
-        <tr><td>32K</td><td>2.0 GB</td><td>18.6 GB</td></tr>
-        <tr><td>128K</td><td>8.0 GB</td><td>24.6 GB</td></tr>
-        <tr><td>262K</td><td>16.4 GB</td><td>33.0 GB</td></tr>
+        <tr><td>8K</td><td>0.5 GB</td><td>17.6 GB</td></tr>
+        <tr><td>32K</td><td>2.0 GB</td><td>19.1 GB</td></tr>
+        <tr><td>128K</td><td>8.0 GB</td><td>25.1 GB</td></tr>
+        <tr><td>262K</td><td>16.4 GB</td><td>33.5 GB</td></tr>
       </tbody>
     </table>
 
@@ -192,17 +195,17 @@ print(r.choices[0].message.content)</code></pre>
 
     <h2>Qwen 3.8 27B or Qwen 3.6 27B?</h2>
 
-    <p>If you already run <a href="how-to-run-qwen-3-6-locally.html">Qwen 3.6</a> and it does what you need, there is no emergency. The 3.8 is the better model at the same size and the same license, with a longer native context and stronger agent behaviour, but it is a 16.6 GB download and a template gotcha. Upgrade when you have an evening, not in the middle of a project.</p>
+    <p>If you already run <a href="how-to-run-qwen-3-6-locally.html">Qwen 3.6</a> and it does what you need, there is no emergency. The 3.8 is the better model at the same size and the same license, with a longer native context and stronger agent behaviour, but it is a 17.1 GB download and a template gotcha. Upgrade when you have an evening, not in the middle of a project.</p>
 
-    <p>If you are on 8 GB or 12 GB, the honest answer is that this is the wrong size for your card. Q2_K technically loads at 10.7 GB and leaves you no context. A smaller Qwen will make you happier.</p>
+    <p>If you are on 8 GB or 12 GB, the honest answer is that this is the wrong size for your card. A 2-bit quant technically loads at 10.7 GB and leaves you no context. A smaller Qwen will make you happier.</p>
 
     <h2>FAQ</h2>
 
     <h3>How much VRAM does Qwen 3.8 27B need?</h3>
-    <p>16.6 GB for the Q4_K_M weights, plus 64 KB per token of context. A 24 GB card is the comfortable home. 32 GB gets you Q8_0.</p>
+    <p>17.1 GB for the Q4_K_M weights, plus 64 KB per token of context. A 24 GB card is the comfortable home. 32 GB gets you Q8_0.</p>
 
     <h3>Does it fit on an RTX 3060 12 GB?</h3>
-    <p>Only at Q2_K, 10.7 GB, with almost nothing left for context. It runs, slowly, with layers offloaded to system RAM.</p>
+    <p>Only at 2-bit, about 10.7 GB, with almost nothing left for context. It runs, slowly, with layers offloaded to system RAM.</p>
 
     <h3>Is it really Apache 2.0?</h3>
     <p>Yes. Commercial use, fine tuning and redistribution are all permitted.</p>
