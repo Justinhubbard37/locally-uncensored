@@ -108,3 +108,74 @@ describe('measureRun', () => {
     expect(m.correct).toBe(false)
   })
 })
+
+// P3 from the review of C1 (2026-08-14). The wall clock is the half of the
+// brake meant for "the benchmark simply stops moving", and it was the one case
+// it could not catch: the check lived inside the for-await body, so it only ran
+// when a chunk arrived. A model that stops sending parks the loop on a pending
+// next() forever. The token cap cannot help there either, because a stalled
+// stream produces no tokens.
+describe('the wall clock reaches a stream that has stopped sending', () => {
+  /** A stream that yields one chunk and then never resolves again. */
+  function stalling(): AsyncIterable<any> {
+    let served = false
+    return {
+      [Symbol.asyncIterator]() {
+        return {
+          next() {
+            if (!served) {
+              served = true
+              return Promise.resolve({ done: false, value: { content: 'hi' } })
+            }
+            return new Promise<never>(() => { /* the stall */ })
+          },
+          return() { return Promise.resolve({ done: true, value: undefined }) },
+        }
+      },
+    }
+  }
+
+  it('stops with finishReason timeout instead of hanging', async () => {
+    const onLimit = vi.fn()
+    const m = await measureRun(stalling(), () => true, {
+      clock: () => 0,
+      maxMs: 50,
+      // Trip immediately, so the test does not wait on a real timer.
+      deadlineIn: () => Promise.resolve(),
+      onLimit,
+    })
+    expect(m.finishReason).toBe('timeout')
+    expect(onLimit).toHaveBeenCalledWith('timeout')
+  })
+
+  it('closes the generator so the model is not left generating', async () => {
+    let closed = false
+    const stream: AsyncIterable<any> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next() { return new Promise<never>(() => {}) },
+          return() { closed = true; return Promise.resolve({ done: true, value: undefined }) },
+        }
+      },
+    }
+    await measureRun(stream, () => true, {
+      clock: () => 0, maxMs: 10, deadlineIn: () => Promise.resolve(),
+    })
+    expect(closed).toBe(true)
+  })
+
+  it('a stream that finishes normally is untouched by the deadline', async () => {
+    async function* good() {
+      yield { content: 'a' }
+      yield { content: 'b', finishReason: 'stop' }
+    }
+    const m = await measureRun(good(), () => true, {
+      clock: () => 0,
+      maxMs: 1000,
+      // A deadline that never fires, the shape of a healthy run.
+      deadlineIn: () => new Promise<void>(() => {}),
+    })
+    expect(m.finishReason).toBe('stop')
+    expect(m.totalTokens).toBe(2)
+  })
+})

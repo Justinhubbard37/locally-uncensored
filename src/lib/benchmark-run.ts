@@ -45,6 +45,9 @@ export interface MeasureOptions {
   /** Called the moment a cap trips, so the caller can abort the upstream
    *  request rather than leave the model generating into a dropped stream. */
   onLimit?: (reason: 'runaway' | 'timeout') => void
+  /** Resolves after `ms`. Injected for the same reason `clock` is: a test must
+   *  be able to trip the wall clock without waiting five real minutes. */
+  deadlineIn?: (ms: number) => Promise<void>
 }
 
 export async function measureRun(
@@ -57,6 +60,10 @@ export async function measureRun(
     maxTokens = RUNAWAY_TOKEN_CAP,
     maxMs = RUNAWAY_MS_CAP,
     onLimit,
+    deadlineIn = (ms) => new Promise<void>((resolve) => {
+      const t = setTimeout(resolve, ms) as unknown as { unref?: () => void }
+      t.unref?.()
+    }),
   } = options
   const startTime = clock()
   let firstTokenTime = 0
@@ -67,7 +74,25 @@ export async function measureRun(
   let apiEvalCount: number | undefined
   let apiEvalDurationMs: number | undefined
 
-  for await (const chunk of stream) {
+  // Not `for await`: that parks on the pending next() and the wall clock below
+  // is only ever read when a chunk arrives. A model that stops sending is
+  // exactly the case the wall clock exists for (ElBiggus: "the benchmark simply
+  // stops moving"), and it was the one case it could not catch. One deadline
+  // for the whole run, raced against every step.
+  const iterator = stream[Symbol.asyncIterator]()
+  const deadline = deadlineIn(maxMs).then(() => ({ kind: 'timeout' as const }))
+  try {
+  for (;;) {
+    const step = await Promise.race([
+      iterator.next().then((r) => ({ kind: 'step' as const, r })),
+      deadline,
+    ])
+    if (step.kind === 'timeout') {
+      finishReason = 'timeout'
+      break
+    }
+    if (step.r.done) break
+    const chunk = step.r.value
     // Time to first token is the first output of any kind: for a model that
     // reasons out loud the thinking arrives before the answer, and starting
     // the clock only at the first answer token would hide the whole reasoning
@@ -107,6 +132,11 @@ export async function measureRun(
       finishReason = limit
       break
     }
+  }
+  } finally {
+    // for await closed the generator on break; doing it by hand keeps that,
+    // so a stalled upstream is released instead of left generating.
+    await iterator.return?.(undefined).catch(() => { /* already closed */ })
   }
   if (finishReason === 'runaway' || finishReason === 'timeout') {
     onLimit?.(finishReason)
