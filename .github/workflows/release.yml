@@ -184,5 +184,31 @@ jobs:
           # Prerelease keeps `releases/latest` on the last verified version.
           # Flipping to Latest is the separate, deliberate step that happens
           # after the build is installed and checked on a real machine.
+          #
+          # This input alone is NOT the guarantee. tauri-action passes
+          # draft/prerelease to createRelease only, so on this workflow's own
+          # primary trigger (`on: release: [published]`, where the release by
+          # definition already exists) the action reuses the release untouched
+          # and the input does nothing. The enforce-prerelease job below is what
+          # actually holds the promise.
           prerelease: true
           args: ${{ matrix.args }}
+
+  # The promise above, made real for every trigger. Runs after the binaries are
+  # attached, so a release published as a full release is put back before
+  # anyone is offered it, and never touches the release that is already Latest.
+  enforce-prerelease:
+    needs: build-tauri
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+      - name: Keep the release out of Latest until it is verified
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+        run: node scripts/enforce-prerelease.mjs

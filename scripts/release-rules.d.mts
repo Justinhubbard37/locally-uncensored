@@ -19,3 +19,8 @@ export declare function shouldCarryBanner(
   rel: GitHubRelease,
   latest: GitHubRelease | null | undefined,
 ): boolean
+
+export declare function shouldForcePrerelease(
+  rel: GitHubRelease | null | undefined,
+  latest: GitHubRelease | null | undefined,
+): boolean

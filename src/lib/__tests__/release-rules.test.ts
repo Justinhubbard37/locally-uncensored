@@ -12,7 +12,10 @@
  * Run: npx vitest run src/lib/__tests__/release-banner-rules.test.ts
  */
 import { describe, it, expect } from 'vitest'
-import { shouldCarryBanner, withoutBanner, BANNER, MARKER } from '../../../scripts/release-banner-rules.mjs'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, resolve } from 'node:path'
+import { shouldCarryBanner, shouldForcePrerelease, withoutBanner, BANNER, MARKER } from '../../../scripts/release-rules.mjs'
 
 const rel = (over: Record<string, unknown> = {}) => ({
   id: 1, tag_name: 'v1', prerelease: false, draft: false,
@@ -81,5 +84,61 @@ describe('the banner text itself', () => {
 
   it('carries the marker the script looks for', () => {
     expect(BANNER.startsWith(MARKER)).toBe(true)
+  })
+})
+
+// P4 from the review, confirmed at the source of the pinned action. release.yml
+// passes `prerelease: true` to tauri-action, and tauri-action hands
+// draft/prerelease to createRelease ONLY (src/create-release.ts at
+// 51a9f115): when the release already exists, which it always does on
+// `on: release: [published]`, the action reuses it and never patches the flag.
+// So the guarantee in that comment held for workflow_dispatch and nothing else,
+// and a release published as a full release went straight to Latest with the
+// download routes and every updater following. That is the 2026-08-10 incident
+// the comment claims was fixed.
+describe('a build is not a decision, on every trigger', () => {
+  const latest = rel({ id: 100, tag_name: 'v2.6.4', published_at: '2026-08-10T00:00:00Z' })
+
+  it('a full release that is not Latest is forced back', () => {
+    const fresh = rel({ id: 3, tag_name: 'v2.6.5', prerelease: false })
+    expect(shouldForcePrerelease(fresh, latest)).toBe(true)
+  })
+
+  it('the release that IS Latest is never touched, or the flip would undo itself', () => {
+    expect(shouldForcePrerelease(latest, latest)).toBe(false)
+  })
+
+  it('a release already marked prerelease needs nothing', () => {
+    expect(shouldForcePrerelease(rel({ id: 4, prerelease: true }), latest)).toBe(false)
+  })
+
+  it('a draft is left alone', () => {
+    expect(shouldForcePrerelease(rel({ id: 5, draft: true }), latest)).toBe(false)
+  })
+
+  it('the very first release of a repo, with no Latest to compare, is still held back', () => {
+    expect(shouldForcePrerelease(rel({ id: 6, prerelease: false }), null)).toBe(true)
+  })
+})
+
+describe('the workflow actually calls it', () => {
+  const wf = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '../../../.github/workflows/release.yml'), 'utf8',
+  )
+
+  it('after the binaries are attached, not before', () => {
+    expect(wf).toContain('enforce-prerelease:')
+    expect(wf).toContain('needs: build-tauri')
+    expect(wf).toContain('node scripts/enforce-prerelease.mjs')
+  })
+
+  it('with the tag from either trigger', () => {
+    expect(wf).toContain('TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}')
+  })
+
+  it('and even when a platform of the matrix failed', () => {
+    // A failed Linux lane must not leave a full release standing.
+    const job = wf.slice(wf.indexOf('enforce-prerelease:'))
+    expect(job).toContain('if: always()')
   })
 })

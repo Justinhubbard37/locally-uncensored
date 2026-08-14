@@ -1,9 +1,9 @@
 /**
- * Which releases carry the "old release" banner.
+ * The rules about release state that CI applies, in one testable place.
  *
- * Pulled out of mark-old-releases.mjs so the rule can be tested without a
- * GitHub token. The script itself is a top-level-await program that talks to
- * the API on import, and the rule is the only part that can be wrong quietly.
+ * Both callers are top-level-await programs that talk to the GitHub API on
+ * import, so the part that can be wrong quietly lives here instead, where a
+ * test can reach it without a token.
  */
 
 export const MARKER = '<!-- lu-old-release-banner -->'
@@ -45,4 +45,28 @@ export function shouldCarryBanner(rel, latest) {
   if (!latest || rel.id === latest.id) return false
   const upcoming = (rel.prerelease === true || rel.draft === true) && stamp(rel) >= stamp(latest)
   return !upcoming
+}
+
+/**
+ * True when this release must be forced back to prerelease.
+ *
+ * release.yml passes `prerelease: true` to tauri-action, and on the workflow's
+ * OWN primary trigger that input does nothing. tauri-action only passes
+ * draft/prerelease to createRelease (src/create-release.ts): when the release
+ * already exists, which it always does on `on: release: [published]`, the
+ * action reuses it and never patches the flag. So the guarantee written into
+ * that comment ("a build is not a decision") held for workflow_dispatch and
+ * for nothing else, and a release published as a full release went straight to
+ * Latest with the download routes and every updater following within minutes.
+ * That is the 2026-08-10 incident the comment says was fixed.
+ *
+ * The rule is the same one the banner uses, from the other side: a release
+ * that is not the flagged Latest has not been verified yet, so it belongs in
+ * prerelease. The deliberate flip to Latest is what takes it out, and this
+ * must never undo that flip.
+ */
+export function shouldForcePrerelease(rel, latest) {
+  if (!rel || rel.prerelease === true || rel.draft === true) return false
+  if (latest && rel.id === latest.id) return false
+  return true
 }

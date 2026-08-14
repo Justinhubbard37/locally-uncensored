@@ -14,7 +14,7 @@
  * re-run or a manual dispatch is free.
  */
 
-import { MARKER, BANNER, withoutBanner, shouldCarryBanner } from './release-banner-rules.mjs'
+import { MARKER, BANNER, withoutBanner, shouldCarryBanner } from './release-rules.mjs'
 
 const repo = process.env.GITHUB_REPOSITORY ?? 'PurpleDoubleD/locally-uncensored'
 const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
