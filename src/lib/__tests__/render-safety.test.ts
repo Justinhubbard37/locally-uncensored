@@ -16,6 +16,9 @@
  * would need fuzzy matching whose false positives would block ordinary prompts.
  */
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, resolve } from 'node:path'
 import { checkPromptSafety } from '../render/safety'
 
 const blocked = (t: string) => checkPromptSafety(t).blocked
@@ -74,5 +77,44 @@ describe('the ordinary cases still behave', () => {
 describe('the documented limit', () => {
   it('a deliberate misspelling is NOT caught — do not read this file as a guarantee', () => {
     expect(blocked('a chiild, nude')).toBe(false)
+  })
+})
+
+// P5 from the review (2026-08-14). The gate is only worth the fields it reads,
+// and the two render paths disagreed: the cloud one covered musicLyrics, the
+// local one skipped it on a written premise that is false. "music is a
+// hosted-only op and cannot reach this path" while useCreate.ts hands
+// `lyrics: state.musicLyrics` to buildLocalOpWorkflow on that very path. A
+// local render has no server gate behind it, so the field went to the model
+// ungated.
+describe('both render paths gate the same fields', () => {
+  const local = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '../../hooks/useCreate.ts'), 'utf8',
+  )
+  const cloud = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '../../hooks/useCloudCreate.ts'), 'utf8',
+  )
+
+  /** The template literal handed to checkPromptSafety, as a set of field names. */
+  const gatedFields = (src: string): string[] => {
+    const at = src.indexOf('checkPromptSafety(')
+    const lit = src.slice(at, src.indexOf('`', src.indexOf('`', at) + 1) + 1)
+    return [...lit.matchAll(/\$\{[a-zA-Z]+\.([a-zA-Z]+)\}/g)].map((m) => m[1]).sort()
+  }
+
+  it('the local path reads prompt, negativePrompt, musicLyrics and triggerWord', () => {
+    expect(gatedFields(local)).toEqual(['musicLyrics', 'negativePrompt', 'prompt', 'triggerWord'])
+  })
+
+  it('and the cloud path reads exactly the same four', () => {
+    expect(gatedFields(cloud)).toEqual(gatedFields(local))
+  })
+
+  it('the local audio lane really does carry the lyrics, so the gate is not theoretical', () => {
+    expect(local).toContain('lyrics: state.musicLyrics')
+  })
+
+  it('lyrics are blocked by the same rule as a prompt', () => {
+    expect(blocked('a nude child singing')).toBe(true)
   })
 })

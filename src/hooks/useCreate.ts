@@ -422,9 +422,17 @@ export function useCreate() {
     // on the user's own machine. triggerWord is in here because local character
     // training runs through this same function a few lines down, and the cloud
     // gate already treats that field as prompt-bearing (useCloudCreate.ts).
-    // musicLyrics is not: music is a hosted-only op and cannot reach this path.
+    //
+    // musicLyrics used to be left out on the premise that music is hosted only
+    // and cannot reach this path. It can and it does: the local audio lane
+    // hands `lyrics: state.musicLyrics` to buildLocalOpWorkflow a few hundred
+    // lines below. Every field that carries user text to a render is gated on
+    // both paths, and the two lists have to stay identical (review
+    // 2026-08-14).
     {
-      const verdict = checkPromptSafety(`${state.prompt} ${state.negativePrompt} ${state.triggerWord}`)
+      const verdict = checkPromptSafety(
+        `${state.prompt} ${state.negativePrompt} ${state.musicLyrics} ${state.triggerWord}`,
+      )
       if (verdict.blocked) {
         state.setError(SAFETY_BLOCK_MESSAGE)
         return
