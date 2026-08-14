@@ -29,6 +29,20 @@ async function waitForIdleRender(signal?: AbortSignal, attempts = 120): Promise<
   }
 }
 
+/** Poll until the engine answers again, on the same budget this file uses for
+ *  a warm start (ensureComfyRunning: 15 rounds of 2s). Deliberately does NOT
+ *  fall through to install_comfyui the way ensureComfyRunning does: after a
+ *  restart the engine is installed by definition, and a multi gigabyte install
+ *  is not something to start behind a model download. */
+async function waitForComfyBack(onStatus?: (m: string) => void, signal?: AbortSignal): Promise<boolean> {
+  for (let i = 0; i < 15; i++) {
+    if (await checkComfyConnection()) return true
+    onStatus?.(`Waiting for ComfyUI to come back up… ${i * 2}s`)
+    await waitOrAbort(2000, signal)
+  }
+  return await checkComfyConnection()
+}
+
 async function restartComfyForNewNodes(): Promise<void> {
   try { await backendCall('stop_comfyui') } catch { /* may already be stopped */ }
   // stop_comfyui reaps its child before returning, so LU's own engine is down
@@ -416,6 +430,9 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
       let missing = await waitForModelsVisible({
         missing: stillMissing, refresh: refreshLists, onStatus: onProgress, signal,
       })
+      // Whatever the restart says is the PRECISE reason, and it has to outlive
+      // the block so the throw below can prefer it over its own guess.
+      let restartSaid = ''
       if (missing.length > 0) {
         // Heal before complaining: a restart rebuilds the model index for
         // certain, and it is the same move that registers a new node pack.
@@ -429,13 +446,25 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
           await waitForIdleRender(signal)
         }
         onProgress?.('Restarting ComfyUI so it picks up the new files…')
-        await restartComfyForNewNodes().catch(() => { /* diagnosed below */ })
+        try {
+          await restartComfyForNewNodes()
+        } catch (e) {
+          restartSaid = e instanceof Error ? e.message : String(e)
+        }
+        // The engine has to be listening again before a scan can report
+        // anything. The old code went straight into a 10 by 3s wait, which had
+        // to cover the boot AND the directory scan, while this same file
+        // budgets 30s for a warm boot alone and 60s after an install. On the
+        // 12 GB video bundles the scan is the slow half, so a perfectly good
+        // install ran out of time and got told its model folder was wrong.
+        if (!restartSaid) await waitForComfyBack(onProgress, signal)
         missing = await waitForModelsVisible({
-          missing: stillMissing, refresh: refreshLists, onStatus: onProgress, signal, attempts: 10,
+          missing: stillMissing, refresh: refreshLists, onStatus: onProgress, signal,
         })
       }
       if (missing.length > 0) {
         throw new Error(
+          restartSaid ||
           `The files downloaded fine, but ComfyUI still does not list ${missing.join(', ')}. ` +
           'Either it is reading a different model folder than LU writes to, or it was started ' +
           'outside LU and cannot be restarted from here. The Model Manager shows where the ' +

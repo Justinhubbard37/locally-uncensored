@@ -115,7 +115,9 @@ describe('the install path uses it, and says something honest when it runs out',
   })
 
   it('the last word is a thrown error, so the card turns red instead of freezing', () => {
-    expect(src).toMatch(/throw new Error\(\s*\n\s*`The files downloaded fine, but ComfyUI still does not list/)
+    // The restart's own reason now sits ahead of the fallback text inside the
+    // same throw, so the anchor is the throw plus the reason, not the literal.
+    expect(src).toMatch(/throw new Error\(\s*\n\s*restartSaid \|\|\s*\n\s*`The files downloaded fine/)
   })
 
   it('the error names the two things that actually cause it', () => {
@@ -150,6 +152,35 @@ describe('the install path uses it, and says something honest when it runs out',
 
   it('waiting for the render to finish is bounded, an install must not park forever', () => {
     expect(src).toMatch(/async function waitForIdleRender\(signal\?: AbortSignal, attempts = \d+\)/)
+  })
+
+  // P7 from the review (2026-08-14). The heal swallowed the restart's own
+  // error, which is the precise one, and then guessed between two causes. And
+  // the follow-up wait was 10 rounds of 3s, which had to cover the engine boot
+  // AND the directory scan, while this same file budgets 15 rounds of 2s for a
+  // warm boot alone and 30 for one after an install. On the 12 GB bundles the
+  // scan is the slow half, so a perfectly good install was told its model
+  // folder was wrong.
+  it('the restart reason is kept and preferred over the guess', () => {
+    expect(src).toContain('restartSaid = e instanceof Error ? e.message : String(e)')
+    const throwAt = src.indexOf('The files downloaded fine, but ComfyUI still does not list')
+    expect(src.slice(throwAt - 200, throwAt)).toContain('restartSaid ||')
+  })
+
+  it('the engine gets the same time to come back that a warm boot gets', () => {
+    expect(src).toContain('await waitForComfyBack(onProgress, signal)')
+    expect(src).toMatch(/for \(let i = 0; i < 15; i\+\+\) \{\s*\n\s*if \(await checkComfyConnection\(\)\) return true/)
+  })
+
+  it('the second visibility wait gets the full budget, not a shortened one', () => {
+    const heal = src.slice(src.indexOf('Restarting ComfyUI so it picks up the new files'))
+    const secondWait = heal.slice(0, heal.indexOf('if (missing.length > 0)'))
+    expect(secondWait).not.toContain('attempts: 10')
+  })
+
+  it('coming back up must not trigger a multi gigabyte install behind the download', () => {
+    const helper = src.slice(src.indexOf('async function waitForComfyBack'), src.indexOf('async function restartComfyForNewNodes'))
+    expect(helper).not.toContain('install_comfyui')
   })
 })
 
