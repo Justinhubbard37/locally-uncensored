@@ -83,6 +83,25 @@ function collides(a: Region, b: Region): boolean {
   return a.start < b.end && b.start < a.end
 }
 
+/**
+ * Does this region have to be EMITTED inside the group being built?
+ *
+ * A separate question from whether it conflicts, and conflating the two is what
+ * broke the merge (review 2026-08-14). An insertion at exactly the first line
+ * of a block the other side replaced does not conflict, so it was left out of
+ * the group and opened its own one further down the loop. Its span then lay
+ * BEHIND the write cursor: the cursor moved backwards, and the tail loop
+ * re-emitted base lines the other side had deleted. The user's deleted line
+ * came back, ok:true, with no conflict and no undo.
+ *
+ * Grouping is therefore inclusive at the edges: anything whose span touches the
+ * group joins it, and the group decides afterwards whether the two sides
+ * actually fight.
+ */
+function touches(a: Region, start: number, end: number): boolean {
+  return a.start <= end && a.end >= start
+}
+
 /** The result of applying one side's regions across [start, end). */
 function rewrite(base: string[], regions: Region[], start: number, end: number): string[] {
   const out: string[] = []
@@ -136,13 +155,13 @@ export function mergeThreeWay(base: string, ours: string, theirs: string): Merge
     // span, so a chain of edits over the same lines is judged as one unit.
     for (let grew = true; grew; ) {
       grew = false
-      while (oi < ourRegions.length && collides(ourRegions[oi], { start, end, lines: [] })) {
+      while (oi < ourRegions.length && touches(ourRegions[oi], start, end)) {
         end = Math.max(end, ourRegions[oi].end)
         mine.push(ourRegions[oi])
         oi++
         grew = true
       }
-      while (ti < theirRegions.length && collides(theirRegions[ti], { start, end, lines: [] })) {
+      while (ti < theirRegions.length && touches(theirRegions[ti], start, end)) {
         end = Math.max(end, theirRegions[ti].end)
         yours.push(theirRegions[ti])
         ti++
@@ -156,6 +175,16 @@ export function mergeThreeWay(base: string, ours: string, theirs: string): Merge
       const only = mine.length === 0 ? yours : mine
       for (const line of rewrite(baseLines, only, start, end)) out.push(line)
       if (mine.length > 0) mergedRegions++
+    } else if (!mine.some((m) => yours.some((y) => collides(m, y)))) {
+      // Both sides edited inside this span but never the same base lines: an
+      // insertion sitting at the first line of a replaced block is the common
+      // one. Take both, in base order, insertion first where the anchor is
+      // shared, so the inserted lines land above the block and not below it.
+      const all = [...mine, ...yours].sort(
+        (x, y) => x.start - y.start || (x.end - x.start) - (y.end - y.start),
+      )
+      for (const line of rewrite(baseLines, all, start, end)) out.push(line)
+      mergedRegions++
     } else {
       const a = rewrite(baseLines, mine, start, end)
       const b = rewrite(baseLines, yours, start, end)
@@ -166,7 +195,9 @@ export function mergeThreeWay(base: string, ours: string, theirs: string): Merge
         conflicts++
       }
     }
-    cursor = end
+    // Never backwards. A group that ends before the cursor would let the tail
+    // loop below re-emit base lines that were already resolved.
+    cursor = Math.max(cursor, end)
   }
 
   if (conflicts > 0) return { ok: false, conflicts }
