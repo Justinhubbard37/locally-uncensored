@@ -272,6 +272,11 @@ export function useCodex() {
     // still works: honour it, and carry the two generators openly from the next
     // step on rather than leaving the model to reference a file it cannot make.
     let createGateOpened = false
+    // A loop must not outlive a refusal no retry can fix. `return` in the catch
+    // below does not skip the finally, so without this the /loop driver simply
+    // fires the next pass, the proxy refuses it again, and the credits dialog
+    // reopens every interval until the user finds Stop.
+    let loopHalt: string | null = null
     // A brand-new instruction clears a previous stop; a /loop pass inherits it.
     if (!opts?.loop) userStoppedRef.current = false
     // `/loop [30s] …` — the interval is the PAUSE BETWEEN PASSES, and the
@@ -1997,6 +2002,7 @@ export function useCodex() {
         // An empty wallet is not a crash and no retry fixes it. Replace the
         // status-code line with the plain explanation the other surfaces use.
         if (e?.code === 'credits_exhausted') {
+          loopHalt = 'out of credits'
           fullContent += `\n\n${CREDITS_EXHAUSTED_MESSAGE}\n\nThe work finished so far stays in this chat. Once you top up, send a new message naming only what is still left.`
           useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent)
           codexStore.addEvent(convId, {
@@ -2094,7 +2100,16 @@ export function useCodex() {
       // keep going keeps going (David 2026-07-25). The stop button is the
       // brake, and the loop bar above the composer makes sure it is never
       // running invisibly.
-      if (loopState && convId && !userStoppedRef.current) {
+      if (loopState && convId && loopHalt) {
+        // Stop the loop where the refusal happened, and say so once. Silently
+        // dropping it would leave the LoopBar promising a pass nobody is going
+        // to run (audit A3).
+        useAgentLoopStore.getState().clear()
+        useChatStore.getState().addMessage(convId, {
+          id: uuid(), role: 'assistant', timestamp: Date.now(),
+          content: `The loop stopped because the run was ${loopHalt}. Start it again once that is sorted.`,
+        })
+      } else if (loopState && convId && !userStoppedRef.current) {
         const saidDone = loopPassSaysDone(fullContent.trim())
         const cap = Math.max(0, settings.loopMaxPasses ?? 0)
         const nextPass = loopState.pass + 1

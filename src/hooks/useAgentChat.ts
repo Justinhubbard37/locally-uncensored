@@ -554,6 +554,11 @@ export function useAgentChat() {
     // interrupted when the chat is deleted mid-generation (gated to a no-op when
     // nothing is in flight).
     useGenerationStore.getState().registerAborter(convId, () => { runningRef.current = false; abort.abort(); requestGenerationCancel() })
+    // A refusal no retry can fix has to end the loop as well. `return` in the
+    // catch does not skip the finally, so without this the driver fires the
+    // next pass into the same refusal and the credits dialog reopens every
+    // interval until the user finds Stop.
+    let loopHalt: string | null = null
     contentRef.current = ''
     thinkingRef.current = ''
     blocksRef.current = []
@@ -1747,6 +1752,7 @@ export function useAgentChat() {
             `This model does not support thinking mode. Disable the Think button or switch to a compatible model (Qwen 3, DeepSeek-R1, Gemma 4).`
           )
         } else if ((err as { code?: string })?.code === 'credits_exhausted') {
+          loopHalt = 'out of credits'
           // No retry fixes an empty wallet, and on a long run this line is the
           // only thing left on screen once the dialog is dismissed. Name where
           // the plan stopped, so "it froze" reads as "it was refused" (Morgan,
@@ -1827,7 +1833,15 @@ export function useAgentChat() {
       // one: a loop someone asked to keep going keeps going until it says done
       // or they stop it. The loop bar above the composer is what keeps that
       // honest rather than invisible.
-      if (opts?.loop && convId && !userStoppedRef.current) {
+      if (opts?.loop && convId && loopHalt) {
+        // Same rule as the coding surface: no retry fixes an empty wallet, so
+        // the loop ends here instead of refiring into the same refusal.
+        useAgentLoopStore.getState().clear()
+        useChatStore.getState().addMessage(convId, {
+          id: uuid(), role: 'assistant', timestamp: Date.now(),
+          content: `The loop stopped because the run was ${loopHalt}. Start it again once that is sorted.`,
+        })
+      } else if (opts?.loop && convId && !userStoppedRef.current) {
         const loopState = opts.loop
         const saidDone = loopPassSaysDone(contentRef.current.trim())
         const cap = Math.max(0, useSettingsStore.getState().settings.loopMaxPasses ?? 0)
