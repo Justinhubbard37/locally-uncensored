@@ -37,15 +37,20 @@ import { mergeThreeWay } from './three-way-merge'
  *   3. foreign edit elsewhere-> merge both and write the result
  *   4. same lines both sides -> refuse, this one needs a human
  *
- * Only steps 2 to 4 need the baseline. `oldContent` is also empty when the
- * stage-time read failed (useCodex treats a failed read as "new file"), and
- * gating on that would break applies that are perfectly fine.
+ * An empty `oldContent` means "there was no file here", and that used to skip
+ * the whole check. It is also what useCodex writes when the stage-time read
+ * merely FAILED, so a new-file write could land on top of a file that exists
+ * now, with no drift check, no merge and no warning. Empty is a baseline like
+ * any other: an empty base against a file that has content is exactly the
+ * insert-against-insert case mergeThreeWay already refuses, and refusing with
+ * the message below beats overwriting somebody's file in silence. A file that
+ * genuinely is not there still throws on the read and takes the create path.
  */
 async function reconcile(
   chatId: string,
   change: StagedChange,
 ): Promise<{ content: string; merged: number }> {
-  if (!change.oldContent) return { content: change.newContent, merged: 0 }
+  const base = change.oldContent ?? ''
   let current: string
   try {
     const res = await backendCall<{ content?: string }>('fs_read', {
@@ -58,10 +63,10 @@ async function reconcile(
     // gone or unreadable, the write recreates it, which is what the user asked for
     return { content: change.newContent, merged: 0 }
   }
-  if (current === change.oldContent || current === change.newContent) {
+  if (current === base || current === change.newContent) {
     return { content: change.newContent, merged: 0 }
   }
-  const merged = mergeThreeWay(change.oldContent, current, change.newContent)
+  const merged = mergeThreeWay(base, current, change.newContent)
   if (merged.ok) {
     return { content: merged.content, merged: merged.mergedRegions }
   }

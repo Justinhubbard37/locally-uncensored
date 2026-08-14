@@ -135,12 +135,32 @@ describe('applyStagedChange refuses to overwrite a file that moved on', () => {
     expect(useStagedChangesStore.getState().list(CHAT)).toHaveLength(0)
   })
 
-  it('does not read at all for a new file (no baseline to compare against)', async () => {
-    fsWrite.mockResolvedValue({ status: 'saved' })
+  // An empty baseline is not a licence to overwrite. useCodex also writes an
+  // empty oldContent when the stage-time read merely FAILED, so "new file" and
+  // "could not look" are the same value here (review 2026-08-14).
+  it('a new file that really is not there is created without ceremony', async () => {
+    route(new Error('no such file'))
     stage('new.py', { oldContent: '' })
     await applyStagedChange(CHAT, useStagedChangesStore.getState().list(CHAT)[0])
-    expect(fsWrite).toHaveBeenCalledTimes(1)
-    expect(fsWrite.mock.calls[0][0]).toBe('fs_write')
+    expect(useStagedChangesStore.getState().list(CHAT)).toHaveLength(0)
+    expect(fsWrite).toHaveBeenCalledWith('fs_write', expect.anything())
+  })
+
+  it('a new file whose path is occupied refuses instead of overwriting', async () => {
+    route('somebody else already wrote this')
+    stage('new.py', { resolvedPath: '/proj/new.py', workingDirectory: '/proj', oldContent: '' })
+    const change = useStagedChangesStore.getState().list(CHAT)[0]
+
+    await expect(applyStagedChange(CHAT, change)).rejects.toThrow(/changed on disk/)
+    expect(fsWrite).not.toHaveBeenCalledWith('fs_write', expect.anything())
+    expect(useStagedChangesStore.getState().list(CHAT)).toHaveLength(1)
+  })
+
+  it('an empty file at that path is not a collision, the write just fills it', async () => {
+    route('')
+    stage('new.py', { resolvedPath: '/proj/new.py', workingDirectory: '/proj', oldContent: '' })
+    await applyStagedChange(CHAT, useStagedChangesStore.getState().list(CHAT)[0])
+    expect(useStagedChangesStore.getState().list(CHAT)).toHaveLength(0)
   })
 
   it('still writes when the file is gone — the write recreates it', async () => {
