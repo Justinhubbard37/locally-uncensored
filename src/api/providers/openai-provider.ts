@@ -246,10 +246,17 @@ export class OpenAIProvider implements ProviderClient {
    */
   private thinkingEffort(model: string, thinking: boolean | undefined): string | undefined {
     if (thinking === undefined) return undefined
-    const floor = OpenAIProvider.effortMemory.get(this.catalogKey(model))
-    if (floor === 'omit') return undefined
-    if (thinking === true) return 'high'
-    return floor === 'minimal' ? 'minimal' : 'none'
+    const walked = OpenAIProvider.effortMemory.get(this.catalogKey(model))
+    if (thinking === true) return walked?.on === 'omit' ? undefined : 'high'
+    if (walked?.off === 'omit') return undefined
+    return walked?.off === 'minimal' ? 'minimal' : 'none'
+  }
+
+  /** Remember a walk, for one direction of the switch only. */
+  private rememberEffort(model: string, lane: 'on' | 'off', value: 'minimal' | 'omit'): void {
+    const key = this.catalogKey(model)
+    const prev = OpenAIProvider.effortMemory.get(key) ?? {}
+    OpenAIProvider.effortMemory.set(key, { ...prev, [lane]: value })
   }
 
   /**
@@ -263,6 +270,11 @@ export class OpenAIProvider implements ProviderClient {
    * unrelated reason (an overlong context is the common one) walks the same
    * ladder and must not leave a memory behind, or one oversized message would
    * cost the user their thinking switch for the rest of the session.
+   *
+   * stream_options gets its own rung ahead of dropping the knob, so a 400 that
+   * field caused is never blamed on thinking. Dropping both at once and then
+   * crediting the knob is how an endpoint that only dislikes stream_options
+   * ended up remembered as one that cannot think at all.
    */
   private async sendChat(
     model: string,
@@ -278,20 +290,31 @@ export class OpenAIProvider implements ProviderClient {
     })
     const refused = (res: Response) => !res.ok && (res.status === 400 || res.status === 422)
 
+    const asked = body.reasoning_effort as string | undefined
+    const lane: 'on' | 'off' | undefined =
+      asked === undefined ? undefined : asked === 'high' ? 'on' : 'off'
+
     let res = await this.sendOrExplain(post)
 
     if (refused(res) && body.reasoning_effort === 'none') {
       body.reasoning_effort = 'minimal'
       res = await post()
-      if (res.ok) OpenAIProvider.effortMemory.set(this.catalogKey(model), 'minimal')
     }
 
-    if (refused(res) && ('reasoning_effort' in body || 'stream_options' in body)) {
-      const hadEffort = 'reasoning_effort' in body
-      delete body.reasoning_effort
+    if (refused(res) && 'stream_options' in body) {
       delete body.stream_options
       res = await post()
-      if (res.ok && hadEffort) OpenAIProvider.effortMemory.set(this.catalogKey(model), 'omit')
+    }
+
+    if (refused(res) && 'reasoning_effort' in body) {
+      delete body.reasoning_effort
+      res = await post()
+    }
+
+    if (res.ok && lane) {
+      const survived = body.reasoning_effort as string | undefined
+      if (survived === undefined) this.rememberEffort(model, lane, 'omit')
+      else if (survived !== asked) this.rememberEffort(model, lane, 'minimal')
     }
 
     return res
@@ -770,11 +793,17 @@ export class OpenAIProvider implements ProviderClient {
 
   /**
    * How far the thinking knob had to be walked down for an endpoint and model,
-   * keyed like probeCache. Absent means 'none' has never been refused here, so
+   * keyed like probeCache. Absent means nothing has been refused here yet, so
    * a new endpoint always gets the value that actually disables thinking.
    * Only a successful request writes to this (see sendChat).
+   *
+   * Split by direction on purpose. An endpoint with the o1-era vocabulary
+   * (low, medium, high) refuses both 'none' and 'minimal' while accepting
+   * 'high' happily, so what we learn with the switch OFF says nothing about
+   * the switch ON. One shared entry made a single OFF message silence the
+   * user's thinking switch for the rest of the session.
    */
-  private static effortMemory = new Map<string, 'minimal' | 'omit'>()
+  private static effortMemory = new Map<string, { on?: 'omit'; off?: 'minimal' | 'omit' }>()
 
   /** Live tool-capability answers per endpoint (G37b). Static for the same
    *  reason as probeCache, and TTL-bound like it: an LM Studio reload or an

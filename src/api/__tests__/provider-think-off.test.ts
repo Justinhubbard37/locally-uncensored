@@ -100,15 +100,31 @@ describe('an endpoint that does not know none gets minimal, not nothing', () => 
     expect(bodyOf(spy, 1).reasoning_effort).toBe('minimal')
   })
 
-  it('an endpoint that knows neither ends up with no knob and no stream_options', async () => {
+  it('stream_options is dropped on its own rung, before the knob', async () => {
+    // The two fields get separate rungs so a 400 that stream_options caused is
+    // never blamed on thinking. Dropping both at once and then crediting the
+    // knob is how an endpoint that merely dislikes stream_options ended up
+    // remembered as one that cannot think at all.
     const spy = vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(refuse())
       .mockResolvedValueOnce(refuse())
       .mockResolvedValueOnce(okStream())
-    await drain(new OpenAIProvider(makeConfig()).chatStream('m-ancient', [{ role: 'user', content: 'hi' }], { thinking: false }))
+    await drain(new OpenAIProvider(makeConfig()).chatStream('m-no-stream-opts', [{ role: 'user', content: 'hi' }], { thinking: false }))
     expect(spy).toHaveBeenCalledTimes(3)
-    expect('reasoning_effort' in bodyOf(spy, 2)).toBe(false)
+    expect(bodyOf(spy, 2).reasoning_effort).toBe('minimal')
     expect('stream_options' in bodyOf(spy, 2)).toBe(false)
+  })
+
+  it('an endpoint that knows neither ends up with no knob and no stream_options', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(refuse())
+      .mockResolvedValueOnce(refuse())
+      .mockResolvedValueOnce(refuse())
+      .mockResolvedValueOnce(okStream())
+    await drain(new OpenAIProvider(makeConfig()).chatStream('m-ancient', [{ role: 'user', content: 'hi' }], { thinking: false }))
+    expect(spy).toHaveBeenCalledTimes(4)
+    expect('reasoning_effort' in bodyOf(spy, 3)).toBe(false)
+    expect('stream_options' in bodyOf(spy, 3)).toBe(false)
   })
 
   it('a refused high goes straight to no knob, it is not a step on the ladder', async () => {
@@ -146,7 +162,7 @@ describe('the detour is paid once, not on every message', () => {
     expect(bodyOf(spy, 0).reasoning_effort).toBe('none')
   })
 
-  it('a refused high is remembered as no knob at all', async () => {
+  it('a refused high is remembered, and the next ON message skips the knob', async () => {
     const provider = new OpenAIProvider(makeConfig())
     vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(refuse())
@@ -154,9 +170,61 @@ describe('the detour is paid once, not on every message', () => {
     await provider.chatWithTools('m-no-knob', [{ role: 'user', content: 'hi' }], [], { thinking: true })
     vi.restoreAllMocks()
     const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(ok())
-    await provider.chatWithTools('m-no-knob', [{ role: 'user', content: 'hi' }], [], { thinking: false })
+    await provider.chatWithTools('m-no-knob', [{ role: 'user', content: 'hi' }], [], { thinking: true })
     expect(spy).toHaveBeenCalledTimes(1)
     expect('reasoning_effort' in bodyOf(spy, 0)).toBe(false)
+  })
+})
+
+describe('what one direction of the switch learns never binds the other', () => {
+  // The review of this very fix found the hole (2026-08-14). Endpoints with
+  // the o1-era vocabulary accept low, medium and high while refusing both
+  // 'none' and 'minimal'. With a single shared entry, one message sent with
+  // thinking OFF walked all the way to "no knob" and that memory then
+  // swallowed the user's 'high' forever after, with no note and no way back
+  // short of restarting the app. The switch looked alive and did nothing.
+
+  it('a walk to no knob with thinking OFF still leaves thinking ON at high', async () => {
+    const provider = new OpenAIProvider(makeConfig())
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(refuse())
+      .mockResolvedValueOnce(refuse())
+      .mockResolvedValueOnce(ok())
+    await provider.chatWithTools('m-o1-era', [{ role: 'user', content: 'hi' }], [], { thinking: false })
+    vi.restoreAllMocks()
+
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(ok())
+    await provider.chatWithTools('m-o1-era', [{ role: 'user', content: 'hi' }], [], { thinking: true })
+    expect(bodyOf(spy, 0).reasoning_effort).toBe('high')
+  })
+
+  it('a refused high does not cost the user the off switch', async () => {
+    const provider = new OpenAIProvider(makeConfig())
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(refuse())
+      .mockResolvedValueOnce(ok())
+    await provider.chatWithTools('m-on-only', [{ role: 'user', content: 'hi' }], [], { thinking: true })
+    vi.restoreAllMocks()
+
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(ok())
+    await provider.chatWithTools('m-on-only', [{ role: 'user', content: 'hi' }], [], { thinking: false })
+    expect(bodyOf(spy, 0).reasoning_effort).toBe('none')
+  })
+
+  it('a 400 that stream_options caused is not remembered as a dead knob', async () => {
+    const provider = new OpenAIProvider(makeConfig())
+    // none refused, minimal refused, stream_options dropped and it goes through:
+    // the endpoint understands minimal fine, it just never knew stream_options.
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(refuse())
+      .mockResolvedValueOnce(refuse())
+      .mockResolvedValueOnce(okStream())
+    await drain(provider.chatStream('m-blame', [{ role: 'user', content: 'hi' }], { thinking: false }))
+    vi.restoreAllMocks()
+
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(ok())
+    await provider.chatWithTools('m-blame', [{ role: 'user', content: 'hi' }], [], { thinking: false })
+    expect(bodyOf(spy, 0).reasoning_effort).toBe('minimal')
   })
 })
 
