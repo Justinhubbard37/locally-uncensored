@@ -751,7 +751,7 @@ export function useChat() {
         // can call the same translation without re-implementing it.
         syncOllamaHealthFromError(err)
 
-        const errorMsg = (err as any).code === 'auth'
+        const errorMsg = (err as any).code === 'auth' || (err as any).code === 'signed_out'
           ? (err as Error).message
           : (err as any).code === 'rate_limit'
             ? (err as Error).message

@@ -1778,6 +1778,24 @@ export function useAgentChat() {
             convId!, assistantMessage.id,
             (contentRef.current ? contentRef.current + '\n\n' : '') + CREDITS_EXHAUSTED_MESSAGE + planLine
           )
+        } else if ((err as { code?: string })?.code === 'signed_out'
+          || (httpStatusOf(err) === 401 && (err as { provider?: string })?.provider === 'lu-cloud')) {
+          // The retries above already re-minted the token twice, so reaching
+          // here means the session is really gone, not merely aged out. Before
+          // this branch existed the run ended on "Agent error: unauthenticated"
+          // or, on an opaque body, "Invalid API key for LU Cloud. Check
+          // Settings > Providers." for a provider that has no API key field.
+          loopHalt = 'signed out of LU Cloud'
+          const todos = useTodoStore.getState().getTodos(convId!)
+          const done = todos.filter((t) => t.status === 'completed').length
+          const planLine = todos.length
+            ? `\n\nThe plan stopped at ${done} of ${todos.length}. Everything finished so far stays in this chat. After signing in, send a new message naming only what is still left, rather than the original prompt.`
+            : ''
+          useChatStore.getState().updateMessageContent(
+            convId!, assistantMessage.id,
+            (contentRef.current ? contentRef.current + '\n\n' : '') +
+            'Your LU Cloud session ended and could not be renewed, so the run stopped here. Sign in again in Settings, then carry on.' + planLine
+          )
         } else if (/failed to fetch|connection refused|connection reset|error sending request|proxy_localhost|network ?error|timed out|timeout|tcp connect|llama runner process|backend unreachable|HTTP 5\d\d/i.test(errorMsg)) {
           // Connection-class failure — after the transient retries above this
           // means the backend really dropped mid-run (crashed, was killed, or

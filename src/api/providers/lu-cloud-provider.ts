@@ -38,7 +38,11 @@ export class LuCloudProvider implements ProviderClient {
       )
     }
     if (!token) {
-      throw new ProviderError('Sign in to your LU Cloud account to chat in the cloud.', 'lu-cloud', 'auth', 401)
+      // `signed_out`, not `auth`: there is no session left to refresh, so this
+      // is the one 401 on this provider that a retry cannot fix. The retry
+      // guard (lib/http-status) keeps every OTHER lu-cloud 401 retryable
+      // precisely because the call below re-mints the token.
+      throw new ProviderError('Sign in to your LU Cloud account to chat in the cloud.', 'lu-cloud', 'signed_out', 401)
     }
     // Hard-pin the endpoint at call time. The Supabase access token is a live
     // bearer; if we trusted `this.config.baseUrl` a tampered provider store could

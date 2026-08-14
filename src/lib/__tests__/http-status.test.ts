@@ -59,3 +59,42 @@ describe('isTerminalModelError', () => {
     expect(isTerminalModelError(new Error('Failed to fetch'))).toBe(false)
   })
 })
+
+// ── a lapsed cloud session is not a dead end (review 2026-08-14) ────────────
+//
+// LU Cloud's bearer is a Supabase access token that lives about an hour, and
+// LuCloudProvider.delegate() re-mints it on EVERY call. So a 401 an hour into
+// an agent run usually means the token aged out between two steps, and the
+// next attempt already carries a fresh one. Ending the run there threw away
+// the only thing that would have fixed it, and told a signed-in user either
+// "unauthenticated" or "Invalid API key, check Settings > Providers" for a
+// provider with no API key field. api/cloud/jobs.ts exempts 401 and 408 on the
+// same cloud for the same reason.
+describe('401 depends on whose credential it is', () => {
+  it('a lapsed LU Cloud token is retried, which is what re-mints it', () => {
+    expect(isTerminalModelError(new ProviderError('unauthenticated', 'lu-cloud', 'auth', 401))).toBe(false)
+  })
+
+  it('but a wrong API key on a configured provider still stops at once', () => {
+    expect(isTerminalModelError(new ProviderError('bad key', 'openai', 'auth', 401))).toBe(true)
+    expect(isTerminalModelError(new ProviderError('bad key', 'anthropic', 'auth', 401))).toBe(true)
+    expect(isTerminalModelError(Object.assign(new Error('nope'), { statusCode: 401 }))).toBe(true)
+  })
+
+  it('really signed out IS terminal, so the dead end costs one backoff, not three', () => {
+    // What delegate() throws when getAccessToken() comes back empty: there is
+    // no session left to refresh, so retrying only delays the true message.
+    expect(isTerminalModelError(
+      new ProviderError('Sign in to your LU Cloud account to chat in the cloud.', 'lu-cloud', 'signed_out', 401),
+    )).toBe(true)
+  })
+
+  it('a 403 from the cloud stays terminal, it is not about a stale token', () => {
+    expect(isTerminalModelError(new ProviderError('closed beta', 'lu-cloud', 'auth', 403))).toBe(true)
+  })
+
+  it('a request timeout is worth another try on any provider', () => {
+    expect(isTerminalModelError(new ProviderError('request timeout', 'openai', undefined, 408))).toBe(false)
+    expect(isTerminalModelError(Object.assign(new Error('timeout'), { statusCode: 408 }))).toBe(false)
+  })
+})
