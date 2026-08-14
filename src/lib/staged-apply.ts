@@ -92,14 +92,23 @@ export async function applyStagedChange(chatId: string, change: StagedChange): P
   // Mirror the apply in the chat log so the user sees a confirmation in the
   // main pane, not just the side-pane entry disappearing. A merge is named as
   // one: the file that landed is not byte for byte the diff that was reviewed.
+  //
+  // This used to carry `hidden: true`, which made the sentence above a lie.
+  // MessageList drops `hidden` AND every system role, CodexView drops
+  // `hidden`, so the notice rendered nowhere at all, and the only line that
+  // ever said "what landed is not what you approved" reached nobody. On a
+  // write to disk that has no undo, that is the one thing the user must not
+  // miss. The role stays 'system' so it still never reaches the model
+  // (useCodex's payload builder filters that role out); `notice` is what tells
+  // the view to render a plain line instead of an assistant bubble.
   useChatStore.getState().addMessage(chatId, {
     id: crypto.randomUUID(),
     role: 'system',
     content: merged > 0
-      ? `Applied staged change: ${change.path} (merged with ${merged} change${merged === 1 ? '' : 's'} made on disk since it was staged)`
+      ? `Applied staged change: ${change.path} (merged with ${merged} change${merged === 1 ? '' : 's'} made on disk since it was staged, so this file is not byte for byte the diff you approved)`
       : `Applied staged change: ${change.path}`,
     timestamp: Date.now(),
-    hidden: true,
+    notice: merged > 0 ? 'warn' : 'info',
   })
 }
 

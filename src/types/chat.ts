@@ -72,6 +72,13 @@ export interface Message {
   // of only the visible messages); it flips to false once the model reports the
   // exact prompt_eval_count / usage.prompt_tokens.
   usage?: { promptTokens: number; completionTokens: number; totalTokens: number; estimated?: boolean }
+  /** An app notice, not a model turn: the coding view renders it as a plain
+   *  line instead of an assistant bubble, because putting it in a bubble would
+   *  claim the model said it. 'warn' is for a notice the user has to act on,
+   *  today the one that says the bytes on disk are NOT the diff they approved.
+   *  Carried on role:'system' messages, which the payload builder drops, so a
+   *  notice never reaches the model. */
+  notice?: 'info' | 'warn'
   /** Why generation ended, when the model did NOT stop on its own terms:
    *  'length' (token budget) or 'disconnect'. Drives the small cut-off badge so
    *  a truncated answer is not shown as if it were complete (parity with the

@@ -23,7 +23,7 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { useModelStore } from '../../stores/modelStore'
 import { StagedChangesPanel } from './StagedChangesPanel'
 import { SlashStepsBlock } from './SlashStepsBlock'
-import { User, Code, Eye, GitBranch, Download, RefreshCw, RotateCcw, Folder } from 'lucide-react'
+import { User, Code, Eye, GitBranch, Download, RefreshCw, RotateCcw, Folder, Check, AlertTriangle } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { checkGitInstalled, openExternal, type GitStatus } from '../../api/backend'
 import { CodexConfirmDialog } from './CodexConfirmDialog'
@@ -206,6 +206,28 @@ export function CodexView() {
           ) : (
             <div ref={contentRef} className="py-1">
               {messages.filter(msg => !msg.hidden).map((msg) => {
+                // App notices (a staged change that landed on disk) are not
+                // model turns. They used to be written hidden, so the one line
+                // that says "the file on disk is not the diff you approved"
+                // reached nobody, and an assistant bubble would be the other
+                // wrong answer: it would claim the model said it.
+                if (msg.role === 'system' && msg.notice) {
+                  const warn = msg.notice === 'warn'
+                  return (
+                    <div key={msg.id} className="px-3 py-1" data-testid="codex-notice">
+                      <div className={`flex items-start gap-1.5 px-2 py-1 rounded border text-[0.6rem] leading-snug ${
+                        warn
+                          ? 'border-amber-300/70 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/10 text-amber-900 dark:text-amber-200'
+                          : 'border-gray-200 dark:border-white/10 bg-gray-50/60 dark:bg-white/[0.02] text-gray-500 dark:text-gray-400'
+                      }`}>
+                        {warn
+                          ? <AlertTriangle size={10} className="mt-0.5 shrink-0" />
+                          : <Check size={10} className="mt-0.5 shrink-0" />}
+                        <span className="break-words">{msg.content}</span>
+                      </div>
+                    </div>
+                  )
+                }
                 // Slash commands: the user typed "/review", but msg.content holds
                 // the expanded instruction the model ran on, show displayContent.
                 const rawForDisplay = msg.role === 'user' ? (msg.displayContent || msg.content) : msg.content

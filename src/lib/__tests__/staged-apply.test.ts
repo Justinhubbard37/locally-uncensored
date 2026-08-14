@@ -193,6 +193,35 @@ describe('applyStagedChange refuses to overwrite a file that moved on', () => {
     expect(addMessage.mock.calls[0][1].content).toMatch(/merged with 1 change made on disk/)
   })
 
+  // The merge notice was written with `hidden: true`, and both renderers drop
+  // hidden messages (MessageList drops every system role on top of that), so
+  // the only line that ever said "the bytes on disk are not the diff you
+  // approved" reached nobody. On a write with no undo that is the one thing
+  // the user must not miss.
+  it('the merge notice is visible and marked as something to act on', async () => {
+    route('a\nb\nc\nadded by another tool')
+    stage('a.py', { oldContent: 'a\nb\nc', newContent: 'a\nCHANGED\nc' })
+    await applyStagedChange(CHAT, useStagedChangesStore.getState().list(CHAT)[0])
+
+    const msg = addMessage.mock.calls[0][1]
+    expect(msg.hidden).toBeUndefined()
+    expect(msg.notice).toBe('warn')
+    expect(msg.content).toMatch(/not byte for byte the diff you approved/)
+    // Still a system message: that is what keeps it out of the model payload.
+    expect(msg.role).toBe('system')
+  })
+
+  it('a clean apply is a quiet confirmation, not a warning', async () => {
+    route('a\nb\nc')
+    stage('a.py', { oldContent: 'a\nb\nc', newContent: 'a\nCHANGED\nc' })
+    await applyStagedChange(CHAT, useStagedChangesStore.getState().list(CHAT)[0])
+
+    const msg = addMessage.mock.calls[0][1]
+    expect(msg.hidden).toBeUndefined()
+    expect(msg.notice).toBe('info')
+    expect(msg.content).not.toMatch(/merged/)
+  })
+
   it('counts an already-applied file as done instead of failing it', async () => {
     route('a\nCHANGED\nc')
     stage('a.py', { oldContent: 'a\nb\nc', newContent: 'a\nCHANGED\nc' })
