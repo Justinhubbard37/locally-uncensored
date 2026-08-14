@@ -87,10 +87,32 @@
 ;
 ; The test is the write itself, not a process list: if the file opens for
 ; writing, nothing holds it and we touch nothing.
+;
+; And when something does hold it, only OUR copy may die. `taskkill /F /T /IM`
+; matches by image name for the whole session, so the first version of this
+; hook also hard-killed a llama.cpp server the user had started themselves,
+; mid-generation, during an update they never watched. llama.cpp is one of the
+; backends this app detects, so having one running is normal, and everywhere
+; else the app leaves a stranger alone: an engine start that meets one on its
+; port refuses and asks the user to quit it (commands/engine.rs), and every
+; kill in Rust goes by PID. The installer was the single place that swung at a
+; name. It now ends exactly the processes whose image IS the file about to be
+; overwritten. The path comes from WMI rather than Get-Process because the
+; installer is 32 bit and .NET cannot read MainModule of a 64 bit process from
+; there, which is what our own engine is.
+;
+; Last resort, when the lock outlives the four rounds because someone else
+; holds it (a scanner, a backup agent, a process this user may not touch):
+; Windows refuses to WRITE a locked image but still allows it to be RENAMED, so
+; the old engine moves aside and the update lands. That is the whole point of
+; the hook, and it beats the stock dialog where Retry loops on the same lock
+; and Ignore leaves the new app running last release's engine. The leftover is
+; swept at the start of the next install.
 !macro LU_FREE_SIDECAR
   Push $R3
   Push $R4
   Push $R9
+  Delete "$INSTDIR\llama-server.exe.old"
   StrCpy $R4 0
   ${Do}
     ${IfNot} ${FileExists} "$INSTDIR\llama-server.exe"
@@ -103,12 +125,13 @@
       ${ExitDo}
     ${EndIf}
     ${If} $R4 >= 4
-      ; Still locked after four rounds. Fall through and let the stock error
-      ; dialog appear rather than spin here forever.
+      ; Still locked after four rounds, so it is not our engine holding it.
+      ; Move it out of the way instead of spinning here or failing the copy.
+      Rename "$INSTDIR\llama-server.exe" "$INSTDIR\llama-server.exe.old"
       ${ExitDo}
     ${EndIf}
     IntOp $R4 $R4 + 1
-    nsExec::Exec '"$SYSDIR\taskkill.exe" /F /T /IM "llama-server.exe"'
+    nsExec::Exec `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "Get-CimInstance Win32_Process | Where-Object { $$_.ExecutablePath -eq '$INSTDIR\llama-server.exe' } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force }"`
     Pop $R9
     Sleep 800
   ${Loop}
