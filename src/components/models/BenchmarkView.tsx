@@ -16,6 +16,7 @@ export function BenchmarkView() {
   const { models } = useModels()
   const results = useBenchmarkStore((s) => s.results)
   const isRunning = useBenchmarkStore((s) => s.isRunning)
+  const benchError = useBenchmarkStore((s) => s.error)
   const currentModel = useBenchmarkStore((s) => s.currentModel)
   const currentStep = useBenchmarkStore((s) => s.currentStep)
   const totalSteps = useBenchmarkStore((s) => s.totalSteps)
@@ -32,11 +33,15 @@ export function BenchmarkView() {
   const stale = staleModels(results, names)
 
   /** Measure everything that has no run yet, one after another. The models
-   *  share one GPU, so this is a queue, not a fan-out (M0j0Risin, D#21). */
+   *  share one GPU, so this is a queue, not a fan-out (M0j0Risin, D#21).
+   *  It also stops at the first failure: without that, a dead backend meant
+   *  every remaining model marched past in silence. */
   const runPending = async () => {
+    useBenchmarkStore.getState().setError(null)
     for (const name of pending) {
       if (useBenchmarkStore.getState().isRunning) break
       await runBenchmark(name)
+      if (useBenchmarkStore.getState().error) break
     }
   }
 
@@ -53,6 +58,17 @@ export function BenchmarkView() {
   return (
     <div className="h-full overflow-y-auto scrollbar-thin">
       <div className="max-w-2xl mx-auto px-4 py-4">
+        {benchError && (
+          <div className="mb-3 px-3 py-2 rounded-md bg-red-500/10 border border-red-500/25 text-[0.6rem] text-red-300 flex items-start gap-2">
+            <span className="flex-1">{benchError}</span>
+            <button
+              onClick={() => useBenchmarkStore.getState().setError(null)}
+              className="text-red-400 hover:text-red-200 transition-colors"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         {/* Header */}
         <div className="flex items-center gap-2 mb-4">
           <button onClick={() => setView('models')} className="p-1 rounded hover:bg-gray-200 dark:hover:bg-white/5 text-gray-500 hover:text-gray-900 dark:hover:text-white transition-colors">

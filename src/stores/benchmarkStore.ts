@@ -8,7 +8,11 @@ interface BenchmarkState {
   currentModel: string | null
   currentStep: number
   totalSteps: number
+  /** Why the last run stopped early, or null. A benchmark that cannot start at
+   *  all used to be indistinguishable from one that finished. */
+  error: string | null
   addResult: (result: BenchmarkResult) => void
+  setError: (message: string | null) => void
   setRunning: (running: boolean, model?: string, total?: number) => void
   setStep: (step: number) => void
   /** Drop every recorded run. */
@@ -29,6 +33,9 @@ export const useBenchmarkStore = create<BenchmarkState>()(
       currentModel: null,
       currentStep: 0,
       totalSteps: 0,
+      error: null,
+
+      setError: (message) => set({ error: message }),
 
       addResult: (result) => set((s) => {
         const existing = s.results[result.modelName] || []
@@ -65,7 +72,14 @@ export const useBenchmarkStore = create<BenchmarkState>()(
         }
       }),
     }),
-    { name: 'lu-benchmark-store' }
+    {
+      name: 'lu-benchmark-store',
+      // Only the measurements are worth keeping. Run state is about the run
+      // that is happening now: a persisted isRunning left over from a crash
+      // greys out the Run button forever, and a persisted error greets the
+      // user with a complaint about a run from last week.
+      partialize: (s) => ({ results: s.results }),
+    }
   )
 )
 
@@ -104,17 +118,27 @@ export function toMarkdownReport(
     return lines.join('\n')
   }
   const pct = (v: number | null): string => (v === null ? '-' : `${Math.round(v * 100)}%`)
+  // The columns follow the on-screen board, including the score it is ranked
+  // by. Exporting a table sorted by score while printing only speed made the
+  // order look wrong to anyone reading the file (review 2026-08-14).
   lines.push(
-    '| # | Model | Average t/s | Latest t/s | Avg tokens | Think | Correct | Runs |',
-    '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |',
+    '| # | Model | Score | Average t/s | Latest t/s | Avg tokens | Think | Correct | Runs |',
+    '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
   )
   board.forEach((entry, i) => {
     const latest = getLatestSpeed(results, entry.model)
+    // A run the brake stopped is not a measurement either, and the footer
+    // promises cut-off runs are marked. Counting only `truncated` left the
+    // capped token count of a runaway sitting in the table unmarked.
+    const flags = [
+      entry.truncated > 0 ? `${entry.truncated} cut off` : '',
+      entry.runaway > 0 ? `${entry.runaway} stopped by the brake` : '',
+    ].filter(Boolean).join(', ')
     const tokens = entry.avgTokens === null
       ? '-'
-      : `${entry.avgTokens}${entry.truncated > 0 ? ` (${entry.truncated} cut off)` : ''}`
+      : `${entry.avgTokens}${flags ? ` (${flags})` : ''}`
     lines.push(
-      `| ${i + 1} | ${entry.model} | ${entry.avgTps} | ${latest ?? '-'} | ${tokens} | ${pct(entry.thinkShare)} | ${pct(entry.accuracy)} | ${entry.runs} |`,
+      `| ${i + 1} | ${entry.model} | ${entry.score} | ${entry.avgTps} | ${latest ?? '-'} | ${tokens} | ${pct(entry.thinkShare)} | ${pct(entry.accuracy)} | ${entry.runs} |`,
     )
   })
   lines.push(
@@ -124,8 +148,10 @@ export function toMarkdownReport(
     'Average is every recorded run. Latest is the most recent benchmark pass.',
     'Avg tokens is the whole output including reasoning; a lower count for the',
     'same answers is the cheaper model. Think is the share of that output spent',
-    'reasoning. Correct is how often the answer matched. A run cut off by the',
-    'token budget is marked, and its token count is a floor, not a measurement.',
+    'reasoning. Correct is how often the answer matched. Score is what the',
+    'table is ranked by, speed weighed against correctness. A run cut off by',
+    'the token budget or stopped by the brake is marked, and its token count is',
+    'a floor, not a measurement.',
     '',
   )
   return lines.join('\n')
