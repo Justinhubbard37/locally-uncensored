@@ -48,6 +48,55 @@ export function httpStatusOf(err: unknown): number {
  * and the provider throws `signed_out`, which IS terminal, so the dead end
  * costs one backoff and then says the true thing.
  */
+/** Longest server-directed wait worth sitting through inside one run. */
+export const MAX_RETRY_AFTER_MS = 60_000
+
+/**
+ * The wait a throttling server asked for, in milliseconds, or undefined.
+ *
+ * `retry-after` comes in two shapes (RFC 9110): whole seconds, which is what
+ * LU Cloud sends, or an HTTP date. Both are read here so a provider that picks
+ * the other one still gets honoured. Anything unparseable or negative is
+ * treated as absent rather than as zero, so a broken header falls back to the
+ * caller's own backoff instead of hammering the server immediately.
+ */
+export function parseRetryAfter(res: { headers: { get(name: string): string | null } }): number | undefined {
+  const raw = res.headers.get('retry-after')
+  if (!raw) return undefined
+  const seconds = Number(raw.trim())
+  if (Number.isFinite(seconds)) return seconds >= 0 ? seconds * 1000 : undefined
+  const at = Date.parse(raw)
+  if (!Number.isFinite(at)) return undefined
+  const ms = at - Date.now()
+  return ms > 0 ? ms : 0
+}
+
+/**
+ * How long to wait before attempt number `attempt` (1-based).
+ *
+ * The server's own number wins whenever it sent one, and this is the whole
+ * point: LU Cloud's burst guard is a FIXED window (60 requests per 60 s), so
+ * `retry-after` can be anything up to a full minute, while the caller's ladder
+ * waited 1.5 s and then 3 s. Both retries therefore landed inside the very
+ * same window that had just refused them, and a throttled run died after 4.5 s
+ * with "too many requests" and no instruction. The 429 carve-out in
+ * isTerminalModelError only pays off if the wait is long enough to outlast the
+ * window it is waiting for.
+ *
+ * Capped at MAX_RETRY_AFTER_MS: a minute of silence is already a lot to ask,
+ * and beyond that the honest answer is to stop and tell the user when to come
+ * back rather than freeze the run.
+ */
+export function retryDelayMs(err: unknown, attempt: number): number {
+  const asked = (err as { retryAfterMs?: unknown } | null)?.retryAfterMs
+  if (typeof asked === 'number' && Number.isFinite(asked) && asked >= 0) {
+    // A server that says "0" means now; keep a beat so the retry is not a
+    // tight loop against a limiter that rounds down.
+    return Math.min(Math.max(asked, 250), MAX_RETRY_AFTER_MS)
+  }
+  return 1500 * attempt
+}
+
 export function isTerminalModelError(err: unknown): boolean {
   const e = err as { code?: unknown; provider?: unknown } | null
   if (e?.code === 'credits_exhausted' || e?.code === 'signed_out') return true

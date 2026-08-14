@@ -17,6 +17,7 @@ import { ProviderError } from './types'
 import { parseSSEStream } from '../sse'
 import { repairJson } from '../../lib/tool-call-repair'
 import { signalCreditsExhausted } from '../../lib/credits-exhausted'
+import { parseRetryAfter } from '../../lib/http-status'
 import { localFetch, localFetchStream, isPrivateOrLanHost, isDirectFetchAllowed, hostnameOf, ensureProxyAllowsHost } from '../backend'
 import { ensureBuiltinEngineAlive, explainDeadEngine } from '../builtin-ensure'
 
@@ -1059,6 +1060,6 @@ export class OpenAIProvider implements ProviderClient {
         "no need to restart LU."
     }
 
-    return new ProviderError(message, 'openai', code, res.status)
+    return new ProviderError(message, 'openai', code, res.status, undefined, parseRetryAfter(res))
   }
 }

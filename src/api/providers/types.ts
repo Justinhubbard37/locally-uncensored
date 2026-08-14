@@ -234,6 +234,14 @@ export class ProviderError extends Error {
    * state. See lib/sync-ollama-health.ts.
    */
   readonly model?: string
+  /**
+   * How long the server said to wait, in milliseconds, from a `retry-after`
+   * header. Only a throttle sends one. Without it the retry site can only
+   * guess, and its guess (1.5 s then 3 s) is far shorter than the window a
+   * fixed-window limiter actually holds, so every attempt lands inside the
+   * same refusal. See lib/http-status retryDelayMs.
+   */
+  readonly retryAfterMs?: number
 
   constructor(
     message: string,
@@ -241,6 +249,7 @@ export class ProviderError extends Error {
     code?: string,
     status?: number,
     model?: string,
+    retryAfterMs?: number,
   ) {
     super(message)
     this.name = 'ProviderError'
@@ -248,5 +257,6 @@ export class ProviderError extends Error {
     this.code = code
     this.status = status
     this.model = model
+    this.retryAfterMs = retryAfterMs
   }
 }

@@ -70,7 +70,7 @@ import { PlanStaleness, planStalenessSteer } from '../lib/plan-staleness'
 import { reasoningOnlyRound, REASONING_CONTINUE_BUDGET, REASONING_CONTINUE_STEER } from '../lib/reasoning-round'
 import { useTodoStore } from '../stores/todoStore'
 import { platformPromptLine } from '../lib/host-platform'
-import { httpStatusOf, isTerminalModelError } from '../lib/http-status'
+import { httpStatusOf, isTerminalModelError, retryDelayMs } from '../lib/http-status'
 import { CREDITS_EXHAUSTED_MESSAGE } from '../lib/credits-exhausted'
 
 // ── Standalone memory extraction (usable outside React hooks) ──
@@ -721,6 +721,21 @@ export function useAgentChat() {
           compactBudget
         ) as ChatMessage[]
 
+        // Honouring a long `retry-after` means the run goes quiet for up to a
+        // minute, and a silent gap reads as a freeze (which is exactly the
+        // complaint the credits work came from). Only a wait the SERVER asked
+        // for gets a line; the 1.5 s connection-blip ladder is not worth one.
+        const announceWait = (err: unknown, ms: number) => {
+          const asked = (err as { retryAfterMs?: unknown } | null)?.retryAfterMs
+          if (typeof asked !== 'number' || ms < 3000) return
+          addBlock(convId!, assistantMessage.id, {
+            id: uuid(),
+            phase: 'reflection',
+            content: `Rate limited by the server, which asked for ${Math.round(ms / 1000)} seconds. Waiting, then carrying on.`,
+            timestamp: Date.now(),
+          })
+        }
+
         if (strategy === 'native') {
           // Show thinking indicator while model processes
           const thinkingBlockId = uuid()
@@ -866,8 +881,10 @@ export function useAgentChat() {
                 const transient = thinkErr?.name !== 'AbortError' && !isTerminalModelError(thinkErr)
                 if (transient && connRetries < 2) {
                   connRetries++
-                  log.warn('agent.model_call_retry', { attempt: connRetries, err: String(thinkErr?.message || thinkErr) })
-                  await new Promise((r) => setTimeout(r, 1500 * connRetries))
+                  const wait = retryDelayMs(thinkErr, connRetries)
+                  log.warn('agent.model_call_retry', { attempt: connRetries, waitMs: wait, err: String(thinkErr?.message || thinkErr) })
+                  announceWait(thinkErr, wait)
+                  await new Promise((r) => setTimeout(r, wait))
                   continue
                 }
                 throw thinkErr
@@ -935,8 +952,10 @@ export function useAgentChat() {
                 const transient = thinkErr?.name !== 'AbortError' && !isTerminalModelError(thinkErr)
                 if (transient && connRetries < 2) {
                   connRetries++
-                  log.warn('agent.model_call_retry', { attempt: connRetries, provider: providerId, err: String(thinkErr?.message || thinkErr) })
-                  await new Promise((r) => setTimeout(r, 1500 * connRetries))
+                  const wait = retryDelayMs(thinkErr, connRetries)
+                  log.warn('agent.model_call_retry', { attempt: connRetries, provider: providerId, waitMs: wait, err: String(thinkErr?.message || thinkErr) })
+                  announceWait(thinkErr, wait)
+                  await new Promise((r) => setTimeout(r, wait))
                   continue
                 }
                 throw thinkErr
@@ -1795,6 +1814,22 @@ export function useAgentChat() {
             convId!, assistantMessage.id,
             (contentRef.current ? contentRef.current + '\n\n' : '') +
             'Your LU Cloud session ended and could not be renewed, so the run stopped here. Sign in again in Settings, then carry on.' + planLine
+          )
+        } else if (httpStatusOf(err) === 429) {
+          // Reaching here means the wait above was already honoured and the
+          // window still had not cleared. "Agent error: too many requests" is
+          // true and useless; a burst guard clears on a clock, so say when.
+          // No loopHalt on purpose: a throttle passes, unlike an empty wallet,
+          // and killing a long /loop over one busy minute would be worse than
+          // letting its next round wait its turn.
+          const asked = (err as { retryAfterMs?: number })?.retryAfterMs
+          const when = typeof asked === 'number' && asked > 0
+            ? `about ${Math.ceil(asked / 1000)} seconds`
+            : 'a minute'
+          useChatStore.getState().updateMessageContent(
+            convId!, assistantMessage.id,
+            (contentRef.current ? contentRef.current + '\n\n' : '') +
+            `The server is limiting how many requests this account may send in a short window, and the run waited for it once already. Give it ${when}, then send your message again. Nothing was charged for the refused attempts.`
           )
         } else if (/failed to fetch|connection refused|connection reset|error sending request|proxy_localhost|network ?error|timed out|timeout|tcp connect|llama runner process|backend unreachable|HTTP 5\d\d/i.test(errorMsg)) {
           // Connection-class failure — after the transient retries above this
