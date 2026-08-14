@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>How to Run Qwen 3.8 27B Locally: VRAM, Quants and the Template Trap</title>
+<meta name="description" content="Qwen 3.8 27B is out under Apache 2.0. Real GGUF sizes, the VRAM math for 12 GB and 24 GB cards, the broken chat template nobody warns you about, and vision setup.">
+<meta name="keywords" content="how to run qwen 3.8 27b locally, qwen 3.8 27b gguf, qwen 3.8 27b vram, qwen 3.8 local, qwen 3.8 27b llama.cpp, qwen 3.8 27b ollama, qwen 3.8 27b quantization, run qwen 3.8 on 12gb">
+<meta property="og:title" content="How to Run Qwen 3.8 27B Locally: VRAM, Quants and the Template Trap">
+<meta property="og:description" content="The open weights landed on August 13, 2026. Measured file sizes, the KV cache math the hybrid architecture changes, and the template bug that truncates multi turn chats.">
+<meta property="og:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<meta property="og:url" content="https://locallyuncensored.com/blog/how-to-run-qwen-3-8-27b-locally.html">
+<meta property="og:type" content="article">
+<meta property="article:published_time" content="2026-08-14">
+<meta property="article:author" content="PurpleDoubleD">
+<meta property="article:tag" content="AI">
+<meta property="article:tag" content="Qwen 3.8">
+<meta property="article:tag" content="Tutorial">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="How to Run Qwen 3.8 27B Locally: VRAM, Quants and the Template Trap">
+<meta name="twitter:description" content="Measured GGUF sizes, VRAM math for 12 GB and 24 GB, the template bug, and vision setup.">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<link rel="canonical" href="https://locallyuncensored.com/blog/how-to-run-qwen-3-8-27b-locally.html">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="../favicon.png">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BlogPosting","headline":"How to Run Qwen 3.8 27B Locally: VRAM, Quants and the Template Trap","description":"A measured guide to running Qwen 3.8 27B on your own GPU after the August 13, 2026 weight drop under Apache 2.0: real GGUF file sizes, the KV cache math the hybrid attention layout changes, the official chat template bug that truncates multi turn conversations, vision setup with mmproj, and thinking control.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-08-14","dateModified":"2026-08-14","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/how-to-run-qwen-3-8-27b-locally.html"},"keywords":"how to run qwen 3.8 27b locally, qwen 3.8 27b gguf, qwen 3.8 27b vram, qwen 3.8 27b llama.cpp"}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"How much VRAM does Qwen 3.8 27B need?","acceptedAnswer":{"@type":"Answer","text":"The Q4_K_M GGUF is 16.6 GB, which fits a 24 GB card with room for a long context. On 12 GB you need Q2_K at 10.7 GB and you will still offload part of the context to system RAM. Q8_0 is 28.6 GB and wants 32 GB or a split across two cards."}},{"@type":"Question","name":"Does Qwen 3.8 27B fit on a 12 GB card like an RTX 3060?","acceptedAnswer":{"@type":"Answer","text":"Only at Q2_K, which is 10.7 GB. That leaves about 1 GB for context, so expect to offload layers. A 3060 runs it, slowly. If you want speed at 12 GB, the 27B is the wrong size and Qwen 3.6 or a smaller Qwen 3.5 is the better answer."}},{"@type":"Question","name":"Is Qwen 3.8 27B really Apache 2.0?","acceptedAnswer":{"@type":"Answer","text":"Yes. The Hugging Face repository Qwen/Qwen3.8-27B carries license: apache-2.0, the same as previous open Qwen releases. Commercial use, fine tuning and redistribution are all allowed."}},{"@type":"Question","name":"Why does my Qwen 3.8 chat get cut off after a few turns?","acceptedAnswer":{"@type":"Answer","text":"The official jinja chat template wraps every assistant turn in a think block even when the reasoning is empty, then opens another one when generation starts. In a multi turn conversation that nests and truncates the history. Several GGUF packs ship a corrected template. If you converted the weights yourself, replace chat_template.jinja before blaming the quantization."}},{"@type":"Question","name":"Can Qwen 3.8 27B see images?","acceptedAnswer":{"@type":"Answer","text":"Yes, it is a native vision language model that handles images and video. In GGUF form the vision encoder is a separate mmproj file of about 0.9 GB that you load alongside the language weights. A text only GGUF pack without an mmproj will answer text and silently ignore pictures."}},{"@type":"Question","name":"How do I turn thinking off?","acceptedAnswer":{"@type":"Answer","text":"Thinking is on by default. Pass chat_template_kwargs with enable_thinking set to false for a direct answer, or leave it on and lower reasoning_effort from the default xhigh to medium or low. On a local card the difference is minutes, not cents."}}]}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/lu.css">
+<script defer src="/assets/lu.js"></script>
+  <script data-goatcounter="https://lu-uncensored.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<nav class="lu-nav">
+  <a class="lu-nav-brand" href="/" aria-label="Locally Uncensored">
+    <span class="lu-mono" data-mono="nav" data-size="40" aria-hidden="true"></span>
+    <span class="lu-nav-word">Locally <span class="accent">Uncensored</span></span>
+  </a>
+  <div class="lu-nav-links" id="lu-nav-links">
+    <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/blog/">Blog</a>
+    <a class="lu-nav-link" href="/guide/">Guide</a>
+    <a class="lu-nav-link" href="/remote-access/">Remote</a>
+  </div>
+  <div class="lu-nav-right">
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">1000+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">430+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <span class="lu-nav-sep"></span>
+    <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
+    <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</nav>
+<div class="container lu-doc">
+  <div class="breadcrumb"><a href="../">Locally Uncensored</a> / <a href="./">Blog</a> / This Post</div>
+
+  <div class="post-meta">
+    <span class="post-tag">Model Guide</span>
+    <span>August 14, 2026</span>
+    <span>·</span>
+    <span>9 min read</span>
+  </div>
+
+  <article>
+    <h1>How to Run Qwen 3.8 27B Locally: VRAM, Quants and the Template Trap</h1>
+
+    <p>The weights are out. <strong>Qwen 3.8 27B</strong> landed on Hugging Face on August 13, 2026, and the LICENSE file naming <strong>Apache 2.0</strong> followed the next morning. The big <a href="qwen-3-8-max-explained.html">Qwen 3.8 Max</a> opened up a day earlier, but under Alibaba's own qwen3.8-max licence rather than Apache, and at 2.4 trillion parameters it is a data center model anyway. The 27B is the one people were actually waiting for: the one that fits on a card you can buy.</p>
+
+    <p>This guide is the measured version. Every file size below was read off the published repositories, not estimated from parameter counts, and the one bug that will waste your evening is in here too.</p>
+
+    <h2>What Actually Landed</h2>
+
+    <table>
+      <thead><tr><th>Property</th><th>Value</th></tr></thead>
+      <tbody>
+        <tr><td>License</td><td>Apache 2.0</td></tr>
+        <tr><td>Parameters</td><td>27B dense (not a MoE)</td></tr>
+        <tr><td>Layers</td><td>64, hidden size 5120, vocab 248,320</td></tr>
+        <tr><td>Attention</td><td>Hybrid: 3 Gated DeltaNet layers for every 1 full attention layer</td></tr>
+        <tr><td>Context</td><td>262,144 native, extensible to 1M</td></tr>
+        <tr><td>Input</td><td>Text, images and video (native vision language model)</td></tr>
+        <tr><td>Thinking</td><td>On by default, switchable, with three reasoning_effort levels</td></tr>
+        <tr><td>BF16 download</td><td>55.6 GB</td></tr>
+      </tbody>
+    </table>
+
+    <p>The architecture is inherited from Qwen 3.5, which matters more than it sounds: only 16 of the 64 layers use full attention, the other 48 are linear attention. That is what makes a 256K context realistic on a desktop, and we do the math on it below.</p>
+
+    <h2>Will It Fit? Real File Sizes</h2>
+
+    <p>These are measured from published GGUF packs on the day of release, not projected:</p>
+
+    <table>
+      <thead><tr><th>Quant</th><th>Size</th><th>Practical home</th></tr></thead>
+      <tbody>
+        <tr><td>Q2_K</td><td>10.7 GB</td><td>12 GB cards, tight, quality drop is real</td></tr>
+        <tr><td>Q3_K_M</td><td>13.3 GB</td><td>16 GB cards</td></tr>
+        <tr><td><strong>Q4_K_M</strong></td><td><strong>16.6 GB</strong></td><td><strong>24 GB cards, the sweet spot</strong></td></tr>
+        <tr><td>Q5_K_M</td><td>19.2 GB</td><td>24 GB, less context headroom</td></tr>
+        <tr><td>Q6_K</td><td>22.1 GB</td><td>24 GB, barely, or 32 GB</td></tr>
+        <tr><td>Q8_0</td><td>28.6 GB</td><td>32 GB or a two card split</td></tr>
+        <tr><td>BF16</td><td>54.7 GB</td><td>Server cards or CPU with a lot of patience</td></tr>
+        <tr><td>mmproj (vision)</td><td>0.9 GB</td><td>Add this if you want it to see pictures</td></tr>
+      </tbody>
+    </table>
+
+    <p>Weights are only half the bill. The other half is the KV cache, and here the hybrid layout pays off hard.</p>
+
+    <h2>The Context Math Nobody Prints</h2>
+
+    <p>Only the 16 full attention layers keep a KV cache. Each has 4 KV heads at head dimension 256, so at fp16 one token costs 2 x 4 x 256 x 2 bytes = 4 KB per layer, 64 KB across all 16 layers.</p>
+
+    <table>
+      <thead><tr><th>Context</th><th>KV cache</th><th>Q4_K_M total</th></tr></thead>
+      <tbody>
+        <tr><td>8K</td><td>0.5 GB</td><td>17.1 GB</td></tr>
+        <tr><td>32K</td><td>2.0 GB</td><td>18.6 GB</td></tr>
+        <tr><td>128K</td><td>8.0 GB</td><td>24.6 GB</td></tr>
+        <tr><td>262K</td><td>16.4 GB</td><td>33.0 GB</td></tr>
+      </tbody>
+    </table>
+
+    <p>For comparison, a conventional dense model with 64 full attention layers at the same head geometry would burn 256 KB per token, four times as much, and 32K context alone would cost 8 GB. That is the whole point of the Gated DeltaNet layers. A 24 GB card genuinely holds Q4_K_M with a 64K to 96K window, which no 27B could do a generation ago.</p>
+
+    <h2>The Fastest Path: Model Manager</h2>
+
+    <p>If you would rather not think about any of the above, <a href="https://locallyuncensored.com/">Locally Uncensored</a> reads your card, hides the quants that will not fit, and downloads the right one:</p>
+
+    <pre><code>git clone https://github.com/PurpleDoubleD/locally-uncensored.git
+cd locally-uncensored
+# Windows: setup.bat | Linux: ./setup.sh</code></pre>
+
+    <p>Or take the installer from the <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest">releases page</a>, open the Model Manager and search for Qwen 3.8. Nothing leaves your machine and there is no account.</p>
+
+    <h2>By Hand With llama.cpp</h2>
+
+    <p>Use a current build. The trunk registers as the <code>qwen35</code> architecture, so a llama.cpp from before the Qwen 3.5 family will refuse the file with an unknown architecture error rather than run it badly.</p>
+
+    <pre><code># text only
+llama-server -m Qwen3.8-27B-Q4_K_M.gguf \
+  --ctx-size 32768 --n-gpu-layers 99 --jinja
+
+# with vision
+llama-server -m Qwen3.8-27B-Q4_K_M.gguf \
+  --mmproj Qwen3.8-27B-mmproj-bf16.gguf \
+  --ctx-size 32768 --n-gpu-layers 99 --jinja</code></pre>
+
+    <p>Two flags earn their place. <code>--jinja</code> makes llama.cpp use the model's own chat template instead of a generic one, which this model needs for its thinking blocks. <code>--mmproj</code> is the vision encoder; without it the model loads fine, answers text fine, and quietly ignores every image you paste, which is a confusing way to conclude that vision is broken.</p>
+
+    <h2>The Template Trap</h2>
+
+    <p>This one is worth the price of the article. <strong>The official jinja chat template wraps every assistant turn in a think block even when the reasoning is empty, then opens another think block when generation starts.</strong> In a single question and answer you never notice. In a multi turn conversation, and especially in an agent loop, the blocks nest and the history gets truncated. The model looks like it developed amnesia, and the natural conclusion is that the quantization is bad.</p>
+
+    <p>It is not the quantization. Several GGUF packs already ship a corrected <code>chat_template.jinja</code> and say so in their model cards. If you converted the weights yourself, or you pulled a GGUF in the first hours after release, replace the template before you debug anything else. Re download rather than patch by hand if the pack offers a fixed one.</p>
+
+    <p>One more day one detail: the official BF16 release contains a one layer MTP head for speculative decoding. Some quantizers strip it, because it adds roughly 0.5 to 0.8 GB and does nothing for answer quality. If you are not running <code>--spec-type draft-mtp</code>, a pack without the MTP head is strictly better for you.</p>
+
+    <h2>Thinking Control</h2>
+
+    <p>Thinking is on by default and the model exposes three effort levels, <code>xhigh</code> (the default), <code>medium</code> and <code>low</code>. Through an OpenAI compatible server:</p>
+
+    <pre><code>from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="none")
+
+r = client.chat.completions.create(
+    model="qwen3.8-27b",
+    messages=[{"role": "user", "content": "Plan a migration from Postgres 14 to 17."}],
+    reasoning_effort="medium",
+    extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+)
+print(r.choices[0].message.content)</code></pre>
+
+    <p>Set <code>enable_thinking</code> to false for a direct answer. Sampling settings from the model authors: thinking mode wants temperature 1.0 and top_p 0.95, non thinking mode wants temperature 0.7 and top_p 0.80 with a presence penalty of 1.5. Those defaults matter more than usual on this family.</p>
+
+    <p>A warning from the model card that is easy to ignore: in multi turn agent work, lower effort is not automatically faster. Shallow analysis causes failures and retries, and the retries cost more time than the thinking would have.</p>
+
+    <h2>On a Mac</h2>
+
+    <p>MLX builds appeared the same day in 3, 5 and 6 bit, plus MXFP4 and NVFP4. A 6 bit MLX build sits around the Q6_K size, so 32 GB of unified memory is comfortable and 24 GB works at 4 bit. Apple Silicon shares memory between CPU and GPU, so the KV table above is the number to plan against, not a separate VRAM budget.</p>
+
+    <h2>Uncensored Builds</h2>
+
+    <p>Abliterated and heretic variants of Qwen 3.8 27B were published within hours of the weights. That is the usual pattern and it is the reason open weights matter: the hosted <a href="qwen-3-8-max-explained.html">Qwen 3.8 Max</a> carries the standard alignment and refusals, and a local copy carries whatever the community removed from it. If uncensored is the point, see the <a href="abliterated-models-guide.html">abliterated models guide</a> for what those builds change and what they cost in accuracy, and the <a href="best-uncensored-ai-models-2026.html">2026 roundup</a> for the alternatives.</p>
+
+    <h2>Qwen 3.8 27B or Qwen 3.6 27B?</h2>
+
+    <p>If you already run <a href="how-to-run-qwen-3-6-locally.html">Qwen 3.6</a> and it does what you need, there is no emergency. The 3.8 is the better model at the same size and the same license, with a longer native context and stronger agent behaviour, but it is a 16.6 GB download and a template gotcha. Upgrade when you have an evening, not in the middle of a project.</p>
+
+    <p>If you are on 8 GB or 12 GB, the honest answer is that this is the wrong size for your card. Q2_K technically loads at 10.7 GB and leaves you no context. A smaller Qwen will make you happier.</p>
+
+    <h2>FAQ</h2>
+
+    <h3>How much VRAM does Qwen 3.8 27B need?</h3>
+    <p>16.6 GB for the Q4_K_M weights, plus 64 KB per token of context. A 24 GB card is the comfortable home. 32 GB gets you Q8_0.</p>
+
+    <h3>Does it fit on an RTX 3060 12 GB?</h3>
+    <p>Only at Q2_K, 10.7 GB, with almost nothing left for context. It runs, slowly, with layers offloaded to system RAM.</p>
+
+    <h3>Is it really Apache 2.0?</h3>
+    <p>Yes. Commercial use, fine tuning and redistribution are all permitted.</p>
+
+    <h3>Why does my chat get cut off after a few turns?</h3>
+    <p>The official chat template nests think blocks and truncates history. Use a GGUF pack with the corrected template.</p>
+
+    <h3>Can it see images?</h3>
+    <p>Yes, with the separate 0.9 GB mmproj file loaded alongside the weights. Without it, images are silently ignored.</p>
+
+    <h3>How do I turn thinking off?</h3>
+    <p>Pass <code>enable_thinking: false</code> in <code>chat_template_kwargs</code>, or lower <code>reasoning_effort</code> from xhigh to medium or low.</p>
+
+    <h2>Getting Started</h2>
+
+    <p>The whole point of an Apache 2.0 release is that you do not have to ask anyone. Pull the app, pick a quant that fits your card, and the model runs on your own hardware with no account, no logging and no refusals you did not choose:</p>
+
+    <pre><code>git clone https://github.com/PurpleDoubleD/locally-uncensored.git
+cd locally-uncensored
+# Windows: setup.bat | Linux: ./setup.sh</code></pre>
+
+    <hr>
+
+    <p><em>Locally Uncensored is AGPL-3.0 licensed and free to use. Built by <a href="https://github.com/PurpleDoubleD">PurpleDoubleD</a>.</em></p>
+  </article>
+
+  <div class="post-footer">
+    <p>Run the models that actually fit your machine, privately and uncensored.</p>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored" class="cta-btn" target="_blank">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+      Get Started on GitHub
+    </a>
+  </div>
+</div>
+
+<footer>
+  <div class="footer-row footer-meta"><span>&copy; 2026 &middot; Locally Uncensored &middot; AGPL-3.0</span></div>
+  <div class="footer-row footer-links">
+    <a href="https://locallyuncensored.com/blog/">Blog</a>
+    <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
+    <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions">Discussions</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
+    <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
+    <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+  </div>
+</footer>
+</body>
+</html>
