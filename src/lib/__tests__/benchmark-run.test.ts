@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { measureRun } from '../benchmark-run'
 import { BENCHMARK_PROMPTS } from '../benchmark-prompts'
 import type { ChatStreamChunk } from '../../api/providers/types'
@@ -165,9 +165,9 @@ describe('the wall clock reaches a stream that has stopped sending', () => {
   })
 
   it('a stream that finishes normally is untouched by the deadline', async () => {
-    async function* good() {
-      yield { content: 'a' }
-      yield { content: 'b', finishReason: 'stop' }
+    async function* good(): AsyncGenerator<ChatStreamChunk> {
+      yield { content: 'a', done: false }
+      yield { content: 'b', finishReason: 'stop', done: true }
     }
     const m = await measureRun(good(), () => true, {
       clock: () => 0,
