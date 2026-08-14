@@ -260,6 +260,24 @@ impl Preflight {
         matches!(self, Preflight::TorchBroken(_) | Preflight::KernelsTooOld { .. })
     }
 
+    /// What the customer can actually DO once the automatic repair has failed
+    /// too. `message()` is a diagnosis on purpose, and a diagnosis on its own
+    /// left them with a pip log tail and nothing to press: the pre-A2 text
+    /// ended with "Run the trainer install again from Character Studio" and
+    /// nothing replaced it.
+    ///
+    /// All three classes end in the same place, pip could not get the right
+    /// files into the venv, and the two things that stop it are the network
+    /// and the disk. So name both, then the one button that runs the whole
+    /// install again. The button is guaranteed to be on screen by then:
+    /// `trainer_env_broken` forces envReady false after a failed repair.
+    pub(crate) fn next_step(&self) -> &'static str {
+        match self {
+            Preflight::Ok => "",
+            _ => "Check that you are online and that the drive has room (the environment needs about 3 GB), then press Set up trainer in Character Studio to install it again.",
+        }
+    }
+
     pub(crate) fn message(&self) -> String {
         match self {
             Preflight::Ok => String::new(),
@@ -274,6 +292,18 @@ impl Preflight {
             }
         }
     }
+}
+
+/// The whole terminal message after a repair that did not take: what is wrong,
+/// that the repair was already tried, what to do, and the tail of the log that
+/// says why. In that order, because the user reads the first sentence and the
+/// last one.
+pub(crate) fn repair_failed_message(after: &Preflight, tail: &str) -> String {
+    format!(
+        "{} The automatic repair did not fix it. {} Last steps: {tail}",
+        after.message(),
+        after.next_step(),
+    )
 }
 
 fn preflight_verdict(exit_ok: bool, stdout: &str, stderr: &str) -> Preflight {
@@ -473,11 +503,15 @@ pub fn install_character_trainer(
     let install = state.trainer_install.clone();
     let cancel = state.trainer_cancel.clone();
     let pid_slot = state.trainer_process.clone();
+    let env_broken = state.trainer_env_broken.clone();
     cancel.store(false, Ordering::SeqCst);
 
     std::thread::spawn(move || {
         match provision_trainer_env(&root, &python_bin, false, &install, "installing", &cancel, &pid_slot) {
-            Ok(()) => set_status(&install, "complete", "Trainer environment ready."),
+            Ok(()) => {
+                env_broken.store(false, Ordering::SeqCst);
+                set_status(&install, "complete", "Trainer environment ready.")
+            }
             Err(e) => set_status(&install, if e == "cancelled" { "cancelled" } else { "error" }, &e),
         }
     });
@@ -649,10 +683,16 @@ pub fn character_trainer_status(
 ) -> Result<serde_json::Value, String> {
     let root = trainer_root(&app);
     let comfy = active_comfy_dir(state.inner());
+    // File presence only, plus the one thing files cannot tell us. A torch
+    // that is on disk but will not import passes every check above, so before
+    // trainer_env_broken existed the Set up button stayed hidden in exactly
+    // the state that needs it, and the run's error pointed at a button the
+    // user could not see.
     let env_ready = venv_python(&root).exists()
         && repo_dir(&root).join("src").exists()
         && torch_installed(&root)
-        && musubi_installed(&root);
+        && musubi_installed(&root)
+        && !state.trainer_env_broken.load(Ordering::SeqCst);
     let dit = resolve_base_file(&root, comfy.as_deref(), DIT_CANDIDATES, "diffusion_models");
     let te = resolve_base_file(&root, comfy.as_deref(), TE_CANDIDATES, "text_encoders");
     let vae = resolve_base_file(&root, comfy.as_deref(), VAE_CANDIDATES, "vae");
@@ -801,6 +841,7 @@ pub fn start_character_training(
     let run = state.trainer_run.clone();
     let cancel = state.trainer_cancel.clone();
     let pid_slot = state.trainer_process.clone();
+    let env_broken = state.trainer_env_broken.clone();
     cancel.store(false, Ordering::SeqCst);
 
     std::thread::spawn(move || {
@@ -874,13 +915,17 @@ pub fn start_character_training(
                 let tail = run.lock().ok()
                     .map(|st| st.logs.iter().rev().take(8).rev().cloned().collect::<Vec<_>>().join(" | "))
                     .unwrap_or_default();
-                set_status(&run, "error", &format!(
-                    "{} The automatic repair did not fix it. Last steps: {tail}",
-                    after.message(),
-                ));
+                // The disk still LOOKS installed, so say out loud that it is
+                // not, otherwise the Set up button this message points at
+                // stays hidden and the customer is back where they started.
+                env_broken.store(true, Ordering::SeqCst);
+                set_status(&run, "error", &repair_failed_message(&after, &tail));
                 return;
             }
+            env_broken.store(false, Ordering::SeqCst);
             push_log(&run, "Trainer environment repaired, starting the run.");
+        } else {
+            env_broken.store(false, Ordering::SeqCst);
         }
 
         // 1) latent cache
@@ -1356,6 +1401,62 @@ mod shutdown_tests {
             step2.contains("venv_create_args(action)"),
             "a rebuild has to pass --clear, which only venv_create_args does",
         );
+    }
+
+    // ── a dead end has to name the way out (review 2026-08-14) ──────────────
+    //
+    // The repair fails a second time on an offline machine or a full disk.
+    // Preflight::message() was rewritten as a pure diagnosis, and the
+    // instruction the pre-A2 text carried ("Run the trainer install again from
+    // Character Studio") was not replaced anywhere, so the customer was left
+    // with a verdict and a pip log tail. Worse, the readiness probe is a
+    // file-presence check: a torch that is on disk but will not import still
+    // counts as ready, so the Set up button was not even on screen.
+
+    #[test]
+    fn the_terminal_message_says_what_to_do_next() {
+        use super::{repair_failed_message, Preflight};
+        let msg = repair_failed_message(
+            &Preflight::TorchBroken("No module named 'torch'".into()),
+            "pip install torch | connection reset",
+        );
+        assert!(msg.contains("PyTorch is missing or broken"), "keeps the diagnosis");
+        assert!(msg.contains("The automatic repair did not fix it."), "says it already tried");
+        assert!(msg.contains("Set up trainer"), "names the button, verbatim as the UI labels it");
+        assert!(msg.contains("online") && msg.contains("room"), "names the two usual blockers");
+        assert!(msg.ends_with("Last steps: pip install torch | connection reset"), "log tail last");
+    }
+
+    #[test]
+    fn every_failure_class_carries_a_next_step_and_a_healthy_one_does_not() {
+        use super::Preflight;
+        for v in [
+            Preflight::TorchBroken("x".into()),
+            Preflight::KernelsTooOld { cap: 12, max: 9 },
+            Preflight::PackageMissing,
+        ] {
+            assert!(v.next_step().contains("Set up trainer"), "{v:?} has no way out");
+        }
+        assert_eq!(Preflight::Ok.next_step(), "");
+    }
+
+    #[test]
+    fn a_failed_repair_makes_the_environment_report_as_not_ready() {
+        // The button the message points at only renders on envReady false, and
+        // the file checks alone cannot see a broken interpreter or a torch
+        // that imports nothing. Source-pinned for the same reason as the
+        // state.rs guard below: the whole fix is this one `&&`.
+        let src = include_str!("trainer.rs");
+        let status = &src[src.find("pub fn character_trainer_status").expect("status fn")..];
+        let status = &status[..status.find("\"basesReady\"").expect("json body")];
+        assert!(
+            status.contains("&& !state.trainer_env_broken.load(Ordering::SeqCst)"),
+            "envReady no longer folds in the failed repair",
+        );
+        // And it must be cleared again, or one bad run hides the trainer for
+        // the rest of the session.
+        assert!(src.contains("env_broken.store(false, Ordering::SeqCst)"));
+        assert!(src.contains("env_broken.store(true, Ordering::SeqCst)"));
     }
 
     #[test]

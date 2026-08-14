@@ -231,6 +231,14 @@ pub struct AppState {
     pub trainer_run: Arc<Mutex<InstallState>>,
     pub trainer_cancel: Arc<AtomicBool>,
     pub trainer_process: Arc<Mutex<Option<u32>>>,
+    /// The environment failed its check AND failed the automatic repair.
+    /// `character_trainer_status` folds this into `envReady`, because the
+    /// readiness probe is a file-presence check and a torch that is on disk
+    /// but unusable passes it, which used to leave the Set up button hidden
+    /// in exactly the state that needs it. In memory only: after a restart
+    /// the disk check speaks again, and a training run that fails the same
+    /// way sets it right back. Cleared the moment a provision succeeds.
+    pub trainer_env_broken: Arc<AtomicBool>,
     pub searxng_install: Mutex<InstallState>,
     pub searxng_available: AtomicBool,
     /// Resolved Python binary path. Empty string means "no real Python on
@@ -359,6 +367,7 @@ impl AppState {
             trainer_run: Arc::new(Mutex::new(InstallState::default())),
             trainer_cancel: Arc::new(AtomicBool::new(false)),
             trainer_process: Arc::new(Mutex::new(None)),
+            trainer_env_broken: Arc::new(AtomicBool::new(false)),
             searxng_install: Mutex::new(InstallState::default()),
             searxng_available: AtomicBool::new(false),
             python_bin: Arc::new(Mutex::new(python_bin)),
