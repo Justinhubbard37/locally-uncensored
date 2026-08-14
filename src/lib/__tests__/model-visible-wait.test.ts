@@ -123,4 +123,50 @@ describe('the install path uses it, and says something honest when it runs out',
     expect(src).toContain('started ')
     expect(src).toContain('outside LU')
   })
+
+  it('the probe asks the GGUF loader too, or the default lipsync bundle can never pass', () => {
+    // UNETLoader only enumerates .safetensors and .sft (comfyui.ts:659), and
+    // getLipsyncBundles()[0] ships Wan2.2-S2V-14B-Q4_K_M.gguf into
+    // diffusion_models, which IS in ENUM_SUBFOLDERS. Without the GGUF loader
+    // the probe fails for a file ComfyUI lists perfectly well: 20 rounds of
+    // waiting, an uncalled-for engine restart, then a wrong diagnosis.
+    const probe = src.slice(src.indexOf('const stillMissing'), src.indexOf('let missing'))
+    expect(probe).toContain('getGgufUnetModels()')
+    expect(src).toMatch(/import \{[^}]*getGgufUnetModels[^}]*\} from '\.\.\/\.\.\/\.\.\/api\/comfyui'/)
+  })
+
+  it('the heal waits for a live render instead of killing it', () => {
+    // An install runs on for minutes after Stage swapped its card away, so
+    // without this the bundle could stop the engine in the middle of somebody
+    // else's video and leave a dead job and no explanation behind.
+    // Anchored on the call site, not on the helper: a guard that exists but is
+    // never called is exactly the bug this pins.
+    const call = src.indexOf('await waitForIdleRender(signal)')
+    const restart = src.indexOf('Restarting ComfyUI so it picks up the new files')
+    expect(call).toBeGreaterThan(-1)
+    expect(call).toBeLessThan(restart)
+    expect(src).toContain('Waiting for the current render to finish before restarting ComfyUI')
+  })
+
+  it('waiting for the render to finish is bounded, an install must not park forever', () => {
+    expect(src).toMatch(/async function waitForIdleRender\(signal\?: AbortSignal, attempts = \d+\)/)
+  })
+})
+
+describe('the card is no longer the owner of the run', () => {
+  const stage = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '../../components/create/experimental/Stage.tsx'),
+    'utf8',
+  )
+
+  it('ModelInstallCard reads the run from the lane registry, not from its own state', () => {
+    const card = stage.slice(stage.indexOf('function ModelInstallCard'), stage.indexOf('function TrainSetBoard'))
+    expect(card).toContain('useSyncExternalStore(subscribeInstallRuns')
+    expect(card).toContain('startInstallRun(kind')
+    expect(card).toContain('cancelInstallRun(kind)')
+    // The old shape: local useState plus an abortRef that nothing ever cleaned
+    // up on unmount. Both are gone, and with them the headless run.
+    expect(card).not.toContain('abortRef')
+    expect(card).not.toContain('setInstalling(')
+  })
 })

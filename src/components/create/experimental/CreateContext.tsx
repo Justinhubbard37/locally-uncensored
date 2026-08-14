@@ -3,7 +3,7 @@ import { useCreate } from '../../../hooks/useCreate'
 import { useCloudCreate, hasActiveCloudRun } from '../../../hooks/useCloudCreate'
 import { useCloudSession } from '../../../hooks/useCloudSession'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
-import { getLoraModels, getVAEModels, getCheckpoints, getDiffusionModels, getCLIPModels, checkComfyConnection, refreshComfyModels } from '../../../api/comfyui'
+import { getLoraModels, getVAEModels, getCheckpoints, getDiffusionModels, getCLIPModels, getGgufUnetModels, checkComfyConnection, refreshComfyModels } from '../../../api/comfyui'
 import { getAllNodeInfo, clearNodeCache } from '../../../api/comfyui-nodes'
 import { installCustomNodes, getImageBundles, getVideoBundles, getAudioBundles, getLipsyncBundles, getMotionBundles, startModelDownload, getDownloadProgress, normalizeModelBase, ENUM_SUBFOLDERS } from '../../../api/discover'
 import { backendCall, isMacOS } from '../../../api/backend'
@@ -20,6 +20,15 @@ import type { CloudQuota } from '../../../lib/render/cloud-jobs'
  *  process keeps the port and keeps serving the stale node list — the pack
  *  would look installed but never show up, and the register-poll would burn
  *  40s to end in a misleading error. Detect that case and state the real fix. */
+/** Hold until nothing is rendering, so a heal never lands on a live job.
+ *  Bounded: a render that never reports finished must not park an install
+ *  forever, and the caller falls back to the plain-language error either way. */
+async function waitForIdleRender(signal?: AbortSignal, attempts = 120): Promise<void> {
+  for (let i = 0; i < attempts && useCreateStore.getState().isGenerating; i++) {
+    await waitOrAbort(5000, signal)
+  }
+}
+
 async function restartComfyForNewNodes(): Promise<void> {
   try { await backendCall('stop_comfyui') } catch { /* may already be stopped */ }
   // stop_comfyui reaps its child before returning, so LU's own engine is down
@@ -387,7 +396,17 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
       const wanted = enumFiles.map((f) => f.filename!)
       const stillMissing = async (): Promise<string[]> => {
         try {
-          const lists = await Promise.all([getCheckpoints(), getDiffusionModels(), getVAEModels(), getCLIPModels()])
+          // getGgufUnetModels belongs here for the same reason getImageModels
+          // needs it (comfyui.ts:658): UNETLoader only enumerates .safetensors
+          // and .sft, GGUF quants are listed by ComfyUI-GGUF's own loader. The
+          // default Talking Character bundle IS a .gguf in diffusion_models, so
+          // without this the probe can never succeed: 20 rounds of waiting, an
+          // uncalled-for engine restart in the middle of whatever the user was
+          // rendering, and then an error blaming the model folder for a file
+          // ComfyUI lists perfectly well.
+          const lists = await Promise.all([
+            getCheckpoints(), getDiffusionModels(), getVAEModels(), getCLIPModels(), getGgufUnetModels(),
+          ])
           const visible = new Set(lists.flat().map(normalizeModelBase))
           return wanted.filter((n) => !visible.has(normalizeModelBase(n)))
         } catch {
@@ -400,6 +419,15 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
       if (missing.length > 0) {
         // Heal before complaining: a restart rebuilds the model index for
         // certain, and it is the same move that registers a new node pack.
+        //
+        // Never while a render is in flight. An install runs on for minutes
+        // after Stage swapped its card away, so without this guard a bundle
+        // that finished downloading could stop the engine in the middle of
+        // somebody's video and leave nothing behind but a dead job.
+        if (useCreateStore.getState().isGenerating) {
+          onProgress?.('Waiting for the current render to finish before restarting ComfyUI…')
+          await waitForIdleRender(signal)
+        }
         onProgress?.('Restarting ComfyUI so it picks up the new files…')
         await restartComfyForNewNodes().catch(() => { /* diagnosed below */ })
         missing = await waitForModelsVisible({

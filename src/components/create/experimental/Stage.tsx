@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useRef, useState, useSyncExternalStore } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { UploadCloud, ImagePlus, Scissors, Wand2, Sparkles, X, Loader2, Download, AlertTriangle, Image as ImageIcon, Film } from 'lucide-react'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
@@ -9,6 +9,9 @@ import { EmptyState } from '../ui/EmptyState'
 import { Button } from '../ui/Button'
 import { cn } from '../ui/cn'
 import { loadImageRef } from './loadImage'
+import {
+  subscribeInstallRuns, getInstallRun, startInstallRun, cancelInstallRun, clearInstallRun,
+} from '../../../lib/model-install-runs'
 import { galleryItemUrl, fetchGalleryItemBlob, recoverGalleryUrl } from './galleryUrl'
 import { InstallCancelled } from '../../../lib/bundle-install'
 import { isMlxImageHost } from '../../../api/mlx-image'
@@ -512,29 +515,20 @@ const BUNDLE_COPY = {
 
 function ModelInstallCard({ kind }: { kind: 'image' | 'video' | 'audio' | 'lipsync' | 'motion' }) {
   const { installModelBundle } = useCreateExp()
-  const [installing, setInstalling] = useState(false)
-  const [status, setStatus] = useState('')
-  const [err, setErr] = useState<string | null>(null)
-  const abortRef = useRef<AbortController | null>(null)
+  // The run outlives this card on purpose. Stage swaps the card away as soon as
+  // a render starts or the lane list refills, and a 12 GB install must not lose
+  // its status line, its Cancel button and its error message to that.
+  const runState = useSyncExternalStore(subscribeInstallRuns, () => getInstallRun(kind))
+  const { status, err, running: installing } = runState
   const mac = isMlxImageHost()
   const copy = (mac && (kind === 'image' || kind === 'video')) ? MAC_BUNDLE_COPY[kind] : BUNDLE_COPY[kind]
 
-  const run = async () => {
-    const ac = new AbortController()
-    abortRef.current = ac
-    setInstalling(true); setErr(null); setStatus('Starting…')
-    try {
-      // On success the model lists refill and Stage swaps this card away.
-      await installModelBundle(kind, setStatus, ac.signal)
-    } catch (e) {
-      setErr(e instanceof InstallCancelled
-        ? 'Cancelled. Files that finished are kept, the one in flight was dropped.'
-        : e instanceof Error ? e.message : String(e))
-    } finally {
-      setInstalling(false)
-      abortRef.current = null
-    }
-  }
+  const run = () => startInstallRun(kind, (onStatus, signal) =>
+    installModelBundle(kind, onStatus, signal).catch((e: unknown) => {
+      throw e instanceof InstallCancelled
+        ? new Error('Cancelled. Files that finished are kept, the one in flight was dropped.')
+        : e
+    }))
 
   return (
     <EmptyState
@@ -545,8 +539,8 @@ function ModelInstallCard({ kind }: { kind: 'image' | 'video' | 'audio' | 'lipsy
     >
       <InstallCardBody
         run={run} installing={installing} status={status} err={err}
-        onDismiss={() => setErr(null)}
-        onCancel={() => abortRef.current?.abort()}
+        onDismiss={() => clearInstallRun(kind)}
+        onCancel={() => cancelInstallRun(kind)}
         cancelTitle={mac ? 'Stops showing progress here. The download itself keeps running — pick it up in Settings → AI Backends → Local Media.' : undefined}
       />
     </EmptyState>
