@@ -132,7 +132,7 @@ Locally Uncensored is a free, open-source (AGPL-3.0) local AI studio for the des
 - Ling 3.0 Flash Explained (124B MoE, 5.1B active, MIT): https://locallyuncensored.com/blog/ling-3-0-flash-explained.html
 - How to Run Ling 3.0 Flash Locally (GGUF sizes, hardware): https://locallyuncensored.com/blog/how-to-run-ling-3-0-flash-locally.html
 - How to Run Qwen 3.8 27B Locally (Apache 2.0, real GGUF sizes, template trap): https://locallyuncensored.com/blog/how-to-run-qwen-3-8-27b-locally.html
-- Qwen 3.8 Max Explained (2.4T flagship, open weights coming): https://locallyuncensored.com/blog/qwen-3-8-max-explained.html
+- Qwen 3.8 Max Explained (2.4T flagship, weights out since Aug 12, custom licence): https://locallyuncensored.com/blog/qwen-3-8-max-explained.html
 - How to Run Qwen 3.8 Max (API, endpoints, local answer): https://locallyuncensored.com/blog/how-to-run-qwen-3-8.html
 - Can You Run Qwen 3.8 Locally (hardware math + the 27B): https://locallyuncensored.com/blog/can-you-run-qwen-3-8-locally.html
 - Qwen 3.8 vs Qwen 3.6: https://locallyuncensored.com/blog/qwen-3-8-vs-qwen-3-6.html

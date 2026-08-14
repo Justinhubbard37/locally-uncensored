@@ -25,10 +25,10 @@
 <meta name="theme-color" content="#0a0a0a">
 <link rel="icon" href="../favicon.png">
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"BlogPosting","headline":"Qwen 3.8 vs Qwen 3.6: What Actually Changed, and Which to Use","description":"An honest comparison of Qwen 3.8 (the 2.4T Max and the coming open weight 27B) against Qwen 3.6, the generation you can run locally today: context windows, benchmarks, pricing, and which model fits which job.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-08-03","dateModified":"2026-08-03","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/qwen-3-8-vs-qwen-3-6.html"},"keywords":"qwen 3.8 vs qwen 3.6, qwen 3.8 comparison, should i wait for qwen 3.8"}
+{"@context":"https://schema.org","@type":"BlogPosting","headline":"Qwen 3.8 vs Qwen 3.6: What Actually Changed, and Which to Use","description":"An honest comparison of Qwen 3.8 (the 2.4T Max and the coming open weight 27B) against Qwen 3.6, the generation you can run locally today: context windows, benchmarks, pricing, and which model fits which job.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-08-03","dateModified":"2026-08-14","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/qwen-3-8-vs-qwen-3-6.html"},"keywords":"qwen 3.8 vs qwen 3.6, qwen 3.8 comparison, should i wait for qwen 3.8"}
 </script>
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is Qwen 3.8 better than Qwen 3.6?","acceptedAnswer":{"@type":"Answer","text":"The Max is, by a wide margin on the launch benchmarks: it is a 2.4 trillion parameter frontier model, while Qwen 3.6 tops out at 35B. But they are not really competitors. Qwen 3.8 Max is a hosted API model today; Qwen 3.6 is the generation you can download and run on your own GPU right now."}},{"@type":"Question","name":"Should I wait for Qwen 3.8 27B or run Qwen 3.6 now?","acceptedAnswer":{"@type":"Answer","text":"Run Qwen 3.6 now. The 3.8 27B weights are promised for the coming week, but GGUFs, tooling support, and abliterated builds all take additional time. Qwen 3.6 27B is proven, runs from 8 GB VRAM up, and switching models later is one click, not a migration."}},{"@type":"Question","name":"Does Qwen 3.8 have a bigger context window than Qwen 3.6?","acceptedAnswer":{"@type":"Answer","text":"Yes: 1 million tokens for Qwen 3.8 Max versus 256K for Qwen 3.6. Whether the open weight 3.8 27B keeps the full 1M window is not yet confirmed."}},{"@type":"Question","name":"Is there an uncensored Qwen 3.8?","acceptedAnswer":{"@type":"Answer","text":"Not yet. Uncensored community builds need public weights, which are promised for the coming week. Qwen 3.6 abliterated builds exist today and are among the strongest uncensored local models of 2026."}}]}
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is Qwen 3.8 better than Qwen 3.6?","acceptedAnswer":{"@type":"Answer","text":"The Max is, by a wide margin on the launch benchmarks: it is a 2.4 trillion parameter frontier model, while Qwen 3.6 tops out at 35B. But they are not really competitors. Qwen 3.8 Max is a hosted API model today; Qwen 3.6 is the generation you can download and run on your own GPU right now."}},{"@type":"Question","name":"Should I wait for Qwen 3.8 27B or run Qwen 3.6 now?","acceptedAnswer":{"@type":"Answer","text":"No need to wait any more: the 3.8 27B weights came out on August 13, 2026 and GGUFs appeared the same day. On 16 GB of VRAM or better, run the 3.8. Below that, Qwen 3.6 27B is still proven and runs from 8 GB up, and switching later is one click, not a migration."}},{"@type":"Question","name":"Does Qwen 3.8 have a bigger context window than Qwen 3.6?","acceptedAnswer":{"@type":"Answer","text":"Yes: 1 million tokens for Qwen 3.8 Max versus 256K for Qwen 3.6. The open weight 3.8 27B ships with a native 262,144 token window that stretches further with the usual scaling tricks."}},{"@type":"Question","name":"Is there an uncensored Qwen 3.8?","acceptedAnswer":{"@type":"Answer","text":"The weights are public and the 27B is Apache 2.0, so finetunes and abliterations are fully legal and community builds started appearing within a day. Qwen 3.6 abliterated builds are still the proven option and are among the strongest uncensored local models of 2026."}}]}
 </script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -64,7 +64,7 @@
 
   <div class="post-meta">
     <span class="post-tag">Comparison</span>
-    <span>August 3, 2026</span>
+    <span>Updated August 14, 2026</span>
     <span>·</span>
     <span>7 min read</span>
   </div>
@@ -72,7 +72,9 @@
   <article>
     <h1>Qwen 3.8 vs Qwen 3.6: What Actually Changed, and Which to Use</h1>
 
-    <p>With <a href="qwen-3-8-max-explained.html">Qwen 3.8 Max</a> generally available since August 3 and its open weights promised for the coming week, the practical question is not "which is better" (the 2.4T flagship, obviously) but "which Qwen should I actually be using, today and next month". Here is the honest lineup.</p>
+    <p><strong>Update, August 14, 2026:</strong> the wait is over. The 2.4T Max checkpoint went public on Hugging Face on <strong>August 12</strong> as <code>Qwen/Qwen3.8-2.4T-A95B</code> under Alibaba's own qwen3.8-max terms, which is <em>not</em> Apache 2.0, and the consumer sized <strong>Qwen 3.8 27B</strong> followed on <strong>August 13</strong> under Apache 2.0. Real GGUF sizes, the VRAM math and the chat template trap are in <a href="how-to-run-qwen-3-8-27b-locally.html">How to Run Qwen 3.8 27B Locally</a>. Everything below is the pre drop picture, kept for context.</p>
+
+    <p>With <a href="qwen-3-8-max-explained.html">Qwen 3.8 Max</a> generally available since August 3 and both sets of open weights out since August 12 and 13, the practical question is not "which is better" (the 2.4T flagship, obviously) but "which Qwen should I actually be using, today and next month". Here is the honest lineup.</p>
 
     <h2>The Two Generations at a Glance</h2>
 
@@ -83,7 +85,7 @@
         <tr><td>Sizes</td><td>27B dense, 35B MoE (3B active)</td><td>Max: 2.4T MoE (~95B active); 27B announced</td></tr>
         <tr><td>Context window</td><td>256K</td><td>1M (Max; 27B unconfirmed)</td></tr>
         <tr><td>Modalities</td><td>Text + image input</td><td>Text + image + video input</td></tr>
-        <tr><td>Open weights</td><td>Yes, since April</td><td>Promised for the coming week (Max + 27B)</td></tr>
+        <tr><td>Open weights</td><td>Yes, since April</td><td>Yes: Max August 12 (qwen3.8-max licence), 27B August 13 (Apache 2.0)</td></tr>
         <tr><td>Runs locally</td><td>Yes, from 8 GB VRAM</td><td>27B: soon. Max: never on consumer hardware</td></tr>
         <tr><td>Uncensored builds</td><td>Yes, abliterated and heretic variants</td><td>Not until the weights are public</td></tr>
         <tr><td>API price</td><td>Cheap everywhere (open weights, many hosts)</td><td>$2 / M input, $6 / M output, single upstream</td></tr>
@@ -131,7 +133,7 @@
     <p>Yes, 1M versus 256K, for the Max. Whether the 27B keeps the full window is unconfirmed.</p>
 
     <h3>Is there an uncensored Qwen 3.8?</h3>
-    <p>Not yet; that needs public weights. Qwen 3.6 abliterated is today's answer.</p>
+    <p>The weights are public now, and Apache 2.0 on the 27B makes finetunes and abliterations fully legal, so community builds started appearing within a day. Qwen 3.6 abliterated is still the safer bet if you want something proven.</p>
 
     <h2>Getting Started</h2>
 

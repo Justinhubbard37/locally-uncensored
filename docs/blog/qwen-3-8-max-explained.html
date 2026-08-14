@@ -26,10 +26,10 @@
 <meta name="theme-color" content="#0a0a0a">
 <link rel="icon" href="../favicon.png">
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"BlogPosting","headline":"Qwen 3.8 Max Explained: Alibaba's 2.4T Flagship Goes Open Weight","description":"Everything known about Qwen 3.8 Max as of August 2026: the 2.4 trillion parameter MoE architecture, 1 million token context window, image and video input, benchmark scores, API pricing, and the promised open weights release for both the Max and the 27B.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-08-03","dateModified":"2026-08-03","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/qwen-3-8-max-explained.html"},"keywords":"qwen 3.8 max, qwen 3.8 release, qwen 3.8 specs, qwen 3.8 api, qwen 3.8 open weights, alibaba qwen 3.8"}
+{"@context":"https://schema.org","@type":"BlogPosting","headline":"Qwen 3.8 Max Explained: Alibaba's 2.4T Flagship Goes Open Weight","description":"Everything known about Qwen 3.8 Max as of August 2026: the 2.4 trillion parameter MoE architecture, 1 million token context window, image and video input, benchmark scores, API pricing, and the promised open weights release for both the Max and the 27B.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-08-03","dateModified":"2026-08-14","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/qwen-3-8-max-explained.html"},"keywords":"qwen 3.8 max, qwen 3.8 release, qwen 3.8 specs, qwen 3.8 api, qwen 3.8 open weights, alibaba qwen 3.8"}
 </script>
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"What is Qwen 3.8 Max?","acceptedAnswer":{"@type":"Answer","text":"Qwen 3.8 Max is Alibaba's flagship model, generally available since August 3, 2026 after a preview at the World AI Conference on July 19. It is a Mixture of Experts model with roughly 2.4 trillion total parameters, a 1 million token context window, and it accepts text, image, and video input. It is the largest and most capable model in the Qwen family to date."}},{"@type":"Question","name":"Is Qwen 3.8 open source?","acceptedAnswer":{"@type":"Answer","text":"Not yet, but Alibaba has promised an open weight checkpoint of Qwen 3.8 Max for the coming week, together with a much smaller Qwen 3.8 27B that goes open weight at the same time. The license has not been published; the Qwen precedent is Apache 2.0."}},{"@type":"Question","name":"How much does the Qwen 3.8 Max API cost?","acceptedAnswer":{"@type":"Answer","text":"Official pricing is 2 dollars per million input tokens and 6 dollars per million output tokens, with cache reads from 0.17 dollars per million. The API is served through OpenAI compatible and DashScope endpoints."}},{"@type":"Question","name":"Is Qwen 3.8 Max better than Claude or GPT?","acceptedAnswer":{"@type":"Answer","text":"On the Arena.AI leaderboard it immediately became the highest ranking Chinese model for text, while still trailing Anthropic's Claude Fable 5. Alibaba's own claim is second only to Fable 5. Launch scores include 92.6 on GPQA Diamond and 86.6 on Terminal-Bench 2.1, but independent verification is thin this early."}},{"@type":"Question","name":"Can I run Qwen 3.8 on my own computer?","acceptedAnswer":{"@type":"Answer","text":"Not the Max: at 2.4 trillion parameters, even a 4 bit quantization is around 1.2 terabytes of weights, which is datacenter territory. The Qwen 3.8 27B that goes open weight alongside it is the local story: it should run on 16 GB of VRAM at 4 bit, just like today's Qwen 3.6 27B."}}]}
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"What is Qwen 3.8 Max?","acceptedAnswer":{"@type":"Answer","text":"Qwen 3.8 Max is Alibaba's flagship model, generally available since August 3, 2026 after a preview at the World AI Conference on July 19. It is a Mixture of Experts model with roughly 2.4 trillion total parameters, a 1 million token context window, and it accepts text, image, and video input. It is the largest and most capable model in the Qwen family to date."}},{"@type":"Question","name":"Is Qwen 3.8 open source?","acceptedAnswer":{"@type":"Answer","text":"Partly. Both checkpoints are public, on different terms. Qwen 3.8 27B, published August 13 2026, is Apache 2.0. The 2.4T Max checkpoint, published August 12 2026 as Qwen/Qwen3.8-2.4T-A95B, carries Alibaba own qwen3.8-max licence rather than Apache, so it is open weight rather than open source."}},{"@type":"Question","name":"How much does the Qwen 3.8 Max API cost?","acceptedAnswer":{"@type":"Answer","text":"Official pricing is 2 dollars per million input tokens and 6 dollars per million output tokens, with cache reads from 0.17 dollars per million. The API is served through OpenAI compatible and DashScope endpoints."}},{"@type":"Question","name":"Is Qwen 3.8 Max better than Claude or GPT?","acceptedAnswer":{"@type":"Answer","text":"On the Arena.AI leaderboard it immediately became the highest ranking Chinese model for text, while still trailing Anthropic's Claude Fable 5. Alibaba's own claim is second only to Fable 5. Launch scores include 92.6 on GPQA Diamond and 86.6 on Terminal-Bench 2.1, but independent verification is thin this early."}},{"@type":"Question","name":"Can I run Qwen 3.8 on my own computer?","acceptedAnswer":{"@type":"Answer","text":"Not the Max: at 2.4 trillion parameters, even a 4 bit quantization is around 1.2 terabytes of weights, which is datacenter territory. The Qwen 3.8 27B released alongside it is the local story: measured, Q4_K_M is 17.1 GB, so a 24 GB card is the comfortable home and a 16 GB card wants IQ4_XS at 15.7 GB."}}]}
 </script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -65,13 +65,15 @@
 
   <div class="post-meta">
     <span class="post-tag">News</span>
-    <span>August 3, 2026</span>
+    <span>Updated August 14, 2026</span>
     <span>·</span>
     <span>8 min read</span>
   </div>
 
   <article>
     <h1>Qwen 3.8 Max Explained: Alibaba's 2.4T Flagship Goes Open Weight</h1>
+
+    <p><strong>Update, August 14, 2026:</strong> the weights are out, and the licence is not what the precedent suggested. The Max checkpoint went up on Hugging Face on <strong>August 12</strong> as <code>Qwen/Qwen3.8-2.4T-A95B</code> under Alibaba's own <strong>qwen3.8-max</strong> terms, which is <em>not</em> Apache 2.0, so read them before you build on it. The consumer sized <strong>Qwen 3.8 27B</strong> followed on August 13 and <em>is</em> Apache 2.0. If you came here to find out what you can actually run, that is the one: see <a href="how-to-run-qwen-3-8-27b-locally.html">How to Run Qwen 3.8 27B Locally</a> for measured file sizes and the setup traps.</p>
 
     <p>On August 3, 2026, Alibaba made <strong>Qwen 3.8 Max</strong> generally available, two weeks after teasing it at the World AI Conference in Shanghai. It is the largest model the Qwen team has ever shipped: roughly 2.4 trillion parameters, a 1 million token context window, image and video input, and launch benchmarks that put it at the top of the open ecosystem. The kicker for people like us: Alibaba says an open weight checkpoint follows within the week, and a much smaller <strong>Qwen 3.8 27B</strong> goes open weight at the same time.</p>
 
@@ -94,8 +96,8 @@
         <tr><td>Reasoning</td><td>Yes, with a thinking budget up to 262K tokens</td></tr>
         <tr><td>Modalities</td><td>Text, image, and video input; text output</td></tr>
         <tr><td>API price</td><td>$2 / M input, $6 / M output, cache reads from $0.17</td></tr>
-        <tr><td>Open weights</td><td>Promised for the coming week, together with Qwen 3.8 27B</td></tr>
-        <tr><td>Expected license</td><td>Not yet published (the Qwen precedent is Apache 2.0)</td></tr>
+        <tr><td>Open weights</td><td>Live since August 12, 2026 as <code>Qwen/Qwen3.8-2.4T-A95B</code>; the 27B followed August 13</td></tr>
+        <tr><td>License</td><td>qwen3.8-max, Alibaba's own terms, not Apache 2.0 (the 27B is Apache 2.0)</td></tr>
       </tbody>
     </table>
 
@@ -113,9 +115,9 @@
 
     <p>For working code and every access route that exists today, see the companion piece: <a href="how-to-run-qwen-3-8.html">How to Run Qwen 3.8 Max</a>.</p>
 
-    <h2>The Open Weights Promise Is the Real Event</h2>
+    <h2>The Open Weights Were the Real Event</h2>
 
-    <p>Alibaba says the Qwen 3.8 Max checkpoint goes public within the week, and it is bringing company: a <strong>Qwen 3.8 27B</strong> goes open weight simultaneously. The license is not published yet; every prior open Qwen generation shipped under Apache 2.0, which permits commercial hosting and fine tuning.</p>
+    <p>Both checkpoints are public now, and the two halves came on different terms. The Max weights landed August 12 as <code>Qwen/Qwen3.8-2.4T-A95B</code> under a custom qwen3.8-max licence, so the Apache assumption in the original version of this post was wrong. The <strong>Qwen 3.8 27B</strong> landed August 13 under plain Apache 2.0, which does permit commercial hosting and fine tuning.</p>
 
     <p>Why this matters more than launch day:</p>
 
@@ -147,7 +149,7 @@
     <p>Alibaba's flagship model, generally available since August 3, 2026: a Mixture of Experts model with roughly 2.4 trillion total parameters, a 1 million token context window, and text, image, and video input. It is the most capable model in the Qwen family to date.</p>
 
     <h3>Is Qwen 3.8 open source?</h3>
-    <p>Announced as open weight, but the weights are not out yet. Alibaba promises the Max checkpoint within the week, alongside an open weight Qwen 3.8 27B. License not yet published; the Qwen precedent is Apache 2.0.</p>
+    <p>Partly. The weights are public, but only one of the two is under an open licence. Qwen 3.8 27B is Apache 2.0. The 2.4T Max checkpoint, published as Qwen/Qwen3.8-2.4T-A95B, carries Alibaba's own qwen3.8-max terms, so treat it as open weight rather than open source.</p>
 
     <h3>How much does the Qwen 3.8 Max API cost?</h3>
     <p>$2 per million input tokens and $6 per million output tokens, with cache reads from $0.17. Served through OpenAI compatible and DashScope endpoints.</p>

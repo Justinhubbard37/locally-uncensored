@@ -26,10 +26,10 @@
 <meta name="theme-color" content="#0a0a0a">
 <link rel="icon" href="../favicon.png">
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"BlogPosting","headline":"Can You Run Qwen 3.8 Locally? The Honest Hardware Math","description":"The real numbers on running Alibaba's 2.4 trillion parameter Qwen 3.8 Max on your own hardware: quantization math, why the open weight Qwen 3.8 27B from the same drop is the actual local story, and the models worth running today.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-08-03","dateModified":"2026-08-03","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/can-you-run-qwen-3-8-locally.html"},"keywords":"run qwen 3.8 locally, qwen 3.8 local, qwen 3.8 gguf, qwen 3.8 27b, qwen 3.8 hardware requirements, qwen 3.8 vram"}
+{"@context":"https://schema.org","@type":"BlogPosting","headline":"Can You Run Qwen 3.8 Locally? The Honest Hardware Math","description":"The real numbers on running Alibaba's 2.4 trillion parameter Qwen 3.8 Max on your own hardware: quantization math, why the open weight Qwen 3.8 27B from the same drop is the actual local story, and the models worth running today.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-08-03","dateModified":"2026-08-14","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/can-you-run-qwen-3-8-locally.html"},"keywords":"run qwen 3.8 locally, qwen 3.8 local, qwen 3.8 gguf, qwen 3.8 27b, qwen 3.8 hardware requirements, qwen 3.8 vram"}
 </script>
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Can you run Qwen 3.8 Max on a normal PC?","acceptedAnswer":{"@type":"Answer","text":"No. At roughly 2.4 trillion parameters, a 4 bit quantization of Qwen 3.8 Max is around 1.2 terabytes of weights before any KV cache. The largest consumer machines top out around 512 GB of unified memory, which is less than half of what the weights alone need."}},{"@type":"Question","name":"Will there be a Qwen 3.8 GGUF?","acceptedAnswer":{"@type":"Answer","text":"Yes, and the one that matters is the 27B. Alibaba is releasing an open weight Qwen 3.8 27B alongside the Max checkpoint in the coming week. Community GGUFs of open Qwen models typically appear within days, and a 27B at Q4_K_M lands around 16 GB, which fits a 16 GB GPU."}},{"@type":"Question","name":"What hardware does Qwen 3.8 27B need?","acceptedAnswer":{"@type":"Answer","text":"Based on the Qwen 3.6 27B precedent: roughly 16 GB of VRAM for Q4_K_M, 12 GB for Q3_K_M class quants, and 8 GB with aggressive 2 bit quantization at reduced quality. Exact numbers follow once the weights and GGUFs exist."}},{"@type":"Question","name":"What should I run locally until the Qwen 3.8 weights drop?","acceptedAnswer":{"@type":"Answer","text":"Qwen 3.6 is the best Qwen you can run today: the 27B dense runs on 8 to 16 GB of VRAM depending on quant, and its abliterated builds are among the strongest uncensored local models of 2026."}},{"@type":"Question","name":"Will there be an uncensored Qwen 3.8?","acceptedAnswer":{"@type":"Answer","text":"Almost certainly, once the weights are public. Every open Qwen generation has received abliterated and heretic community builds within weeks. Hosted only models can never be freed; open weights are what makes uncensored variants possible."}}]}
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Can you run Qwen 3.8 Max on a normal PC?","acceptedAnswer":{"@type":"Answer","text":"No. At roughly 2.4 trillion parameters, a 4 bit quantization of Qwen 3.8 Max is around 1.2 terabytes of weights before any KV cache. The largest consumer machines top out around 512 GB of unified memory, which is less than half of what the weights alone need."}},{"@type":"Question","name":"Will there be a Qwen 3.8 GGUF?","acceptedAnswer":{"@type":"Answer","text":"Yes, and the one that matters is the 27B. The weights came out on August 13, 2026 under Apache 2.0 and community GGUFs appeared the same day. Q4_K_M measures 17.1 GB, which fits a 26 GB GPU."}},{"@type":"Question","name":"What hardware does Qwen 3.8 27B need?","acceptedAnswer":{"@type":"Answer","text":"Measured from the released GGUFs: Q4_K_M is 17.1 GB and wants a 24 GB card, IQ4_XS at 15.7 GB is the largest quant that stays whole on 16 GB, UD-Q3_K_XL is 13.4 GB, and the 2 bit quants sit at 9.0 to 10.7 GB for 12 GB cards at a visible quality cost."}},{"@type":"Question","name":"What should I run locally until the Qwen 3.8 weights drop?","acceptedAnswer":{"@type":"Answer","text":"Qwen 3.6 is the best Qwen you can run today: the 27B dense runs on 8 to 16 GB of VRAM depending on quant, and its abliterated builds are among the strongest uncensored local models of 2026."}},{"@type":"Question","name":"Will there be an uncensored Qwen 3.8?","acceptedAnswer":{"@type":"Answer","text":"Almost certainly, once the weights are public. Every open Qwen generation has received abliterated and heretic community builds within weeks. Hosted only models can never be freed; open weights are what makes uncensored variants possible."}}]}
 </script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -65,13 +65,15 @@
 
   <div class="post-meta">
     <span class="post-tag">Guide</span>
-    <span>August 3, 2026</span>
+    <span>Updated August 14, 2026</span>
     <span>·</span>
     <span>9 min read</span>
   </div>
 
   <article>
     <h1>Can You Run Qwen 3.8 Locally? The Honest Hardware Math</h1>
+
+    <p><strong>Update, August 14, 2026:</strong> the wait is over. The 2.4T Max checkpoint went public on Hugging Face on <strong>August 12</strong> as <code>Qwen/Qwen3.8-2.4T-A95B</code> under Alibaba's own qwen3.8-max terms, which is <em>not</em> Apache 2.0, and the consumer sized <strong>Qwen 3.8 27B</strong> followed on <strong>August 13</strong> under Apache 2.0. Real GGUF sizes, the VRAM math and the chat template trap are in <a href="how-to-run-qwen-3-8-27b-locally.html">How to Run Qwen 3.8 27B Locally</a>. Everything below is the pre drop picture, kept for context.</p>
 
     <p>Alibaba's <a href="qwen-3-8-max-explained.html">Qwen 3.8 Max</a> went generally available on August 3 with the promise local AI people care about: open weights within the week. The question everyone is typing into a search box right now is whether a 2.4 trillion parameter model can run on hardware a human being owns.</p>
 
@@ -118,13 +120,13 @@
       </tbody>
     </table>
 
-    <p>Exact sizes follow once the weights and GGUFs exist; community GGUFs of open Qwen releases typically appear within days. When they do, the model becomes one click in <a href="https://locallyuncensored.com/">Locally Uncensored</a>'s Model Manager, like every Qwen before it.</p>
+    <p>The exact sizes are in now, measured rather than projected. From <code>unsloth/Qwen3.8-27B-GGUF</code> on August 14, 2026: UD-Q2_K_XL 10.7 GB, UD-Q3_K_XL 13.4 GB, IQ4_XS 15.7 GB, <strong>Q4_K_M 17.1 GB</strong>, Q5_K_M 19.8 GB, Q6_K 22.9 GB, Q8_0 29.0 GB, plus a 0.9 GB mmproj file if you want it to read images. The table above guessed 16 GB for Q4, which turned out a little optimistic: on a 16 GB card, IQ4_XS is the one that stays whole. Full breakdown in <a href="how-to-run-qwen-3-8-27b-locally.html">How to Run Qwen 3.8 27B Locally</a>.</p>
 
     <p>And weights mean derivatives. Every open Qwen generation has received <a href="abliterated-models-guide.html">abliterated and heretic builds</a> within weeks, and those builds are what most of the <a href="best-uncensored-ai-models-2026.html">best uncensored local models of 2026</a> are made of. A hosted only model can never be freed; an open 27B from the current frontier generation is about the best thing that can happen to this ecosystem.</p>
 
-    <h2>What to Run Today (Not Next Week)</h2>
+    <h2>What to Run Today</h2>
 
-    <p>Until the 3.8 weights land, the answer is the model it will replace: <strong>Qwen 3.6</strong> is the best Qwen you can run right now, and it is genuinely strong.</p>
+    <p>The 3.8 weights have landed, so on a 16 GB card or better the answer is now <strong>Qwen 3.8 27B</strong>. Below that, <strong>Qwen 3.6</strong> is still the right call and is genuinely strong.</p>
 
     <table>
       <thead><tr><th>Your VRAM</th><th>Run this</th><th>What you get</th></tr></thead>
