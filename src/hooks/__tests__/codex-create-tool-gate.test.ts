@@ -148,15 +148,17 @@ describe('the prompt and the tool list answer the same question', () => {
 
 describe('the wiring in useCodex', () => {
   it('the gate runs on the routed list, so it covers all three branches', () => {
-    expect(src).toMatch(/const relevantDefs = gateCreateTools\(routedDefs, lastUserMsg\)/)
+    expect(src).toMatch(/const relevantDefs = gateCreateTools\(routedDefs, lastUserMsg, createGateOpened\)/)
   })
 
   it('the hermes fallback is gated too, it carries the weakest models', () => {
-    expect(src).toMatch(/gateCreateTools\(\s*\n?\s*toolRegistry\.toHermesToolDefs\(permissions\), instruction,/)
+    expect(src).toMatch(/gateCreateTools\(\s*\n?\s*toolRegistry\.toHermesToolDefs\(permissions\), instruction, createGateOpened,/)
   })
 
-  it('the asset line is conditional and never fires in review mode', () => {
-    expect(src).toMatch(/!reviewMode && !settings\.smallModelMode && wantsMediaTools\(instruction\)/)
+  it('the asset line never fires in review mode or on a read-only command', () => {
+    // A read-only slash command strips MUTATING_TOOLS for the turn, so the
+    // generators are gone there too. Promising them is the same broken promise.
+    expect(src).toMatch(/!reviewMode && !readOnlyTurn && !settings\.smallModelMode/)
   })
 
   it('the asset promise left the always-on prompt body', () => {
@@ -169,5 +171,55 @@ describe('the wiring in useCodex', () => {
     // The gate is deliberately the LAST step, not a rewrite of the branch: a
     // hosted model keeps the full coding catalog, minus the three.
     expect(src).toMatch(/!isLocalModelByName\(activeModel\)\s*\n?\s*\?\s*codexTools/)
+  })
+})
+
+describe('a run that discovers halfway through that it needs a picture', () => {
+  // The hole the review found in this very fix (2026-08-14). "build me a
+  // landing page for my bakery" matches no keyword, so the two generators are
+  // stripped AND the asset line is absent. Before the gate the model simply
+  // called image_generate and it worked, because toolRegistry.execute resolves
+  // by name and never looks at the offered list. Without a way back the model
+  // writes <img src="hero.jpg"> against a file that will never exist and then
+  // reports success.
+
+  it('the gate reopens for the rest of the run once a create tool is called', () => {
+    const defs = [{ name: 'file_read' }, { name: 'image_generate' }, { name: 'video_generate' }]
+    const ask = 'build me a landing page for my bakery'
+    expect(gateCreateTools(defs, ask).map((d) => d.name)).toEqual(['file_read'])
+    expect(gateCreateTools(defs, ask, true).map((d) => d.name)).toEqual(
+      ['file_read', 'image_generate', 'video_generate'],
+    )
+  })
+
+  it('useCodex flips it on the call itself, not on the offered list', () => {
+    expect(src).toMatch(/if \(CREATE_TOOLS\.includes\(name\)\) createGateOpened = true/)
+    // Declared per run, so one run's discovery does not leak into the next.
+    expect(src).toMatch(/let createGateOpened = false/)
+  })
+
+  it('a closed gate still tells the model the hatch is there', () => {
+    expect(src).toContain('const CODEX_ASSET_HINT')
+    expect(src).toContain('They are not in your tool list until you do, and the call still works.')
+    expect(src).toMatch(/: `\\n\$\{CODEX_ASSET_HINT\}`/)
+  })
+})
+
+describe('the English words for the thing are in the list too', () => {
+  // 'foto' and 'grafik' were there, 'photo' and 'graphic' were not, and the
+  // match is a substring test, so neither German entry covers its English
+  // twin. On the cloud path a missed keyword is a lost capability.
+  it.each([
+    'add a photo of the product',
+    'I need a graphic for the header',
+    'generate a photo-realistic hero',
+  ])('%s wants the generators', (ask) => {
+    expect(wantsMediaTools(ask)).toBe(true)
+    expect(gateCreateTools([{ name: 'image_generate' }], ask).length).toBe(1)
+  })
+
+  it('a plain refactor still gets none of them', () => {
+    const defs = [{ name: 'image_generate' }, { name: 'video_generate' }, { name: 'run_workflow' }]
+    expect(gateCreateTools(defs, 'rename the handler and update its callers')).toEqual([])
   })
 })

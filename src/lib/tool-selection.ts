@@ -29,9 +29,13 @@ interface ToolGroup {
 // list, on the cloud path it means a capability the user had yesterday is gone.
 // A false positive here costs tokens, a false negative costs the feature, so
 // the list leans generous.
+// 'photo' and 'graphic' were missing next to their German twins 'foto' and
+// 'grafik' (review 2026-08-14). The match is a substring test, so 'foto' does
+// not cover 'photo' and 'grafik' does not cover 'graphic': the two commonest
+// English words for the thing lost the capability on the paid path.
 const MEDIA_KEYWORDS = [
-  'image', 'picture', 'generate image', 'draw', 'create image', 'bild', 'foto', 'zeichne',
-  'logo', 'icon', 'thumbnail', 'banner', 'illustration', 'avatar', 'artwork', 'grafik', 'poster',
+  'image', 'picture', 'photo', 'generate image', 'draw', 'create image', 'bild', 'foto', 'zeichne',
+  'logo', 'icon', 'thumbnail', 'banner', 'illustration', 'avatar', 'artwork', 'graphic', 'grafik', 'poster',
   'video', 'animate', 'animation', 'clip', 'mp4', 'make a video', 'turn into a video', 'movie', 'gif', 'animiere',
 ]
 const WORKFLOW_KEYWORDS = ['workflow', 'run workflow', 'automate']
@@ -260,13 +264,21 @@ export function selectRelevantTools(
  * a creative intent surfaces the two generators, a workflow intent surfaces
  * run_workflow, and naming a tool verbatim always wins.
  *
- * Honest limit: the decision is made once from the run's instruction. A model
- * that discovers halfway through that it wants a placeholder image will not
- * have the tool. That is already how the local path behaves, and the system
- * prompt only promises asset generation when the gate opened, so the model is
- * never told it can do something it cannot.
+ * The decision starts from the run's instruction, and `opened` reopens it for
+ * the rest of the run. That second half is not a nicety: "build me a landing
+ * page for my bakery" hits no keyword, and at step six the model wants a hero
+ * image. Before the gate it simply called image_generate and it worked, because
+ * toolRegistry.execute resolves by name and never consults the offered list.
+ * Without a way back the model instead writes a reference to a file that will
+ * never exist and reports success. So the first real call is honoured, and from
+ * the next step the schemas ride along openly.
  */
-export function gateCreateTools<T extends { name: string }>(defs: T[], userMessage: string): T[] {
+export function gateCreateTools<T extends { name: string }>(
+  defs: T[],
+  userMessage: string,
+  opened = false,
+): T[] {
+  if (opened) return defs
   const msg = userMessage.toLowerCase()
   const wantsMedia = MEDIA_KEYWORDS.some((k) => msg.includes(k))
   const wantsFlow = WORKFLOW_KEYWORDS.some((k) => msg.includes(k))

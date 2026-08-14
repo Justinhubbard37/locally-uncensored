@@ -52,7 +52,7 @@ import { CREDITS_EXHAUSTED_MESSAGE } from '../lib/credits-exhausted'
 import { streamOllamaChatWithTools } from '../lib/ollama-stream-tools'
 import { extractToolCallsWithRanges, stripRanges } from '../lib/tool-call-repair'
 import { canonicalToolName } from '../lib/loose-tool-parse'
-import { selectRelevantTools, selectRelevantToolsAsync, SMALL_MODEL_MAX_TOOLS, gateCreateTools, wantsMediaTools } from '../lib/tool-selection'
+import { selectRelevantTools, selectRelevantToolsAsync, SMALL_MODEL_MAX_TOOLS, gateCreateTools, wantsMediaTools, CREATE_TOOLS } from '../lib/tool-selection'
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
 import { toolCallCapMs, raceWithToolTimeout, SHELL_EXECUTE_DEFAULT_TIMEOUT_MS, CODE_EXECUTE_DEFAULT_TIMEOUT_MS } from '../lib/tool-timeout'
@@ -122,6 +122,12 @@ Rules:
 // two generators in the catalog. It used to sit inside the prompt above and
 // promised a tool the local keyword router had already removed, which is a
 // wasted step: the model calls it and gets "unknown tool".
+// The short form, carried on every run whose instruction did not ask for
+// media. It names the escape hatch without paying for the schemas: calling the
+// tool works even when it is not in the offered list, and the call reopens the
+// gate for the rest of the run.
+const CODEX_ASSET_HINT = `- If the task turns out to need an image or a short clip, call image_generate or video_generate by name. They are not in your tool list until you do, and the call still works.`
+
 const CODEX_ASSET_LINE = `- Asset generation: when the task needs an image or a short video (placeholder art, hero image, demo clip), call image_generate / video_generate as a real tool call, they run on-device (Apple MLX on macOS, ComfyUI elsewhere). To animate a generated image, call video_generate with inputImage set to that image's filename.`
 
 // Small-Model Mode (Knob 2): a lean Codex prompt (~500 chars vs ~1700 above)
@@ -260,6 +266,12 @@ export function useCodex() {
     // this turn, so /review and /security physically cannot rewrite the files
     // they were asked to look at.
     const readOnlyTurn = slash?.command.readOnly === true
+    // The create gate reads the run's instruction, which cannot know that step
+    // six of "build me a landing page" wants a hero image. The registry
+    // executes by name and never consults the offered list, so that first call
+    // still works: honour it, and carry the two generators openly from the next
+    // step on rather than leaving the model to reference a file it cannot make.
+    let createGateOpened = false
     // A brand-new instruction clears a previous stop; a /loop pass inherits it.
     if (!opts?.loop) userStoppedRef.current = false
     // `/loop [30s] …` — the interval is the PAUSE BETWEEN PASSES, and the
@@ -459,10 +471,19 @@ export function useCodex() {
     // The prompt promises asset generation only while the tool list carries it.
     // Same question, same helper as the gate on the catalog below, so the two
     // cannot disagree. Never in review mode, which generates nothing.
-    const assetLine =
-      !reviewMode && !settings.smallModelMode && wantsMediaTools(instruction)
+    // A read-only slash command generates nothing either, and its own
+    // MUTATING_TOOLS filter has already stripped the generators, so promising
+    // them there is the same broken promise reviewMode was fixed for.
+    const assetsPossible = !reviewMode && !readOnlyTurn && !settings.smallModelMode
+    const assetLine = !assetsPossible
+      ? ''
+      : wantsMediaTools(instruction)
         ? `\n${CODEX_ASSET_LINE}`
-        : ''
+        // The schemas stay out of the catalog, but the knowledge stays in: one
+        // line costs a few tokens against the 1.963 the three schemas cost, and
+        // without it a run that discovers it needs a picture halfway through
+        // silently writes a reference to a file nobody will ever create.
+        : `\n${CODEX_ASSET_HINT}`
     // Ground the model in its cwd. In sandbox mode (workDir '.') say so
     // concretely + repeat the relative-path rule, since a bare "." led small
     // models to fall back to drive-root absolute paths (e.g. /package.json).
@@ -914,7 +935,7 @@ export function useCodex() {
             : !isLocalModelByName(activeModel)
               ? codexTools
               : selectRelevantTools(lastUserMsg, codexTools, permissions)
-          const relevantDefs = gateCreateTools(routedDefs, lastUserMsg)
+          const relevantDefs = gateCreateTools(routedDefs, lastUserMsg, createGateOpened)
           const tools: ToolDefinition[] = relevantDefs.map(t => ({
             type: 'function' as const,
             function: { name: t.name, description: t.description, parameters: t.inputSchema },
@@ -1114,7 +1135,7 @@ export function useCodex() {
           // `instruction`, not the newest user-role message: same reason as the
           // native path above, steers and nudges are pushed as role 'user'.
           const hermesTools = gateCreateTools(
-            toolRegistry.toHermesToolDefs(permissions), instruction,
+            toolRegistry.toHermesToolDefs(permissions), instruction, createGateOpened,
           ).filter(
             (t) => {
               const def = toolRegistry.getToolByName(t.name)
@@ -1685,7 +1706,13 @@ export function useCodex() {
             const td = toolRegistry.getToolByName(name)
             return td ? { name: td.name, inputSchema: td.inputSchema } : undefined
           },
-          execute: (name: string, args: Record<string, any>) => dispatchTool(name, args),
+          execute: (name: string, args: Record<string, any>) => {
+            // A create tool the gate had closed still reaches the registry, so
+            // the run self-heals: this call runs, and the next step offers the
+            // schemas instead of pretending the capability is gone.
+            if (CREATE_TOOLS.includes(name)) createGateOpened = true
+            return dispatchTool(name, args)
+          },
           lookupCache: convId ? makeInTurnCacheLookup({ convId, turnStartMs }) : undefined,
           explainError: (toolName, err) => explainToolError(toolName, err),
           // Codex is auto-approve by default (the coding agent runs unattended).
