@@ -485,8 +485,74 @@ pub fn install_character_trainer(
     Ok(serde_json::json!({"status": "installing"}))
 }
 
-/// The four install steps, idempotent by design: an existing checkout and an
-/// existing venv are kept, the two pip steps always run. One function because
+/// What has to happen to `<root>/venv` before the two pip steps can use it.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum VenvAction {
+    Keep,
+    Create,
+    Rebuild,
+}
+
+/// Presence is not health, and the old check only asked about presence.
+///
+/// On Windows `venv\Scripts\python.exe` is a real copied binary. Upgrade
+/// Python 3.11 to 3.13 and uninstall the old one and that file is still there,
+/// still passes `exists()`, and dies on every start with a fatal
+/// init_fs_encoding error because pyvenv.cfg points at a home that is gone.
+/// The repair path then skipped step 2 (the venv was "there"), drove steps 3
+/// and 4 with the dead interpreter, and reported "torch install failed", which
+/// names neither the cause nor a way out. Worse, `start_character_training`
+/// refuses to even reach the repair unless that same file exists, so on the
+/// repair path the old guard could never once be true. On POSIX the identical
+/// venv healed itself by accident: `venv/bin/python` is a symlink, and
+/// `exists()` follows it, so a dead base made the check false.
+///
+/// The question is therefore whether the interpreter RUNS.
+pub(crate) fn venv_action(python_exists: bool, python_starts: bool) -> VenvAction {
+    match (python_exists, python_starts) {
+        (false, _) => VenvAction::Create,
+        (true, false) => VenvAction::Rebuild,
+        (true, true) => VenvAction::Keep,
+    }
+}
+
+/// `python -m venv` arguments for the action. A rebuild has to CLEAR: keeping
+/// the directory would keep a site-packages built for the interpreter that
+/// just died, and pip would then repair on top of metadata for a Python
+/// version that is no longer installed.
+pub(crate) fn venv_create_args(action: VenvAction) -> &'static [&'static str] {
+    match action {
+        VenvAction::Rebuild => &["-m", "venv", "--clear"],
+        _ => &["-m", "venv"],
+    }
+}
+
+/// Why we are stopping when there is no system Python to build with. A rebuild
+/// deletes the old venv, so it must never start without one: leaving the
+/// customer with no environment at all is worse than the broken one they had.
+pub(crate) fn no_base_python_message(action: VenvAction) -> String {
+    let why = if action == VenvAction::Rebuild {
+        "The trainer environment is still there but its Python does not start any more (the Python it was built from was moved, upgraded or removed), and rebuilding it needs a working Python on this machine."
+    } else {
+        "Setting up the trainer needs a working Python on this machine."
+    };
+    format!("{why} Install Python in Settings, then start this again.")
+}
+
+/// Cheapest honest check that an interpreter is usable: start it and let it
+/// exit immediately. A venv python whose base is gone never reaches the code,
+/// it aborts during interpreter init, so a non-zero exit is the answer.
+fn python_starts(exe: &Path) -> bool {
+    let mut cmd = Command::new(exe);
+    cmd.args(["-c", "pass"]);
+    force_python_utf8(&mut cmd);
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// The four install steps, idempotent by design: an existing checkout and a
+/// WORKING venv are kept, the two pip steps always run. One function because
 /// the training run repairs its own environment with it (A2), and a repair
 /// that drifted from the install would be a second, untested installer.
 ///
@@ -522,11 +588,27 @@ fn provision_trainer_env(
         push_log(state, "musubi tuner already present, keeping the pinned checkout.");
     }
 
-    // 2) venv
-    if !venv_python(root).exists() {
+    // 2) venv. Asked as "does its python run", not "is the file there": see
+    // venv_action. A dead venv is exactly the state a repair is called for,
+    // and it used to be the one state this step could not fix.
+    let vpy_path = venv_python(root);
+    let exists = vpy_path.exists();
+    let action = venv_action(exists, exists && python_starts(&vpy_path));
+    if action != VenvAction::Keep {
+        // A rebuild deletes what is there, so it may only start once we know
+        // there is something to rebuild WITH. is_real_python filters the
+        // Windows Store stub; starting it is what proves the interpreter the
+        // user still has is the one this venv lost.
+        let base = Path::new(python_bin);
+        if !crate::python::is_real_python(python_bin) || !python_starts(base) {
+            return Err(no_base_python_message(action));
+        }
+        if action == VenvAction::Rebuild {
+            push_log(state, "The trainer environment is there but its Python does not start any more. Rebuilding it from scratch, your training images and base models are left alone.");
+        }
         set_status(state, status_kind, &format!("{tag} (2/4): creating the training environment (venv)..."));
         let mut venv = Command::new(python_bin);
-        venv.args(["-m", "venv"]).arg(root.join("venv"));
+        venv.args(venv_create_args(action)).arg(root.join("venv"));
         run_streamed(venv, "venv create", state, cancel, pid_slot)?;
     }
     let vpy = venv_python(root).to_string_lossy().to_string();
@@ -1192,6 +1274,87 @@ mod shutdown_tests {
         assert!(
             slot.lock().unwrap().is_none(),
             "the slot must be empty afterwards so a later pass cannot kill a recycled pid",
+        );
+    }
+
+    // ── a venv that is present but dead (review 2026-08-14) ─────────────────
+    //
+    // Windows user upgrades Python 3.11 to 3.13 and uninstalls the old one.
+    // `venv\Scripts\python.exe` is a real copied binary, so it is still there
+    // and still passes exists(), but it aborts during interpreter init because
+    // pyvenv.cfg names a home that is gone. The old step 2 asked only about
+    // presence, so the repair kept the dead venv and drove the two pip steps
+    // with it, and the run died as "torch install failed (exit 103)". It could
+    // never recover: start_character_training refuses to reach the repair
+    // unless that same file exists, so on the repair path the old guard was
+    // false every single time, and the Set up button stays hidden because the
+    // status probe counts files too.
+
+    #[test]
+    fn a_venv_whose_python_no_longer_starts_gets_rebuilt() {
+        use super::{venv_action, venv_create_args, VenvAction};
+        assert_eq!(venv_action(true, false), VenvAction::Rebuild);
+        // A rebuild must clear: the old site-packages belongs to an
+        // interpreter that no longer exists, and pip would repair on top of it.
+        assert_eq!(venv_create_args(VenvAction::Rebuild), ["-m", "venv", "--clear"]);
+    }
+
+    #[test]
+    fn a_working_venv_is_kept_and_a_missing_one_is_created() {
+        use super::{venv_action, venv_create_args, VenvAction};
+        assert_eq!(venv_action(true, true), VenvAction::Keep);
+        assert_eq!(venv_action(false, false), VenvAction::Create);
+        // POSIX: venv/bin/python is a symlink, so a dead base already shows up
+        // as absent. That is why this only ever bit Windows.
+        assert_eq!(venv_action(false, true), VenvAction::Create);
+        assert_eq!(venv_create_args(VenvAction::Create), ["-m", "venv"]);
+        assert_eq!(venv_create_args(VenvAction::Keep), ["-m", "venv"]);
+    }
+
+    #[test]
+    fn presence_alone_never_counts_as_a_working_interpreter() {
+        use super::python_starts;
+        let dir = std::env::temp_dir().join("lu-trainer-venv-probe");
+        let _ = std::fs::create_dir_all(&dir);
+        let fake = dir.join("python-not-an-interpreter");
+        std::fs::write(&fake, b"pyvenv.cfg points at a home that is gone").unwrap();
+        assert!(fake.exists(), "the file is there, which is all the old check asked");
+        assert!(!python_starts(&fake), "but it does not run, which is the question");
+        assert!(!python_starts(&dir.join("nothing-here")));
+        let _ = std::fs::remove_file(&fake);
+    }
+
+    #[test]
+    fn a_rebuild_without_a_base_python_explains_itself_instead_of_wiping_the_venv() {
+        use super::{no_base_python_message, VenvAction};
+        let rebuild = no_base_python_message(VenvAction::Rebuild);
+        assert!(rebuild.contains("does not start any more"));
+        assert!(rebuild.contains("Install Python in Settings"));
+        // The fresh-install case must not claim there is an environment.
+        let create = no_base_python_message(VenvAction::Create);
+        assert!(!create.contains("still there"));
+        assert!(create.contains("Install Python in Settings"));
+    }
+
+    #[test]
+    fn step_two_asks_whether_the_venv_runs_not_whether_it_exists() {
+        // Same guard as the state.rs one below: the whole fix is which
+        // question step 2 asks, and a revert to exists() would pass every
+        // other test in this file.
+        let src = include_str!("trainer.rs");
+        let step2 = &src[src.find("    // 2) venv").expect("step 2 marker")..];
+        let step2 = &step2[..step2.find("// 3) torch").expect("step 3 marker")];
+        assert!(
+            step2.contains("venv_action(exists, exists && python_starts(&vpy_path))"),
+            "step 2 must decide with venv_action, not with a bare exists()",
+        );
+        assert!(
+            !step2.contains("if !venv_python(root).exists()"),
+            "the presence-only guard is back",
+        );
+        assert!(
+            step2.contains("venv_create_args(action)"),
+            "a rebuild has to pass --clear, which only venv_create_args does",
         );
     }
 
