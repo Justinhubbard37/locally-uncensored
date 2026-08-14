@@ -304,14 +304,16 @@ async function proxyStreamChunked(url: string, method: string, body?: string, he
   const streamId =
     (globalThis.crypto as Crypto | undefined)?.randomUUID?.() ??
     `s_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  // Already aborted before we start: cancelling a stream id that has never
+  // been opened cancels nothing, and the old code then opened it anyway. On the
+  // Tauri loopback path that is a real upstream request fired after the user
+  // pressed Stop (review 2026-08-14). Refuse first, cancel nothing.
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   const cancelUpstream = () => { void invoke("cancel_proxy_stream", { streamId }).catch(() => { /* best-effort */ }); };
   let onAbort: (() => void) | null = null;
   if (signal) {
-    if (signal.aborted) cancelUpstream();
-    else {
-      onAbort = () => cancelUpstream();
-      signal.addEventListener("abort", onAbort, { once: true });
-    }
+    onAbort = () => cancelUpstream();
+    signal.addEventListener("abort", onAbort, { once: true });
   }
   const detachAbort = () => { if (signal && onAbort) { signal.removeEventListener("abort", onAbort); onAbort = null; } };
 

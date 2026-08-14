@@ -257,3 +257,39 @@ describe('a 400 for an unrelated reason teaches nothing', () => {
     expect(spy).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('stop ends the walk', () => {
+  // P6 from the review. The claim as filed does not hold for the real fetch:
+  // an aborted signal makes it reject, so no rung reaches the network. It does
+  // hold for localFetchStream, whose proxy path used to call cancel on a stream
+  // id it had not opened yet and then start the request anyway. The mock here
+  // stands in for exactly that kind of fetcher, one that ignores the signal.
+  it('a rung is not posted once the user has pressed stop', async () => {
+    const ac = new AbortController()
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      // Deaf to the signal on purpose, like the proxy path was.
+      ac.abort()
+      return refuse()
+    })
+    await expect(
+      new OpenAIProvider(makeConfig()).chatWithTools(
+        'm-stopped', [{ role: 'user', content: 'hi' }], [], { thinking: false, signal: ac.signal },
+      ),
+    ).rejects.toBeTruthy()
+    expect(spy).toHaveBeenCalledTimes(1)
+  })
+
+  it('and nothing is learned from a walk the user cut short', async () => {
+    const provider = new OpenAIProvider(makeConfig())
+    const ac = new AbortController()
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => { ac.abort(); return refuse() })
+    await expect(
+      provider.chatWithTools('m-cut', [{ role: 'user', content: 'hi' }], [], { thinking: false, signal: ac.signal }),
+    ).rejects.toBeTruthy()
+    vi.restoreAllMocks()
+
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(ok())
+    await provider.chatWithTools('m-cut', [{ role: 'user', content: 'hi' }], [], { thinking: false })
+    expect(bodyOf(spy, 0).reasoning_effort).toBe('none')
+  })
+})

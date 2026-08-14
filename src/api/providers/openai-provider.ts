@@ -294,19 +294,24 @@ export class OpenAIProvider implements ProviderClient {
     const lane: 'on' | 'off' | undefined =
       asked === undefined ? undefined : asked === 'high' ? 'on' : 'off'
 
+    // Stop ends the walk. The real fetch rejects on an aborted signal on its
+    // own, but localFetchStream's proxy path used to fire the request anyway,
+    // so the ladder could keep spending steps after the user was done.
+    const stopped = () => signal?.aborted === true
+
     let res = await this.sendOrExplain(post)
 
-    if (refused(res) && body.reasoning_effort === 'none') {
+    if (!stopped() && refused(res) && body.reasoning_effort === 'none') {
       body.reasoning_effort = 'minimal'
       res = await post()
     }
 
-    if (refused(res) && 'stream_options' in body) {
+    if (!stopped() && refused(res) && 'stream_options' in body) {
       delete body.stream_options
       res = await post()
     }
 
-    if (refused(res) && 'reasoning_effort' in body) {
+    if (!stopped() && refused(res) && 'reasoning_effort' in body) {
       delete body.reasoning_effort
       res = await post()
     }
