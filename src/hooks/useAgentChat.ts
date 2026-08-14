@@ -833,7 +833,13 @@ export function useAgentChat() {
                   log.warn('agent.vision_feedback_healed', { model: modelToUse })
                   continue
                 }
-                if (thinkErr?.message?.includes('does not support thinking') || httpStatusOf(thinkErr) === 400) {
+                // Only worth a second attempt if there is something to drop.
+                // useChat guards the same downgrade with `useThinking !==
+                // undefined` (useChat.ts:560); without it the agent path
+                // resent a byte-identical request and charged the user for a
+                // 400 twice (review 2026-08-14).
+                if (chatOptions.thinking !== undefined
+                  && (thinkErr?.message?.includes('does not support thinking') || httpStatusOf(thinkErr) === 400)) {
                   turn = await streamOllamaChatWithTools(
                     modelToUse,
                     agentMessages,
@@ -916,7 +922,13 @@ export function useAgentChat() {
                   log.warn('agent.vision_feedback_healed', { model: modelToUse, provider: providerId })
                   continue
                 }
-                if (thinkErr?.message?.includes('does not support thinking') || httpStatusOf(thinkErr) === 400) {
+                // Only worth a second attempt if there is something to drop.
+                // useChat guards the same downgrade with `useThinking !==
+                // undefined` (useChat.ts:560); without it the agent path
+                // resent a byte-identical request and charged the user for a
+                // 400 twice (review 2026-08-14).
+                if (streamOpts.thinking !== undefined
+                  && (thinkErr?.message?.includes('does not support thinking') || httpStatusOf(thinkErr) === 400)) {
                   turn = await streamProviderTurn(provider, modelToUse, agentMessages, { ...streamOpts, thinking: undefined as unknown as boolean }, onLiveContent, () => {})
                   break
                 }

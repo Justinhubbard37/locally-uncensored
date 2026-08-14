@@ -44,8 +44,8 @@ what it is doing.
   restart now, which matters because installing an update is a restart: work
   waiting for your yes is no longer thrown away by the thing meant to rescue
   it.
-- **A refused tool call ends the run at once and says why**, instead of the
-  agent carrying on as if it had permission.
+- **A request the model server refuses ends the run at once with the reason**,
+  instead of being retried twice while the run still looks alive.
 - **The trainer repairs its own environment** instead of refusing to start,
   and FramePack gets back the VAE it was trained with, so image-to-video
   stops producing mush.

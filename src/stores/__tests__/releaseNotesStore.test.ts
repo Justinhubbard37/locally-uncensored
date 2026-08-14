@@ -137,3 +137,28 @@ describe('the fresh-install sequence end to end', () => {
     expect(shouldShowReleaseNotes(KNOWN, useReleaseNotesStore.getState().lastNotesVersion, true)).toBe(false)
   })
 })
+
+describe('the notes describe what actually shipped', () => {
+  // The 2.6.5 sheet claimed "A refused tool call ends the run at once and says
+  // why, instead of the agent carrying on as if it had permission." The commit
+  // it was written for (7110df26) changes how an HTTP 4xx from the MODEL
+  // SERVER is classified. Nothing in the release touches tool permissions, so
+  // the one line most likely to be read as a fix for the approval flow
+  // promised something that is not in the build (review 2026-08-14).
+  const notesSrc = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '../../lib/release-notes.ts'), 'utf8',
+  )
+  const changelog = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '../../../CHANGELOG.md'), 'utf8',
+  )
+
+  it('does not promise a tool-permission fix this release does not contain', () => {
+    expect(notesSrc).not.toContain('as if it had permission')
+    expect(changelog).not.toContain('as if it had permission')
+  })
+
+  it('says what the 4xx change really does, in both places', () => {
+    expect(notesSrc).toContain('A request the model server refuses ends the run at once')
+    expect(changelog).toContain('A request the model server refuses ends the run at once')
+  })
+})

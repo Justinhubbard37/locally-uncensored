@@ -46,7 +46,7 @@ export const RELEASE_NOTES: ReleaseNote[] = [
         items: [
           'The installer shuts our engine down before writing, instead of rolling the update back at a locked llama-server.exe.',
           'An approved change lands, or names the conflict. Changes waiting for approval are kept across a restart, and the plan bar no longer claims to be finished while writes are still queued.',
-          'A refused tool call ends the run at once and says why, instead of the agent carrying on as if it had permission.',
+          'A request the model server refuses ends the run at once with the reason, instead of being retried twice while the run looks alive.',
           'Dragging files onto the Character Studio board, the chat composer or the RAG panel works again on Windows.',
           'Download and install waits for ComfyUI to actually list the new model, counts the seconds, restarts the engine once if the scan stalls, and explains itself if that still does not help.',
           'Character training repairs its own environment instead of refusing to start, and FramePack got back the VAE it was trained with.',
