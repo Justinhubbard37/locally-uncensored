@@ -275,9 +275,25 @@ fn detect_other_via_wmic(have_rocm: bool) -> Vec<DetectedGpu> {
     };
     // AdapterRAM below is a uint32 and lies about anything past 4 GiB, so the
     // driver's registry entry is the source of truth for size when it answers.
-    let registry_vram = vram_mib_by_adapter_name();
+    detect_other_via_wmic_from(&raw, have_rocm, &vram_mib_by_adapter_name())
+}
+
+/// The parser, split out the same way the lspci one is: wmic only exists on
+/// Windows and the CI runners are not Windows, so the part that can be wrong
+/// quietly gets to be tested everywhere.
+fn detect_other_via_wmic_from(
+    raw: &str,
+    have_rocm: bool,
+    registry_vram: &[(String, u64)],
+) -> Vec<DetectedGpu> {
     let mut gpus = Vec::new();
-    let mut idx: u32 = 0;
+    // Per-vendor counters, exactly as on the lspci path. HIP_VISIBLE_DEVICES
+    // and ONEAPI_DEVICE_SELECTOR are vendor-scoped, so a box with an Intel
+    // iGPU listed first and an AMD card second must not hand the AMD card the
+    // number 1: it is the only HIP device there is, and HIP device 1 does not
+    // exist. That is lapbo's machine (Win11 plus ZLUDA, no rocm-smi), which is
+    // the whole reason this branch lists AMD at all.
+    let mut next: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
     // wmic `/format:csv` emits a LEADING blank line before the header row
     // ("Node,AdapterRAM,Name"). A bare `.skip(1)` would skip that blank line and
     // then parse the header itself as a device → a phantom GPU literally named
@@ -314,15 +330,16 @@ fn detect_other_via_wmic(have_rocm: bool) -> Vec<DetectedGpu> {
                 _ => (None, "wmic"),
             },
         };
+        let index = next.entry(vendor).or_insert(0);
         gpus.push(DetectedGpu {
-            index: idx,
+            index: *index,
             vendor: vendor.into(),
             name,
             memory_mib,
             source: source.into(),
             note: note_for(vendor),
         });
-        idx += 1;
+        *index += 1;
     }
     gpus
 }
@@ -702,6 +719,53 @@ End of search: 2 match(es) found.
 
         // nvidia-smi ships with the driver, so NVIDIA is never taken from here.
         assert!(!found.iter().any(|g| g.vendor == "nvidia"));
+    }
+
+    /// The Windows fallback must count per vendor for the same reason lspci
+    /// does. HIP_VISIBLE_DEVICES is vendor-scoped, so on a box that lists an
+    /// Intel iGPU first and an AMD card second, a shared counter hands the AMD
+    /// card the number 1 while it is the only HIP device there is. That is
+    /// lapbo's machine (Win11 plus ZLUDA, no rocm-smi), which is the entire
+    /// reason this branch reports AMD at all.
+    #[test]
+    fn wmic_counts_per_vendor_not_across_them() {
+        use super::detect_other_via_wmic_from;
+        let raw = "\r\nNode,AdapterRAM,Name\r\nBOX,1073741824,Intel(R) UHD Graphics 770\r\nBOX,4293918720,AMD Radeon RX 7900 XTX\r\n";
+        let found = detect_other_via_wmic_from(raw, false, &[]);
+        assert_eq!(found.len(), 2, "both cards listed");
+        let amd = found.iter().find(|g| g.vendor == "amd").expect("amd present");
+        let intel = found.iter().find(|g| g.vendor == "intel").expect("intel present");
+        assert_eq!(amd.index, 0, "the only AMD card is HIP device 0");
+        assert_eq!(intel.index, 0, "the only Intel card is device 0 in its own view");
+    }
+
+    #[test]
+    fn wmic_still_numbers_two_cards_of_one_vendor_in_order() {
+        use super::detect_other_via_wmic_from;
+        let raw = "\r\nNode,AdapterRAM,Name\r\nBOX,1073741824,AMD Radeon RX 7900 XTX\r\nBOX,1073741824,AMD Radeon RX 6800\r\n";
+        let found = detect_other_via_wmic_from(raw, false, &[]);
+        assert_eq!(found[0].index, 0);
+        assert_eq!(found[1].index, 1);
+    }
+
+    #[test]
+    fn wmic_skips_nvidia_and_honours_rocm() {
+        use super::detect_other_via_wmic_from;
+        let raw = "\r\nNode,AdapterRAM,Name\r\nBOX,1073741824,NVIDIA GeForce RTX 3060\r\nBOX,1073741824,AMD Radeon RX 7900 XTX\r\n";
+        assert_eq!(detect_other_via_wmic_from(raw, true, &[]).len(), 0, "rocm-smi already reported it");
+        let without = detect_other_via_wmic_from(raw, false, &[]);
+        assert_eq!(without.len(), 1);
+        assert_eq!(without[0].vendor, "amd");
+        assert_eq!(without[0].index, 0);
+    }
+
+    #[test]
+    fn wmic_header_and_blank_lines_are_not_devices() {
+        use super::detect_other_via_wmic_from;
+        let raw = "\r\nNode,AdapterRAM,Name\r\n\r\nBOX,1073741824,Intel(R) Arc A770\r\n";
+        let found = detect_other_via_wmic_from(raw, false, &[]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "Intel(R) Arc A770");
     }
 
     #[test]
