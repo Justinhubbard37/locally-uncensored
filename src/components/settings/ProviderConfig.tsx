@@ -6,9 +6,71 @@ import { getProvider } from '../../api/providers'
 import { PROVIDER_PRESETS } from '../../api/providers/types'
 import { Modal } from '../ui/Modal'
 import { backendCall } from '../../api/backend'
-import type { ProviderId } from '../../api/providers/types'
+import type { ProviderId, ProviderConfig } from '../../api/providers/types'
 
 const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__
+
+/** What a slot in the provider list may show and let the user change. */
+export interface SlotView {
+  label: string
+  /** Preset the row resolved to, or null when the app owns the slot itself. */
+  presetId: string | null
+  /** False when the app pins the address, so an edit box would be a lie. */
+  endpointEditable: boolean
+  /** False when the credential is not something the user types here. */
+  needsKey: boolean
+  placeholder?: string
+  /** Shown in place of the fields the app owns. */
+  note?: string
+}
+
+/**
+ * Decide what a provider row is allowed to promise.
+ *
+ * `LuCloudProvider` pins the address to CLOUD_BASE and uses the account's
+ * session token as the bearer, on purpose: a tampered provider store must not
+ * be able to redirect that traffic (security review 2.5.7). The pane used to
+ * offer an editable Endpoint box and an API Key box anyway, so both ignored
+ * what was typed and said nothing about it, and the row called itself
+ * "Custom (OpenAI-compat)" because no preset matched, which made the one
+ * first-party backend look hand-rolled. The built-in engine already handles
+ * its own fixed address this way; this is the same answer for the other slot
+ * the app owns.
+ */
+export function providerSlotView(id: ProviderId, config: ProviderConfig): SlotView {
+  if (id === 'lu-cloud') {
+    return {
+      label: config.name || 'LU Cloud',
+      presetId: null,
+      endpointEditable: false,
+      needsKey: false,
+      note: 'Signed in with your LU account. The address is fixed and needs no key.',
+    }
+  }
+  const preset =
+    id === 'ollama'
+      ? PROVIDER_PRESETS.find(p => p.id === 'ollama')!
+      : id === 'anthropic'
+        ? PROVIDER_PRESETS.find(p => p.id === 'anthropic')!
+        : PROVIDER_PRESETS.find(p => p.providerId === 'openai' && (p.name === config.name || p.baseUrl === config.baseUrl)) ||
+          PROVIDER_PRESETS.find(p => p.id === 'custom-openai')!
+  if (config.managed) {
+    return {
+      label: preset.name || config.name,
+      presetId: preset.id,
+      endpointEditable: false,
+      needsKey: false,
+      note: 'Built-in engine, runs locally, nothing to configure.',
+    }
+  }
+  return {
+    label: preset.name || config.name,
+    presetId: preset.id,
+    endpointEditable: true,
+    needsKey: !config.isLocal,
+    placeholder: preset.placeholder,
+  }
+}
 
 // Sweep #4 Bug (g): when LM Studio is installed locally but its embedded
 // server is not currently listening on :1234 (user closed the GUI, the
@@ -66,16 +128,6 @@ export function ProviderSettings() {
 
   // Get all enabled providers
   const enabledProviderIds = (Object.keys(providers) as ProviderId[]).filter(id => providers[id].enabled)
-
-  // Find the preset that matches a provider config
-  function getPresetForProvider(id: ProviderId) {
-    const config = providers[id]
-    if (id === 'ollama') return PROVIDER_PRESETS.find(p => p.id === 'ollama')!
-    if (id === 'anthropic') return PROVIDER_PRESETS.find(p => p.id === 'anthropic')!
-    // For openai-compat, match by name or baseUrl
-    return PROVIDER_PRESETS.find(p => p.providerId === 'openai' && (p.name === config.name || p.baseUrl === config.baseUrl)) ||
-      PROVIDER_PRESETS.find(p => p.id === 'custom-openai')!
-  }
 
   // Add a preset (enable a provider without disabling others)
   function selectPreset(preset: typeof PROVIDER_PRESETS[0]) {
@@ -161,8 +213,8 @@ export function ProviderSettings() {
       {/* Active Providers List */}
       {enabledProviderIds.map(id => {
         const config = providers[id]
-        const preset = getPresetForProvider(id)
-        const needsKey = !config.isLocal
+        const view = providerSlotView(id, config)
+        const needsKey = view.needsKey
         const currentKey = getProviderApiKey(id)
         const status = statuses[id] || 'idle'
         const isExpanded = expandedProvider === id
@@ -190,7 +242,7 @@ export function ProviderSettings() {
                     status === 'failed' ? 'bg-red-500' :
                     'bg-gray-500'
                   }`} />
-                  <span className="text-[0.65rem] text-gray-300 font-medium truncate">{preset?.name || config.name}</span>
+                  <span className="text-[0.65rem] text-gray-300 font-medium truncate">{view.label}</span>
                   {config.managed && <span className="text-[0.5rem] px-1 py-0.5 rounded bg-purple-500/15 text-purple-300 shrink-0">DEFAULT</span>}
                   {config.isLocal && <span className="text-[0.5rem] px-1 py-0.5 rounded bg-green-500/10 text-green-400 shrink-0">LOCAL</span>}
                   {!config.isLocal && <span className="text-[0.5rem] px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 shrink-0">CLOUD</span>}
@@ -204,12 +256,16 @@ export function ProviderSettings() {
             {/* Expanded config */}
             {isExpanded && (
               <div className="px-2 pb-2 space-y-1.5 border-t border-white/[0.04]">
-                {/* Endpoint — hidden for the app-managed built-in engine, whose
-                    URL is fixed and lifecycle is owned by the app. */}
-                {config.managed ? (
-                  <p className="pt-1.5 text-[0.6rem] text-gray-500 leading-tight">
-                    Built-in engine, runs locally, nothing to configure.
-                  </p>
+                {/* Endpoint — an edit box only where editing it does something.
+                    The built-in engine and LU Cloud both run on an address the
+                    app pins, so they show it instead of pretending. */}
+                {!view.endpointEditable ? (
+                  <div className="pt-1.5 space-y-0.5">
+                    <p className="text-[0.6rem] text-gray-500 leading-tight">{view.note}</p>
+                    {!config.isLocal && (
+                      <code className="block text-[0.6rem] text-gray-400 font-mono break-all select-text">{config.baseUrl}</code>
+                    )}
+                  </div>
                 ) : (
                   <div className="pt-1.5">
                     <label className="text-[0.6rem] text-gray-500 mb-0.5 block">Endpoint</label>
@@ -231,7 +287,7 @@ export function ProviderSettings() {
                         type={isKeyVisible ? 'text' : 'password'}
                         value={currentKey}
                         onChange={(e) => setProviderApiKey(id, e.target.value)}
-                        placeholder={preset?.placeholder || 'sk-...'}
+                        placeholder={view.placeholder || 'sk-...'}
                         className="w-full px-2 py-1 pr-7 rounded bg-white/5 border border-white/8 text-[0.65rem] text-gray-300 font-mono focus:outline-none focus:border-white/20"
                       />
                       <button
@@ -263,7 +319,7 @@ export function ProviderSettings() {
                       we have positive evidence that the binary is on disk but the
                       server isn't up. The same Tauri command is idempotent so
                       duplicate clicks are safe. */}
-                  {preset?.id === 'lmstudio'
+                  {view.presetId === 'lmstudio'
                     && lmStudioInfo?.lms_present
                     && lmStudioInfo?.running === false
                     && status !== 'connected'
