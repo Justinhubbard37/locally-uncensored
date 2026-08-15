@@ -19,6 +19,34 @@ import { useChatStore } from '../stores/chatStore'
 import { mergeThreeWay } from './three-way-merge'
 
 /**
+ * Line endings, the difference between "merged" and "we refused your own edit".
+ *
+ * Measured against the real queue on the Windows box, 2026-08-14: `oldContent`
+ * and the file on disk both carry CRLF, because that is what a Windows editor
+ * writes, and the model writes `newContent` with LF. Compared as bytes, EVERY
+ * line differs from the baseline, so mergeThreeWay sees one replaced block
+ * spanning the whole file and any foreign edit inside it reads as a collision.
+ * The user is told their edit touches the same place, which is not true.
+ *
+ * The quieter half is on the happy path: writing LF content over a CRLF file
+ * flips the whole file and turns a three-line change into a full rewrite in
+ * everyone's diff.
+ *
+ * So compare and merge on LF, and write back in the form the FILE has. The
+ * model's choice of ending is an artefact of the model, never a decision.
+ */
+const toLf = (text: string) => text.replace(/\r\n/g, '\n')
+
+function eolOf(text: string): '\r\n' | '\n' {
+  const crlf = (text.match(/\r\n/g) ?? []).length
+  const lf = (text.match(/(?<!\r)\n/g) ?? []).length
+  return crlf > lf ? '\r\n' : '\n'
+}
+
+const withEol = (text: string, eol: '\r\n' | '\n') =>
+  eol === '\r\n' ? toLf(text).replace(/\n/g, '\r\n') : toLf(text)
+
+/**
  * Decide what to write when the file moved on since it was staged.
  *
  * A staged change carries the file as it looked when the model wrote it. The
@@ -63,12 +91,17 @@ async function reconcile(
     // gone or unreadable, the write recreates it, which is what the user asked for
     return { content: change.newContent, merged: 0 }
   }
-  if (current === base || current === change.newContent) {
-    return { content: change.newContent, merged: 0 }
+  // The file on disk decides the form; an empty file inherits the model's.
+  const eol = current ? eolOf(current) : eolOf(change.newContent)
+  const baseLf = toLf(base)
+  const currentLf = toLf(current)
+  const newLf = toLf(change.newContent)
+  if (currentLf === baseLf || currentLf === newLf) {
+    return { content: withEol(change.newContent, eol), merged: 0 }
   }
-  const merged = mergeThreeWay(base, current, change.newContent)
+  const merged = mergeThreeWay(baseLf, currentLf, newLf)
   if (merged.ok) {
-    return { content: merged.content, merged: merged.mergedRegions }
+    return { content: withEol(merged.content, eol), merged: merged.mergedRegions }
   }
   throw new Error(
     `${change.path} changed on disk in the same ${merged.conflicts === 1 ? 'place' : 'places'} this edit touches, so applying it would drop those changes. Everything else was left alone. Reject this one and let the model read the file again.`,
