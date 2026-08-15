@@ -405,11 +405,15 @@ fn run_streamed(
 
     let exit = loop {
         if cancel.load(Ordering::SeqCst) {
-            let _ = child.kill();
+            // The whole tree, not just this child: accelerate spawns the
+            // trainer underneath and `Child::kill` never reaches it.
+            kill_trainer_tree(child.id());
             let _ = child.wait();
-            for h in handles {
-                let _ = h.join();
-            }
+            // The reader threads are deliberately NOT joined here. They sit in
+            // read() on a pipe that every surviving grandchild still holds
+            // open, so the join blocked forever and the cancel never returned:
+            // the run stayed on "running" with the card busy and no way left
+            // to stop it. They end by themselves once the pipe closes.
             return Err("cancelled".to_string());
         }
         match child.try_wait() {
@@ -1062,20 +1066,20 @@ pub async fn cancel_character_training(app: tauri::AppHandle) -> Result<(), Stri
 /// Shared with `AppState::shutdown_subprocesses`: the trainer PID lives in
 /// AppState like every other long-running child, but shutdown never killed it,
 /// so quitting mid-training left an orphaned Python process holding the GPU
-/// with no UI left to stop it. `/T` matters — the trainer runs accelerate,
-/// which spawns the actual worker underneath.
+/// with no UI left to stop it. The whole tree matters: the trainer runs
+/// accelerate, which spawns the actual worker underneath.
 pub(crate) fn kill_trainer_tree(pid: u32) {
-    #[cfg(target_os = "windows")]
-    {
-        let mut kill = Command::new("taskkill");
-        kill.args(["/PID", &pid.to_string(), "/T", "/F"]);
-        kill.creation_flags(CREATE_NO_WINDOW);
-        let _ = kill.output();
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
-    }
+    // This used to be `taskkill /T /F` on Windows and a bare `kill -9`
+    // elsewhere, and both left the worker alive. Measured on the box
+    // 2026-08-15: a cancelled run killed `accelerate` and the python directly
+    // under it, while the two processes BELOW those kept the card at 100
+    // percent for as long as anyone watched. `/T` resolves the tree in one
+    // shot and loses whatever hangs under a process it has just killed.
+    //
+    // The shell tool already solved this: collect the tree with sysinfo and
+    // kill the leaves first. One mechanism for both is also one place to fix
+    // the next time a child learns to spawn children.
+    crate::commands::shell::kill_tree(pid);
 }
 
 fn cancel_character_training_blocking(state: &AppState) -> Result<(), String> {
@@ -1091,6 +1095,79 @@ fn cancel_character_training_blocking(state: &AppState) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    /// Cancelling a training run has to reach the process that actually holds
+    /// the card, not just the launcher.
+    ///
+    /// The 2.6.5 build failed exactly here: `Cancel` killed `accelerate` and
+    /// the python under it, while the two below kept computing. This test
+    /// builds the same shape, a parent with a grandchild, and fails if
+    /// anything survives. With the old body (`kill -9` on the parent alone,
+    /// `taskkill /T` on Windows) it is red.
+    #[cfg(unix)]
+    #[test]
+    fn cancelling_a_run_takes_the_grandchildren_with_it() {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("bash")
+            .arg("-c")
+            .arg("sleep 40 & sleep 40")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn bash");
+        let pid = child.id();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+
+        let mut sys = sysinfo::System::new();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        let unten = crate::commands::shell::descendants(pid, &sys);
+        assert!(!unten.is_empty(), "bash spawned nothing, the test setup is wrong");
+
+        super::kill_trainer_tree(pid);
+        let _ = child.wait();
+
+        let frist = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let mut jetzt = sysinfo::System::new();
+            jetzt.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+            let am_leben: Vec<u32> = unten
+                .iter()
+                .copied()
+                .filter(|p| jetzt.process(sysinfo::Pid::from_u32(*p)).is_some())
+                .collect();
+            if am_leben.is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < frist,
+                "these survived the cancel: {am_leben:?}",
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    /// The other half of the same bug: the cancel branch must not wait on the
+    /// reader threads. They block in read() on a pipe a surviving grandchild
+    /// still holds, so joining there left the run on "running" for good.
+    #[test]
+    fn the_cancel_branch_does_not_join_the_reader_threads() {
+        let src = include_str!("trainer.rs");
+        let zweig = src
+            .split("if cancel.load(Ordering::SeqCst) {")
+            .nth(1)
+            .expect("cancel branch")
+            .split("return Err(\"cancelled\".to_string());")
+            .next()
+            .expect("end of the cancel branch");
+        assert!(
+            !zweig.contains("h.join()"),
+            "the cancel branch waits on the reader threads again",
+        );
+        assert!(
+            zweig.contains("kill_trainer_tree(child.id())"),
+            "the cancel branch no longer kills the whole tree",
+        );
+    }
+
     #[test]
     fn blackwell_routes_to_cu128_and_older_cards_keep_cu121() {
         use super::torch_index_for_cap;
