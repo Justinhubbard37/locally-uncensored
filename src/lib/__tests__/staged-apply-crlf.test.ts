@@ -124,6 +124,42 @@ describe('an approved change lands on a CRLF file', () => {
     expect(written[0]).not.toContain('\r')
   })
 
+  it('merges a foreign edit in the MIDDLE of a longer CRLF file', async () => {
+    // The open line from the E2E list, written down on 2026-08-11 from Morgan's
+    // run: on Windows only an edit at the very END of the file survived,
+    // because CRLF against the model's LF made the whole file look like one
+    // changed block, and anything foreign further up read as a collision.
+    // A file long enough that a middle edit and the model's edit sit in clearly
+    // different regions, so nothing but the line endings can decide this.
+    const base = [
+      'import os',
+      'import sys',
+      '',
+      'def load(path):',
+      '    with open(path) as f:',
+      '        return f.read()',
+      '',
+      'def main():',
+      '    data = load("in.txt")',
+      '    print("hi")',
+      '',
+      'main()',
+    ]
+    // Someone fixed the middle of the file by hand while the change sat in the
+    // queue. The model, minutes earlier, had touched the print near the bottom.
+    const disk = crlf(base.map((l) => (l === '    with open(path) as f:' ? '    with open(path, encoding="utf-8") as f:' : l)))
+    const model = lf(base.map((l) => (l === '    print("hi")' ? '    print("hello")' : l)))
+    const written = onDisk(disk)
+
+    await applyStagedChange(CHAT, stageEdit(model, crlf(base)))
+
+    expect(written).toHaveLength(1)
+    expect(written[0]).toContain('encoding="utf-8"')
+    expect(written[0]).toContain('print("hello")')
+    // and it went back as a Windows file, not as one long LF block
+    expect(written[0].split('\r\n')).toHaveLength(base.length)
+  })
+
   it('still refuses when the two edits really are the same line', async () => {
     // Normalizing must not turn a real collision into a silent overwrite.
     const disk = crlf(['import os', '', 'def main():', '    print("from disk")', '', 'main()'])
