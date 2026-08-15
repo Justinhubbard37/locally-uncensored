@@ -38,6 +38,7 @@ import {
 } from '../api/comfyui-ws'
 import { buildDynamicWorkflow, buildLocalOpWorkflow, checkVideoOutputCapability } from '../api/dynamic-workflow'
 import { getAllNodeInfo, clearNodeCache } from '../api/comfyui-nodes'
+import { restartComfyForNewNodes } from '../api/comfy-restart'
 import { installCustomNodes } from '../api/discover'
 import { backendCall } from '../api/backend'
 import { checkPromptSafety, SAFETY_BLOCK_MESSAGE } from '../lib/render/safety'
@@ -942,11 +943,13 @@ export function useCreate() {
                 try {
                   await installCustomNodes(['videohelpersuite'])
                   setProgress(9, 'Restarting ComfyUI to register the new node...')
-                  try {
-                    await backendCall('stop_comfyui')
-                  } catch { /* may already be stopped */ }
-                  await new Promise(r => setTimeout(r, 2000))
-                  await backendCall('start_comfyui')
+                  // Shared with the Create surface on purpose. The version that
+                  // used to live here trusted "something answers on the port"
+                  // as proof of a restart, which is exactly wrong when the
+                  // engine was started outside LU: the old process keeps the
+                  // port and its old node list, and the error below then sent
+                  // people hunting an IMPORT FAILED line nobody ever wrote.
+                  await restartComfyForNewNodes()
                   // Wait for ComfyUI to come back; poll /object_info up to 30s
                   let backUp = false
                   for (let i = 0; i < 15; i++) {

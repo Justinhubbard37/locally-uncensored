@@ -12,14 +12,9 @@ import { useDownloadStore } from '../../../stores/downloadStore'
 import { downloadBundleFiles, waitOrAbort, waitForModelsVisible } from '../../../lib/bundle-install'
 import { ensureLocalFilename } from './loadImage'
 import { comfyStartupError } from './comfyError'
+import { restartComfyForNewNodes } from '../../../api/comfy-restart'
 import type { CloudQuota } from '../../../lib/render/cloud-jobs'
 
-/** Restart ComfyUI so a freshly installed node pack registers (packs only load
- *  on startup). stop_comfyui can only kill the ComfyUI that LU itself spawned:
- *  if the engine was started outside LU (user's own terminal/script), the old
- *  process keeps the port and keeps serving the stale node list — the pack
- *  would look installed but never show up, and the register-poll would burn
- *  40s to end in a misleading error. Detect that case and state the real fix. */
 /** Hold until nothing is rendering, so a heal never lands on a live job.
  *  Bounded: a render that never reports finished must not park an install
  *  forever, and the caller falls back to the plain-language error either way. */
@@ -41,24 +36,6 @@ async function waitForComfyBack(onStatus?: (m: string) => void, signal?: AbortSi
     await waitOrAbort(2000, signal)
   }
   return await checkComfyConnection()
-}
-
-async function restartComfyForNewNodes(): Promise<void> {
-  try { await backendCall('stop_comfyui') } catch { /* may already be stopped */ }
-  // stop_comfyui reaps its child before returning, so LU's own engine is down
-  // by now — poll a few extra rounds anyway instead of trusting one sleep.
-  // Whatever still answers after that is an engine LU does not own.
-  let stillUp = await checkComfyConnection()
-  for (let i = 0; stillUp && i < 5; i++) {
-    await new Promise((r) => setTimeout(r, 2000))
-    stillUp = await checkComfyConnection()
-  }
-  if (stillUp) {
-    throw new Error(
-      'Your ComfyUI is running outside LU, so LU cannot restart it. New node packs only load on startup: restart your ComfyUI yourself, then come back here.',
-    )
-  }
-  await backendCall('start_comfyui')
 }
 
 /**

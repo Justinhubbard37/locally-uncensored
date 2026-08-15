@@ -179,7 +179,11 @@ describe('the install path uses it, and says something honest when it runs out',
   })
 
   it('coming back up must not trigger a multi gigabyte install behind the download', () => {
-    const helper = src.slice(src.indexOf('async function waitForComfyBack'), src.indexOf('async function restartComfyForNewNodes'))
+    // Endanker ist der Kommentar der naechsten Deklaration. Vorher stand hier
+    // `restartComfyForNewNodes`, die seit dem 15.08. in `api/comfy-restart.ts`
+    // liegt, weil der Generate-Pfad dieselbe Fassung braucht. Ein Anker, der
+    // nicht mehr existiert, liefert -1 und schneidet die ganze Datei mit.
+    const helper = src.slice(src.indexOf('async function waitForComfyBack'), src.indexOf('The seam between the redesigned Create surface'))
     expect(helper).not.toContain('install_comfyui')
   })
 })
