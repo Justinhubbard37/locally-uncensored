@@ -15,7 +15,8 @@ import {
 import { galleryItemUrl, fetchGalleryItemBlob, recoverGalleryUrl } from './galleryUrl'
 import { InstallCancelled } from '../../../lib/bundle-install'
 import { isMlxImageHost } from '../../../api/mlx-image'
-import { videoLaneModels } from '../../../api/comfyui'
+import { videoLaneModels, bundleForVideoIntent } from '../../../api/comfyui'
+import { getVideoBundles } from '../../../api/discover'
 
 interface Props {
   displayed?: GalleryItem
@@ -494,7 +495,10 @@ const BUNDLE_COPY = {
   video: {
     icon: Film,
     title: 'Local video generation needs a one-time download',
-    description: 'This sets up everything for a fully local run: ComfyUI itself if it’s missing, plus the Wan 2.1 starter model files (~9.2 GB, 480p, light on VRAM).',
+    // Filled in per lane below: Animate and Extend need an image-to-video
+    // model and get a different bundle than the plain Video tab, so a fixed
+    // sentence here named a download the user was not going to get.
+    description: 'This sets up everything for a fully local run: ComfyUI itself if it’s missing, plus the starter model files.',
   },
   audio: {
     icon: ImageIcon,
@@ -513,8 +517,17 @@ const BUNDLE_COPY = {
   },
 } as const
 
+/** What the video card promises has to be the bundle the button installs.
+ *  Same pick as the installer, so the two cannot drift apart again. */
+function videoBundleLine(intent: string): string {
+  const b = bundleForVideoIntent(getVideoBundles(), intent)
+  if (!b) return ''
+  return ` The lane needs ${intent === 'animate' || intent === 'extend' ? 'an image-to-video' : 'a text-to-video'} model, so this installs ${b.name} (~${b.totalSizeGB} GB, ${b.vramRequired} VRAM).`
+}
+
 function ModelInstallCard({ kind }: { kind: 'image' | 'video' | 'audio' | 'lipsync' | 'motion' }) {
   const { installModelBundle } = useCreateExp()
+  const intent = useCreateStore((s) => s.intent())
   // The run outlives this card on purpose. Stage swaps the card away as soon as
   // a render starts or the lane list refills, and a 12 GB install must not lose
   // its status line, its Cancel button and its error message to that.
@@ -522,6 +535,10 @@ function ModelInstallCard({ kind }: { kind: 'image' | 'video' | 'audio' | 'lipsy
   const { status, err, running: installing } = runState
   const mac = isMlxImageHost()
   const copy = (mac && (kind === 'image' || kind === 'video')) ? MAC_BUNDLE_COPY[kind] : BUNDLE_COPY[kind]
+  // The Mac lane runs its own MLX stack and has no ComfyUI bundle to name.
+  const description = (kind === 'video' && !mac)
+    ? copy.description + videoBundleLine(intent)
+    : copy.description
 
   const run = () => startInstallRun(kind, (onStatus, signal) =>
     installModelBundle(kind, onStatus, signal).catch((e: unknown) => {
@@ -535,7 +552,7 @@ function ModelInstallCard({ kind }: { kind: 'image' | 'video' | 'audio' | 'lipsy
       icon={copy.icon}
       tone="accent"
       title={installing ? 'Setting this up for you' : copy.title}
-      description={installing ? (mac ? BUSY_DESCRIPTION.macBundle : BUSY_DESCRIPTION.bundle) : copy.description}
+      description={installing ? (mac ? BUSY_DESCRIPTION.macBundle : BUSY_DESCRIPTION.bundle) : description}
     >
       <InstallCardBody
         run={run} installing={installing} status={status} err={err}

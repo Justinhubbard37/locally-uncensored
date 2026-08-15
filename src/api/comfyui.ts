@@ -288,6 +288,40 @@ export function videoLaneModels(list: ClassifiedModel[], intent: string): Classi
   return list.filter((m) => canRunVideoIntent(m.name, intent))
 }
 
+/** Where a bundle keeps the thing that actually generates. The rest of a
+ *  bundle is VAE and text encoder, and those names say nothing about i2v. */
+const BUNDLE_MODEL_SUBFOLDERS = new Set(['diffusion_models', 'checkpoints', 'unet'])
+
+/**
+ * The starter bundle whose MODEL this lane can actually run.
+ *
+ * Third place that has to obey canRunVideoIntent, and the one that did not.
+ * Stage decides "this lane has no models" through that rule, while the
+ * installer always took the first video bundle, a Wan 2.1 **T2V**. On Extend
+ * Video and Animate Image, which are i2v lanes, that bundle can never satisfy
+ * the gate: the card offers a 9.2 GB download, the download succeeds, ComfyUI
+ * lists every file, and the card comes back unchanged. Pressing the button
+ * again does exactly the same thing, forever.
+ *
+ * Measured on the box 2026-08-15 on Extend Video, and it is the other half of
+ * what Voxyl AI and Aldrich Ironhart reported on 2026-08-13. The C8 fix cured
+ * the frozen status line; this cures the reason the card stayed at all.
+ *
+ * The other lanes need no such pick: their gate is a plain length check on
+ * their own list, and their single bundle always lands in it.
+ */
+export function bundleForVideoIntent<B extends { files: Array<{ filename?: string; subfolder?: string }> }>(
+  bundles: B[],
+  intent: string,
+): B | undefined {
+  return bundles.find((b) =>
+    b.files.some((f) =>
+      !!f.filename &&
+      BUNDLE_MODEL_SUBFOLDERS.has(f.subfolder ?? '') &&
+      canRunVideoIntent(f.filename, intent)),
+  )
+}
+
 // ─── Default generation parameters per model type ───
 
 export interface ModelTypeDefaults {

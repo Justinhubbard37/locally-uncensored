@@ -93,6 +93,16 @@ describe('the install path uses it, and says something honest when it runs out',
     'utf8',
   )
 
+  it('the video bundle is picked by the lane rule, not by index', () => {
+    // The bug this pins: the installer took getVideoBundles()[0] whatever the
+    // lane was, so Extend Video and Animate Image were offered a Wan 2.1 T2V
+    // bundle that their own gate rejects. 9.2 GB later the card was still
+    // there, and pressing the button again did the same thing. Measured on the
+    // box 2026-08-15.
+    expect(src).toMatch(/bundleForVideoIntent\(getVideoBundles\(\), useCreateStore\.getState\(\)\.intent\(\)\)/)
+    expect(src).not.toMatch(/kind === 'video' \? getVideoBundles\(\)/)
+  })
+
   it('only the subfolders ComfyUI enumerates are checked', () => {
     // loras and upscale models never show up in these enums, so demanding
     // them would turn every install into a failure.

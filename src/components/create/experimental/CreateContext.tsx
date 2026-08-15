@@ -3,7 +3,7 @@ import { useCreate } from '../../../hooks/useCreate'
 import { useCloudCreate, hasActiveCloudRun } from '../../../hooks/useCloudCreate'
 import { useCloudSession } from '../../../hooks/useCloudSession'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
-import { getLoraModels, getVAEModels, getCheckpoints, getDiffusionModels, getCLIPModels, getGgufUnetModels, checkComfyConnection, refreshComfyModels } from '../../../api/comfyui'
+import { getLoraModels, getVAEModels, getCheckpoints, getDiffusionModels, getCLIPModels, getGgufUnetModels, checkComfyConnection, refreshComfyModels, bundleForVideoIntent } from '../../../api/comfyui'
 import { getAllNodeInfo, clearNodeCache } from '../../../api/comfyui-nodes'
 import { installCustomNodes, getImageBundles, getVideoBundles, getAudioBundles, getLipsyncBundles, getMotionBundles, startModelDownload, getDownloadProgress, normalizeModelBase, ENUM_SUBFOLDERS } from '../../../api/discover'
 import { backendCall, isMacOS } from '../../../api/backend'
@@ -319,13 +319,19 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
       return
     }
     await ensureComfyRunning(onProgress, signal)
-    const bundle = (
-      kind === 'image' ? getImageBundles()
-      : kind === 'video' ? getVideoBundles()
-      : kind === 'audio' ? getAudioBundles()
-      : kind === 'lipsync' ? getLipsyncBundles()
-      : getMotionBundles()
-    )[0]
+    // The video lane picks by the SAME rule the gate uses, because the two
+    // disagreed: Stage counts an i2v lane as empty unless it sees an i2v
+    // model, and this always installed the first bundle, a Wan 2.1 T2V. On
+    // Extend Video and Animate Image that meant a 9.2 GB download that could
+    // not possibly make the card go away. See bundleForVideoIntent.
+    const bundle = kind === 'video'
+      ? bundleForVideoIntent(getVideoBundles(), useCreateStore.getState().intent())
+      : (
+        kind === 'image' ? getImageBundles()
+        : kind === 'audio' ? getAudioBundles()
+        : kind === 'lipsync' ? getLipsyncBundles()
+        : getMotionBundles()
+      )[0]
     if (!bundle) throw new Error('No starter bundle available for this intent.')
     if (bundle.customNodes?.length) {
       onProgress?.('Installing the required node packs. This can take a minute…')
