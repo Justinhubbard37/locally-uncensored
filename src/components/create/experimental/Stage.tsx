@@ -522,7 +522,10 @@ const BUNDLE_COPY = {
 function videoBundleLine(intent: string): string {
   const b = bundleForVideoIntent(getVideoBundles(), intent)
   if (!b) return ''
-  return ` The lane needs ${intent === 'animate' || intent === 'extend' ? 'an image-to-video' : 'a text-to-video'} model, so this installs ${b.name} (~${b.totalSizeGB} GB, ${b.vramRequired} VRAM).`
+  // Bundle names carry their own parenthetical ("Wan 2.2 · TI2V 5B (Image +
+  // Text to Video)"), and two brackets in a row read as a typo.
+  const name = b.name.replace(/\s*\([^)]*\)\s*$/, '')
+  return ` The lane needs ${intent === 'animate' || intent === 'extend' ? 'an image-to-video' : 'a text-to-video'} model, so this installs ${name} (~${b.totalSizeGB} GB, ${b.vramRequired} VRAM).`
 }
 
 function ModelInstallCard({ kind }: { kind: 'image' | 'video' | 'audio' | 'lipsync' | 'motion' }) {
