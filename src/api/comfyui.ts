@@ -673,9 +673,14 @@ export async function getImageModels(): Promise<ClassifiedModel[]> {
   for (const name of checkpoints) {
     if (!complete.has(name)) continue
     const type = classifyModel(name)
-    // Skip video-type checkpoints (e.g. SVD) — they belong in getVideoModels()
-    if (isVideoModelType(type)) continue
-    result.push({ name, type: isImageModelType(type) ? type : 'sdxl', source: 'checkpoint' })
+    // One predicate for both loops. isImageModelType lets 'unknown' through, so
+    // a checkpoint the classifier cannot name is still offered, while the video
+    // types (SVD) and the lane architectures (ACE audio, Wan S2V/Animate/VACE)
+    // stay in their own pickers. The old branch renamed anything unmatched to
+    // sdxl instead of skipping it, which put an ACE-Step music checkpoint at
+    // the top of the image picker on a real box.
+    if (!isImageModelType(type)) continue
+    result.push({ name, type, source: 'checkpoint' })
   }
 
   for (const name of unets) {

@@ -94,6 +94,27 @@ describe('getImageModels sees everything installed', () => {
     expect(names).not.toContain('wan2.1_t2v_1.3B.safetensors')
   })
 
+  it('keeps the lane architectures out of the image list, as CHECKPOINTS too', async () => {
+    // Measured on the Windows box on 2026-08-15: "zeichne mir ein Logo fuer die
+    // Startseite" opened the image model picker with exactly two entries,
+    // ace_step_1.5_turbo_aio and sd_turbo, and the ACE one was pre-selected
+    // because it sorts first. ACE-Step makes MUSIC. Nobody clicks in 90 seconds
+    // when the card says it continues on its own, so the AFK case the countdown
+    // exists for would have rendered a picture with an audio checkpoint.
+    //
+    // The UNET loop filters on isImageModelType and gets this right. The
+    // checkpoint loop only skipped video types and renamed everything else to
+    // sdxl, so the four lane architectures (ace, wans2v, wananimate, wanvace)
+    // walked in through the checkpoint door. Distributed as .safetensors
+    // checkpoints, which is exactly how our own Model Manager installs them.
+    routeObjectInfo({
+      checkpoints: ['ace_step_1.5_turbo_aio.safetensors', 'wan2.1_vace_14b.safetensors'],
+      unets: ['ace_step_v1_3.5b.safetensors'],
+    })
+    const names = (await getImageModels()).map((m) => m.name)
+    expect(names).toEqual([])
+  })
+
   it('degrades quietly when ComfyUI-GGUF is not installed', async () => {
     routeObjectInfo({ unets: ['flux1-dev.safetensors'], ggufInstalled: false })
     const names = (await getImageModels()).map((m) => m.name)
