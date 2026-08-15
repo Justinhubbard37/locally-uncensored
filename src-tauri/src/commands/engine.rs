@@ -122,7 +122,7 @@ pub(crate) fn effective_ctx(tuning: &EngineTuning) -> u32 {
 /// layer to the GPU (Metal on mac); llama-server clamps to the real layer
 /// count, so an over-large value is the idiomatic "all layers" request.
 /// Default tuning yields exactly the legacy argv (pinned by regression test).
-pub(crate) fn build_server_args(model_path: &str, tuning: &EngineTuning, port: u16) -> Vec<String> {
+pub(crate) fn build_server_args(model_path: &str, tuning: &EngineTuning, port: u16, slot_save_dir: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-m".into(),
         model_path.into(),
@@ -160,6 +160,17 @@ pub(crate) fn build_server_args(model_path: &str, tuning: &EngineTuning, port: u
     }
     if tuning.no_mmap {
         args.push("--no-mmap".into());
+    }
+    // GH #85 (I-Am-LongXi): enable llama-server's slot save/restore API so the
+    // VRAM handoff can serialize the KV cache to disk before evicting the
+    // engine for a render, and restore it after the reload instead of
+    // re-processing the whole conversation. The flag only enables the
+    // endpoint; nothing is written until a save is requested. (llama.cpp
+    // cannot save slots with an mmproj loaded; the built-in engine never
+    // loads one, so that limitation does not apply here.)
+    if let Some(dir) = slot_save_dir {
+        args.push("--slot-save-path".into());
+        args.push(dir.into());
     }
     args
 }
@@ -357,6 +368,34 @@ fn resolve_engine_binary(app: &AppHandle) -> Option<PathBuf> {
 
 // ── Health probe ─────────────────────────────────────────────────────────────
 
+/// Save or restore llama-server's KV slot 0 (GH #85). The webview cannot fetch
+/// the engine port directly (CSP; all engine traffic rides the Rust proxy), so
+/// the handoff calls this instead. One fixed filename: the handoff carries at
+/// most one conversation across one eviction at a time. `ok:false` is a normal
+/// outcome (old binary, empty slot, ctx mismatch after a settings change) and
+/// means the next turn re-processes the history, exactly the pre-#85 cost.
+#[tauri::command]
+pub async fn kv_slot_action(port: u16, action: String) -> Result<serde_json::Value, String> {
+    if action != "save" && action != "restore" {
+        return Err("action must be 'save' or 'restore'".to_string());
+    }
+    let url = format!("http://127.0.0.1:{port}/slots/0?action={action}");
+    let client = reqwest::Client::builder()
+        // Serializing a multi-GB KV cache to disk takes a while on slow disks.
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let res = client
+        .post(&url)
+        .json(&serde_json::json!({ "filename": "lu-handoff.bin" }))
+        .send()
+        .await
+        .map_err(|e| format!("slot {action} failed: {e}"))?;
+    let ok = res.status().is_success();
+    let body: serde_json::Value = res.json().await.unwrap_or_else(|_| serde_json::json!({}));
+    Ok(serde_json::json!({ "ok": ok, "body": body }))
+}
+
 fn engine_healthy(port: u16) -> bool {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_millis(400))
@@ -448,7 +487,16 @@ fn start_bundled_engine_blocking(
         return Err(format!("Model file not found: {model_path}"));
     }
 
-    let desired_args = build_server_args(&model_path, &tuning, port);
+    // KV-slot directory next to the built-in models (GH #85). Best effort: a
+    // failure here only disables slot save/restore, never the engine itself.
+    let slot_dir = builtin_models_dir()
+        .ok()
+        .and_then(|models| models.parent().map(|p| p.join("kv-slots")))
+        .and_then(|dir| {
+            std::fs::create_dir_all(&dir).ok()?;
+            Some(dir.to_string_lossy().to_string())
+        });
+    let desired_args = build_server_args(&model_path, &tuning, port, slot_dir.as_deref());
 
     // Already serving this exact argv and healthy → no-op. The argv is the
     // idempotence key: a ctx/KV-quant/flash-attn change restarts the server,
@@ -621,6 +669,10 @@ pub async fn bundled_engine_status(app: AppHandle) -> Result<serde_json::Value, 
                 "running": true,
                 "healthy": engine_healthy(port),
                 "port": port,
+                // Model file size feeds the handoff's fits/doesn't-fit call
+                // (GH #85): a GGUF's on-disk size is a close proxy for its
+                // VRAM footprint at full offload.
+                "modelBytes": std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0),
                 "model_path": model_path,
                 "ctx": ctx,
             }),
@@ -930,10 +982,20 @@ mod tests {
     }
 
     #[test]
+    fn slot_save_dir_appends_the_flag_and_none_stays_legacy() {
+        // GH #85: the KV-slot flag rides at the end so every earlier pin holds.
+        let with = build_server_args("/m.gguf", &EngineTuning::default(), 8127, Some("/data/kv-slots"));
+        let tail: Vec<&str> = with.iter().rev().take(2).map(String::as_str).collect();
+        assert_eq!(tail, vec!["/data/kv-slots", "--slot-save-path"]);
+        let without = build_server_args("/m.gguf", &EngineTuning::default(), 8127, None);
+        assert!(!without.iter().any(|a| a == "--slot-save-path"));
+    }
+
+    #[test]
     fn default_tuning_args_match_legacy_shape() {
         // Pin: absent/default tuning must produce EXACTLY the argv the app has
         // shipped since 2.5.7 — expert settings are opt-in, never a drift.
-        let args = build_server_args("/models/qwen.gguf", &EngineTuning::default(), 8127);
+        let args = build_server_args("/models/qwen.gguf", &EngineTuning::default(), 8127, None);
         assert_eq!(
             args,
             vec![
@@ -958,7 +1020,7 @@ mod tests {
             mlock: true,
             no_mmap: true,
         };
-        let args = build_server_args("/m.gguf", &tuning, 8127);
+        let args = build_server_args("/m.gguf", &tuning, 8127, None);
         assert_eq!(
             args,
             vec![
@@ -991,7 +1053,7 @@ mod tests {
             mlock: false,
             no_mmap: false,
         };
-        let args = build_server_args("/m.gguf", &tuning, 8127);
+        let args = build_server_args("/m.gguf", &tuning, 8127, None);
         assert_eq!(
             args,
             vec![
@@ -1007,7 +1069,7 @@ mod tests {
     #[test]
     fn gpu_layers_zero_means_cpu_only_not_all() {
         let tuning = EngineTuning { gpu_layers: 0, ..Default::default() };
-        let args = build_server_args("/m.gguf", &tuning, 8127);
+        let args = build_server_args("/m.gguf", &tuning, 8127, None);
         let ngl = args.iter().position(|a| a == "-ngl").unwrap();
         assert_eq!(args[ngl + 1], "0");
     }

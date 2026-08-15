@@ -46,6 +46,7 @@
 
 import { backendCall, ollamaUrl, localFetch, isOllamaLocal } from './backend'
 import { listRunningModels, loadModel, unloadModel } from './ollama'
+import { startBundledEngine } from './engine'
 import { useSettingsStore } from '../stores/settingsStore'
 import {
   getImageModels,
@@ -458,6 +459,31 @@ export function estimateLmsTextVramBytes(id: string): number | undefined {
   return Math.round(params * 0.75 * 1e9)
 }
 
+// ── Built-in engine (llama-server) juggling + KV-slot carry (GH #85) ──
+// I-Am-LongXi: llama.cpp can serialize a slot's KV cache to disk and restore
+// it after a reload. The handoff uses that, so evicting the built-in engine
+// for a render no longer costs a full history re-process on the next turn.
+// The HTTP rides the Rust side (kv_slot_action): the webview cannot reach the
+// engine port, all engine traffic goes through the proxy anyway.
+
+export interface BundledTarget {
+  port: number
+  modelPath: string
+  /** GGUF size on disk, a close proxy for its VRAM at full offload. */
+  modelBytes: number
+}
+
+/** The built-in llama-server, when it is running and holding VRAM. */
+export async function detectBundledEngine(): Promise<BundledTarget | null> {
+  try {
+    const s = await backendCall<{ running?: boolean; port?: number; model_path?: string | null; modelBytes?: number }>('bundled_engine_status')
+    if (s?.running && typeof s.port === 'number' && typeof s.model_path === 'string' && s.model_path) {
+      return { port: s.port, modelPath: s.model_path, modelBytes: typeof s.modelBytes === 'number' ? s.modelBytes : 0 }
+    }
+  } catch { /* command absent (web build) or engine idle */ }
+  return null
+}
+
 export async function pollGone(modelName: string, timeoutMs = 15_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
   // Check immediately first (cheap) before sleeping.
@@ -755,20 +781,24 @@ async function runHandoff(kind: 'image' | 'video', args: VramHandoffArgs, seq: n
   if (!lmsTarget) lmsTarget = await detectAnyLoadedLmsModel()
   const lmsVramBytes = lmsTarget ? estimateLmsTextVramBytes(lmsTarget.id) : undefined
 
+  // ── Built-in engine side (live): llama-server holding a GGUF (GH #85) ──
+  const bundledTarget = await detectBundledEngine()
+
   // ── Decide: one shared fits/doesn't-fit call over EVERYTHING resident.
   // If the sum doesn't co-exist with the generation footprint, free BOTH
   // sides — over-evicting is lossless (both reload in the finally), while
   // under-evicting risks the exact 11.9/12 GB thrash this exists to avoid.
   let willUnload = false
   let willUnloadLms = false
-  if (textModel || lmsTarget) {
+  let willUnloadBundled = false
+  if (textModel || lmsTarget || bundledTarget) {
     try {
       const [footprint, systemVram, mode] = await Promise.all([
         Promise.resolve(estimateModelFootprintGB(targetModel)),
         getSystemVRAM(),
         Promise.resolve(getExclusiveVramMode()),
       ])
-      const residentBytes = (textVramBytes ?? 0) + (lmsVramBytes ?? 0)
+      const residentBytes = (textVramBytes ?? 0) + (lmsVramBytes ?? 0) + (bundledTarget?.modelBytes ?? 0)
       const decision = decideUnload({
         textVramBytes: residentBytes > 0 ? residentBytes : undefined,
         modelFootprintGB: footprint,
@@ -777,13 +807,16 @@ async function runHandoff(kind: 'image' | 'video', args: VramHandoffArgs, seq: n
       })
       willUnload = decision.unload && !!textModel
       willUnloadLms = decision.unload && !!lmsTarget
+      willUnloadBundled = decision.unload && !!bundledTarget
       log.info('vram_handoff.decision', {
         kind,
         targetModel,
         textModel,
         lmsModel: lmsTarget?.id ?? null,
+        bundledModel: bundledTarget?.modelPath ?? null,
         textVramBytes,
         lmsVramBytes,
+        bundledBytes: bundledTarget?.modelBytes,
         ...decision,
       })
     } catch (e) {
@@ -791,6 +824,7 @@ async function runHandoff(kind: 'image' | 'video', args: VramHandoffArgs, seq: n
       log.warn('vram_handoff.decision_failed', { err: String(e) })
       willUnload = false
       willUnloadLms = false
+      willUnloadBundled = false
     }
   }
 
@@ -798,6 +832,7 @@ async function runHandoff(kind: 'image' | 'video', args: VramHandoffArgs, seq: n
   // even if `active` was somehow stale.
   let evictedModel: string | null = null
   let evictedLms: LmsTextModel | null = null
+  let evictedBundled: (BundledTarget & { slotSaved: boolean }) | null = null
 
   try {
     // A chat-initiated ComfyUI gen is now ACTUALLY in flight — we are past every
@@ -858,6 +893,23 @@ async function runHandoff(kind: 'image' | 'video', args: VramHandoffArgs, seq: n
         // Same policy as the Ollama path: never block the generation on a
         // failed unload — ComfyUI may still OOM and that surfaces verbatim.
         log.warn('vram_handoff.lms_unload_failed', { lmsModel: lmsTarget.id, err: String(e) })
+      }
+    }
+
+    // ── (b3) HANDOFF-OUT for the built-in engine (GH #85) ──────────
+    if (willUnloadBundled && bundledTarget) {
+      emitHandoff('freeing_vram', { kind, detail: 'built-in engine' })
+      // Carry the conversation across the eviction: serialize the KV cache to
+      // disk, then stop the engine. Restore happens in the finally. When
+      // either half fails, the next chat turn just re-processes the history,
+      // which is exactly the pre-#85 cost — never block the render on it.
+      const saved = await backendCall<{ ok?: boolean }>('kv_slot_action', { port: bundledTarget.port, action: 'save' }).catch(() => null)
+      if (saved?.ok !== true) log.warn('vram_handoff.kv_save_failed', { port: bundledTarget.port })
+      try {
+        await backendCall('stop_bundled_engine')
+        evictedBundled = { ...bundledTarget, slotSaved: saved?.ok === true }
+      } catch (e) {
+        log.warn('vram_handoff.bundled_stop_failed', { err: String(e) })
       }
     }
 
@@ -959,6 +1011,24 @@ async function runHandoff(kind: 'image' | 'video', args: VramHandoffArgs, seq: n
         })
       } catch (e) {
         log.warn('vram_handoff.lms_reload_failed', { lmsModel: evictedLms.id, err: String(e) })
+      }
+    }
+    if (evictedBundled) {
+      try {
+        // Same model, same settings-derived tuning as every engine start;
+        // start_bundled_engine blocks until /health is green, so the slot
+        // restore below never races the model load.
+        await startBundledEngine(evictedBundled.modelPath)
+        if (evictedBundled.slotSaved) {
+          const restored = await backendCall<{ ok?: boolean }>('kv_slot_action', { port: evictedBundled.port, action: 'restore' }).catch(() => null)
+          if (restored?.ok !== true) {
+            // Non-fatal by design: the next turn re-processes the history,
+            // exactly the pre-#85 cost.
+            log.warn('vram_handoff.kv_restore_failed', { port: evictedBundled.port })
+          }
+        }
+      } catch (e) {
+        log.warn('vram_handoff.bundled_reload_failed', { err: String(e) })
       }
     }
     emitHandoff('done', { kind })
