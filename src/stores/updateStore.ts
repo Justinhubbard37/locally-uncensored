@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { version as currentVersion } from '../../package.json'
 import { isTauri, backendCall, openExternal } from '../api/backend'
+import { stopBundledEngine, stopBundledEmbed } from '../api/engine'
 import type { Update } from '@tauri-apps/plugin-updater'
 
 // ── Types ─────────────────────────────────────────────────────
@@ -220,8 +221,21 @@ export const useUpdateStore = create<UpdateState>()(
         set({ downloadStatus: 'installing' })
 
         try {
+          // Free our own sidecars BEFORE the installer runs. Windows locks a
+          // running image against writes, and llama-server.exe lives in the
+          // install directory, which is why aldrich_ironhart's update stopped at
+          // "Error opening file for writing" (C4). The NSIS hook handles that
+          // case, but it is the only installer that has one: a machine that
+          // installed the .msi takes the WiX path, where nothing frees the
+          // sidecar. And the exit below is no help either, it runs AFTER
+          // install() has already handed over.
+          // Both stops are lazy-restart no-ops when nothing is running, and the
+          // next thing to happen here is an installer, so there is nothing to
+          // lose by being early. Best effort: a failure here must not stop the
+          // update, the installer still has its own recovery.
+          await Promise.allSettled([stopBundledEngine(), stopBundledEmbed()])
           await _pendingUpdate.install()
-          // Exit so NSIS installer can overwrite the binary
+          // Exit so the installer can overwrite the binary
           await backendCall('exit_app')
         } catch (e) {
           set({
