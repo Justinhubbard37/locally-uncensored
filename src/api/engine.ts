@@ -159,6 +159,31 @@ export async function ensureBundledEmbedAlive(): Promise<void> {
   return embedEnsureInflight
 }
 
+/**
+ * Can the bundled lane actually embed right now.
+ *
+ * "The built-in engine is the active backend" is not the same question, which
+ * is what RAG's pre-flight used to ask. Measured on the Windows box on
+ * 2026-08-15: built-in engine active, the app models dir holding one chat GGUF
+ * and no embedding GGUF, ports 8127 and 8128 both dead. The pre-flight said
+ * yes, the dropped file was accepted, and the embedder then failed with
+ * `proxy_localhost: error sending request`. `ensureBundledEmbedAlive` starts an
+ * embedding GGUF, it cannot conjure one, so an installed embedding model is the
+ * precondition and this is where it gets asked.
+ */
+export async function bundledEmbedLaneReady(): Promise<boolean> {
+  try {
+    if ((await bundledEmbedStatus()).running) return true
+  } catch {
+    /* engine command unavailable — fall through to the model scan */
+  }
+  try {
+    return (await listBundledModels()).some((m) => isEmbeddingGgufName(m.name))
+  } catch {
+    return false
+  }
+}
+
 /** List downloaded GGUFs in the app models dir. Refreshes the name→path map. */
 export async function listBundledModels(): Promise<BundledModel[]> {
   const res = await backendCall<{ dir: string; models: BundledModel[] }>('list_bundled_models')

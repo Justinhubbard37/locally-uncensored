@@ -2,7 +2,12 @@ import { useCallback, useEffect, useRef } from "react"
 import { useShallow } from "zustand/react/shallow"
 import { useRAGStore } from "../stores/ragStore"
 import { indexDocument, retrieveContext } from "../api/rag"
-import { isManagedBuiltinActive, bundledEmbedStatus } from "../api/engine"
+import {
+  isManagedBuiltinActive,
+  bundledEmbedStatus,
+  bundledEmbedLaneReady,
+} from "../api/engine"
+import { installBundledEmbedModel } from "../api/embed-install"
 import { getModelContext, listModels, pullModelTauri, checkConnection } from "../api/ollama"
 import { useModelStore } from "../stores/modelStore"
 import type { DocumentMeta, RAGContext } from "../types/rag"
@@ -10,15 +15,19 @@ import { log } from "../lib/logger"
 
 const EMPTY_DOCS: DocumentMeta[] = []
 
-/** True when the bundled embeddings server can serve indexing without Ollama
- *  (built-in engine active, or the embed GGUF server is up). */
+/** True when the bundled lane can serve indexing without Ollama: its server is
+ *  up, or the built-in engine is active and an embedding GGUF is installed for
+ *  it (see `bundledEmbedLaneReady`, which is the same question rag.ts answers
+ *  when it routes). */
 async function builtinEmbedReady(): Promise<boolean> {
-  if (isManagedBuiltinActive()) return true
-  try {
-    return (await bundledEmbedStatus()).running
-  } catch {
-    return false
+  if (!isManagedBuiltinActive()) {
+    try {
+      return (await bundledEmbedStatus()).running
+    } catch {
+      return false
+    }
   }
+  return bundledEmbedLaneReady()
 }
 
 export function useRAG(conversationId: string | null) {
@@ -90,11 +99,21 @@ export function useRAG(conversationId: string | null) {
    * from the post-update banner / Install card so the UI can ask once and
    * not re-probe per file.
    *
-   * Returns true when nomic-embed-text (or whatever `embeddingModel` is set
-   * to) is in Ollama's model list. False when missing — caller is expected
-   * to surface the in-app Install prompt rather than blocking.
+   * Asks about the lane the embedder will ACTUALLY take (rag.ts): the bundled
+   * server whenever it is running or the built-in engine is the backend,
+   * Ollama otherwise. Asking Ollama on a built-in-engine box was the bug that
+   * let RAGPanel open with no install card and swallow a dropped file: Ollama
+   * had nomic-embed-text pulled, the bundled lane had no embedding GGUF at
+   * all, and nobody ever asked the lane that ran.
+   *
+   * False when missing — caller is expected to surface the in-app Install
+   * prompt rather than blocking.
    */
   const ensureEmbeddingModel = useCallback(async (): Promise<boolean> => {
+    if (await builtinEmbedReady()) return true
+    // The bundled lane is the only one rag.ts will use here, so a pulled
+    // Ollama model is not an answer to this question.
+    if (isManagedBuiltinActive()) return false
     const { embeddingModel } = useRAGStore.getState()
     const ollamaUp = await checkConnection()
     if (!ollamaUp) return false
@@ -131,6 +150,25 @@ export function useRAG(conversationId: string | null) {
 
     setPullingEmbeddingModel(true)
     setEmbeddingPullProgress({ completed: 0, total: 0, status: "starting" })
+
+    // The install has to feed the same lane the embedder reads from. On a
+    // built-in-engine box `ollama pull` fills a shop rag.ts never visits, so
+    // the card would spin, report success and change nothing.
+    if (isManagedBuiltinActive()) {
+      try {
+        await installBundledEmbedModel((completed, total) =>
+          setEmbeddingPullProgress({ completed, total, status: "downloading" }),
+        )
+        setEmbeddingPullProgress({ completed: 1, total: 1, status: "success" })
+        return true
+      } catch (err) {
+        log.error("[EmbeddingPull] bundled install failed", { err })
+        return false
+      } finally {
+        setPullingEmbeddingModel(false)
+        setTimeout(() => setEmbeddingPullProgress(null), 1500)
+      }
+    }
 
     try {
       const { promise } = pullModelTauri(embeddingModel, (p) => {
@@ -174,6 +212,14 @@ export function useRAG(conversationId: string | null) {
       // Ollama — indexDocument → generateEmbeddings already prefers it — so only
       // fall back to the Ollama checks when that server isn't running.
       if (!(await builtinEmbedReady())) {
+        // Built-in engine but no embedding GGUF: rag.ts routes to the bundled
+        // server regardless of what Ollama has, so offer the install instead
+        // of measuring the wrong lane and accepting a file we cannot index.
+        if (isManagedBuiltinActive()) {
+          queueEmbeddingFile(file)
+          setEmbeddingInstallPrompt(true)
+          return null
+        }
         const ollamaUp = await checkConnection()
         if (!ollamaUp) {
           throw new Error(

@@ -112,6 +112,15 @@ export async function generateEmbeddings(
     // A Create/Music render may have offloaded the embed sidecar — revive it
     // before the request instead of failing with "cannot reach :8128".
     await ensureBundledEmbedAlive()
+    // It revives a server, it cannot create the model one needs. Without this
+    // the next line dies on a bare transport error and the panel shows
+    // `proxy_localhost: error sending request`, which names the pipe instead
+    // of the missing part (measured on the Windows box, 2026-08-15).
+    if (!(await bundledEmbedStatus().then((s) => s.running).catch(() => false))) {
+      throw new Error(
+        "No embedding model is installed for the built-in engine. Open Document Chat and use the install card to download it (84 MB), then drop the file again."
+      )
+    }
     return embedViaBuiltin(texts, model)
   }
   try {
