@@ -48,6 +48,38 @@ describe('the webview keeps its own drag and drop', () => {
   })
 })
 
+describe('the platform configs do not undo it', () => {
+  // Measured on the Windows box on 2026-08-15 against the installed 2.6.5:
+  // a real OLE drop of three PNGs onto the training board produced zero HTML5
+  // events in the page and a full set of `tauri://drag-enter`, `drag-over`,
+  // `drag-drop` instead. So Tauri still owned the drop, on the very platform
+  // the fix was written for.
+  //
+  // The reason is the merge rule. Tauri layers tauri.<platform>.conf.json over
+  // the base config, and `windows` is an array: the platform file REPLACES it,
+  // it does not merge field by field. tauri.windows.conf.json and
+  // tauri.macos.conf.json each declare their own window object, so the base
+  // value never reached either of them. Only Linux, which declares no window,
+  // inherited the fix. A setting that only survives on the platform nobody
+  // reported is not a fix, so every config that declares a window has to carry
+  // the flag itself.
+  const platform = readdirSync(join(root, 'src-tauri'))
+    .filter((f) => /^tauri\..+\.conf\.json$/.test(f))
+    .map((f) => [f, JSON.parse(readFileSync(join(root, 'src-tauri', f), 'utf8'))] as const)
+
+  it('there is at least one platform config, or this guard is asleep', () => {
+    expect(platform.length).toBeGreaterThan(0)
+  })
+
+  for (const [name, cfg] of platform) {
+    it(`${name} does not hand drag and drop back to Tauri`, () => {
+      const wins = cfg?.app?.windows
+      if (!wins) return // declares no window, inherits the base value
+      for (const w of wins) expect(w.dragDropEnabled).toBe(false)
+    })
+  }
+})
+
 describe('the assumptions that make it safe', () => {
   it('the frontend really does use HTML5 drops, so the setting earns its place', () => {
     const zones: string[] = []
