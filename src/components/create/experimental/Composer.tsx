@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useRef, useState, useSyncExternalStore } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Sparkles, X, History, SlidersHorizontal, Square, Workflow } from 'lucide-react'
 import { useCreateStore, MODEL_TYPE_DEFAULTS } from '../../../stores/createStore'
@@ -15,6 +15,7 @@ import {
   runCredits,
 } from '../../../stores/cloudCatalogStore'
 import { INTENT_MAP } from './intents'
+import { subscribeInstallRuns, getInstallRun } from '../../../lib/model-install-runs'
 import { useWorkflowStore, shouldShowManagerNotice } from '../../../stores/workflowStore'
 import { noPromptHint, shouldShowLaneHint } from './laneHint'
 import { ModelChip } from './ModelChip'
@@ -150,11 +151,22 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
           : intent === 'motion'
             ? !!source && !!videoInput
             : true
+  // A half-installed bundle is pickable long before it is usable: the lane
+  // list refills as soon as the diffusion model lands, while the VAE it needs
+  // is still coming down. Measured on the box 2026-08-15 at 88 percent of the
+  // Wan 2.2 bundle. Submitting there buys a ComfyUI error about a file that is
+  // already on its way, so the button waits for the run that is filling this
+  // lane. Local only: a cloud render needs nothing from that download.
+  const installing = useSyncExternalStore(
+    subscribeInstallRuns,
+    () => (backend === 'local' && meta.requiresModels ? getInstallRun(meta.requiresModels).running : false),
+  )
   const canGenerate =
     (!needPrompt || prompt.trim().length > 0) &&
     (!meta.needsSource || !!source) &&
     specialReady &&
-    creditsOk
+    creditsOk &&
+    !installing
   const showNoPromptHint = shouldShowLaneHint({ needPrompt, isGenerating, intent, specialReady })
 
   return (

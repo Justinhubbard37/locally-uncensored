@@ -87,10 +87,22 @@ export function Stage({ displayed, onOpenMaskEditor, onEditResult, onFullscreen 
   const characterTab = useCreateStore((s) => s.characterTab)
   const characterTrain = intent === 'character' && characterTab === 'train'
 
+  // A bundle is not usable until ALL of its files are down, and the lane list
+  // refills the moment the diffusion model alone lands. Measured on the box
+  // 2026-08-15: at 88 percent the card vanished and Wan 2.2 TI2V was pickable
+  // while its VAE was still at 2 percent, so Create was one click away from a
+  // ComfyUI error about a file that was on its way. The card stays until the
+  // run it started is finished, which is also where its progress, its Cancel
+  // and its error message live.
+  const installRun = useSyncExternalStore(
+    subscribeInstallRuns,
+    () => (meta.requiresModels ? getInstallRun(meta.requiresModels).running : false),
+  )
+
   let body: React.ReactNode
   if (isGenerating) {
     body = <GeneratingView />
-  } else if (modelsMissing) {
+  } else if (modelsMissing || installRun) {
     body = <ModelInstallCard kind={meta.requiresModels!} />
   } else if (meta.capability && !capReady) {
     body = <CapabilityCard cap={meta.capability} />
