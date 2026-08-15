@@ -318,7 +318,7 @@ function ComfyUISettings() {
   const [hostError, setHostError] = useState('')
   const [hostSuccess, setHostSuccess] = useState(false)
   // P14 Python install state for the Settings Install-ComfyUI flow.
-  const [installPhase, setInstallPhase] = useState<'idle' | 'python' | 'comfyui' | 'error'>('idle')
+  const [installPhase, setInstallPhase] = useState<'idle' | 'python' | 'comfyui' | 'repair' | 'error'>('idle')
   const [installLogs, setInstallLogs] = useState<string[]>([])
   const [installErr, setInstallErr] = useState('')
 
@@ -349,8 +349,53 @@ function ComfyUISettings() {
       const { backendCall } = await import('../../api/backend')
       await backendCall('start_comfyui')
       setStatus(prev => prev ? { ...prev, starting: true } : null)
+      // GH #98 (joelnewswanger): a crash AFTER the 2s spawn watch used to flip
+      // the panel silently back to Stopped, which read as "the start button
+      // does nothing". Look once, a few seconds in, and say what happened.
+      setTimeout(async () => {
+        try {
+          const out: any = await backendCall('comfyui_last_output')
+          if (out?.exited && Array.isArray(out?.lines) && out.lines.length > 1) {
+            const { comfyStartupError } = await import('../create/experimental/comfyError')
+            setStartError(
+              comfyStartupError(out.lines) +
+              (out.envBroken ? '\n\nThe Python environment looks broken. Repair environment below rebuilds it in place; models, outputs and custom nodes are left alone.' : ''),
+            )
+          }
+        } catch { /* status polling keeps the panel honest */ }
+      }, 6000)
     } catch (err) {
       setStartError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  // GH #98: rebuild the ComfyUI venv (fresh isolated env, ~2 GB) through the
+  // same status contract the installer uses, so the progress card just works.
+  const handleRepair = async () => {
+    setStartError('')
+    setInstallPhase('repair')
+    setInstallLogs(['Repairing the ComfyUI environment…'])
+    try {
+      const { backendCall } = await import('../../api/backend')
+      await backendCall('repair_comfyui_env')
+      const poll = setInterval(async () => {
+        try {
+          const data: any = await backendCall('install_comfyui_status')
+          setInstallLogs(data.logs || [])
+          if (data.status === 'complete') {
+            clearInterval(poll)
+            setInstallPhase('idle')
+          } else if (data.status === 'error' || data.status === 'cancelled') {
+            clearInterval(poll)
+            const lastLog = (data.logs?.length ? data.logs[data.logs.length - 1] : '') as string
+            setInstallErr(lastLog || 'Environment repair failed')
+            setInstallPhase('error')
+          }
+        } catch { /* keep polling */ }
+      }, 2000)
+    } catch (err) {
+      setInstallPhase('error')
+      setInstallErr(err instanceof Error ? err.message : 'Failed to start the repair')
     }
   }
 
@@ -527,6 +572,14 @@ function ComfyUISettings() {
             Restart
           </button>
         )}
+        {/* GH #98: a from-source install whose Python env broke (shared system
+            Python, dead torch) needs a rebuild, not a re-install — pip reports
+            broken packages as already satisfied. Rebuilds ComfyUI/venv. */}
+        {status?.found && !status?.running && installPhase === 'idle' && (
+          <button onClick={handleRepair} title="Rebuild the Python environment in an isolated venv (~2 GB). Models, outputs and custom nodes are left alone." className="px-2 py-1 rounded text-[0.6rem] bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 transition-colors">
+            Repair environment
+          </button>
+        )}
         {(!status?.found || status?.complete === false) && installPhase === 'idle' && (
           <button
             onClick={async () => {
@@ -657,6 +710,7 @@ function ComfyUISettings() {
               <span>
                 {installPhase === 'python' && 'Installing Python 3.12 (~30 MB)…'}
                 {installPhase === 'comfyui' && 'Installing ComfyUI…'}
+                {installPhase === 'repair' && 'Rebuilding the ComfyUI environment…'}
                 {installPhase === 'error' && 'Install failed'}
               </span>
             </div>

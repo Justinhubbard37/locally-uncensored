@@ -195,54 +195,96 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
   }, [connected, setCaps])
   useEffect(() => { void refreshModelLists() }, [refreshModelLists])
 
-  // One-click prerequisite: make sure a local ComfyUI is actually running —
-  // start it if it's merely stopped, INSTALL it first if it's missing (the
-  // "complete noob PC" case: every Create tab's Download & install button must
-  // deliver a 100% functional run, not assume ComfyUI exists).
-  // Every wait in here reports a ticking second count. A line that never
-  // changes for 40s reads as frozen, which is exactly what David hit on the
-  // Motion Control card: the only feedback was a spinner, so "is it doing
-  // anything" had no answer. A counter answers it without promising a duration
-  // we cannot know.
-  const ensureComfyRunning = useCallback(async (onProgress?: (msg: string) => void, signal?: AbortSignal) => {
-    if (await checkComfyConnection()) return
-    onProgress?.('Starting ComfyUI…')
-    try { await backendCall('start_comfyui') } catch { /* not installed yet — handled below */ }
-    for (let i = 0; i < 15; i++) {
-      onProgress?.(`Starting ComfyUI… ${i * 2}s`)
-      await waitOrAbort(2000, signal)
-      if (await checkComfyConnection()) { checkConnection(); return }
-    }
-    onProgress?.('ComfyUI is not installed. Downloading and installing it now, this is a one time step of a few GB…')
-    await backendCall('install_comfyui')
-    // Poll the same status contract the Settings installer uses. Generous cap:
-    // a slow connection legitimately needs a while for the one-time install.
+  // Rebuild the ComfyUI venv via the same status contract the installer uses,
+  // narrating pip's progress (GH #98). Throws with the last log line on error.
+  const repairComfyEnv = useCallback(async (onProgress?: (msg: string) => void, signal?: AbortSignal) => {
+    onProgress?.("ComfyUI's Python environment is broken. Rebuilding it as an isolated venv now (~2 GB download). Models, outputs and custom nodes are left alone…")
+    await backendCall('repair_comfyui_env')
     for (let i = 0; i < 2700; i++) {
       await waitOrAbort(2000, signal)
       const st = await backendCall<{ status?: string; logs?: string[] }>('install_comfyui_status').catch(() => null)
       const lastLog = st?.logs?.length ? String(st.logs[st.logs.length - 1]) : ''
       if (lastLog) onProgress?.(lastLog)
-      if (st?.status === 'complete') break
-      if (st?.status === 'error') {
-        throw new Error(lastLog || 'ComfyUI install failed. See Settings → AI Backends for details.')
+      if (st?.status === 'complete') return
+      if (st?.status === 'error' || st?.status === 'cancelled') {
+        throw new Error(lastLog || 'The environment repair failed. See Settings, AI Backends for details.')
       }
     }
+    throw new Error('The environment repair did not finish. See Settings, AI Backends for details.')
+  }, [])
+
+  // Start ComfyUI and wait for its port, reporting 'crashed' the moment the
+  // child exits: polling a port that will never open hid every startup crash
+  // behind a spinner (GH #98). The ticking counter stays, a line that never
+  // changes for 40s reads as frozen (David, Motion Control card).
+  const startAndAwait = useCallback(async (rounds: number, onProgress?: (msg: string) => void, signal?: AbortSignal): Promise<'up' | 'crashed' | 'timeout'> => {
     onProgress?.('Starting ComfyUI…')
     await backendCall('start_comfyui')
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < rounds; i++) {
       onProgress?.(`Starting ComfyUI… ${i * 2}s`)
       await waitOrAbort(2000, signal)
-      if (await checkComfyConnection()) { checkConnection(); return }
-      // The process died — every further poll waits on a port that will
-      // never open. Fail now, with the crash instead of a guess (GH #98:
-      // the shipped app has no console, so "did not come up" was a dead
-      // end with nothing behind it).
-      const out = await backendCall<{ lines?: string[]; exited?: boolean }>('comfyui_last_output').catch(() => null)
-      if (out?.exited) throw new Error(comfyStartupError(out.lines))
+      if (await checkComfyConnection()) { checkConnection(); return 'up' }
+      const out = await backendCall<{ exited?: boolean }>('comfyui_last_output').catch(() => null)
+      if (out?.exited) return 'crashed'
     }
-    const out = await backendCall<{ lines?: string[] }>('comfyui_last_output').catch(() => null)
-    throw new Error(comfyStartupError(out?.lines))
+    return 'timeout'
   }, [checkConnection])
+
+  // One-click prerequisite: make sure a local ComfyUI is actually running —
+  // start it if it's merely stopped, INSTALL it first if it's missing (the
+  // "complete noob PC" case: every Create tab's Download & install button must
+  // deliver a 100% functional run, not assume ComfyUI exists).
+  //
+  // joelnewswanger's loop (GH #98): torch in the shared system Python was
+  // broken, every start died at import, the crash read as "not installed",
+  // and the re-install changed nothing because pip saw each package as
+  // already satisfied. A crash now gets ONE venv rebuild; only a start that
+  // cannot find an install at all goes down the one-time download path.
+  const ensureComfyRunning = useCallback(async (onProgress?: (msg: string) => void, signal?: AbortSignal) => {
+    if (await checkComfyConnection()) return
+    let repaired = false
+    let installedNow = false
+    let r: 'up' | 'crashed' | 'timeout' | 'missing'
+    try {
+      r = await startAndAwait(60, onProgress, signal)
+    } catch { r = 'missing' }
+    for (;;) {
+      if (r === 'up') return
+      if (r === 'crashed') {
+        const out = await backendCall<{ lines?: string[]; envBroken?: boolean }>('comfyui_last_output').catch(() => null)
+        if (out?.envBroken && !repaired) {
+          repaired = true
+          await repairComfyEnv(onProgress, signal)
+          r = await startAndAwait(60, onProgress, signal)
+          continue
+        }
+        throw new Error(comfyStartupError(out?.lines))
+      }
+      if (r === 'missing' && !installedNow) {
+        installedNow = true
+        onProgress?.('ComfyUI is not installed. Downloading and installing it now, this is a one time step of a few GB…')
+        await backendCall('install_comfyui')
+        // Poll the same status contract the Settings installer uses. Generous cap:
+        // a slow connection legitimately needs a while for the one-time install.
+        for (let i = 0; i < 2700; i++) {
+          await waitOrAbort(2000, signal)
+          const st = await backendCall<{ status?: string; logs?: string[] }>('install_comfyui_status').catch(() => null)
+          const lastLog = st?.logs?.length ? String(st.logs[st.logs.length - 1]) : ''
+          if (lastLog) onProgress?.(lastLog)
+          if (st?.status === 'complete') break
+          if (st?.status === 'error') {
+            throw new Error(lastLog || 'ComfyUI install failed. See Settings → AI Backends for details.')
+          }
+        }
+        r = await startAndAwait(60, onProgress, signal)
+        continue
+      }
+      // Timeout, or a state we already tried to fix once: report with the
+      // real output instead of guessing.
+      const out = await backendCall<{ lines?: string[] }>('comfyui_last_output').catch(() => null)
+      throw new Error(comfyStartupError(out?.lines))
+    }
+  }, [checkConnection, repairComfyEnv, startAndAwait])
 
   // Install a capability in place — mirrors the VHS one-click flow (#72):
   // ensure ComfyUI runs, clone the custom node + pip install where one is

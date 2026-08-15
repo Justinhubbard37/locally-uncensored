@@ -218,6 +218,31 @@ pub fn comfy_startup_failure(
     msg
 }
 
+/// Whether a startup crash reads as a broken Python environment (GH #98,
+/// joelnewswanger 2026-08-14). His torch lived in the shared system Python
+/// and died inside `infer_schema.py` on import, so the tail shows a traceback
+/// running through site-packages with no ModuleNotFoundError anywhere;
+/// kryptoxide's variant was a shadowing `comfy` package ("No module named
+/// 'comfy.options'"). Both are exactly what a fresh venv fixes.
+///
+/// Excluded on purpose, because a rebuild cannot fix them and their own
+/// messages are better: a port collision and a full disk.
+pub fn comfy_env_failure(tail: &[String]) -> bool {
+    let joined = tail.join("\n");
+    if joined.contains("Address already in use")
+        || joined.contains("only one usage of each socket address")
+        || joined.contains("No space left on device")
+        || joined.contains("not enough space on the disk")
+    {
+        return false;
+    }
+    joined.contains("ModuleNotFoundError")
+        || joined.contains("No module named")
+        || joined.contains("ImportError")
+        || joined.contains("DLL load failed")
+        || (joined.contains("Traceback (most recent call last)") && joined.contains("site-packages"))
+}
+
 /// Pure decision (all probes done by the caller): pass `--cpu` to ComfyUI?
 ///
 /// - `baseline_needs_cpu`: `needs_cpu_fallback()` — false when NVIDIA present or macOS.
@@ -1519,7 +1544,11 @@ pub fn comfyui_last_output(state: State<'_, AppState>) -> Result<serde_json::Val
             None => true,
         }
     };
-    Ok(serde_json::json!({ "lines": lines, "exited": exited }))
+    // envBroken drives the self-repair (GH #98): only a crash that looks like
+    // a dead Python environment may trigger the venv rebuild, everything else
+    // keeps its own message.
+    let env_broken = exited && comfy_env_failure(&lines);
+    Ok(serde_json::json!({ "lines": lines, "exited": exited, "envBroken": env_broken }))
 }
 
 #[tauri::command]
@@ -2233,6 +2262,62 @@ mod tests {
         let a = needs_cpu_fallback();
         let b = needs_cpu_fallback();
         assert_eq!(a, b, "needs_cpu_fallback returned inconsistent results");
+    }
+
+    // ── Broken-env classifier fuer die Selbstheilung (GH #98) ────────────
+
+    fn zeilen(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn joels_torch_import_death_reads_as_broken_env() {
+        // 14.08.: kein ModuleNotFoundError im Tail, nur ein Traceback durch
+        // site-packages\torch — genau der Fall, den nur die Frame-Regel faengt.
+        let tail = zeilen(&[
+            "[start] python main.py --port 8188",
+            "Traceback (most recent call last):",
+            r#"  File "C:\Users\joeln\AppData\Local\Python\pythoncore-3.12-64\Lib\site-packages\torch\_library\infer_schema.py", line 106, in infer_schema"#,
+            "    error_fn(",
+            "RuntimeError: infer_schema(func): Parameter dtype has unsupported type",
+        ]);
+        assert!(comfy_env_failure(&tail));
+    }
+
+    #[test]
+    fn kryptoxides_shadowing_package_reads_as_broken_env() {
+        let tail = zeilen(&[
+            "Traceback (most recent call last):",
+            r#"  File "I:\comfyui\main.py", line 1, in <module>"#,
+            "    import comfy.options",
+            "ModuleNotFoundError: No module named 'comfy.options'",
+        ]);
+        assert!(comfy_env_failure(&tail));
+    }
+
+    #[test]
+    fn a_port_collision_is_not_an_env_failure() {
+        // Ein venv-Neubau kann den Port nicht freimachen; die eigene Meldung
+        // ist besser. Der Frame laeuft trotzdem durch site-packages (aiohttp),
+        // deshalb braucht es den expliziten Ausschluss.
+        let tail = zeilen(&[
+            "Traceback (most recent call last):",
+            r#"  File "C:\Python312\Lib\site-packages\aiohttp\web_runner.py", line 119, in start"#,
+            "OSError: [Errno 10048] error while attempting to bind on address ('127.0.0.1', 8188): only one usage of each socket address",
+        ]);
+        assert!(!comfy_env_failure(&tail));
+    }
+
+    #[test]
+    fn a_full_disk_and_a_clean_tail_are_not_env_failures() {
+        let voll = zeilen(&[
+            "Traceback (most recent call last):",
+            r#"  File "C:\Python312\Lib\site-packages\torch\serialization.py", line 998"#,
+            "OSError: [Errno 28] No space left on device",
+        ]);
+        assert!(!comfy_env_failure(&voll));
+        let sauber = zeilen(&["[start] python main.py --port 8188", "Total VRAM 12288 MB"]);
+        assert!(!comfy_env_failure(&sauber));
     }
 
     // ── AMD/ROCm ComfyUI GPU decision (rhodium92, 2026-07-01) ────────────

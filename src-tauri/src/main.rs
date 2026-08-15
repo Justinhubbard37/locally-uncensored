@@ -124,6 +124,7 @@ fn main() {
             // Installation
             commands::install::install_comfyui,
             commands::install::install_comfyui_status,
+            commands::install::repair_comfyui_env,
             commands::install::update_comfyui,
             commands::install::cancel_comfyui_install,
             commands::install::install_ollama,

@@ -519,6 +519,61 @@ pub fn pip_install_streaming_with_retry_cancellable(
     ))
 }
 
+/// Pure: the pip argument set for the PyTorch install, for a given wheel
+/// index. Split from the probe so the arg shapes are testable without
+/// nvidia-smi on the machine.
+pub(crate) fn pytorch_pip_args(index_url: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "-m", "pip", "install",
+        "--progress-bar", "off",
+        "--no-input",
+        "torch", "torchvision", "torchaudio",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    if let Some(u) = index_url {
+        args.push("--index-url".to_string());
+        args.push(u.to_string());
+    }
+    args
+}
+
+/// GPU probe + wheel choice + pip args, shared between the first install and
+/// `repair_comfyui_env` so the two can never drift apart (same cu128/cu121/
+/// CPU decision, same flags).
+///
+/// Bug #10 (vokurta — RTX 6000 Blackwell, 2026-05-11): SM 12.0 GPUs need
+/// PyTorch cu128 wheels. cu121 stops at sm_90 (Hopper); on Blackwell the
+/// kernel simply isn't shipped and the first compute call dies with "CUDA
+/// error: no kernel image is available for execution on the device". We probe
+/// `--query-gpu=compute_cap` and pick the wheel set accordingly. Falls back
+/// to cu121 if the probe fails for any reason — that's the previous
+/// behaviour, so we never regress existing setups.
+pub(crate) fn plan_pytorch_install() -> (Vec<String>, String) {
+    let mut nv = Command::new("nvidia-smi");
+    nv.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    nv.creation_flags(CREATE_NO_WINDOW);
+    let has_nvidia = nv.output().map(|o| o.status.success()).unwrap_or(false);
+
+    let compute_cap_major = if has_nvidia { detect_nvidia_compute_cap_major() } else { None };
+    let pytorch_index = match compute_cap_major {
+        Some(major) if major >= 12 => Some("https://download.pytorch.org/whl/cu128"),
+        Some(_) => Some("https://download.pytorch.org/whl/cu121"),
+        None if has_nvidia => Some("https://download.pytorch.org/whl/cu121"),
+        None => None,
+    };
+
+    let gpu_info = match (has_nvidia, compute_cap_major) {
+        (true, Some(major)) if major >= 12 => "NVIDIA Blackwell GPU detected (SM 12.0+) — installing PyTorch cu128",
+        (true, Some(_)) => "NVIDIA GPU detected — installing CUDA PyTorch (cu121)",
+        (true, None) => "NVIDIA GPU detected (compute capability probe failed) — falling back to cu121",
+        (false, _) => "No NVIDIA GPU — installing CPU PyTorch",
+    };
+    (pytorch_pip_args(pytorch_index), gpu_info.to_string())
+}
+
 #[tauri::command]
 pub fn install_comfyui(
     install_path: Option<String>,
@@ -737,35 +792,9 @@ pub fn install_comfyui(
             python_bin.clone()
         };
 
-        // Step 2: Detect GPU and install PyTorch
-        let mut nv = Command::new("nvidia-smi");
-        nv.stdout(Stdio::piped()).stderr(Stdio::piped());
-        #[cfg(target_os = "windows")]
-        nv.creation_flags(CREATE_NO_WINDOW);
-        let has_nvidia = nv.output().map(|o| o.status.success()).unwrap_or(false);
-
-        // Bug #10 (vokurta — RTX 6000 Blackwell, 2026-05-11): SM 12.0 GPUs
-        // need PyTorch cu128 wheels. cu121 stops at sm_90 (Hopper); on
-        // Blackwell the kernel simply isn't shipped and the first compute
-        // call dies with "CUDA error: no kernel image is available for
-        // execution on the device". We probe `--query-gpu=compute_cap` and
-        // pick the wheel set accordingly. Falls back to cu121 if the probe
-        // fails for any reason — that's the previous behaviour, so we
-        // never regress existing setups.
-        let compute_cap_major = if has_nvidia { detect_nvidia_compute_cap_major() } else { None };
-        let pytorch_index = match compute_cap_major {
-            Some(major) if major >= 12 => Some("https://download.pytorch.org/whl/cu128"),
-            Some(_) => Some("https://download.pytorch.org/whl/cu121"),
-            None if has_nvidia => Some("https://download.pytorch.org/whl/cu121"),
-            None => None,
-        };
-
-        let gpu_info = match (has_nvidia, compute_cap_major) {
-            (true, Some(major)) if major >= 12 => "NVIDIA Blackwell GPU detected (SM 12.0+) — installing PyTorch cu128",
-            (true, Some(_)) => "NVIDIA GPU detected — installing CUDA PyTorch (cu121)",
-            (true, None) => "NVIDIA GPU detected (compute capability probe failed) — falling back to cu121",
-            (false, _) => "No NVIDIA GPU — installing CPU PyTorch",
-        };
+        // Step 2: Detect GPU and install PyTorch (probe + wheel choice shared
+        // with repair_comfyui_env via plan_pytorch_install).
+        let (torch_args, gpu_info) = plan_pytorch_install();
         println!("[Install] {}", gpu_info);
         update("installing", &format!("Step 2/3: {}", gpu_info));
         update(
@@ -776,24 +805,8 @@ pub fn install_comfyui(
              lines appearing, the install is making progress, not hung.",
         );
 
-        let torch_args: Vec<&str> = if let Some(index_url) = pytorch_index {
-            vec![
-                "-m", "pip", "install",
-                "--progress-bar", "off",
-                "--no-input",
-                "torch", "torchvision", "torchaudio",
-                "--index-url", index_url,
-            ]
-        } else {
-            vec![
-                "-m", "pip", "install",
-                "--progress-bar", "off",
-                "--no-input",
-                "torch", "torchvision", "torchaudio",
-            ]
-        };
-
-        match pip_install_streaming_with_retry_cancellable(&torch_args, &effective_python, 3, &install_status, Some(&cancel_flag)) {
+        let torch_arg_refs: Vec<&str> = torch_args.iter().map(|s| s.as_str()).collect();
+        match pip_install_streaming_with_retry_cancellable(&torch_arg_refs, &effective_python, 3, &install_status, Some(&cancel_flag)) {
             Ok(()) => {
                 update("installing", "PyTorch installed successfully.");
             }
@@ -871,6 +884,180 @@ pub fn install_comfyui(
         }
 
         update("complete", "ComfyUI installed successfully!");
+    });
+
+    Ok(serde_json::json!({"status": "installing"}))
+}
+
+/// GH #98 (joelnewswanger, 2026-08-14): ComfyUI installed once, then died at
+/// import time on every start. His torch lived in the SHARED system Python's
+/// site-packages, where anything the user ever pip-installed can break us,
+/// and clicking install again changed nothing because pip saw every package
+/// as "already satisfied". kryptoxide's night (same issue) was the same trap
+/// from the other side: a stray `comfy 0.0.1` on the system Python shadowed
+/// ComfyUI's own package.
+///
+/// The repair builds what those installs never had: a fresh venv inside the
+/// ComfyUI folder, with PyTorch and the requirements installed into it. The
+/// launcher already prefers ComfyUI/venv over the system Python, so the next
+/// start picks it up with no further wiring. The system Python, models,
+/// outputs and custom nodes are left alone. Progress goes through the same
+/// install_status slot, so install_comfyui_status polling just works.
+#[tauri::command]
+pub fn repair_comfyui_env(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    if !crate::commands::process::comfy_supported_here() {
+        return Err(crate::commands::process::MACOS_COMFY_REFUSAL.to_string());
+    }
+    let comfy_dir = {
+        let p = state.comfy_path.lock().unwrap().clone();
+        p.or_else(crate::commands::process::find_comfyui_path)
+    };
+    let Some(comfy_dir) = comfy_dir else {
+        return Err(
+            "ComfyUI is not installed, so there is no environment to repair. Use Install ComfyUI instead."
+                .to_string(),
+        );
+    };
+    let comfy_dir = PathBuf::from(comfy_dir);
+    // Portable installs bring their own python_embeded and the launcher
+    // prefers it over any venv, so a rebuilt venv would never be used.
+    let embeded_here = comfy_dir.join("python_embeded").join("python.exe").exists();
+    let embeded_beside = comfy_dir
+        .parent()
+        .map(|p| p.join("python_embeded").join("python.exe").exists())
+        .unwrap_or(false);
+    if embeded_here || embeded_beside {
+        return Err(
+            "This is a portable ComfyUI with its own bundled Python. Re-extract the portable \
+             package to repair it; the app cannot rebuild that environment."
+                .to_string(),
+        );
+    }
+    let python_bin = state.python_bin.lock().unwrap().clone();
+    if python_bin.is_empty() || !crate::python::is_real_python(&python_bin) {
+        return Err(
+            "no_python: Python must be installed before the environment can be rebuilt. Call install_python first."
+                .to_string(),
+        );
+    }
+    {
+        let mut install = state.install_status.lock().unwrap();
+        if install.status == "installing" {
+            return Ok(serde_json::json!({"status": "already_installing"}));
+        }
+        install.status = "installing".to_string();
+        install.logs.clear();
+        install.logs.push("Repairing the ComfyUI environment...".to_string());
+    }
+    info!("comfyui env repair start");
+    // A tracked child would hold venv files open on Windows; it is dead or
+    // dying anyway (the repair only runs after a startup crash).
+    {
+        let mut proc = state.comfy_process.lock().unwrap();
+        if let Some(mut child) = proc.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+    state.comfyui_install_cancel.store(false, Ordering::SeqCst);
+    let cancel_flag = state.comfyui_install_cancel.clone();
+    let install_status = state.install_status.clone();
+
+    std::thread::spawn(move || {
+        let update = |status: &str, msg: &str| {
+            if let Ok(mut s) = install_status.lock() {
+                s.status = status.to_string();
+                s.logs.push(msg.to_string());
+            }
+        };
+
+        // A broken venv must go entirely: pip inside it would report the
+        // damaged packages as already satisfied, which is the exact dead end
+        // this command exists to break.
+        let venv_dir = comfy_dir.join("venv");
+        if venv_dir.exists() {
+            update(
+                "installing",
+                "Removing the old venv (models, outputs and custom nodes stay untouched)...",
+            );
+            if let Err(e) = std::fs::remove_dir_all(&venv_dir) {
+                update(
+                    "error",
+                    &format!(
+                        "Could not remove the old venv at {}: {}. Close anything using it and retry.",
+                        venv_dir.display(),
+                        e
+                    ),
+                );
+                return;
+            }
+        }
+
+        update(
+            "installing",
+            "Step 1/3: Creating a fresh isolated venv inside the ComfyUI folder...",
+        );
+        let venv_py = match create_comfyui_venv(&comfy_dir, &python_bin) {
+            Ok(p) => p.to_string_lossy().to_string(),
+            Err(e) => {
+                update("error", &format!("venv creation failed.\n\n{}", e));
+                return;
+            }
+        };
+        if cancel_flag.load(Ordering::SeqCst) {
+            update("cancelled", "Repair cancelled.");
+            return;
+        }
+
+        let (torch_args, gpu_info) = plan_pytorch_install();
+        update("installing", &format!("Step 2/3: {}", gpu_info));
+        update(
+            "installing",
+            "Downloading PyTorch into the fresh venv (~2 GB). Live pip output below.",
+        );
+        let refs: Vec<&str> = torch_args.iter().map(|s| s.as_str()).collect();
+        match pip_install_streaming_with_retry_cancellable(&refs, &venv_py, 3, &install_status, Some(&cancel_flag)) {
+            Ok(()) => update("installing", "PyTorch installed."),
+            Err(d) if d == "cancelled" => {
+                update("cancelled", "Repair cancelled during the PyTorch download.");
+                return;
+            }
+            Err(d) => {
+                update("error", &format!("PyTorch installation failed.\n\n{}", d));
+                return;
+            }
+        }
+
+        let reqs = comfy_dir.join("requirements.txt");
+        if reqs.exists() {
+            update(
+                "installing",
+                "Step 3/3: Installing ComfyUI dependencies into the venv...",
+            );
+            let reqs_str = reqs.to_string_lossy().to_string();
+            let req_args = vec![
+                "-m", "pip", "install",
+                "--progress-bar", "off",
+                "--no-input",
+                "-r", reqs_str.as_str(),
+            ];
+            match pip_install_streaming_with_retry_cancellable(&req_args, &venv_py, 3, &install_status, Some(&cancel_flag)) {
+                Ok(()) => update("installing", "Dependencies installed."),
+                Err(d) if d == "cancelled" => {
+                    update("cancelled", "Repair cancelled during the requirements install.");
+                    return;
+                }
+                Err(d) => update(
+                    "installing",
+                    &format!("Some optional dependencies had warnings (non-critical): {}", d),
+                ),
+            }
+        }
+
+        update(
+            "complete",
+            "Environment repaired. ComfyUI now runs from its own venv; start it again.",
+        );
     });
 
     Ok(serde_json::json!({"status": "installing"}))
@@ -3275,6 +3462,27 @@ fn is_permission_denied_pip_error(output: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── PyTorch-Args, geteilt zwischen Install und Repair (GH #98) ──────
+
+    #[test]
+    fn pytorch_args_carry_the_wheel_index_when_given() {
+        let args = pytorch_pip_args(Some("https://download.pytorch.org/whl/cu128"));
+        assert_eq!(args.first().map(String::as_str), Some("-m"));
+        assert!(args.contains(&"torch".to_string()));
+        assert!(args.contains(&"torchvision".to_string()));
+        assert!(args.contains(&"torchaudio".to_string()));
+        assert!(args.contains(&"--no-input".to_string()));
+        let idx = args.iter().position(|a| a == "--index-url").expect("index flag");
+        assert_eq!(args.get(idx + 1).map(String::as_str), Some("https://download.pytorch.org/whl/cu128"));
+    }
+
+    #[test]
+    fn pytorch_args_without_index_stay_on_pypi() {
+        let args = pytorch_pip_args(None);
+        assert!(!args.iter().any(|a| a == "--index-url"));
+        assert!(args.contains(&"torch".to_string()));
+    }
 
     // ── install_custom_node helpers (#72 bob: VHS install loop) ─────────
 
