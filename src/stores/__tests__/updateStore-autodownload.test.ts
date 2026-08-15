@@ -156,3 +156,26 @@ describe('the 6h re-check does not re-download', () => {
     expect(updater.downloads).toBe(0)
   })
 })
+
+describe('a withdrawn release stops being advertised', () => {
+  // Found on 2026-08-15 at the installed 2.6.5 build while checking that a
+  // prerelease install is not offered the older Latest: with a version left in
+  // the store, the Updates section showed "Latest Version v2.9.9" and the green
+  // "You are on the latest version." at the same time. The branch that finds
+  // nothing only cleared updateAvailable and left the version standing.
+  it('forgets the version once the check comes back empty', async () => {
+    updater.check.mockResolvedValue(fakeUpdate('2.1.0'))
+    await useUpdateStore.getState().checkForUpdate()
+    await settle()
+    expect(useUpdateStore.getState().latestVersion).toBe('2.1.0')
+
+    // The release is pulled: same endpoint, nothing newer than what runs here.
+    updater.check.mockResolvedValue(null)
+    await useUpdateStore.getState().checkForUpdate(true)
+    await settle()
+
+    expect(useUpdateStore.getState().updateAvailable).toBe(false)
+    expect(useUpdateStore.getState().latestVersion).toBe(null)
+    expect(useUpdateStore.getState().releaseNotes).toBe(null)
+  })
+})

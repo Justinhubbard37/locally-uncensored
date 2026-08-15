@@ -130,7 +130,20 @@ export const useUpdateStore = create<UpdateState>()(
                 void get().downloadUpdate()
               }
             } else {
-              set({ isChecking: false, lastChecked: Date.now(), updateAvailable: false })
+              // Nothing on offer, so nothing may be left standing either. Only
+              // clearing the flag kept the last known version in the store, and
+              // the Updates section shows that row whenever it is newer than the
+              // running build: "Latest Version v2.9.9" right next to the green
+              // "You are on the latest version.". A withdrawn release is the
+              // real path there, and it leaves people hunting for an update
+              // that no longer exists.
+              set({
+                isChecking: false,
+                lastChecked: Date.now(),
+                updateAvailable: false,
+                latestVersion: null,
+                releaseNotes: null,
+              })
             }
           } else {
             // Dev mode: check GitHub releases API (no install capability)
