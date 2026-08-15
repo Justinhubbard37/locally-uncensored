@@ -1027,9 +1027,9 @@ export function getImageBundles(): ModelBundle[] {
         {
           name: 'T5-XXL Text Encoder (FP8)',
           description: 'Required text encoder for FLUX prompt understanding.',
-          pulls: '', tags: ['Text Encoder', '3.9 GB'], updated: '',
+          pulls: '', tags: ['Text Encoder', '4.6 GB'], updated: '',
           downloadUrl: 'https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors',
-          filename: 't5xxl_fp8_e4m3fn.safetensors', subfolder: 'text_encoders', sizeGB: 3.9,
+          filename: 't5xxl_fp8_e4m3fn.safetensors', subfolder: 'text_encoders', sizeGB: 4.6,
         },
         {
           name: 'CLIP-L Text Encoder',
@@ -1067,9 +1067,9 @@ export function getImageBundles(): ModelBundle[] {
         {
           name: 'T5-XXL Text Encoder (FP8)',
           description: 'Required text encoder for FLUX prompt understanding.',
-          pulls: '', tags: ['Text Encoder', '3.9 GB'], updated: '',
+          pulls: '', tags: ['Text Encoder', '4.6 GB'], updated: '',
           downloadUrl: 'https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors',
-          filename: 't5xxl_fp8_e4m3fn.safetensors', subfolder: 'text_encoders', sizeGB: 3.9,
+          filename: 't5xxl_fp8_e4m3fn.safetensors', subfolder: 'text_encoders', sizeGB: 4.6,
         },
         {
           name: 'CLIP-L Text Encoder',
@@ -1565,9 +1565,9 @@ export function getVideoBundles(): ModelBundle[] {
         {
           name: 'Qwen 2.5 VL 7B Text Encoder (FP8)',
           description: 'Required text encoder for HunyuanVideo 1.5.',
-          pulls: '', tags: ['Text Encoder', '7.5 GB'], updated: '',
+          pulls: '', tags: ['Text Encoder', '8.8 GB'], updated: '',
           downloadUrl: 'https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors',
-          filename: 'qwen_2.5_vl_7b_fp8_scaled.safetensors', subfolder: 'text_encoders', sizeGB: 7.5,
+          filename: 'qwen_2.5_vl_7b_fp8_scaled.safetensors', subfolder: 'text_encoders', sizeGB: 8.8,
         },
         {
           name: 'CLIP-L Text Encoder',
@@ -1598,9 +1598,9 @@ export function getVideoBundles(): ModelBundle[] {
         {
           name: 'Gemma 3 12B Text Encoder (FP8)',
           description: 'Required text encoder for LTX Video 2.x.',
-          pulls: '', tags: ['Text Encoder', '~12 GB'], updated: 'New',
+          pulls: '', tags: ['Text Encoder', '12.4 GB'], updated: 'New',
           downloadUrl: 'https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it_fp8_scaled.safetensors',
-          filename: 'gemma_3_12B_it_fp8_scaled.safetensors', subfolder: 'text_encoders', sizeGB: 12,
+          filename: 'gemma_3_12B_it_fp8_scaled.safetensors', subfolder: 'text_encoders', sizeGB: 12.4,
         },
       ],
     },
@@ -1684,9 +1684,9 @@ export function getVideoBundles(): ModelBundle[] {
         {
           name: 'FramePack F1 I2V Model (FP8)',
           description: 'Main I2V model · generates video from a single image.',
-          pulls: '', tags: ['Model', '13 GB'], updated: '',
+          pulls: '', tags: ['Model', '15.3 GB'], updated: '',
           downloadUrl: 'https://huggingface.co/Kijai/HunyuanVideo_comfy/resolve/main/FramePackI2V_HY_fp8_e4m3fn.safetensors',
-          filename: 'FramePackI2V_HY_fp8_e4m3fn.safetensors', subfolder: 'diffusion_models', sizeGB: 13,
+          filename: 'FramePackI2V_HY_fp8_e4m3fn.safetensors', subfolder: 'diffusion_models', sizeGB: 15.3,
         },
         {
           name: 'SigCLIP Vision Encoder',

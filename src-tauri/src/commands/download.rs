@@ -353,6 +353,50 @@ fn ended_early(total: u64, downloaded: u64) -> bool {
     total > 0 && downloaded < total
 }
 
+/// Headroom left free on the drive, on top of the bytes the download needs.
+/// Windows starts failing in ways that have nothing to do with us once the
+/// system drive runs dry, so the last gigabyte is never ours to take.
+const SPACE_RESERVE: u64 = 1024 * 1024 * 1024;
+
+/// Bytes still needed versus bytes still free, when the drive cannot hold the
+/// rest of this download. `None` means it fits, or that there is nothing to
+/// compare against: a server that declares no length gives no number to plan
+/// with, and a drive we cannot measure must not block the download.
+///
+/// Without this the transfer simply ran until the drive hit zero. On
+/// 2026-08-15 a 16.3 GB video model did exactly that on the test machine:
+/// curl died with a write error at 0 bytes free, the half file stayed behind,
+/// and the drive was too full for anything else to run. A model set is the one
+/// download big enough to fill a disk, so the check belongs here, where every
+/// download passes through, not in the caller that happens to know the sizes.
+fn space_shortfall(total: u64, already_on_disk: u64, available: Option<u64>) -> Option<(u64, u64)> {
+    let available = available?;
+    if total == 0 {
+        return None;
+    }
+    let needed = total.saturating_sub(already_on_disk).saturating_add(SPACE_RESERVE);
+    if available >= needed { None } else { Some((needed, available)) }
+}
+
+/// Free bytes on the drive that holds `dest`. The longest matching mount point
+/// wins, so a model folder on a mounted volume is measured against that volume
+/// and not against the root it hangs under.
+fn available_space_for(dest: &Path) -> Option<u64> {
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    disks
+        .iter()
+        .filter(|d| dest.starts_with(d.mount_point()))
+        .max_by_key(|d| d.mount_point().as_os_str().len())
+        .map(|d| d.available_space())
+}
+
+/// Gibibyte, weil Windows und der Finder den freien Platz so anzeigen und der
+/// Nutzer die Zahl aus der Meldung genau damit vergleicht. Der Katalog zaehlt
+/// aus demselben Grund in derselben Einheit.
+fn gib(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+}
+
 async fn do_download(
     url: &str,
     dest: &PathBuf,
@@ -412,6 +456,18 @@ async fn do_download(
     } else {
         content_length
     };
+
+    // Stop before the first byte if the drive cannot hold the rest. Saying it
+    // now costs nothing; finding out at the end costs the whole transfer and
+    // leaves the machine with a full disk.
+    if let Some((needed, free)) = space_shortfall(total, already_on_disk, available_space_for(dest)) {
+        return Err(format!(
+            "Not enough free space for {}. It still needs {} and the drive has {} free. Free up some space and start it again, the part already downloaded is kept.",
+            dest.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "this download".to_string()),
+            gib(needed),
+            gib(free),
+        ));
+    }
 
     // Update total size
     if let Ok(mut dl) = downloads.lock() {
@@ -1000,6 +1056,36 @@ pub async fn check_model_sizes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_full_drive_is_named_before_the_first_byte() {
+        // Der echte Fall vom 15.08.: 16,3 GB Videomodell, 15,2 GB frei.
+        let modell = 16_331_849_976;
+        let (needed, free) = space_shortfall(modell, 0, Some(15_200_000_000)).expect("muss knapp sein");
+        assert_eq!(free, 15_200_000_000);
+        assert!(needed > free);
+        // Genug Platz plus Reserve: der Download laeuft.
+        assert!(space_shortfall(modell, 0, Some(modell + SPACE_RESERVE)).is_none());
+        // Exakt die Reserve zu wenig: das ist der Fall, der Windows lahmlegt.
+        assert!(space_shortfall(modell, 0, Some(modell)).is_some());
+    }
+
+    #[test]
+    fn what_already_lies_on_disk_does_not_have_to_fit_twice() {
+        // Fortsetzung: 12 GB von 16,3 GB liegen schon, es fehlen 4,3 GB.
+        let total = 16_000_000_000;
+        assert!(space_shortfall(total, 12_000_000_000, Some(5_500_000_000)).is_none());
+        // Ohne Anrechnung des Vorhandenen waere derselbe Lauf abgelehnt worden.
+        assert!(space_shortfall(total, 0, Some(5_500_000_000)).is_some());
+    }
+
+    #[test]
+    fn without_a_number_nothing_is_blocked() {
+        // Server nennt keine Laenge: es gibt nichts zu rechnen, also kein Nein.
+        assert!(space_shortfall(0, 0, Some(1)).is_none());
+        // Laufwerk nicht messbar: ein unbekannter Wert darf niemanden aussperren.
+        assert!(space_shortfall(16_000_000_000, 0, None).is_none());
+    }
 
     #[test]
     fn a_short_body_is_never_renamed_into_place() {
