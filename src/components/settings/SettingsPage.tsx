@@ -301,7 +301,13 @@ function HfDownloadPathSetting() {
 // ── ComfyUI Settings ────────────────────────────────────────────
 
 function ComfyUISettings() {
-  const [status, setStatus] = useState<{ running: boolean; found: boolean; complete?: boolean; path?: string; port?: number; host?: string; isLocal?: boolean; starting?: boolean } | null>(null)
+  const [status, setStatus] = useState<{ running: boolean; found: boolean; complete?: boolean; path?: string; port?: number; host?: string; isLocal?: boolean; starting?: boolean; stalled?: boolean } | null>(null)
+  // Why the last start attempt did not stick. The button used to swallow this
+  // whole (E16): on a box with no ComfyUI python environment, Start answered
+  // "started", the panel went back to `Stopped`, and six minutes later there
+  // was still no reason anywhere on screen while the traceback sat in our own
+  // ring buffer. An error is not allowed to be silence.
+  const [startError, setStartError] = useState('')
   const [loading, setLoading] = useState(true)
   const [customPath, setCustomPath] = useState('')
   const [pathError, setPathError] = useState('')
@@ -338,11 +344,14 @@ function ComfyUISettings() {
   }, [])
 
   const handleStart = async () => {
+    setStartError('')
     try {
       const { backendCall } = await import('../../api/backend')
       await backendCall('start_comfyui')
       setStatus(prev => prev ? { ...prev, starting: true } : null)
-    } catch {}
+    } catch (err) {
+      setStartError(err instanceof Error ? err.message : String(err))
+    }
   }
 
   const handleStop = async () => {
@@ -380,10 +389,24 @@ function ComfyUISettings() {
         <div className="flex items-center gap-1.5">
           <div className={`w-1.5 h-1.5 rounded-full ${status?.running ? 'bg-green-500' : status?.found ? 'bg-orange-500' : 'bg-gray-500'}`} />
           <span className="text-[0.65rem] text-gray-500">
-            {status?.running ? 'Running' : status?.found ? 'Stopped' : 'Not Installed'}
+            {status?.running ? 'Running'
+              : status?.stalled ? 'Not responding'
+              : status?.starting ? 'Starting'
+              : status?.found ? 'Stopped' : 'Not Installed'}
           </span>
         </div>
       </div>
+
+      {startError && (
+        <pre className="whitespace-pre-wrap break-words text-[0.55rem] leading-relaxed text-red-400 bg-red-500/[0.06] border border-red-500/20 rounded p-2 max-h-40 overflow-y-auto">
+          {startError}
+        </pre>
+      )}
+      {status?.stalled && !startError && (
+        <p className="text-[0.55rem] text-amber-400">
+          ComfyUI has been starting for a while without answering on its port. Use Show output below to see what it printed.
+        </p>
+      )}
 
       {/* Host - editable (supports remote ComfyUI: Docker, LAN, homelab) */}
       <div className="space-y-1">

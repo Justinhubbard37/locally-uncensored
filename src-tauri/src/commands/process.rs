@@ -140,6 +140,84 @@ impl ComfyGpuMode {
     }
 }
 
+/// How long after a spawn a still-living child counts as proof of a start.
+/// ComfyUI imports for 20 to 60 seconds before it binds the port, so we cannot
+/// wait for the port here. We can wait for the crash: a bad dependency kills
+/// main.py on the first import, well inside this window.
+const COMFY_STARTUP_WATCH: std::time::Duration = std::time::Duration::from_millis(2_000);
+const COMFY_STARTUP_STEP: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// After this long without the port opening, "starting" is a lie.
+/// The slowest honest start measured on the 3060 box is about a minute; a
+/// custom-node-heavy install can take longer, so this is deliberately generous.
+const COMFY_STARTING_GRACE_SECS: u64 = 300;
+
+/// What the panel should say about a child that is alive but has not bound the
+/// port: `(starting, stalled)`.
+///
+/// Measured on the Windows box on 2026-08-14: `starting` was
+/// `process_alive && !running` and nothing else, so a handle that never
+/// resolved left the panel claiming a start that had been over for six
+/// minutes. `starting` now expires, and the caller reports `stalled` so the UI
+/// can offer the output instead of a spinner.
+pub fn comfy_starting_state(
+    process_alive: bool,
+    running: bool,
+    since_start: Option<std::time::Duration>,
+) -> (bool, bool) {
+    if running || !process_alive {
+        return (false, false);
+    }
+    match since_start {
+        // A handle we cannot date (kept from an earlier call, or a start we did
+        // not make) gets the old reading rather than a stall we cannot prove.
+        None => (true, false),
+        Some(waited) if waited.as_secs() > COMFY_STARTING_GRACE_SECS => (false, true),
+        Some(_) => (true, false),
+    }
+}
+
+/// The message a start that is already over has to carry.
+///
+/// The traceback was never the missing part: `capture` has been putting every
+/// line into `comfy_output` since GH #98. The missing part was anyone reading
+/// it at the moment the start failed, which is why the box showed `Stopped`
+/// with no reason while `main.py`'s ImportError sat in the ring buffer.
+pub fn comfy_startup_failure(
+    python: &str,
+    code: Option<i32>,
+    tail: &[String],
+    has_own_python_env: bool,
+) -> String {
+    let mut msg = format!("ComfyUI exited right after starting (python={python}");
+    if let Some(c) = code {
+        msg.push_str(&format!(", exit code {c}"));
+    }
+    msg.push_str(").");
+    if !has_own_python_env {
+        msg.push_str(
+            " This install has no python_embeded and no venv, so it ran on the system Python, \
+             which usually does not have ComfyUI's dependencies. Settings, ComfyUI, Install \
+             builds one.",
+        );
+    }
+    let lines: Vec<&str> = tail
+        .iter()
+        .map(|l| l.trim_end())
+        .filter(|l| !l.is_empty())
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if !lines.is_empty() {
+        msg.push_str("\n\nLast output:\n");
+        msg.push_str(&lines.join("\n"));
+    }
+    msg
+}
+
 /// Pure decision (all probes done by the caller): pass `--cpu` to ComfyUI?
 ///
 /// - `baseline_needs_cpu`: `needs_cpu_fallback()` — false when NVIDIA present or macOS.
@@ -1331,11 +1409,52 @@ fn start_comfyui_blocking(state: &AppState) -> Result<serde_json::Value, String>
         });
     }
 
+    // A spawn is not a start (E16, measured on the Windows box 2026-08-14).
+    // That install had ComfyUI's source but neither python_embeded nor a venv,
+    // so this fell back to the system Python, which has none of the
+    // dependencies: main.py died on its first import inside a second. We
+    // reported {"status":"started"} anyway, the panel showed `Stopped` with no
+    // reason, and the traceback sat unread in our own ring buffer.
+    //
+    // The port cannot be the test here, ComfyUI imports for 20 to 60 seconds
+    // before it binds. The crash can: it happens far inside this window. So
+    // watch briefly, and if the child is already gone, fail with what it said.
+    let mut watched = std::time::Duration::ZERO;
+    let early_exit = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status.code()),
+            Ok(None) => {}
+            Err(_) => break None,
+        }
+        if watched >= COMFY_STARTUP_WATCH {
+            break None;
+        }
+        std::thread::sleep(COMFY_STARTUP_STEP);
+        watched += COMFY_STARTUP_STEP;
+    };
+    if let Some(code) = early_exit {
+        let tail: Vec<String> = state
+            .comfy_output
+            .lock()
+            .map(|b| b.iter().cloned().collect())
+            .unwrap_or_default();
+        let msg = comfy_startup_failure(
+            &python,
+            code,
+            &tail,
+            bundled_python.is_some() || venv_python.is_some(),
+        );
+        error!(python = %python, "comfyui exited during startup");
+        *state.comfy_start_at.lock().unwrap() = None;
+        return Err(msg);
+    }
+
     // Store process
     {
         let mut proc = state.comfy_process.lock().unwrap();
         *proc = Some(child);
     }
+    *state.comfy_start_at.lock().unwrap() = Some(std::time::Instant::now());
 
     println!("[ComfyUI] Started");
     info!("comfyui started");
@@ -1373,6 +1492,7 @@ fn stop_comfyui_blocking(state: &AppState) -> Result<serde_json::Value, String> 
         // the dying process and silently leave the OLD node list being served.
         let _ = child.wait();
         *proc = None;
+        *state.comfy_start_at.lock().unwrap() = None;
         println!("[ComfyUI] Stopped");
         info!(pid = pid, "comfyui stopped");
         Ok(serde_json::json!({"status": "stopped"}))
@@ -1478,9 +1598,13 @@ pub async fn comfyui_status(state: State<'_, AppState>) -> Result<serde_json::Va
         true
     };
 
+    let since_start = state.comfy_start_at.lock().unwrap().map(|t| t.elapsed());
+    let (starting, stalled) = comfy_starting_state(process_alive, running, since_start);
+
     Ok(serde_json::json!({
         "running": running,
-        "starting": process_alive && !running,
+        "starting": starting,
+        "stalled": stalled,
         "found": found,
         "complete": complete,
         "path": path,
@@ -1977,6 +2101,76 @@ pub fn auto_start_comfyui(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── E16: a start that fails has to say so ────────────────────────────
+    //
+    // Measured on the Windows box on 2026-08-14. The install had ComfyUI's
+    // source but neither python_embeded nor a venv, so the launch fell back to
+    // the system Python, which has none of the dependencies. main.py died on
+    // its first import inside a second. What the user got: `start_comfyui`
+    // answered {"status":"started"}, `comfyui_status` answered
+    // processAlive true / running false / starting true, the panel showed
+    // `Stopped`, and six minutes later it still showed `Stopped` with no
+    // reason anywhere, while the ImportError sat in our own ring buffer.
+
+    #[test]
+    fn a_start_that_is_already_over_stops_claiming_to_be_starting() {
+        // Inside the grace period a slow import is a normal start.
+        assert_eq!(
+            comfy_starting_state(true, false, Some(std::time::Duration::from_secs(30))),
+            (true, false),
+        );
+        // Past it, the handle is not proof of anything. `starting` has to end,
+        // and the caller needs to know it ended badly rather than quietly.
+        assert_eq!(
+            comfy_starting_state(true, false, Some(std::time::Duration::from_secs(COMFY_STARTING_GRACE_SECS + 1))),
+            (false, true),
+        );
+        // A port that answers is the end of the question, however long it took.
+        assert_eq!(
+            comfy_starting_state(true, true, Some(std::time::Duration::from_secs(9_999))),
+            (false, false),
+        );
+        // No child, nothing to wait for.
+        assert_eq!(comfy_starting_state(false, false, None), (false, false));
+        // Unknown start time (handle from an earlier session): fall back to the
+        // old reading rather than declaring a stall we cannot date.
+        assert_eq!(comfy_starting_state(true, false, None), (true, false));
+    }
+
+    #[test]
+    fn the_failure_message_carries_the_traceback_and_the_likely_cause() {
+        let tail = vec![
+            "[start] C:\\Python313\\python.exe main.py --port 8188".to_string(),
+            "Traceback (most recent call last):".to_string(),
+            "  File \"main.py\", line 25, in <module>".to_string(),
+            "    from app.assets.seeder import asset_seeder".to_string(),
+            "ModuleNotFoundError: No module named 'app'".to_string(),
+        ];
+        let msg = comfy_startup_failure("C:\\Python313\\python.exe", Some(1), &tail, false);
+
+        // The reason the user can act on, verbatim from the child.
+        assert!(msg.contains("ModuleNotFoundError: No module named 'app'"), "{msg}");
+        assert!(msg.contains("exit code 1"), "{msg}");
+        // And the one sentence that explains why it happened on THIS install.
+        assert!(msg.contains("no python_embeded and no venv"), "{msg}");
+
+        // With a proper environment the guess would be wrong, so it is not made.
+        let msg2 = comfy_startup_failure("C:\\ComfyUI\\venv\\Scripts\\python.exe", None, &tail, true);
+        assert!(!msg2.contains("no python_embeded"), "{msg2}");
+        assert!(msg2.contains("ModuleNotFoundError"), "{msg2}");
+    }
+
+    #[test]
+    fn the_failure_message_keeps_the_last_lines_not_the_first() {
+        // A crash prints its reason at the END. Keeping the head of a 400 line
+        // ring buffer would show the banner and hide the error.
+        let mut tail: Vec<String> = (0..50).map(|i| format!("line {i}")).collect();
+        tail.push("RuntimeError: the actual reason".to_string());
+        let msg = comfy_startup_failure("python", Some(1), &tail, true);
+        assert!(msg.contains("RuntimeError: the actual reason"), "{msg}");
+        assert!(!msg.contains("line 0"), "{msg}");
+    }
 
     #[test]
     fn a_host_typed_with_its_port_keeps_both() {
