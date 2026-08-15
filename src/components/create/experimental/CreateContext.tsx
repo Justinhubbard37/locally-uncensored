@@ -63,6 +63,9 @@ interface CreateExpValue {
   /** Installed LoRA + VAE filenames for the Advanced drawer. */
   loraList: string[]
   vaeList: string[]
+  /** Re-scan LoRA/VAE lists + node caps on demand (GH #109): the lists load
+   *  once per connect, so files dropped in later were invisible until restart. */
+  refreshModelLists: () => Promise<void>
   connected: boolean | null
   modelsLoaded: boolean
   modelLoadError: string | null
@@ -167,30 +170,30 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
 
   // Once ComfyUI is reachable, fetch LoRA/VAE lists and probe installed
   // capabilities (RMBG for cutout, inpaint nodes) so the UI gates correctly.
-  useEffect(() => {
+  // Exposed as refreshModelLists because this used to run exactly once per
+  // connect: a .safetensors dropped into models/loras afterwards stayed
+  // invisible until an app restart, which read as "no LoRA support at all"
+  // (GH #109, ElBiggus). The LoRA stack's Rescan button re-runs it on demand;
+  // getAllNodeInfo(true) skips the node cache so the scan is really fresh.
+  const refreshModelLists = useCallback(async () => {
     if (connected !== true) return
-    let cancelled = false
-    ;(async () => {
-      const [loras, vaes] = await Promise.all([
-        getLoraModels().catch(() => [] as string[]),
-        getVAEModels().catch(() => [] as string[]),
-      ])
-      if (cancelled) return
-      setLoraList(loras)
-      setVaeList(['auto', ...vaes])
-      try {
-        const nodes = await getAllNodeInfo()
-        if (cancelled) return
-        const names = new Set(Object.keys(nodes))
-        setCaps({
-          rmbg: names.has('RMBG'),
-          'inpaint-nodes': names.has('VAEEncodeForInpaint') || names.has('InpaintModelConditioning'),
-          dwpose: names.has('DWPreprocessor'),
-        })
-      } catch { /* node probe is best-effort */ }
-    })()
-    return () => { cancelled = true }
+    const [loras, vaes] = await Promise.all([
+      getLoraModels().catch(() => [] as string[]),
+      getVAEModels().catch(() => [] as string[]),
+    ])
+    setLoraList(loras)
+    setVaeList(['auto', ...vaes])
+    try {
+      const nodes = await getAllNodeInfo(true)
+      const names = new Set(Object.keys(nodes))
+      setCaps({
+        rmbg: names.has('RMBG'),
+        'inpaint-nodes': names.has('VAEEncodeForInpaint') || names.has('InpaintModelConditioning'),
+        dwpose: names.has('DWPreprocessor'),
+      })
+    } catch { /* node probe is best-effort */ }
   }, [connected, setCaps])
+  useEffect(() => { void refreshModelLists() }, [refreshModelLists])
 
   // One-click prerequisite: make sure a local ComfyUI is actually running —
   // start it if it's merely stopped, INSTALL it first if it's missing (the
@@ -466,7 +469,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
     cancel: () => (hasActiveCloudRun() ? cloud.cancel() : cancel()),
     enhanceVideo: cloud.enhanceVideo,
     makeVoice: cloud.makeVoice,
-    samplerList, schedulerList, loraList, vaeList,
+    samplerList, schedulerList, loraList, vaeList, refreshModelLists,
     connected, modelsLoaded, modelLoadError, mlxMissing, comfyOnCpu, installCapability, installModelBundle,
     cloudAvailable, quota, refreshQuota,
   }

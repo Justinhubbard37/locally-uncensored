@@ -28,7 +28,7 @@ const VIDEO_LORA_FAMILIES = new Set(['wan', 'wan22', 'hunyuan', 'ltx', 'mochi', 
 // falling back to the standard node names until they load.
 export function ParamGroups() {
   const s = useCreateStore()
-  const { samplerList, schedulerList, loraList, vaeList } = useCreateExp()
+  const { samplerList, schedulerList, loraList, vaeList, refreshModelLists } = useCreateExp()
   const meta = INTENT_MAP[s.intent()]
   const isVideo = meta.isVideo
   const isEdit = meta.id === 'edit'
@@ -218,9 +218,21 @@ export function ParamGroups() {
           <Slider label="Mask edge feather" min={0} max={64} step={1} value={s.growMaskBy} onChange={s.setGrowMaskBy} unit="px" />
         )}
 
-        {loraSupported && loraList.length > 0 && (
+        {loraSupported && (
           <div className="space-y-1.5">
-            <div className="t-control text-gray-400">LoRA stack {s.selectedLoras.length > 0 && <span className="t-mono text-gray-600">· {s.selectedLoras.length} active</span>}</div>
+            <div className="flex items-center justify-between">
+              <div className="t-control text-gray-400">LoRA stack {s.selectedLoras.length > 0 && <span className="t-mono text-gray-600">· {s.selectedLoras.length} active</span>}</div>
+              {/* GH #109: the list loads once per connect, so a file dropped
+                  into models/loras later never appeared — and with an empty
+                  list the whole section was invisible, which read as "no LoRA
+                  support at all". Always show it, let the user re-scan. */}
+              <button onClick={() => { void refreshModelLists() }} title="Re-scan ComfyUI's models/loras folder" className="t-control text-gray-500 hover:text-gray-300 inline-flex items-center gap-1">
+                <RotateCcw className="w-3 h-3" /> Rescan
+              </button>
+            </div>
+            {loraList.length === 0 ? (
+              <div className="t-control text-gray-600">No LoRAs found yet. Drop .safetensors files into ComfyUI&apos;s models/loras folder and hit Rescan. Characters trained in Character Studio land there automatically.</div>
+            ) : (
             <div className="space-y-1 max-h-44 overflow-y-auto scrollbar-thin">
               {loraList.map((name) => {
                 const active = s.selectedLoras.find((l) => l.name === name)
@@ -239,6 +251,7 @@ export function ParamGroups() {
                 )
               })}
             </div>
+            )}
           </div>
         )}
 
