@@ -294,15 +294,95 @@ impl Preflight {
     }
 }
 
-/// The whole terminal message after a repair that did not take: what is wrong,
-/// that the repair was already tried, what to do, and the tail of the log that
-/// says why. In that order, because the user reads the first sentence and the
-/// last one.
+/// pip never deletes an installation before it replaces it. It moves the old
+/// files aside and only drops them once the new ones are in place, so a torch
+/// reinstall wants roughly 7 GB free even though torch itself is 4.27 GB, and
+/// the last twelve log lines of a run that ran out are all `Moving to ...` with
+/// the sentence that matters buried above them. Measured on the box on
+/// 2026-08-15: the repair died with `[Errno 28] No space left on device` on a
+/// drive that had 5.8 GB free, while our own next step said 3 GB.
+const DISK_NEXT_STEP: &str = "The drive ran out of room. Free up about 7 GB (a PyTorch reinstall needs space for both copies while it swaps them), then press Set up trainer in Character Studio.";
+
+/// The disk-full wording pip and the OS use, on either platform.
+pub(crate) fn out_of_disk(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    t.contains("no space left on device")
+        || t.contains("errno 28")
+        || t.contains("not enough space on the disk")
+        || t.contains("enough free space")
+}
+
+/// The last three lines that say something, with pip's rollback noise dropped.
+pub(crate) fn useful_tail(text: &str) -> String {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| {
+            !l.is_empty()
+                && !l.starts_with("Moving to ")
+                && !l.starts_with("Removing file or directory")
+        })
+        .collect();
+    if lines.is_empty() {
+        return "no detail in the log".to_string();
+    }
+    lines[lines.len().saturating_sub(3)..].join(" | ")
+}
+
+/// One shape for every dead end in the trainer environment: what is wrong, what
+/// to press, and a short tail that says why. In that order, because the user
+/// reads the first sentence and the last one.
+///
+/// Before this, a repair that never finished put the raw process error into the
+/// status line instead, which on a full disk meant fifteen `Moving to ...`
+/// lines and no next step at all.
+pub(crate) fn env_failure_message(diagnosis: &str, fallback_step: &str, log: &str) -> String {
+    let step = if out_of_disk(log) { DISK_NEXT_STEP } else { fallback_step };
+    let head = diagnosis.trim();
+    let head = if head.is_empty() { String::new() } else { format!("{head} ") };
+    format!("{head}{step} Last steps: {}", useful_tail(log))
+}
+
+/// The whole terminal message after a repair that did not take.
 pub(crate) fn repair_failed_message(after: &Preflight, tail: &str) -> String {
-    format!(
-        "{} The automatic repair did not fix it. {} Last steps: {tail}",
-        after.message(),
+    env_failure_message(
+        &format!("{} The automatic repair did not fix it.", after.message()),
         after.next_step(),
+        tail,
+    )
+}
+
+/// An error that is already a finished sentence with its own way out. Wrapping
+/// it would bury that way out under a generic one and quote it back as a log
+/// tail. `no_base_python_message` is the only such case today, and it points at
+/// a different button than every other failure here.
+fn already_explained(err: &str) -> bool {
+    err.contains("Install Python in Settings")
+}
+
+/// The repair stopped before it even finished. Same dead end for the customer
+/// as one that finished and did not take, so it gets the same shape.
+pub(crate) fn repair_aborted_message(before: &Preflight, err: &str) -> String {
+    if already_explained(err) {
+        return err.to_string();
+    }
+    env_failure_message(
+        &format!("{} The automatic repair stopped before it finished.", before.message()),
+        before.next_step(),
+        err,
+    )
+}
+
+/// The Set up button itself failing. No preflight verdict exists on that path,
+/// the environment is simply not there yet.
+pub(crate) fn install_failed_message(err: &str) -> String {
+    if already_explained(err) {
+        return err.to_string();
+    }
+    env_failure_message(
+        "Setting up the trainer environment failed.",
+        Preflight::PackageMissing.next_step(),
+        err,
     )
 }
 
@@ -516,7 +596,14 @@ pub fn install_character_trainer(
                 env_broken.store(false, Ordering::SeqCst);
                 set_status(&install, "complete", "Trainer environment ready.")
             }
-            Err(e) => set_status(&install, if e == "cancelled" { "cancelled" } else { "error" }, &e),
+            Err(e) if e == "cancelled" => set_status(&install, "cancelled", &e),
+            Err(e) => {
+                // Same reason as on the repair path: the raw process error is
+                // pip's rollback log, and the sentence that matters is above
+                // it. And the environment is provably not ready, so say so.
+                env_broken.store(true, Ordering::SeqCst);
+                set_status(&install, "error", &install_failed_message(&e));
+            }
         }
     });
 
@@ -908,7 +995,19 @@ pub fn start_character_training(
             push_log(&run, "Repairing it now, no action needed. Your training images and base models are left alone.");
             let force = verdict.needs_torch_reinstall();
             if let Err(e) = provision_trainer_env(&root, &python_bin, force, &run, "running", &cancel, &pid_slot) {
-                set_status(&run, if e == "cancelled" { "cancelled" } else { "error" }, &e);
+                if e == "cancelled" {
+                    set_status(&run, "cancelled", &e);
+                    return;
+                }
+                // A repair that never finished leaves the environment exactly
+                // as broken as one that finished and did not take, so it has
+                // to say so out loud. It did not: the raw process error went
+                // into the status line and envReady stayed true, because that
+                // only folds in `trainer_env_broken` and nothing set it here.
+                // The Set up button the message points at was therefore not on
+                // screen. Measured on the box on 2026-08-15 with a full drive.
+                env_broken.store(true, Ordering::SeqCst);
+                set_status(&run, "error", &repair_aborted_message(&verdict, &e));
                 return;
             }
             // Only a SECOND failure is a dead end. Report what is still wrong
@@ -1502,6 +1601,100 @@ mod shutdown_tests {
         assert!(msg.contains("Set up trainer"), "names the button, verbatim as the UI labels it");
         assert!(msg.contains("online") && msg.contains("room"), "names the two usual blockers");
         assert!(msg.ends_with("Last steps: pip install torch | connection reset"), "log tail last");
+    }
+
+    /// The repair that never finished used to hand the customer the raw process
+    /// error. Measured on the box on 2026-08-15: twelve `Moving to ...` lines
+    /// from pip's rollback, and the one sentence that said why somewhere above
+    /// them, off the top of the status line.
+    #[test]
+    fn a_repair_that_stopped_early_names_the_cause_instead_of_quoting_pip() {
+        use super::{repair_aborted_message, Preflight};
+        let mut roh = String::from("torch install failed (exit Some(1)).\n");
+        roh.push_str("ERROR: Could not install packages due to an OSError: [Errno 28] No space left on device\n");
+        for i in 0..12 {
+            roh.push_str(&format!(
+                "Moving to c:\\users\\ddrob\\musubi\\venv\\lib\\site-packages\\torch\\lib\\part{i}.dll\n"
+            ));
+        }
+        let msg = repair_aborted_message(&Preflight::TorchBroken("No module named 'torch'".into()), &roh);
+
+        assert!(!msg.contains("Moving to"), "pip rollback noise is still in the message: {msg}");
+        assert!(msg.contains("The automatic repair stopped before it finished."), "{msg}");
+        assert!(msg.contains("Set up trainer"), "names no button: {msg}");
+        assert!(
+            msg.contains("ran out of room") && msg.contains("7 GB"),
+            "the disk case is not named with a real number: {msg}",
+        );
+        assert!(
+            !msg.contains("about 3 GB"),
+            "still promises the environment fits in 3 GB, which a torch reinstall does not: {msg}",
+        );
+    }
+
+    /// Same disk case on the other two paths into the same dead end.
+    #[test]
+    fn a_full_drive_is_named_on_every_path_into_the_dead_end() {
+        use super::{install_failed_message, repair_failed_message, Preflight};
+        let voll = "ERROR: Could not install packages due to an OSError: [Errno 28] No space left on device";
+        for msg in [
+            install_failed_message(voll),
+            repair_failed_message(&Preflight::PackageMissing, voll),
+        ] {
+            assert!(msg.contains("ran out of room"), "{msg}");
+            assert!(msg.contains("Set up trainer"), "{msg}");
+        }
+        // And a failure that is not about the disk keeps the usual two.
+        let netz = install_failed_message("ERROR: connection reset by peer");
+        assert!(netz.contains("online") && netz.contains("room"), "{netz}");
+        assert!(!netz.contains("ran out of room"), "{netz}");
+    }
+
+    /// One error already carries its own way out, and it points at a different
+    /// button. Wrapping it would bury that and quote it back as a log tail.
+    #[test]
+    fn an_error_that_already_names_its_button_is_left_alone() {
+        use super::{install_failed_message, no_base_python_message, repair_aborted_message, Preflight, VenvAction};
+        let eigen = no_base_python_message(VenvAction::Rebuild);
+        assert_eq!(install_failed_message(&eigen), eigen);
+        assert_eq!(
+            repair_aborted_message(&Preflight::TorchBroken("x".into()), &eigen),
+            eigen,
+        );
+    }
+
+    /// Befund B: after a repair that stopped early the environment is broken,
+    /// but `envReady` folds in `trainer_env_broken` only, and nothing set it on
+    /// this branch. So the app called the environment healthy and the button
+    /// the message points at was not on screen.
+    #[test]
+    fn a_repair_that_stopped_early_also_reports_the_environment_as_not_ready() {
+        let src = include_str!("trainer.rs");
+        let zweig = src
+            .split("if let Err(e) = provision_trainer_env(")
+            .nth(1)
+            .expect("the repair call")
+            .split("let after = probe_env(")
+            .next()
+            .expect("end of the repair branch");
+        assert!(
+            zweig.contains("env_broken.store(true, Ordering::SeqCst)"),
+            "a repair that stopped early leaves envReady true",
+        );
+        assert!(
+            zweig.contains("repair_aborted_message"),
+            "the raw process error goes into the status line again",
+        );
+        // The Set up button path has the same two halves.
+        let knopf = src
+            .split("match provision_trainer_env(&root, &python_bin, false,")
+            .nth(1)
+            .expect("the install call")
+            .split("Ok(serde_json::json!")
+            .next()
+            .expect("end of the install thread");
+        assert!(knopf.contains("env_broken.store(true, Ordering::SeqCst)"), "{knopf}");
+        assert!(knopf.contains("install_failed_message"), "{knopf}");
     }
 
     #[test]
