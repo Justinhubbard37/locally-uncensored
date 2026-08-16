@@ -879,10 +879,18 @@ const SERVER_PY: &str = include_str!("../../resources/mlx/server.py");
 mod tests {
     use super::*;
 
-    /// The token is a process-wide secret, so these run as one test — two
-    /// #[test]s would race each other through the same lock.
+    /// The token is a process-wide secret, so the tests that drive it take
+    /// this lock instead of running side by side. The note above the round
+    /// trip used to say the tests were one function for that reason, but a
+    /// second one had been added underneath, and on 2026-08-16 it wrote its
+    /// token into the exact instant the first one was asserting the store was
+    /// empty. Poisoning is ignored: a panic in one test must fail that test,
+    /// not every later one.
+    static TOKEN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn hf_token_round_trip_and_clear() {
+        let _guard = TOKEN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let state = AppState::new();
 
         // Absent by default: a fresh install has no token and must not send one.
@@ -925,6 +933,7 @@ mod tests {
     /// would put a live credential into logs and remote responses.
     #[test]
     fn hf_token_status_never_returns_the_token() {
+        let _guard = TOKEN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let state = AppState::new();
         set_hf_token(&state, &json!({ "token": "hf_do_not_leak" })).unwrap();
         let body = hf_token_present(&state, &json!({})).unwrap();
