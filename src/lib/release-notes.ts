@@ -39,6 +39,7 @@ export const RELEASE_NOTES: ReleaseNote[] = [
       'In Code mode an approved change actually lands now, or says exactly why it cannot, and anything still waiting for your yes survives a restart. Installing an update is a restart, so this used to throw away the work it was meant to rescue.',
       'Create tells the truth about what it is doing: Download and install finishes instead of freezing on "Refreshing the model list", the gallery reports the seed you really rendered with, help tooltips are readable, and the Music tab stops quoting cloud prices at local users.',
       'Dropping files into the app works again on Windows, the trainer repairs its own environment, FramePack stops producing mush, and an AMD card shows up without the ROCm tools installed.',
+      'Your own LoRAs are selectable in image generation, a broken ComfyUI Python environment rebuilds itself instead of showing a wall of errors, and a conversation with the built in engine survives a render that needs the video memory.',
     ],
     details: [
       {
@@ -49,7 +50,14 @@ export const RELEASE_NOTES: ReleaseNote[] = [
           'A request the model server refuses ends the run at once with the reason, instead of being retried twice while the run looks alive.',
           'Dragging files onto the Character Studio board, the chat composer or the RAG panel works again on Windows.',
           'Download and install waits for ComfyUI to actually list the new model, counts the seconds, restarts the engine once if the scan stalls, and explains itself if that still does not help.',
+          'The LoRA section in image generation is always there on lanes that support it. Empty, it names the folder to drop files into and offers Rescan, so a LoRA added while the app runs shows up without a restart. Characters from the trainer land there by themselves.',
+          'A ComfyUI Python environment that dies at import is recognised as broken and rebuilt into its own venv, from Create automatically and from Settings with Repair environment. Re-running the installer never fixed this, because pip saw every package as already there.',
+          'A chat with the built in engine survives an image or video render. The engine used to be left out of the memory juggling entirely, and a restart meant re-reading the whole conversation. Its state is now parked on disk and restored afterwards.',
           'Character training repairs its own environment instead of refusing to start, and FramePack got back the VAE it was trained with.',
+          'Cancel in Character Studio stops the training itself, not just the launcher above it. The two processes holding the card at full load used to keep running until they were killed by hand.',
+          'A repair that cannot finish says why in one sentence, a full disk for example, and stops reporting the environment as ready.',
+          'The starter bundle offered on a lane is one that lane can actually run, and its card stays up until the last file has landed, so nothing is pickable while it is still downloading.',
+          'A release that was withdrawn stops being advertised as an available update.',
           'An AMD card is listed even without the ROCm command line tools, and says plainly what could not be verified.',
           'The gallery reports the seed the image was really made with, so a run can be repeated.',
           'Help tooltips float above the window instead of being clipped to two words, everywhere in the app.',

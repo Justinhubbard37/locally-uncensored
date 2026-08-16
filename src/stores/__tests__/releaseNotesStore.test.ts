@@ -57,6 +57,45 @@ describe('the notes table', () => {
     expect(RELEASE_NOTES[0].version, 'the shipping version belongs at the top').toBe(shipping)
   })
 
+  it('the shipping entry covers what actually shipped, not the state it was written in', () => {
+    // The existence guard above has a blind spot: an entry written early stays
+    // green while the branch moves on. The 2.6.5 sheet was written on
+    // 2026-08-12 and ten commits landed after it, including the three features
+    // customers asked for by name. A customer reading the sheet would not learn
+    // that the thing they filed an issue about is in the build they just
+    // installed. Each anchor below is one of those late arrivals.
+    const shipping = JSON.parse(
+      readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../package.json'), 'utf8'),
+    ).version as string
+    const note = releaseNoteFor(shipping)
+    const prose = [
+      note?.headline ?? '',
+      ...(note?.lines ?? []),
+      ...(note?.details ?? []).flatMap((s) => s.items),
+    ]
+      .join('\n')
+      .toLowerCase()
+    for (const anchor of ['lora', 'python environment', 'conversation', 'cancel', 'withdrawn']) {
+      expect(prose, `${shipping}: nothing about "${anchor}"`).toContain(anchor)
+    }
+  })
+
+  it('every file that carries the version carries the same one', () => {
+    // package-lock.json sat at 2.6.2 for three releases while everything else
+    // moved, because a version bump touches four files and only three of them
+    // are obvious. It does not change the built app, but it is the file a
+    // packager reads, and a wrong number here is a wrong number in a bug report.
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
+    const shipping = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')).version as string
+    const lock = JSON.parse(readFileSync(resolve(root, 'package-lock.json'), 'utf8'))
+    expect(lock.version, 'package-lock.json root').toBe(shipping)
+    expect(lock.packages?.['']?.version, 'package-lock.json self entry').toBe(shipping)
+    const tauri = JSON.parse(readFileSync(resolve(root, 'src-tauri/tauri.conf.json'), 'utf8'))
+    expect(tauri.version, 'tauri.conf.json').toBe(shipping)
+    const cargo = readFileSync(resolve(root, 'src-tauri/Cargo.toml'), 'utf8')
+    expect(cargo, 'Cargo.toml').toContain(`version = "${shipping}"`)
+  })
+
   it('2.6.3 carries full details with a Local and a Cloud section', () => {
     const note = releaseNoteFor('2.6.3')
     const titles = (note?.details ?? []).map((s) => s.title)

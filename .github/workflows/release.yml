@@ -75,6 +75,13 @@ jobs:
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
+        # On 2026-08-15 this step hung for six hours and was killed by the job
+        # limit, so the run produced Windows assets only. The release kept the
+        # previous run's Linux files, which carry the new version number and
+        # none of the new code. A stall here has to fail fast and loudly.
+        timeout-minutes: 20
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
           sudo apt-get install -y \
