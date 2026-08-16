@@ -659,17 +659,36 @@ pub(crate) fn process_read_bytes(_pid: u32) -> Option<u64> {
     None
 }
 
-/// GPU probe + wheel choice + pip args, shared between the first install and
-/// `repair_comfyui_env` so the two can never drift apart (same cu128/cu121/
-/// CPU decision, same flags).
+/// Pure: the wheel index for a GPU situation, kept apart from the nvidia-smi
+/// probes so the channel choice is testable.
 ///
-/// Bug #10 (vokurta — RTX 6000 Blackwell, 2026-05-11): SM 12.0 GPUs need
-/// PyTorch cu128 wheels. cu121 stops at sm_90 (Hopper); on Blackwell the
-/// kernel simply isn't shipped and the first compute call dies with "CUDA
-/// error: no kernel image is available for execution on the device". We probe
-/// `--query-gpu=compute_cap` and pick the wheel set accordingly. Falls back
-/// to cu121 if the probe fails for any reason — that's the previous
-/// behaviour, so we never regress existing setups.
+/// Bug #10 (vokurta, RTX 6000 Blackwell, 2026-05-11): SM 12.0 GPUs need
+/// PyTorch cu128 wheels; older channels simply don't ship the kernel and the
+/// first compute call dies with "no kernel image is available".
+///
+/// Box measurement 2026-08-16 (W2, #98): everything below Blackwell used to
+/// get cu121, but that channel is frozen at torch 2.5.1 while ComfyUI's own
+/// unpinned requirements move on. Current cores import comfy_kitchen, whose
+/// custom ops use builtin generic annotations (`kernel_size: list[int]`) that
+/// torch only accepts from 2.6 on, so a freshly repaired venv died at import
+/// with the infer_schema ValueError. cu126 is the living channel (torch 2.6+,
+/// sm_50 through sm_90, ComfyUI's own documented default), so repaired and
+/// fresh installs follow the requirements instead of trailing them.
+pub(crate) fn pytorch_index_for(
+    has_nvidia: bool,
+    compute_cap_major: Option<u32>,
+) -> Option<&'static str> {
+    match compute_cap_major {
+        Some(major) if major >= 12 => Some("https://download.pytorch.org/whl/cu128"),
+        Some(_) => Some("https://download.pytorch.org/whl/cu126"),
+        None if has_nvidia => Some("https://download.pytorch.org/whl/cu126"),
+        None => None,
+    }
+}
+
+/// GPU probe + wheel choice + pip args, shared between the first install and
+/// `repair_comfyui_env` so the two can never drift apart (same cu128/cu126/
+/// CPU decision, same flags).
 pub(crate) fn plan_pytorch_install() -> (Vec<String>, String) {
     let mut nv = Command::new("nvidia-smi");
     nv.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -678,17 +697,12 @@ pub(crate) fn plan_pytorch_install() -> (Vec<String>, String) {
     let has_nvidia = nv.output().map(|o| o.status.success()).unwrap_or(false);
 
     let compute_cap_major = if has_nvidia { detect_nvidia_compute_cap_major() } else { None };
-    let pytorch_index = match compute_cap_major {
-        Some(major) if major >= 12 => Some("https://download.pytorch.org/whl/cu128"),
-        Some(_) => Some("https://download.pytorch.org/whl/cu121"),
-        None if has_nvidia => Some("https://download.pytorch.org/whl/cu121"),
-        None => None,
-    };
+    let pytorch_index = pytorch_index_for(has_nvidia, compute_cap_major);
 
     let gpu_info = match (has_nvidia, compute_cap_major) {
         (true, Some(major)) if major >= 12 => "NVIDIA Blackwell GPU detected (SM 12.0+) — installing PyTorch cu128",
-        (true, Some(_)) => "NVIDIA GPU detected — installing CUDA PyTorch (cu121)",
-        (true, None) => "NVIDIA GPU detected (compute capability probe failed) — falling back to cu121",
+        (true, Some(_)) => "NVIDIA GPU detected, installing CUDA PyTorch (cu126)",
+        (true, None) => "NVIDIA GPU detected (compute capability probe failed), falling back to cu126",
         (false, _) => "No NVIDIA GPU — installing CPU PyTorch",
     };
     (pytorch_pip_args(pytorch_index), gpu_info.to_string())
@@ -3582,6 +3596,35 @@ fn is_permission_denied_pip_error(output: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── PyTorch-Kanalwahl (W2-Befund 16.08., comfy_kitchen braucht 2.6+) ─
+
+    #[test]
+    fn pytorch_index_rides_living_channels() {
+        assert_eq!(
+            pytorch_index_for(true, Some(12)),
+            Some("https://download.pytorch.org/whl/cu128")
+        );
+        assert_eq!(
+            pytorch_index_for(true, Some(8)),
+            Some("https://download.pytorch.org/whl/cu126")
+        );
+        assert_eq!(
+            pytorch_index_for(true, None),
+            Some("https://download.pytorch.org/whl/cu126")
+        );
+        assert_eq!(pytorch_index_for(false, None), None);
+    }
+
+    #[test]
+    fn pytorch_index_never_picks_the_frozen_cu121_channel() {
+        // Negative control: cu121 is stuck at torch 2.5.1, which current
+        // ComfyUI cores reject at import (comfy_kitchen infer_schema).
+        for (nv, cap) in [(true, Some(6)), (true, Some(7)), (true, Some(8)), (true, Some(9)), (true, Some(12)), (true, None)] {
+            let idx = pytorch_index_for(nv, cap).unwrap_or("");
+            assert!(!idx.contains("cu121"), "frozen channel chosen for cap {:?}", cap);
+        }
+    }
 
     // ── Download-Anzeige am Rebuilding-Spinner (#162) ───────────────────
 
