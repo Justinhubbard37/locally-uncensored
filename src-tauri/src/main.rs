@@ -209,6 +209,8 @@ fn main() {
             commands::engine::kv_slot_action,
             commands::engine::swap_bundled_model,
             commands::engine::list_bundled_models,
+            commands::engine::list_importable_models,
+            commands::engine::import_local_model,
             // Built-in embeddings server (bundled llama-server --embeddings, P5)
             commands::engine::start_bundled_embed,
             commands::engine::stop_bundled_embed,

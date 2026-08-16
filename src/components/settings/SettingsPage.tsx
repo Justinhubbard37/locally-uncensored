@@ -299,6 +299,92 @@ function HfDownloadPathSetting() {
   )
 }
 
+// ── Import models from Ollama / LM Studio ──────────────────────
+// Discord feedback 2026-08-16: users with existing local models should not
+// download them a second time. The backend hard links the GGUF into the app
+// models dir, zero copy; Ollama and LM Studio keep working untouched.
+
+function ImportLocalModels() {
+  const [candidates, setCandidates] = useState<import('../../api/engine').ImportCandidate[] | null>(null)
+  const [scanning, setScanning] = useState(false)
+  const [busyPath, setBusyPath] = useState<string | null>(null)
+  const [errors, setErrors] = useState<Record<string, string>>({})
+
+  async function scan() {
+    setScanning(true)
+    setErrors({})
+    try {
+      const { listImportableModels } = await import('../../api/engine')
+      setCandidates(await listImportableModels())
+    } catch (e) {
+      setCandidates([])
+      setErrors({ scan: String(e) })
+    } finally {
+      setScanning(false)
+    }
+  }
+
+  async function doImport(c: import('../../api/engine').ImportCandidate) {
+    setBusyPath(c.path)
+    setErrors((prev) => { const next = { ...prev }; delete next[c.path]; return next })
+    try {
+      const { importLocalModel, listBundledModels } = await import('../../api/engine')
+      await importLocalModel(c.path, c.name)
+      await listBundledModels()
+      setCandidates((prev) => prev?.map((x) => x.path === c.path ? { ...x, already_imported: true } : x) ?? prev)
+    } catch (e) {
+      setErrors((prev) => ({ ...prev, [c.path]: String(e) }))
+    } finally {
+      setBusyPath(null)
+    }
+  }
+
+  return (
+    <div className="space-y-2 py-1 border-t border-white/5 mt-2 pt-2">
+      <div className="text-[0.6rem] text-gray-500 leading-relaxed">
+        Already have models in Ollama or LM Studio? Link them into LU without downloading or copying anything. The file stays where it is; both apps keep working.
+      </div>
+      <button
+        onClick={scan}
+        disabled={scanning}
+        className="px-2.5 py-1 rounded-md text-[0.6rem] font-medium bg-white dark:bg-white/10 text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-white/15 border border-gray-200 dark:border-white/15 transition-colors disabled:opacity-50"
+      >
+        {scanning ? 'Scanning…' : 'Scan for local models'}
+      </button>
+      {errors.scan && <div className="text-[0.6rem] text-red-400">{errors.scan}</div>}
+      {candidates !== null && !errors.scan && (
+        candidates.length === 0 ? (
+          <div className="text-[0.6rem] text-gray-500">No importable models found. Looked in the Ollama store and the LM Studio models folder.</div>
+        ) : (
+          <div className="space-y-1">
+            {candidates.map((c) => (
+              <div key={c.path}>
+                <div className="flex items-center gap-2">
+                  <span className="flex-1 text-[0.65rem] text-gray-700 dark:text-gray-300 font-mono truncate" title={c.path}>{c.name}</span>
+                  <span className="text-[0.55rem] text-gray-500 uppercase">{c.source}</span>
+                  <span className="text-[0.55rem] text-gray-500">{formatBytes(c.size)}</span>
+                  {c.already_imported ? (
+                    <span className="text-[0.6rem] text-green-500">Imported</span>
+                  ) : (
+                    <button
+                      onClick={() => doImport(c)}
+                      disabled={busyPath === c.path}
+                      className="px-2 py-0.5 rounded-md text-[0.6rem] font-medium bg-white dark:bg-white/10 text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-white/15 border border-gray-200 dark:border-white/15 transition-colors disabled:opacity-50"
+                    >
+                      {busyPath === c.path ? 'Linking…' : 'Import'}
+                    </button>
+                  )}
+                </div>
+                {errors[c.path] && <div className="text-[0.6rem] text-red-400 leading-snug">{errors[c.path]}</div>}
+              </div>
+            ))}
+          </div>
+        )
+      )}
+    </div>
+  )
+}
+
 // ── ComfyUI Settings ────────────────────────────────────────────
 
 function ComfyUISettings() {
@@ -1395,6 +1481,7 @@ export function SettingsPage() {
 
           <Section title="Model Storage">
             <HfDownloadPathSetting />
+            <ImportLocalModels />
           </Section>
 
           {builtinManaged && (

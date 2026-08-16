@@ -761,6 +761,219 @@ fn list_bundled_models_blocking(state: &AppState) -> Result<serde_json::Value, S
     }))
 }
 
+// ── Import from other local tools (Ollama, LM Studio) ───────────────────────
+// Discord feedback 2026-08-16: "how do I bring my existing models along?"
+// Ollama blobs and LM Studio downloads ARE plain GGUFs, so the answer is a
+// hard link into the built-in models dir: zero copy, zero download, the file
+// keeps living in the original store and both tools stay functional.
+
+/// A GGUF found in another local tool's store that the built-in engine could
+/// use via a hard link.
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportCandidate {
+    pub name: String,
+    pub source: String,
+    pub path: String,
+    pub size: u64,
+    pub already_imported: bool,
+}
+
+/// File name a candidate gets inside the built-in models dir. Tag colons,
+/// separators and spaces become dashes, everything outside [A-Za-z0-9._-] is
+/// dropped, leading dots and dashes are trimmed so a hostile name can never
+/// escape the folder, and the result always ends in .gguf.
+pub(crate) fn sanitize_model_file_name(name: &str) -> String {
+    let mut base: String = name
+        .chars()
+        .map(|c| match c {
+            ':' | '/' | '\\' | ' ' => '-',
+            other => other,
+        })
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .collect();
+    base = base.trim_matches(|c| c == '.' || c == '-').to_string();
+    if base.is_empty() {
+        base = "model".to_string();
+    }
+    if base.to_ascii_lowercase().ends_with(".gguf") {
+        base
+    } else {
+        format!("{base}.gguf")
+    }
+}
+
+/// Digest of the layer that carries the actual weights in an Ollama manifest,
+/// mediaType application/vnd.ollama.image.model. None when the JSON does not
+/// parse or no such layer exists (the other layers are template, params,
+/// license and so on).
+pub(crate) fn ollama_manifest_model_digest(manifest_json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(manifest_json).ok()?;
+    let layers = v.get("layers")?.as_array()?;
+    layers.iter().find_map(|l| {
+        let mt = l.get("mediaType")?.as_str()?;
+        if mt != "application/vnd.ollama.image.model" {
+            return None;
+        }
+        l.get("digest")?.as_str().map(str::to_string)
+    })
+}
+
+/// Walk an Ollama store (default ~/.ollama/models). Every file under
+/// manifests/ is registry/namespace/repo/tag, the weights sit in blobs/ under
+/// the digest with the colon flattened to a dash. A manifest whose blob is
+/// missing is skipped, so a half pulled model never shows up as importable.
+pub(crate) fn scan_ollama_models(root: &Path) -> Vec<ImportCandidate> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.join("manifests")];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let manifest = match std::fs::read_to_string(&path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let Some(digest) = ollama_manifest_model_digest(&manifest) else {
+                continue;
+            };
+            let blob = root.join("blobs").join(digest.replace(':', "-"));
+            let Ok(meta) = std::fs::metadata(&blob) else {
+                continue;
+            };
+            let tag = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let repo = path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            if tag.is_empty() || repo.is_empty() {
+                continue;
+            }
+            out.push(ImportCandidate {
+                name: format!("{repo}-{tag}"),
+                source: "ollama".to_string(),
+                path: blob.to_string_lossy().to_string(),
+                size: meta.len(),
+                already_imported: false,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Walk an LM Studio store recursively for *.gguf files
+/// (models/publisher/repo/file.gguf). Case-insensitive on the extension,
+/// same as scan_gguf_models.
+pub(crate) fn scan_lmstudio_models(root: &Path) -> Vec<ImportCandidate> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let is_gguf = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("gguf"))
+                .unwrap_or(false);
+            if !is_gguf {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            out.push(ImportCandidate {
+                name: stem.to_string(),
+                source: "lmstudio".to_string(),
+                path: path.to_string_lossy().to_string(),
+                size,
+                already_imported: false,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Hard link src into dest_dir under the sanitized name. Deliberately no copy
+/// fallback: a copy would eat the disk twice for a 10 GB model, and the error
+/// tells the user the honest way out (same drive, or move the models folder).
+pub(crate) fn import_model_file(src: &Path, dest_dir: &Path, name: &str) -> Result<PathBuf, String> {
+    if !src.is_file() {
+        return Err(format!("Source model not found: {}", src.display()));
+    }
+    let target = dest_dir.join(sanitize_model_file_name(name));
+    if target.exists() {
+        return Err(format!(
+            "A model named {} already exists in the built-in models folder",
+            target.file_name().and_then(|s| s.to_str()).unwrap_or("?")
+        ));
+    }
+    std::fs::hard_link(src, &target).map_err(|e| {
+        format!(
+            "Could not link the model into the built-in folder ({e}). \
+             Linking needs source and destination on the same drive. \
+             Move the models folder (Settings, Model Storage) to that drive, \
+             or copy the file there yourself."
+        )
+    })?;
+    Ok(target)
+}
+
+/// GGUFs found in local Ollama and LM Studio stores, ready to link into the
+/// built-in engine. Candidates whose target file already exists are flagged
+/// instead of hidden so the UI can show them as done.
+#[tauri::command]
+pub async fn list_importable_models() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(|| {
+        let dest = builtin_models_dir()?;
+        let home = dirs::home_dir().ok_or("Cannot resolve home directory")?;
+        let mut all = scan_ollama_models(&home.join(".ollama").join("models"));
+        let lm_primary = home.join(".lmstudio").join("models");
+        let lm = if lm_primary.is_dir() {
+            lm_primary
+        } else {
+            home.join(".cache").join("lm-studio").join("models")
+        };
+        all.extend(scan_lmstudio_models(&lm));
+        for c in &mut all {
+            c.already_imported = dest.join(sanitize_model_file_name(&c.name)).exists();
+        }
+        Ok(serde_json::json!({ "candidates": all }))
+    })
+    .await
+    .map_err(|e| format!("list_importable_models task: {e}"))?
+}
+
+/// Link one candidate into the built-in models dir (zero copy hard link).
+/// The next list_bundled_models picks it up like any downloaded GGUF.
+#[tauri::command]
+pub async fn import_local_model(path: String, name: String) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let dest = builtin_models_dir()?;
+        let target = import_model_file(Path::new(&path), &dest, &name)?;
+        Ok(serde_json::json!({ "path": target.to_string_lossy() }))
+    })
+    .await
+    .map_err(|e| format!("import_local_model task: {e}"))?
+}
+
 /// Kill the managed engine child if present. Returns whether one was running.
 /// Takes the state lock internally; callers must not already hold it.
 pub(crate) fn stop_engine_locked(state: &AppState) -> bool {
@@ -1211,6 +1424,85 @@ mod tests {
         assert_eq!(split_shard_stem("M-001-of-002"), None); // too short
         assert_eq!(split_shard_stem("M-00004-of-00003"), None); // part > total
         assert_eq!(split_shard_stem("-00001-of-00002"), None); // empty base
+    }
+
+    #[test]
+    fn sanitized_import_names_stay_inside_the_folder() {
+        assert_eq!(sanitize_model_file_name("qwen2.5-coder:14b"), "qwen2.5-coder-14b.gguf");
+        assert_eq!(sanitize_model_file_name("Already.GGUF"), "Already.GGUF");
+        // Negative control: traversal and separators can never survive.
+        assert_eq!(sanitize_model_file_name("../../evil"), "evil.gguf");
+        assert_eq!(sanitize_model_file_name("a/b\\c d"), "a-b-c-d.gguf");
+        assert_eq!(sanitize_model_file_name("###"), "model.gguf");
+    }
+
+    #[test]
+    fn ollama_manifest_digest_picks_the_model_layer_only() {
+        let manifest = r#"{"layers":[
+            {"mediaType":"application/vnd.ollama.image.template","digest":"sha256:aaa"},
+            {"mediaType":"application/vnd.ollama.image.model","digest":"sha256:bbb"},
+            {"mediaType":"application/vnd.ollama.image.params","digest":"sha256:ccc"}
+        ]}"#;
+        assert_eq!(ollama_manifest_model_digest(manifest), Some("sha256:bbb".into()));
+        // Negative controls: no model layer, and garbage JSON.
+        let no_model = r#"{"layers":[{"mediaType":"application/vnd.ollama.image.params","digest":"sha256:ccc"}]}"#;
+        assert_eq!(ollama_manifest_model_digest(no_model), None);
+        assert_eq!(ollama_manifest_model_digest("not json"), None);
+    }
+
+    #[test]
+    fn ollama_scan_finds_blobs_and_skips_half_pulled_models() {
+        let root = tempfile::tempdir().unwrap();
+        let mdir = root.path().join("manifests/registry.ollama.ai/library/qwen2.5-coder");
+        std::fs::create_dir_all(&mdir).unwrap();
+        std::fs::create_dir_all(root.path().join("blobs")).unwrap();
+        std::fs::write(root.path().join("blobs/sha256-abc"), b"weights").unwrap();
+        let manifest = r#"{"layers":[{"mediaType":"application/vnd.ollama.image.model","digest":"sha256:abc"}]}"#;
+        std::fs::write(mdir.join("14b"), manifest).unwrap();
+        // Negative control: manifest whose blob was never finished.
+        let missing = r#"{"layers":[{"mediaType":"application/vnd.ollama.image.model","digest":"sha256:gone"}]}"#;
+        std::fs::write(mdir.join("7b"), missing).unwrap();
+
+        let found = scan_ollama_models(root.path());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "qwen2.5-coder-14b");
+        assert_eq!(found[0].source, "ollama");
+        assert_eq!(found[0].size, 7);
+        assert!(found[0].path.ends_with("sha256-abc"));
+    }
+
+    #[test]
+    fn lmstudio_scan_is_recursive_and_gguf_only() {
+        let root = tempfile::tempdir().unwrap();
+        let deep = root.path().join("lmstudio-community/qwen");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("qwen-7b-Q4.gguf"), b"gg").unwrap();
+        // Negative control: sidecar files never count as models.
+        std::fs::write(deep.join("README.md"), b"docs").unwrap();
+
+        let found = scan_lmstudio_models(root.path());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "qwen-7b-Q4");
+        assert_eq!(found[0].source, "lmstudio");
+    }
+
+    #[test]
+    fn import_links_once_and_refuses_dupes_and_missing_sources() {
+        let store = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let src = store.path().join("sha256-abc");
+        std::fs::write(&src, b"weights").unwrap();
+
+        let target = import_model_file(&src, dest.path(), "qwen2.5-coder:14b").unwrap();
+        assert_eq!(target, dest.path().join("qwen2.5-coder-14b.gguf"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"weights");
+
+        // Negative controls: a second import of the same name, and a source
+        // that does not exist. Both must fail loudly, nothing silent.
+        let dupe = import_model_file(&src, dest.path(), "qwen2.5-coder:14b");
+        assert!(dupe.unwrap_err().contains("already exists"));
+        let missing = import_model_file(&store.path().join("nope"), dest.path(), "x");
+        assert!(missing.unwrap_err().contains("not found"));
     }
 }
 

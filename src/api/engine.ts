@@ -197,6 +197,29 @@ export async function listBundledModels(): Promise<BundledModel[]> {
   return models
 }
 
+/** A GGUF sitting in another local tool's store, importable via hard link. */
+export interface ImportCandidate {
+  name: string
+  source: 'ollama' | 'lmstudio'
+  path: string
+  size: number
+  already_imported: boolean
+}
+
+/**
+ * GGUFs found in local Ollama and LM Studio stores. Ollama blobs ARE plain
+ * GGUFs, so bringing them along is a hard link, not a second download.
+ */
+export async function listImportableModels(): Promise<ImportCandidate[]> {
+  const res = await backendCall<{ candidates: ImportCandidate[] }>('list_importable_models')
+  return res?.candidates ?? []
+}
+
+/** Link one candidate into the app models dir. Errors come back user-readable. */
+export async function importLocalModel(path: string, name: string): Promise<void> {
+  await backendCall('import_local_model', { path, name })
+}
+
 /**
  * Map bundled GGUFs to the app's model list shape. Built-in models live in the
  * `openai` slot, so they are prefixed `openai::<name>` for provider routing.
