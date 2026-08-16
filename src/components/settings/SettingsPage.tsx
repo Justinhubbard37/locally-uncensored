@@ -10,6 +10,7 @@ import { PersonaPanel } from '../personas/PersonaPanel'
 import { AccountPanel } from '../auth/AccountPanel'
 import { useVoiceStore } from '../../stores/voiceStore'
 import { checkWhisperAvailable, checkTtsAvailable, downloadPiperVoice, listInstalledPiperVoices } from '../../api/voice'
+import { downloadSuffix } from '../../lib/formatters'
 
 // Curated local neural (Piper) voices the user can pick. Selecting one not yet
 // on disk downloads it (~63 MB). Ids match rhasspy/piper-voices.
@@ -321,6 +322,8 @@ function ComfyUISettings() {
   const [installPhase, setInstallPhase] = useState<'idle' | 'python' | 'comfyui' | 'repair' | 'error'>('idle')
   const [installLogs, setInstallLogs] = useState<string[]>([])
   const [installErr, setInstallErr] = useState('')
+  // #162: size, rate and remaining time in the bracket next to the spinner.
+  const [installDl, setInstallDl] = useState({ progress: 0, total: 0, speed: 0 })
 
   useEffect(() => {
     let cancelled = false
@@ -375,6 +378,7 @@ function ComfyUISettings() {
     setStartError('')
     setInstallPhase('repair')
     setInstallLogs(['Repairing the ComfyUI environment…'])
+    setInstallDl({ progress: 0, total: 0, speed: 0 })
     try {
       const { backendCall } = await import('../../api/backend')
       await backendCall('repair_comfyui_env')
@@ -382,6 +386,7 @@ function ComfyUISettings() {
         try {
           const data: any = await backendCall('install_comfyui_status')
           setInstallLogs(data.logs || [])
+          setInstallDl({ progress: data.download_progress || 0, total: data.download_total || 0, speed: data.download_speed || 0 })
           if (data.status === 'complete') {
             clearInterval(poll)
             setInstallPhase('idle')
@@ -640,6 +645,7 @@ function ComfyUISettings() {
                   try {
                     const data: any = await backendCall('install_comfyui_status')
                     setInstallLogs(data.logs || [])
+                    setInstallDl({ progress: data.download_progress || 0, total: data.download_total || 0, speed: data.download_speed || 0 })
                     if (data.status === 'complete') {
                       clearInterval(poll)
                       setInstallPhase('idle')
@@ -677,6 +683,7 @@ function ComfyUISettings() {
                   try {
                     const data: any = await backendCall('install_comfyui_status')
                     setInstallLogs(data.logs || [])
+                    setInstallDl({ progress: data.download_progress || 0, total: data.download_total || 0, speed: data.download_speed || 0 })
                     if (data.status === 'complete') {
                       clearInterval(poll)
                       setInstallPhase('idle')
@@ -709,8 +716,8 @@ function ComfyUISettings() {
               {installPhase !== 'error' && <Loader2 size={10} className="animate-spin" />}
               <span>
                 {installPhase === 'python' && 'Installing Python 3.12 (~30 MB)…'}
-                {installPhase === 'comfyui' && 'Installing ComfyUI…'}
-                {installPhase === 'repair' && 'Rebuilding the ComfyUI environment…'}
+                {installPhase === 'comfyui' && `Installing ComfyUI…${downloadSuffix(installDl)}`}
+                {installPhase === 'repair' && `Rebuilding the ComfyUI environment…${downloadSuffix(installDl)}`}
                 {installPhase === 'error' && 'Install failed'}
               </span>
             </div>

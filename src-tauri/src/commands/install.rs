@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read as IoRead};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -425,6 +425,15 @@ pub fn pip_install_streaming_with_retry_cancellable(
             delay_seconds = (delay_seconds * 3).min(180);
         }
 
+        // Fresh download stats per pip run; a retry must not double the
+        // announced total by counting the same wheels twice.
+        if let Ok(mut s) = install_state.lock() {
+            s.download_progress = 0;
+            s.download_total = 0;
+            s.download_speed = 0.0;
+        }
+        let announced_total = Arc::new(AtomicU64::new(0));
+
         let mut cmd = Command::new(python_bin);
         cmd.args(args)
             .stdout(Stdio::piped())
@@ -443,12 +452,16 @@ pub fn pip_install_streaming_with_retry_cancellable(
 
         // Stream stdout to install logs
         let stdout_state = install_state.clone();
+        let announced = announced_total.clone();
         let stdout_handle = std::thread::spawn(move || {
             if let Some(out) = stdout {
                 let reader = BufReader::new(out);
                 for line in reader.lines().map_while(Result::ok) {
                     let trimmed = line.trim();
                     if !trimmed.is_empty() {
+                        if let Some(bytes) = parse_pip_download_size(trimmed) {
+                            announced.fetch_add(bytes, Ordering::Relaxed);
+                        }
                         if let Ok(mut s) = stdout_state.lock() {
                             s.logs.push(trimmed.to_string());
                         }
@@ -480,6 +493,12 @@ pub fn pip_install_streaming_with_retry_cancellable(
 
         // Poll for either the child to exit or the cancel flag to flip.
         // try_wait avoids blocking the cancel check; sleep keeps CPU idle.
+        // Once a second the child's cumulative read bytes turn the announced
+        // wheel sizes into progress and speed for the install status, which
+        // the UI renders next to the rebuild spinner.
+        let pid = child.id();
+        let mut io_baseline: Option<(u64, Instant)> = None;
+        let mut tick: u32 = 0;
         let exit_status = loop {
             if cancel.as_ref().map(|c| c.load(Ordering::SeqCst)).unwrap_or(false) {
                 // Kill the child so pip doesn't keep saturating disk.
@@ -491,12 +510,42 @@ pub fn pip_install_streaming_with_retry_cancellable(
             }
             match child.try_wait() {
                 Ok(Some(s)) => break s,
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
+                Ok(None) => {
+                    tick += 1;
+                    if tick % 5 == 0 {
+                        let total = announced_total.load(Ordering::Relaxed);
+                        if total > 0 {
+                            if let Some(read) = process_read_bytes(pid) {
+                                let (base, since) =
+                                    *io_baseline.get_or_insert((read, Instant::now()));
+                                let progress = read.saturating_sub(base).min(total);
+                                let elapsed = since.elapsed().as_secs_f64();
+                                let speed =
+                                    if elapsed > 0.5 { progress as f64 / elapsed } else { 0.0 };
+                                if let Ok(mut s) = install_state.lock() {
+                                    s.download_progress = progress;
+                                    s.download_total = total;
+                                    s.download_speed = speed;
+                                }
+                            }
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
                 Err(e) => return Err(format!("pip wait failed: {}", e)),
             }
         };
         let _ = stdout_handle.join();
         let _ = stderr_handle.join();
+
+        // The run is over either way; a frozen speed would read as a live
+        // download next to a finished or failed step.
+        if let Ok(mut s) = install_state.lock() {
+            if exit_status.success() && s.download_total > 0 {
+                s.download_progress = s.download_total;
+            }
+            s.download_speed = 0.0;
+        }
 
         if exit_status.success() {
             return Ok(());
@@ -537,6 +586,77 @@ pub(crate) fn pytorch_pip_args(index_url: Option<&str>) -> Vec<String> {
         args.push(u.to_string());
     }
     args
+}
+
+/// Bytes a pip "Downloading <thing> (<size>)" stdout line announces. pip
+/// prints decimal units, kB means 1000 bytes. "Using cached" lines are not
+/// network traffic and must not count.
+pub(crate) fn parse_pip_download_size(line: &str) -> Option<u64> {
+    let rest = line.trim().strip_prefix("Downloading ")?;
+    let inner = rest[rest.rfind('(')? + 1..].strip_suffix(')')?;
+    let mut parts = inner.split_whitespace();
+    let num: f64 = parts.next()?.parse().ok()?;
+    let unit = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let factor = match unit {
+        "bytes" | "B" => 1.0,
+        "kB" => 1e3,
+        "MB" => 1e6,
+        "GB" => 1e9,
+        _ => return None,
+    };
+    Some((num * factor).round() as u64)
+}
+
+/// Cumulative bytes the process has read from files and sockets. pip
+/// downloads in-process, so this is the live counter behind the progress
+/// display next to the rebuild spinner. None where the platform has no
+/// cheap probe and on any probe error; the caller then keeps the plain
+/// spinner instead of guessing.
+#[cfg(target_os = "windows")]
+pub(crate) fn process_read_bytes(pid: u32) -> Option<u64> {
+    #[repr(C)]
+    struct IoCounters {
+        read_ops: u64,
+        write_ops: u64,
+        other_ops: u64,
+        read_bytes: u64,
+        write_bytes: u64,
+        other_bytes: u64,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
+        fn GetProcessIoCounters(handle: isize, counters: *mut IoCounters) -> i32;
+        fn CloseHandle(handle: isize) -> i32;
+    }
+    const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid);
+        if handle == 0 {
+            return None;
+        }
+        let mut counters = std::mem::zeroed::<IoCounters>();
+        let ok = GetProcessIoCounters(handle, &mut counters);
+        CloseHandle(handle);
+        (ok != 0).then_some(counters.read_bytes)
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn process_read_bytes(pid: u32) -> Option<u64> {
+    std::fs::read_to_string(format!("/proc/{}/io", pid))
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix("rchar:"))
+        .and_then(|v| v.trim().parse().ok())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+pub(crate) fn process_read_bytes(_pid: u32) -> Option<u64> {
+    None
 }
 
 /// GPU probe + wheel choice + pip args, shared between the first install and
@@ -3462,6 +3582,47 @@ fn is_permission_denied_pip_error(output: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Download-Anzeige am Rebuilding-Spinner (#162) ───────────────────
+
+    #[test]
+    fn pip_download_size_parses_decimal_units() {
+        assert_eq!(
+            parse_pip_download_size(
+                "Downloading torch-2.5.1+cu121-cp311-cp311-win_amd64.whl (2445.5 MB)"
+            ),
+            Some(2_445_500_000)
+        );
+        assert_eq!(
+            parse_pip_download_size(
+                "Downloading https://download.pytorch.org/whl/jinja2-3.1.6-py3-none-any.whl (134 kB)"
+            ),
+            Some(134_000)
+        );
+        assert_eq!(
+            parse_pip_download_size("Downloading foo-1.0.tar.gz (1.2 GB)"),
+            Some(1_200_000_000)
+        );
+        assert_eq!(
+            parse_pip_download_size("Downloading mdurl-0.1.2-py3-none-any.whl.metadata (1.6 kB)"),
+            Some(1_600)
+        );
+    }
+
+    #[test]
+    fn pip_download_size_ignores_lines_that_are_no_download() {
+        // Negative controls: cache hits and chatter must not inflate the total.
+        assert_eq!(
+            parse_pip_download_size("Using cached torch-2.5.1-cp311-win_amd64.whl (2445.5 MB)"),
+            None
+        );
+        assert_eq!(parse_pip_download_size("Installing collected packages: torch"), None);
+        assert_eq!(parse_pip_download_size("Downloading build artifacts"), None);
+        assert_eq!(
+            parse_pip_download_size("Collecting torch (from -r requirements.txt (line 10))"),
+            None
+        );
+    }
 
     // ── PyTorch-Args, geteilt zwischen Install und Repair (GH #98) ──────
 

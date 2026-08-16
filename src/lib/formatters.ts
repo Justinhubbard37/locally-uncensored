@@ -6,6 +6,25 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`
 }
 
+export function formatEta(seconds: number): string {
+  const s = Math.round(seconds)
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.round(s / 60)} min`
+  return `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`
+}
+
+// #162: the bracket next to the Rebuilding spinner. Empty until the backend
+// has announced a total, so a plain spinner never grows a "(0 B of 0 B)".
+export function downloadSuffix(p: { progress: number; total: number; speed: number }): string {
+  if (!p.total) return ''
+  const parts = [`${formatBytes(p.progress)} of ${formatBytes(p.total)}`]
+  if (p.speed > 0) {
+    parts.push(`${formatBytes(p.speed)}/s`)
+    parts.push(`~${formatEta(Math.max(0, p.total - p.progress) / p.speed)} left`)
+  }
+  return ` (${parts.join(', ')})`
+}
+
 export function formatDate(timestamp: number): string {
   const date = new Date(timestamp)
   const now = new Date()
