@@ -60,7 +60,11 @@ Grab the latest release from [**Releases**](https://github.com/PurpleDoubleD/loc
 
 > **Antivirus warning?** Some engines flag unsigned NSIS installers that download other binaries — a **false positive**. The installer is built by GitHub Actions from the public source on `master`, and the auto-update channel is signed against a public minisign key. Verification steps: [SECURITY.md](SECURITY.md#antivirus--browser-false-positives).
 
-**Current release: v2.6.4** (August 2026). Portable-friendly installers for Windows and Linux (no admin rights required), under the short in-app name **LU** by LU Labs. Full history in [Releases](https://github.com/PurpleDoubleD/locally-uncensored/releases) and [CHANGELOG.md](CHANGELOG.md).
+**Current release: v2.6.5** (August 2026). Portable-friendly installers for Windows and Linux (no admin rights required), under the short in-app name **LU** by LU Labs. Full history in [Releases](https://github.com/PurpleDoubleD/locally-uncensored/releases) and [CHANGELOG.md](CHANGELOG.md).
+
+### What's new in 2.6.5
+
+The self-healing release. Updating works again: the installer closes our own running engine first instead of failing at "Error opening file for writing" and rolling everything back. The image track gained a LoRA section with a Rescan button, so characters you trained and files you dropped in are selectable and stackable. A ComfyUI environment that dies at import is detected and rebuilt into its own venv, with a Repair button in Settings, and fresh setups install a torch build the current core actually accepts. The built-in engine keeps its conversation memory when an image or video render needs the VRAM. Settings, Model Storage, "Scan for local models" links the models Ollama and LM Studio already store, no copying, no re-download. Model downloads no longer freeze at "Refreshing the model list": the install waits, restarts ComfyUI once if needed, and says what is wrong instead of hanging. Also fixed: trainer Cancel really stops the run and frees the GPU, Blackwell cards get the right torch build with a clear preflight, AMD cards show up without the ROCm tools, staged changes apply again and survive a restart, the gallery shows the seed that was really rolled, tooltips are readable everywhere, drag and drop works again on Windows, environment rebuilds show size, speed and time left, and FramePack got its proper VAE back.
 
 ### What's new in 2.6.4
 

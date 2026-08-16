@@ -4,11 +4,24 @@ All notable changes to Locally Uncensored are documented here.
 
 ## [Unreleased]
 
-## [2.6.5] - 2026-08-13
+## [2.6.5] - 2026-08-16
 
 The release that makes updating possible again, plus the work you already
 started surviving that update, and the Create tab telling the truth about
 what it is doing.
+
+### Added
+
+- **LoRA selection in image generation** (#109, ElBiggus). The image track
+  has a LoRA section with a Rescan button. Characters trained in Character
+  Studio and files dropped into the LoRA folder are selectable and
+  stackable.
+- **Bring your existing models along.** Settings, Model Storage, "Scan for
+  local models" finds the models Ollama and LM Studio already store and
+  links them into the app without copying, so the disk pays once and both
+  apps keep working. Ollama's blob files are resolved to real model names.
+- **Environment rebuilds show their work.** The rebuilding spinner reports
+  download size, rate and time left instead of spinning silently.
 
 ### Fixed
 
@@ -69,6 +82,19 @@ what it is doing.
   on a machine where nothing is billed. It also offered width and height for
   audio. All of that is gone: local music always takes your lyrics, and the
   Music tab has no canvas.
+- **A ComfyUI environment that dies at import heals itself** (#98,
+  kryptoxide and joel). The broken environment is detected and rebuilt into
+  its own venv automatically, and Settings has a Repair button for doing it
+  by hand.
+- **The built-in engine keeps its memory across renders** (#85,
+  I-Am-LongXi). Conversation state is saved before an image or video render
+  takes the VRAM and restored after, measured 2.3 s warm against 62 s cold,
+  instead of the chat starting over.
+- **Fresh ComfyUI setups install a torch the current core accepts.** The
+  environment builder rode a torch index frozen at 2.5.1 while current
+  ComfyUI needs 2.6 or newer, so a fresh setup or repair on a normal NVIDIA
+  card died at import. Non-Blackwell cards now ride the living cu126
+  channel; Blackwell keeps cu128.
 
 ### Changed
 
