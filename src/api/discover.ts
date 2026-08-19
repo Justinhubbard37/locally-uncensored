@@ -1,5 +1,5 @@
 import { backendCall, fetchExternal } from "./backend"
-import { getCheckpoints, getDiffusionModels, getVAEModels, getCLIPModels, filterPartialFiles } from "./comfyui"
+import { getCheckpoints, getDiffusionModels, getVAEModels, getCLIPModels, getGgufUnetModels, filterPartialFiles } from "./comfyui"
 import type { ProviderId } from "./providers/types"
 import { log } from "../lib/logger"
 
@@ -205,6 +205,35 @@ export function normalizeModelBase(name: string): string {
   const base = name.split(/[\\/]/).pop() ?? name
   return base.replace(/\.[^.]+$/, '').toLowerCase()
     .replace(/[-_](fp4|fp8|fp16|bf16|e4m3fn|scaled|fp8_e4m3fn_scaled)$/g, '')
+}
+
+/** Which of `wanted` the RUNNING ComfyUI does not list yet.
+ *
+ *  One function, because there are two journeys that end in the same place: a
+ *  bundle installed from Create (CreateContext) and a download finished in the
+ *  Model Manager (downloadStore). C8 gave the first one a wait and left the
+ *  second with a single fetch, so the same slow directory scan that froze
+ *  Voxyl AI's card on 2026-08-13 simply left a model out of the Installed tab
+ *  instead. Two probes would have been two chances to drift.
+ *
+ *  getGgufUnetModels belongs here for the same reason getImageModels needs it
+ *  (comfyui.ts:658): UNETLoader only enumerates .safetensors and .sft, GGUF
+ *  quants are listed by ComfyUI-GGUF's own loader. The default Talking
+ *  Character bundle IS a .gguf in diffusion_models, so without it the probe
+ *  can never succeed for that bundle.
+ *
+ *  An engine it cannot reach reports everything as missing: an answer we could
+ *  not get is not a file we have seen. */
+export async function modelsNotVisibleInComfy(wanted: string[]): Promise<string[]> {
+  try {
+    const lists = await Promise.all([
+      getCheckpoints(), getDiffusionModels(), getVAEModels(), getCLIPModels(), getGgufUnetModels(),
+    ])
+    const visible = new Set(lists.flat().map(normalizeModelBase))
+    return wanted.filter((n) => !visible.has(normalizeModelBase(n)))
+  } catch {
+    return wanted // engine unreachable, so it has confirmed nothing
+  }
 }
 
 /** #72: the backend used to resolve a failed `git pull` as

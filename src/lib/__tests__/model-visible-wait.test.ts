@@ -92,6 +92,13 @@ describe('the install path uses it, and says something honest when it runs out',
     resolve(dirname(fileURLToPath(import.meta.url)), '../../components/create/experimental/CreateContext.tsx'),
     'utf8',
   )
+  // The probe moved into discover.ts so the Model Manager download path can
+  // use the same one. These assertions moved with it: they exist to catch
+  // drift, which means they have to read the file that owns the code.
+  const discoverSrc = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '../../api/discover.ts'),
+    'utf8',
+  )
 
   it('the video bundle is picked by the lane rule, not by index', () => {
     // The bug this pins: the installer took getVideoBundles()[0] whatever the
@@ -110,7 +117,7 @@ describe('the install path uses it, and says something honest when it runs out',
   })
 
   it('an engine it cannot reach counts as nothing confirmed', () => {
-    expect(src).toMatch(/catch \{\s*\n\s*return wanted/)
+    expect(discoverSrc).toMatch(/catch \{\s*\n\s*return wanted/)
   })
 
   it('it restarts the engine once before giving up', () => {
@@ -142,9 +149,15 @@ describe('the install path uses it, and says something honest when it runs out',
     // diffusion_models, which IS in ENUM_SUBFOLDERS. Without the GGUF loader
     // the probe fails for a file ComfyUI lists perfectly well: 20 rounds of
     // waiting, an uncalled-for engine restart, then a wrong diagnosis.
-    const probe = src.slice(src.indexOf('const stillMissing'), src.indexOf('let missing'))
+    const probe = discoverSrc.slice(
+      discoverSrc.indexOf('export async function modelsNotVisibleInComfy'),
+      discoverSrc.indexOf('/** #72:'),
+    )
     expect(probe).toContain('getGgufUnetModels()')
-    expect(src).toMatch(/import \{[^}]*getGgufUnetModels[^}]*\} from '\.\.\/\.\.\/\.\.\/api\/comfyui'/)
+    expect(discoverSrc).toMatch(/import \{[^}]*getGgufUnetModels[^}]*\} from "\.\/comfyui"/)
+    // And the caller still runs it through the wait rather than once.
+    expect(src).toContain('missing: stillMissing, refresh: refreshLists')
+    expect(src).toContain('const stillMissing = () => modelsNotVisibleInComfy(wanted)')
   })
 
   it('the heal waits for a live render instead of killing it', () => {
