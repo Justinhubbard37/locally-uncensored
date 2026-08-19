@@ -3,7 +3,13 @@ import { persist } from 'zustand/middleware'
 import { version as currentVersion } from '../../package.json'
 import { isTauri, backendCall, openExternal } from '../api/backend'
 import { stopBundledEngine, stopBundledEmbed } from '../api/engine'
+import { flushChatPersist } from './chatStore'
+import { flushStagedPersist } from './stagedChangesStore'
 import type { Update } from '@tauri-apps/plugin-updater'
+
+/** Quiet time between the last persisted write and handing the process to
+ *  the installer. See installAndRestart for why it is a hedge. */
+const UPDATE_SETTLE_MS = 250
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -247,6 +253,24 @@ export const useUpdateStore = create<UpdateState>()(
           // lose by being early. Best effort: a failure here must not stop the
           // update, the installer still has its own recovery.
           await Promise.allSettled([stopBundledEngine(), stopBundledEmbed()])
+
+          // Put the chats on disk and go quiet BEFORE handing over. install()
+          // does not return: the installer takes the process down, and both
+          // coalesced stores can have a multi megabyte IndexedDB write in
+          // flight at that moment because the window only closes 250 ms after
+          // the last change. A LevelDB killed mid write is the most plausible
+          // mechanism behind aldrich_ironhart losing every chat across a 2.6.5
+          // update while sockenmonster on the same build lost none, and the
+          // bigger the history the wider that window.
+          //
+          // flush() resolves when the put has landed, so awaiting it is the
+          // real work. The pause after it is a hedge, not a guarantee: what
+          // the engine does with its own log and compaction after a commit is
+          // not something a page can await. A quarter second of an update the
+          // user already agreed to costs nothing.
+          await Promise.allSettled([flushChatPersist(), flushStagedPersist()])
+          await new Promise((r) => setTimeout(r, UPDATE_SETTLE_MS))
+
           await _pendingUpdate.install()
           // Exit so the installer can overwrite the binary
           await backendCall('exit_app')

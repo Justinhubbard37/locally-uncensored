@@ -264,15 +264,96 @@ fn persistent_dir() -> Result<std::path::PathBuf, String> {
     }
 }
 
-/// Backup all localStorage stores to %APPDATA% (survives NSIS updates)
-/// Uses atomic write (temp file + rename) to prevent corruption on crash
+/// Which keys the previous backup carried that the incoming snapshot does not.
+///
+/// A key is only ever ABSENT from a snapshot when the storage read came back
+/// empty, which means the store is gone, not that the user emptied it: a
+/// cleared chat list still serialises to a present, valid value. So a missing
+/// key is a signal that something was lost since the last backup, never a
+/// deletion the user asked for.
+///
+/// Both sides must be JSON objects for this to mean anything. Anything else
+/// answers "nothing was lost", which leaves the plain overwrite in place
+/// rather than inventing a merge over data we cannot read.
+pub(crate) fn keys_lost(previous: &str, incoming: &str) -> Vec<String> {
+    let (Ok(serde_json::Value::Object(prev)), Ok(serde_json::Value::Object(next))) = (
+        serde_json::from_str::<serde_json::Value>(previous),
+        serde_json::from_str::<serde_json::Value>(incoming),
+    ) else {
+        return Vec::new();
+    };
+    prev.iter()
+        .filter(|(k, v)| {
+            !v.as_str().unwrap_or("").is_empty()
+                && next.get(*k).and_then(|n| n.as_str()).unwrap_or("").is_empty()
+        })
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
+/// The snapshot that actually goes to disk: the incoming one, plus every key
+/// it lost carried over from the backup that is already there.
+///
+/// aldrich_ironhart, 2.6.5, Discord #general 18.08.: "My code chats are
+/// vaporised". chat-conversations lives in IndexedDB, localStorage does not,
+/// and they are different storage layers with different lifetimes. A hard
+/// process kill during a self update can leave Chromium discarding the whole
+/// IndexedDB database on the next start while localStorage comes back
+/// untouched. On that boot the snapshot the frontend builds simply has no
+/// chat-conversations in it, and this command wrote that over the one
+/// remaining copy of the chats, five seconds after launch, every launch.
+///
+/// A backup is not a mirror. It may lag, it may hold something the live store
+/// no longer has, and it must never be the thing that finishes a data loss.
+pub(crate) fn merged_backup(previous: &str, incoming: &str, lost: &[String]) -> String {
+    if lost.is_empty() {
+        return incoming.to_string();
+    }
+    let (Ok(serde_json::Value::Object(prev)), Ok(serde_json::Value::Object(mut next))) = (
+        serde_json::from_str::<serde_json::Value>(previous),
+        serde_json::from_str::<serde_json::Value>(incoming),
+    ) else {
+        return incoming.to_string();
+    };
+    for key in lost {
+        if let Some(v) = prev.get(key) {
+            next.insert(key.clone(), v.clone());
+        }
+    }
+    serde_json::Value::Object(next).to_string()
+}
+
+/// Backup all stores to %APPDATA% (survives NSIS updates). Atomic write (temp
+/// file + rename) so a crash mid-write cannot truncate a previous backup.
+///
+/// Never destructive: a snapshot that lost a key keeps the old value for it,
+/// and the untouched previous file is set aside once as store_backup.prev.json
+/// so the loss can still be looked at afterwards. See merged_backup.
 #[tauri::command]
 pub fn backup_stores(data: String) -> Result<(), String> {
     let dir = persistent_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let target = dir.join("store_backup.json");
     let tmp = dir.join("store_backup.tmp");
-    std::fs::write(&tmp, &data).map_err(|e| e.to_string())?;
+
+    let previous = std::fs::read_to_string(&target).unwrap_or_default();
+    let lost = keys_lost(&previous, &data);
+    let payload = if lost.is_empty() {
+        data
+    } else {
+        tracing::warn!("backup snapshot lost {:?}, keeping the previous values", lost);
+        // Set the last complete file aside before it is replaced, once. The
+        // merge means the next snapshot is complete again, so a machine in
+        // this state writes this file on the first boot after the loss and
+        // never again.
+        let aside = dir.join("store_backup.prev.json");
+        if !aside.exists() {
+            let _ = std::fs::write(&aside, &previous);
+        }
+        merged_backup(&previous, &data, &lost)
+    };
+
+    std::fs::write(&tmp, &payload).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &target).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -393,6 +474,88 @@ pub fn get_current_time() -> Result<serde_json::Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// aldrich_ironhart, 2.6.5, Discord #general 18.08. 12:59 "has anyone lost
+    /// their chats after a restart??" and 16:12 "My code chats are vaporised".
+    ///
+    /// chat-conversations lives in IndexedDB and the rest of the stores live
+    /// in localStorage. Those are different storage layers with different
+    /// lifetimes, so a boot can come back with one gone and the other whole.
+    /// On such a boot the snapshot the frontend hands this command has no
+    /// chat-conversations in it at all, and the old code wrote it straight
+    /// over the only remaining copy.
+    #[test]
+    fn a_snapshot_that_lost_the_chats_does_not_take_the_backup_with_it() {
+        let previous = r#"{"__ts":"old","chat-conversations":"{\"chats\":42}","chat-settings":"{}"}"#;
+        let incoming = r#"{"__ts":"new","chat-settings":"{}"}"#;
+
+        let lost = keys_lost(previous, incoming);
+        assert_eq!(lost, vec!["chat-conversations".to_string()]);
+
+        let merged = merged_backup(previous, incoming, &lost);
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(v["chat-conversations"], "{\"chats\":42}");
+        // The rest of the snapshot is still the new one.
+        assert_eq!(v["__ts"], "new");
+
+        // Negative control: the old rule was the incoming string, unread.
+        let old_rule: serde_json::Value = serde_json::from_str(incoming).unwrap();
+        assert!(old_rule.get("chat-conversations").is_none());
+    }
+
+    /// The one case that must NOT be treated as a loss. A user who deletes
+    /// every chat still has a live store, so the key is present and carries a
+    /// valid empty payload. Carrying the old value over there would resurrect
+    /// chats somebody deliberately deleted.
+    #[test]
+    fn an_emptied_store_is_not_a_lost_one() {
+        let previous = r#"{"chat-conversations":"{\"state\":{\"conversations\":[1,2]}}"}"#;
+        let incoming = r#"{"chat-conversations":"{\"state\":{\"conversations\":[]}}"}"#;
+        assert!(keys_lost(previous, incoming).is_empty());
+        assert_eq!(merged_backup(previous, incoming, &[]), incoming);
+    }
+
+    #[test]
+    fn a_first_backup_and_unreadable_neighbours_are_left_alone() {
+        let incoming = r#"{"__ts":"new","chat-conversations":"x"}"#;
+        // No previous file at all.
+        assert!(keys_lost("", incoming).is_empty());
+        assert_eq!(merged_backup("", incoming, &[]), incoming);
+        // A previous file that is not JSON, or not an object, cannot be
+        // reasoned about, and guessing over unreadable data is worse than the
+        // plain overwrite this replaced.
+        assert!(keys_lost("not json at all", incoming).is_empty());
+        assert!(keys_lost("[1,2,3]", incoming).is_empty());
+        // And an incoming payload we cannot read is written as it came.
+        assert!(keys_lost(r#"{"a":"1"}"#, "not json").is_empty());
+    }
+
+    #[test]
+    fn an_empty_string_value_counts_as_lost_too() {
+        // The frontend skips falsy values, so this shape should not occur, but
+        // an empty payload is a loss by any reading and must not overwrite.
+        let previous = r#"{"chat-conversations":"real"}"#;
+        let incoming = r#"{"chat-conversations":""}"#;
+        assert_eq!(keys_lost(previous, incoming), vec!["chat-conversations".to_string()]);
+        let merged = merged_backup(previous, incoming, &["chat-conversations".to_string()]);
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(v["chat-conversations"], "real");
+    }
+
+    #[test]
+    fn every_key_that_went_missing_comes_back_not_just_the_first() {
+        let previous = r#"{"chat-conversations":"c","locally-uncensored-memory":"m","rag-store":"r"}"#;
+        let incoming = r#"{"rag-store":"r2"}"#;
+        let mut lost = keys_lost(previous, incoming);
+        lost.sort();
+        assert_eq!(lost, vec!["chat-conversations".to_string(), "locally-uncensored-memory".to_string()]);
+        let merged = merged_backup(previous, incoming, &lost);
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(v["chat-conversations"], "c");
+        assert_eq!(v["locally-uncensored-memory"], "m");
+        // A key the snapshot DID bring keeps the new value, not the old one.
+        assert_eq!(v["rag-store"], "r2");
+    }
 
     /// The old implementation spawned a process for the UTC offset and fell
     /// back to 0 when that failed, so it could report UTC as local time. These

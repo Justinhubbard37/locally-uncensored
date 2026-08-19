@@ -24,6 +24,8 @@ import { detectLocalBackends, type DetectedBackend } from '../../lib/backend-det
 import { whenRunsIdle } from '../../lib/run-idle'
 import { backendCall, isTauri } from '../../api/backend'
 import { idbStorage } from '../../lib/idbStorage'
+import { idbKeysToRestore, mayReloadForIdbRestore } from '../../lib/idb-restore'
+import { log } from '../../lib/logger'
 import type { AIModel } from '../../types/models'
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts'
 import { useCloudAuth } from '../../hooks/useCloudAuth'
@@ -215,6 +217,44 @@ export function AppShell() {
         // backup exists and the live store has none for the documents the
         // localStorage `rag-store` knows about. Best-effort; ignore errors.
         ;(async () => {
+          // The chats live in IndexedDB too, and until now nothing on this
+          // branch looked at them. A hard process kill mid write, which is
+          // what a self update is, can leave Chromium discarding the whole
+          // IndexedDB database while localStorage comes back whole, and this
+          // branch IS that boot: every localStorage store answers, so the full
+          // restore below never runs. aldrich_ironhart lost a 230k token
+          // coding chat that way on 2.6.5 with a good copy of it sitting in
+          // store_backup.json the entire time.
+          try {
+            const live: Record<string, string | null> = {}
+            for (const key of IDB_STORE_KEYS) {
+              live[key] = await Promise.resolve(idbStorage.getItem(key)).catch(() => null)
+            }
+            if (Object.values(live).some((v) => !v)) {
+              const raw = await backendCall<string | null>('restore_stores')
+              const parsed = raw ? JSON.parse(raw) : null
+              const wanted = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+                ? idbKeysToRestore(live, parsed as Record<string, unknown>)
+                : []
+              let back = 0
+              for (const key of wanted) {
+                try {
+                  await Promise.resolve(idbStorage.setItem(key, (parsed as Record<string, string>)[key]))
+                  back++
+                } catch { /* one key failing must not stop the rest */ }
+              }
+              if (back > 0) {
+                log.warn('[AppShell] IndexedDB stores were empty, restored from the appData backup', { keys: wanted })
+                // The stores already hydrated empty, so only a reload picks
+                // this up. Once per window session, never a loop.
+                if (mayReloadForIdbRestore(typeof sessionStorage !== 'undefined' ? sessionStorage : null)) {
+                  resolveRestoreDecided()
+                  window.location.reload()
+                  return
+                }
+              }
+            }
+          } catch { /* best-effort, the RAG restore below still runs */ }
           try {
             const data = await backendCall<string | null>('restore_rag_chunks')
             if (data) {
