@@ -137,16 +137,27 @@ export async function checkBundlesInstalled(bundles: ModelBundle[]): Promise<Rec
   // file check_model_sizes confirms is partial before matching.
   let comfyLists: Record<string, string[]> | null = null
   try {
-    const [rawCheckpoints, rawDiffModels, rawVaes, rawClips] = await Promise.all([
-      getCheckpoints(), getDiffusionModels(), getVAEModels(), getCLIPModels(),
+    // getGgufUnetModels for the same reason the Create probe needs it
+    // (b8531b6): UNETLoader only enumerates .safetensors and .sft, and GGUF
+    // quants are listed by ComfyUI-GGUF's own loader. Both Unfiltered video
+    // bundles are GGUF, so without it this cannot see the one file that makes
+    // them what they are, and the fuzzy fallback below can never confirm them.
+    const [rawCheckpoints, rawDiffModels, rawGgufUnets, rawVaes, rawClips] = await Promise.all([
+      getCheckpoints(), getDiffusionModels(), getGgufUnetModels(), getVAEModels(), getCLIPModels(),
     ])
-    const [checkpoints, diffModels, vaes, clips] = await Promise.all([
+    const [checkpoints, diffModels, ggufUnets, vaes, clips] = await Promise.all([
       filterPartialFiles(rawCheckpoints).then(s => Array.from(s)),
       filterPartialFiles(rawDiffModels).then(s => Array.from(s)),
+      filterPartialFiles(rawGgufUnets).then(s => Array.from(s)),
       filterPartialFiles(rawVaes).then(s => Array.from(s)),
       filterPartialFiles(rawClips).then(s => Array.from(s)),
     ])
-    comfyLists = { checkpoints, diffusion_models: diffModels, vae: vaes, text_encoders: clips }
+    comfyLists = {
+      checkpoints,
+      diffusion_models: [...diffModels, ...ggufUnets],
+      vae: vaes,
+      text_encoders: clips,
+    }
   } catch {
     comfyLists = null // ComfyUI not reachable · size-check verdicts stand
   }
