@@ -58,6 +58,7 @@ import { truncateToolResult } from '../lib/truncate-tool-result'
 import { toolCallCapMs, raceWithToolTimeout, SHELL_EXECUTE_DEFAULT_TIMEOUT_MS, CODE_EXECUTE_DEFAULT_TIMEOUT_MS } from '../lib/tool-timeout'
 import { compactMessages, getModelMaxTokens, estimateTokens } from '../lib/context-compaction'
 import { resolveAgentNumCtx } from '../lib/agent-num-ctx'
+import { ensureBuiltinAgentCtx } from '../api/builtin-ensure'
 import { AgentLoopGuard } from '../lib/agent-loop-guard'
 import { findStagedForPath, stagedReadResult, stagedListingNote } from '../lib/staged-overlay'
 import { applyAllStagedChanges } from '../lib/staged-apply'
@@ -733,6 +734,14 @@ export function useCodex() {
     // every iteration, forgot the files it had just read, and looped on the
     // same file_read for minutes (Morgan, 2026-07-26). Both the num_ctx we
     // send and the compaction target below derive from this one value.
+    // Z36 finding 2: raise the managed built-in engine to the agent ceiling
+    // (min of the GGUF's trained ctx and AGENT_CONTEXT_CAP) BEFORE the
+    // resolver below reads the started ctx as this run's budget. The coding
+    // loop carries the same tool catalogue that outgrows the 8192 default.
+    try {
+      await ensureBuiltinAgentCtx(modelToUse)
+    } catch { /* run with whatever the engine has */ }
+
     const numCtx: number = await resolveAgentNumCtx(
       modelToUse, providerId, settings.contextWindowOverride, activeModel,
     )

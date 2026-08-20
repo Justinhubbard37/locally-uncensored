@@ -38,6 +38,7 @@ import { summarizeTurn } from '../lib/turn-summary'
 import { buildVisionFeedback } from '../api/vision-feedback'
 import { compactMessages, getModelMaxTokens, estimateTokens } from '../lib/context-compaction'
 import { resolveAgentNumCtx } from '../lib/agent-num-ctx'
+import { ensureBuiltinAgentCtx } from '../api/builtin-ensure'
 import { useMemoryStore } from '../stores/memoryStore'
 import { useVoiceStore } from '../stores/voiceStore'
 import { autoSpeak } from '../lib/ttsBridge'
@@ -326,6 +327,16 @@ export function useAgentChat() {
     // signals now go true together here and false together in the finally; the
     // only early return before the try (no conv) resets both.
     setIsAgentRunning(true)
+
+    // Z36 finding 2: an agent turn carries the tool catalogue and outgrows
+    // the built-in engine's 8192 start default, and llama-server's ctx is a
+    // start-time flag no per-request option can raise. Lift the engine to
+    // the agent ceiling (min of the GGUF's trained ctx and AGENT_CONTEXT_CAP)
+    // BEFORE resolveAgentNumCtx reads the started ctx as the run budget.
+    // No-op for every other provider; never throws.
+    try {
+      await ensureBuiltinAgentCtx(modelToUse)
+    } catch { /* run with whatever the engine has */ }
 
     // Create or get conversation
     let convId = store.activeConversationId

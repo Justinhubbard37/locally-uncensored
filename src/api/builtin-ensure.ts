@@ -17,14 +17,17 @@
 import { backendCall } from './backend'
 import { useProviderStore } from '../stores/providerStore'
 import { useSettingsStore } from '../stores/settingsStore'
+import { AGENT_CONTEXT_CAP } from '../lib/context-window'
 
 interface EngineStatusLite {
   running: boolean
   healthy: boolean
+  /** The `--ctx-size` the chat engine was started with (ENG-3). */
+  ctx?: number | null
 }
 
 interface BundledList {
-  models?: Array<{ name: string; path: string }>
+  models?: Array<{ name: string; path: string; ctx_train?: number | null }>
 }
 
 // Coalesce concurrent sends (chat + title generation) into ONE health-check /
@@ -110,4 +113,93 @@ export async function ensureBuiltinEngineAlive(modelName: string): Promise<void>
     }
   })()
   return inflight
+}
+
+// The default the engine ships with. A settings ctx equal to it is treated as
+// "never touched", anything else as an explicit user choice that wins in both
+// directions (see ensureBuiltinAgentCtx below).
+const ENGINE_DEFAULT_CTX = 8192
+
+// Models whose raise attempt failed once (path -> refused ctx). Without this
+// a card that cannot allocate the bigger KV cache would retry the failing
+// restart on every single agent turn.
+const refusedCtxByPath = new Map<string, number>()
+
+/** Test-only: forget refused raises so unit tests stay isolated. */
+export function __resetAgentCtxStateForTests(): void {
+  refusedCtxByPath.clear()
+}
+
+/**
+ * Z36 finding 2 (W3 run 2026-08-16): an agent turn carries the full tool
+ * catalogue and routinely outgrows the engine's 8192 default, while the GGUF
+ * itself was trained for far more (ctx_train 32k live). llama-server's ctx is
+ * a START-time flag, so unlike Ollama's per-request num_ctx somebody has to
+ * restart the engine bigger, and nobody did: the prompt silently overflowed.
+ *
+ * This raises the managed built-in engine to the same ceiling the Ollama
+ * agent path already uses: min(ctx_train, AGENT_CONTEXT_CAP), floored at the
+ * 8192 default. It only ever raises, never shrinks, and only when the GGUF
+ * header states the model can take it (no RoPE extrapolation on a guess).
+ * A user-set engine ctx (anything other than the untouched 8192 default) or
+ * a contextWindowOverride wins outright, matching resolveAgentNumCtx.
+ *
+ * When the raise attempt fails (a small card may not fit the bigger KV
+ * cache), the engine is restarted with the previous tuning so chat survives,
+ * and the (path, ctx) pair is remembered so we never retry-loop. Never
+ * throws: an agent run must start even when none of this works.
+ */
+export async function ensureBuiltinAgentCtx(modelName: string): Promise<void> {
+  if (!isManagedBuiltinSlot()) return
+  const settings = useSettingsStore.getState().settings
+  const tuning = settings.builtinEngine as (typeof settings.builtinEngine) | undefined
+  if (tuning && typeof tuning.ctx === 'number' && tuning.ctx > 0 && tuning.ctx !== ENGINE_DEFAULT_CTX) {
+    return // explicit expert choice, do not second-guess it
+  }
+
+  let status: EngineStatusLite | null
+  try {
+    status = await backendCall<EngineStatusLite>('bundled_engine_status')
+  } catch {
+    return // non-Tauri context (tests/browser)
+  }
+
+  let models: Array<{ name: string; path: string; ctx_train?: number | null }>
+  try {
+    const res = await backendCall<BundledList>('list_bundled_models')
+    models = res?.models ?? []
+  } catch {
+    return
+  }
+  const bare = modelName.includes('::') ? modelName.split('::')[1] : modelName
+  const hit = models.find((m) => m.name === bare)
+  if (!hit) return
+
+  const override = settings.contextWindowOverride
+  let want = 0
+  if (typeof override === 'number' && override > 0) {
+    want = override
+  } else if (typeof hit.ctx_train === 'number' && hit.ctx_train > 0) {
+    want = Math.max(ENGINE_DEFAULT_CTX, Math.min(hit.ctx_train, AGENT_CONTEXT_CAP))
+  } else {
+    return // the GGUF does not state a trained context, never raise on a guess
+  }
+
+  if (refusedCtxByPath.get(hit.path) === want) return
+  const current = status?.running && typeof status.ctx === 'number' && status.ctx > 0 ? status.ctx : 0
+  if (current >= want) return
+
+  const raised = { ...(tuning ?? {}), ctx: want }
+  try {
+    await backendCall(status?.running ? 'swap_bundled_model' : 'start_bundled_engine', {
+      modelPath: hit.path,
+      tuning: raised,
+    })
+  } catch {
+    refusedCtxByPath.set(hit.path, want)
+    // Fall back to the previous tuning so the chat engine is not left dead.
+    try {
+      await backendCall('start_bundled_engine', { modelPath: hit.path, tuning })
+    } catch { /* the lazy self-heal on the next send takes over */ }
+  }
 }
