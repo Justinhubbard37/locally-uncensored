@@ -30,7 +30,12 @@ import {
   type ComfyUIOutput,
   type VideoBackend,
 } from '../api/comfyui'
-import { comfyErrorHint } from '../api/vram-handoff'
+import {
+  comfyErrorHint,
+  evictChatBackendsForRender,
+  restoreChatBackendsAfterRender,
+  type RenderEviction,
+} from '../api/vram-handoff'
 import {
   comfyWS, CLIENT_ID,
   LOADER_NODES, CLIP_LOADER_NODES, VAE_LOADER_NODES, SAMPLER_NODES, DECODE_NODES,
@@ -40,7 +45,6 @@ import { buildDynamicWorkflow, buildLocalOpWorkflow, checkVideoOutputCapability 
 import { getAllNodeInfo, clearNodeCache } from '../api/comfyui-nodes'
 import { restartComfyForNewNodes } from '../api/comfy-restart'
 import { installCustomNodes } from '../api/discover'
-import { backendCall } from '../api/backend'
 import { checkPromptSafety, SAFETY_BLOCK_MESSAGE } from '../lib/render/safety'
 import { resolveRunSeed } from '../lib/run-seed'
 import {
@@ -782,16 +786,17 @@ export function useCreate() {
 
     // Make VRAM room for the render. On a single local GPU a resident chat LLM
     // (Ollama / LM Studio / the bundled engine) squats the card, which forces
-    // ComfyUI into heavy CPU offload — or a CUDA OOM on the 14B video lanes
-    // (S2V / Animate). Free the chat backends first (they reload lazily on the
-    // next message) but keep ComfyUI's own checkpoint cached across runs
-    // (includeComfyui:false). Best-effort — never block a render on housekeeping.
+    // ComfyUI into heavy CPU offload, or a CUDA OOM on the 14B video lanes
+    // (S2V / Animate). Z36: this used to be a bare offload_local_models call
+    // that killed both llama processes with no KV save and no reload, costing
+    // the next chat turn a 62 s cold start. The hand-off helper captures what
+    // is resident, saves the built-in engine's KV slot, then evicts; the
+    // finally below brings everything back. exclusiveVramMode 'never' skips
+    // the eviction. Best-effort, never blocks a render.
+    let renderEviction: RenderEviction | null = null
     try {
-      await Promise.all([
-        backendCall('offload_local_models', { includeComfyui: false }).catch(() => {}),
-        backendCall('lmstudio_unload_model', { model: '--all' }).catch(() => {}),
-      ])
-    } catch { /* ignore — VRAM housekeeping is best-effort */ }
+      renderEviction = await evictChatBackendsForRender()
+    } catch { /* VRAM housekeeping is best-effort */ }
 
     try {
       let outputWidth = width
@@ -1379,6 +1384,11 @@ export function useCreate() {
       useCreateStore.getState().setCurrentPromptId(null)
       if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
       abortRef.current = null
+      // Bring the evicted chat backends back (Z36). Fire and forget: the
+      // reload can take a minute and must not hold the Create UI or the
+      // next render (the helper serialises and a follow-up render inherits
+      // the haul instead of waiting for it to load).
+      if (renderEviction) void restoreChatBackendsAfterRender(renderEviction)
     }
   }, [videoBackend, runCharacterTraining])
 
