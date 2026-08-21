@@ -40,6 +40,20 @@ const MEDIA_KEYWORDS = [
 ]
 const WORKFLOW_KEYWORDS = ['workflow', 'run workflow', 'automate']
 
+// A6: the two remaining ride-alongs. pr_resume only ever fires on a PR link or
+// a "continue this PR", delegate_task only on an explicit fan-out, and both
+// carry a schema on every step of every coding run that never asks for either.
+// Same words the TOOL_GROUPS router already uses, so the local and the cloud
+// path answer the question identically.
+const PR_KEYWORDS = [
+  'pull request', 'pull-request', 'open a pr', 'create a pr', 'the pr', 'this pr',
+  'github', 'gh pr', '/resume', 'pick up review', '/pull/',
+]
+const DELEGATE_KEYWORDS = [
+  'delegate', 'sub-agent', 'subagent', 'sub agent', 'fan out', 'fan-out',
+  'in parallel', 'parallelize', 'parallelise', 'split the work',
+]
+
 /**
  * The three tools that draw, film and automate. Everything else in the coding
  * catalog earns its place on every turn; these three cost 1.963 of the 6.186
@@ -47,6 +61,33 @@ const WORKFLOW_KEYWORDS = ['workflow', 'run workflow', 'automate']
  * against the model's own tokenizer) and a coding turn almost never wants them.
  */
 export const CREATE_TOOLS = ['image_generate', 'video_generate', 'run_workflow']
+
+/**
+ * Every keyword-gated tool and the words that open its gate (A6).
+ *
+ * CREATE_TOOLS stays its own exported list because the Codex asset line keys
+ * off exactly those three; this map is the superset the filter walks.
+ */
+const GATE_KEYWORDS: Record<string, readonly string[]> = {
+  image_generate: MEDIA_KEYWORDS,
+  video_generate: MEDIA_KEYWORDS,
+  run_workflow: WORKFLOW_KEYWORDS,
+  pr_resume: PR_KEYWORDS,
+  delegate_task: DELEGATE_KEYWORDS,
+}
+
+/**
+ * The names whose first real call must reopen the gate for the rest of the run
+ * (the createGateOpened self-heal). A run that discovers at step six that it
+ * needs a sub-agent, or that the task is a PR after all, gets the schema back
+ * from the next step instead of calling blind for the remaining twenty.
+ */
+export const GATE_OPENING_TOOLS: readonly string[] = Object.keys(GATE_KEYWORDS)
+
+/** True when this tool only ships when the turn asked for it. */
+export function isGatedTool(name: string): boolean {
+  return name in GATE_KEYWORDS
+}
 
 const TOOL_GROUPS: ToolGroup[] = [
   {
@@ -254,16 +295,19 @@ export function selectRelevantTools(
 export function gateCreateTools<T extends { name: string }>(
   defs: T[],
   userMessage: string,
-  opened = false,
+  opened: boolean | Iterable<string> = false,
 ): T[] {
-  if (opened) return defs
+  if (opened === true) return defs
+  // A caller that tracks WHICH tool reopened the gate may pass the names; the
+  // boolean form stays the run-wide "everything is open again" it always was.
+  const reopened = opened === false ? null : new Set(opened)
   const msg = userMessage.toLowerCase()
-  const wantsMedia = MEDIA_KEYWORDS.some((k) => msg.includes(k))
-  const wantsFlow = WORKFLOW_KEYWORDS.some((k) => msg.includes(k))
   return defs.filter((t) => {
-    if (!CREATE_TOOLS.includes(t.name)) return true
+    const words = GATE_KEYWORDS[t.name]
+    if (!words) return true
+    if (reopened?.has(t.name)) return true
     if (msg.includes(t.name)) return true
-    return t.name === 'run_workflow' ? wantsFlow : wantsMedia
+    return words.some((k) => msg.includes(k))
   })
 }
 

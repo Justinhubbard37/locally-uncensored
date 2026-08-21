@@ -105,8 +105,11 @@ describe('the tools really are gone', () => {
   })
 
   it('shell_execute is the documented way to open something', () => {
+    // The A6 diet shortened the sentence; what has to survive is that the
+    // description still names opening files/folders/apps as shell work, so
+    // nobody re-adds a tool for it.
     const tools = read('api', 'mcp', 'builtin-tools.ts')
-    expect(tools).toMatch(/This is also how you open things on the desktop/)
+    expect(tools).toMatch(/open(ing)? (things on the desktop|files, folders or apps)/)
   })
 
   it('the agent prompt states the platform instead of spending a call on it', () => {

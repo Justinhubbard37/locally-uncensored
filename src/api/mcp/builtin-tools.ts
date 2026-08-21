@@ -1,6 +1,6 @@
 // Built-in tool definitions + executors — replaces hardcoded AGENT_TOOL_DEFS
 
-import type { MCPToolDefinition } from './types'
+import type { JSONSchemaProp, MCPToolDefinition } from './types'
 import type { ToolRegistry } from './tool-registry'
 import { backendCall, fetchExternal } from '../backend'
 import { getActiveChatId, getActiveConversationId, getActiveWorkspace, isChatArtifactMode, captureChatArtifact, isReadOnlyShellTurn } from '../agent-context'
@@ -40,6 +40,41 @@ function chatCtx(): { chatId?: string; workingDirectory?: string } {
 
 // ── Tool Definitions ────────────────────────────────────────────
 
+/**
+ * The `settings` sub-schema image_generate and video_generate share (A6).
+ *
+ * The two carried byte-identical copies of eight properties plus the same
+ * paragraph of prose about limits, and every creative turn paid for both. Two
+ * copies also drift: video's sampler and width already explained themselves
+ * differently from image's for no reason a model can use. One definition, one
+ * wording, each tool adding only what is genuinely its own.
+ */
+const MEDIA_SETTINGS_HINT =
+  'Optional fine-tuning. Set ONLY what the user asked for, omit the rest. '
+  + 'A value beyond the installed model\'s real limit is rejected with the actual limit. '
+  + 'A flat top-level argument wins over the same key here.'
+
+const SHARED_MEDIA_SETTINGS: Record<string, JSONSchemaProp> = {
+  steps: { type: 'number', description: 'Sampling steps.' },
+  cfg: { type: 'number', description: 'CFG / guidance scale.' },
+  sampler: { type: 'string', description: 'Sampler name, must be one this model supports.' },
+  scheduler: { type: 'string', description: 'Scheduler name, must be one this model supports.' },
+  seed: { type: 'number', description: 'Seed; omit or -1 for random.' },
+  width: { type: 'number', description: 'Output width in px.' },
+  height: { type: 'number', description: 'Output height in px.' },
+  negativePrompt: { type: 'string', description: 'Things to avoid.' },
+}
+
+/** The shared eight plus the keys only one of the two pipelines understands. */
+function mediaSettingsSchema(own: Record<string, JSONSchemaProp>): JSONSchemaProp {
+  return {
+    type: 'object',
+    description: MEDIA_SETTINGS_HINT,
+    additionalProperties: true,
+    properties: { ...SHARED_MEDIA_SETTINGS, ...own },
+  }
+}
+
 // tool-classification.test.ts reads the names out of this array to assert that
 // every one of them is classified as mutating or read-only. It parses the file
 // rather than importing it, because importing pulls in the tool-registry cycle.
@@ -48,11 +83,9 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
   {
     name: 'todo_write',
     description:
-      'Write the plan for a multi-step task and keep it up to date. The list is shown to the user live, so it is how they see what you are doing and how far along you are. '
-      + 'USE FIRST on any task that needs more than about three tool calls: write the whole plan before the first step. '
-      + 'Then call it again after each step to flip that item to completed and the next one to in_progress. '
-      + 'Send the COMPLETE list every time. It replaces the previous one, it does not merge. Exactly one item should be in_progress at a time. '
-      + 'DO NOT use it for a single-step request, and NEVER mark an item completed before the work actually succeeded.',
+      'Write and update the plan for a multi-step task. The list is shown to the user live, so it is how they follow a long run. '
+      + 'USE FIRST when a task needs more than about three tool calls, then send it again after each step. '
+      + 'Send the COMPLETE list every time: it replaces the previous one, it does not merge.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -83,9 +116,8 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
     name: 'web_search',
     description:
       'Search the web via the configured provider (Brave, Tavily, or auto). Returns a ranked list of {title, url, snippet}. '
-      + 'PREFER web_fetch on promising URLs for full content — snippets are teasers, not answers. '
-      + 'DO NOT call more than 3x per turn with similar queries; refine the query instead of re-searching. '
-      + 'For the current date/time, trust the date line in the system prompt; do NOT web_search for it.',
+      + 'Snippets are teasers, not answers: PREFER web_fetch on the promising URLs for the real content. '
+      + 'DO NOT run more than 3 similar queries per turn, refine instead of re-searching.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -100,11 +132,10 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
   {
     name: 'web_fetch',
     description:
-      'Fetch a single URL and return its readable text (up to ~24 000 chars). '
-      + 'Strips <script>, <style>, <nav>, <header>, <footer>, <aside>, <form> — returns main content only. '
+      'Fetch a single URL and return its readable text (up to ~24 000 chars), scripts, styles and page furniture stripped. '
       + 'PREFER this over web_search when you already know the target URL. '
-      + 'NEVER call with localhost, private IPs (10.*, 192.168.*, 172.16-31.*), or file:// — they are refused. '
-      + 'If response is empty or 4xx, try a different URL rather than retrying the same one.',
+      + 'NEVER call it with localhost, a private IP or file://, those are refused. '
+      + 'On an empty or 4xx response try a different URL, not the same one again.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -121,12 +152,11 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
   {
     name: 'file_read',
     description:
-      'Read a file. PREFER absolute paths; relative paths resolve against the agent workspace (~/agent-workspace). '
+      'Read a file. PREFER absolute paths; relative paths resolve against the agent workspace. '
       + 'Omitting offset/limit returns the whole file. For LARGE files pass offset (1-based start line) and limit '
-      + '(number of lines) to read a window — the response names the window and the total line count, and tells you '
-      + 'the offset for the next page. Very long whole-file reads get their middle truncated, so page large files. '
-      + 'DO NOT re-read a file you just wrote with file_write; the write response already confirmed the save. '
-      + 'For directory listings use file_list; for content search across many files use file_search.',
+      + '(number of lines): the response names the window, the total line count and the offset of the next page. '
+      + 'A very long whole-file read gets its middle truncated, so page large files. '
+      + 'DO NOT re-read a file you just wrote, the write response already confirmed it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -142,11 +172,9 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
   {
     name: 'file_write',
     description:
-      'Write a WHOLE file. Use for CREATING a new file or fully replacing one. '
-      + 'To change part of an EXISTING file, PREFER file_edit — it is far cheaper than resending the whole file and never truncates a large one. '
-      + 'Creates parent directories if missing. OVERWRITES existing content — there is NO append mode. '
-      + 'PREFER absolute paths. '
-      + 'Writes to the same path within one turn are serialized automatically via the sideEffectKey scheduler.',
+      'Write a WHOLE file: use it to CREATE a new file or fully replace one, and PREFER file_edit to change part of an existing one. '
+      + 'Creates parent directories if missing. OVERWRITES existing content, there is no append mode. '
+      + 'PREFER absolute paths.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -161,11 +189,9 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
   {
     name: 'file_edit',
     description:
-      'Make a SURGICAL edit to an existing file: replace old_string with new_string. '
-      + 'PREFER this over file_write for changing an existing file — you send only the lines that change, so it is far cheaper and never truncates a large file. '
-      + 'old_string must match EXACTLY ONCE: copy the exact text (including indentation) from a prior file_read and include enough surrounding lines to be unique. '
-      + 'It FAILS with no change if old_string is missing or matches more than one place — then read the file and retry with more context. '
-      + 'Use file_write instead to create a new file or fully rewrite one.',
+      'Make a SURGICAL edit to an existing file: replace old_string with new_string. PREFER it over file_write for any change to a file that exists. '
+      + 'old_string must match EXACTLY ONCE: copy the exact text including indentation from a prior file_read and take enough surrounding lines to be unique. '
+      + 'It FAILS with no change when old_string is missing or matches twice; then read the file and retry with more context.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -181,10 +207,10 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
   {
     name: 'file_list',
     description:
-      'List directory contents. Returns entries with name, isDir, size, full path. '
-      + 'Supports recursive=true for full tree and glob pattern ("*.ts", "**/*.py"). '
-      + 'PREFER a specific pattern over recursive listing of large trees — recursing home / C:\\ is slow. '
-      + 'For content search (grep), use file_search instead.',
+      'List directory contents. Returns name, isDir, size and full path per entry. '
+      + 'Supports recursive=true and a glob pattern ("*.ts", "**/*.py"). '
+      + 'PREFER a specific pattern over recursing a whole home or drive, that is slow. '
+      + 'For content search use file_search.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -200,11 +226,10 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
   {
     name: 'file_search',
     description:
-      'Grep-style regex content search across files in a directory. Returns matching lines with file + line number. '
-      + 'PREFER over file_read + manual scan when hunting for a symbol across many files. '
-      + 'Use file_list first if you do not know the layout. '
-      + 'Default max 50 results — narrow the pattern or path if you flood. '
-      + 'Pattern uses Rust regex syntax, not PCRE.',
+      'Grep-style regex content search across files in a directory. Returns matching lines with file and line number. '
+      + 'PREFER it over file_read plus a manual scan when hunting a symbol across many files. '
+      + 'Default max 50 results, narrow the pattern or path if you flood. '
+      + 'Pattern is Rust regex syntax, not PCRE.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -223,13 +248,13 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
     name: 'shell_execute',
     description:
       'THE terminal. Run a shell command: PowerShell on Windows, bash on Unix. Returns stdout, stderr, exit code. '
-      + 'Everything runs here: git, tests, package managers, gh, python, platform utilities. This is also how you open things on the desktop: files, folders, apps (the system prompt states the OS and the exact open command). '
-      + 'Useful forms: `git status --porcelain=2 --branch` and a recognised test run (`npm test`, `npx vitest run`, `cargo test`, `pytest`) return a parsed summary; `git log --oneline -n 20`; `git diff`; `git add -A && git commit -m "msg"`; `git push`; `gh pr create --title "t" --body "b"`. '
-      + 'Feed a script via `stdin` instead of quoting it: set command to `python3 -` or `bash -s` and put the source in `stdin` (fresh process each call, no REPL state). '
-      + 'Long-running work: set `background: true` to get a task id back immediately; follow it by calling again with `task: "status"` and `task_id` (or `task: "list"` / `task: "kill"`). '
-      + 'PREFER dedicated tools where available: file_read over `cat`, file_list over `ls`/`dir`, file_search over `grep`. '
-      + '`git commit --no-verify` is refused. NEVER permanently delete without confirmation (rm -rf, Remove-Item -Recurse, git reset --hard). '
-      + 'Default timeout 120 s (recognised test runs get 300 s); set higher only for known long builds.',
+      + 'Everything runs here: git, tests, package managers, gh, python, platform utilities, and opening files, folders or apps. '
+      + 'A recognised test run and the common git commands come back as a parsed summary. '
+      + 'Feed a script through `stdin` instead of quoting it: set command to `python3 -` or `bash -s` (fresh process each call, no REPL state). '
+      + 'For long work set `background: true` to get a task id back at once, then call again with `task: "status"` and `task_id` (or "list" / "kill"). '
+      + 'PREFER dedicated tools where available: file_read over `cat`, file_list over `ls`, file_search over `grep`. '
+      + '`--no-verify` is refused, and NEVER delete permanently without confirmation. '
+      + 'Default timeout 120 s, test runs 300 s.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -300,7 +325,7 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
       + 'First installed image model is auto-selected (or pass `model`). '
       + 'EXPECT A PAUSE on non-Mac (ComfyUI) single-GPU machines: LU may briefly unload the chat model from VRAM to fit the image model, then reload it after — typically a 30-90s swap. This avoids out-of-memory errors; your conversation is fully preserved across the swap. '
       + 'Rate-limit yourself to 1 call per turn — generations serialize internally so parallel calls will queue, not speed up. '
-      + 'Fine-tune with the optional `settings` object (steps, cfg, sampler, scheduler, width/height, seed, lora, vae); set ONLY what the user asked for. A value beyond the installed model\'s real limit is REJECTED with the actual limit so you can retry lower — values are never silently changed.',
+      + 'Fine-tune through the optional `settings` object; a value beyond the model\'s real limit is REJECTED with the actual limit, never silently changed.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -309,25 +334,12 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
         model: { type: 'string', description: 'Optional image model filename to use. Omit to auto-select the first installed image model.' },
         inputImage: { type: 'string', description: 'Optional. Filename of a previously generated image (from an earlier image_generate result) to use as the base for image-to-image. Omit for text-to-image.' },
         denoise: { type: 'number', description: 'Image-to-image strength 0.05–1.0 (default 0.6). Lower keeps more of the input image, higher follows the prompt more. Only used together with inputImage.' },
-        settings: {
-          type: 'object',
-          description: 'Optional fine-tuning. Set ONLY what the user explicitly asked for; omit the rest (the model\'s own defaults apply). Any value beyond the installed model\'s real limit is rejected with the actual limit. Flat top-level args (above) win over the same key here.',
-          additionalProperties: true,
-          properties: {
-            steps: { type: 'number', description: 'Sampling steps.' },
-            cfg: { type: 'number', description: 'CFG / guidance scale.' },
-            sampler: { type: 'string', description: 'Sampler name — must be one this model supports, else rejected.' },
-            scheduler: { type: 'string', description: 'Scheduler name — must be one this model supports, else rejected.' },
-            seed: { type: 'number', description: 'Seed; omit or -1 for random.' },
-            width: { type: 'number', description: 'Output width in px.' },
-            height: { type: 'number', description: 'Output height in px.' },
-            negativePrompt: { type: 'string', description: 'Things to avoid.' },
-            denoise: { type: 'number', description: 'Image-to-image strength 0.05–1.0 (only with inputImage).' },
-            lora: { type: ['string', 'array'], items: { type: 'string' }, description: 'LoRA filename to apply — or an ARRAY of filenames to stack multiple LoRAs (chained in order, like stacking LoraLoader nodes). Names are matched against the installed LoRAs (extension optional); an unknown name is rejected with the installed list.' },
-            loraStrength: { type: ['number', 'array'], items: { type: 'number' }, description: 'LoRA strength (~0–2). Single number = applied to every LoRA; array = one strength per LoRA in the same order.' },
-            vae: { type: 'string', description: 'Override VAE filename.' },
-          },
-        },
+        settings: mediaSettingsSchema({
+          denoise: { type: 'number', description: 'Image-to-image strength 0.05 to 1.0 (only with inputImage).' },
+          lora: { type: ['string', 'array'], items: { type: 'string' }, description: 'LoRA filename, or an ARRAY of filenames to stack several (chained in order). Matched against the installed LoRAs, extension optional; an unknown name is rejected with the installed list.' },
+          loraStrength: { type: ['number', 'array'], items: { type: 'number' }, description: 'LoRA strength (~0 to 2). One number applies to every LoRA; an array gives one strength per LoRA in the same order.' },
+          vae: { type: 'string', description: 'Override VAE filename.' },
+        }),
       },
       required: ['prompt'],
     },
@@ -343,7 +355,7 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
       + 'Pass `inputImage` (a filename from an earlier image_generate result) to animate a still image — image-to-video, which auto-selects an installed I2V model such as SVD; omit it for text-to-video. First installed video model is auto-selected (or pass `model`). '
       + 'Write ONE clear prompt and call this ONCE per turn — video generation is slow and ComfyUI queues parallel calls rather than speeding up. '
       + 'EXPECT A PAUSE: LU will briefly unload the chat model from VRAM to fit the (large) video model, then reload it after — typically a 30-90s swap, longer on a cold ComfyUI start. This prevents out-of-memory errors; your conversation is preserved across the swap. '
-      + 'Fine-tune with the optional `settings` object (steps, cfg, sampler, scheduler, width/height, seed); set ONLY what the user asked for. A value beyond the installed model\'s real limit (e.g. more frames than the model can make) is REJECTED with the actual limit so you can retry lower — values are never silently changed.',
+      + 'Fine-tune through the optional `settings` object; a value beyond the model\'s real limit is REJECTED with the actual limit, never silently changed.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -354,24 +366,11 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
         frames: { type: 'number', description: 'Advanced: exact frame count (rejected if beyond the model max; e.g. ~81 for Wan, ~25 for SVD). Prefer `seconds`. Omit for the model default.' },
         fps: { type: 'number', description: 'Frames per second of the output clip (e.g. 16). Omit for the model default.' },
         inputImage: { type: 'string', description: 'Optional. Filename of a previously generated image to animate (image-to-video). Requires an installed I2V model such as SVD. Omit for text-to-video.' },
-        settings: {
-          type: 'object',
-          description: 'Optional fine-tuning. Set ONLY what the user explicitly asked for; omit the rest (the model\'s own defaults apply). Any value beyond the installed model\'s real limit is rejected with the actual limit. Flat top-level args (above) win over the same key here.',
-          additionalProperties: true,
-          properties: {
-            seconds: { type: 'number', description: 'Clip length in seconds (preferred length control).' },
-            frames: { type: 'number', description: 'Exact frame count — rejected if beyond the model max.' },
-            fps: { type: 'number', description: 'Frames per second of the output clip.' },
-            steps: { type: 'number', description: 'Sampling steps.' },
-            cfg: { type: 'number', description: 'CFG / guidance scale.' },
-            sampler: { type: 'string', description: 'Sampler name — must be one this model supports (ignored by FramePack, which uses a fixed sampler).' },
-            scheduler: { type: 'string', description: 'Scheduler name — must be one this model supports.' },
-            seed: { type: 'number', description: 'Seed; omit or -1 for random.' },
-            width: { type: 'number', description: 'Output width in px (snapped to the video grid).' },
-            height: { type: 'number', description: 'Output height in px (snapped to the video grid).' },
-            negativePrompt: { type: 'string', description: 'Things to avoid.' },
-          },
-        },
+        settings: mediaSettingsSchema({
+          seconds: { type: 'number', description: 'Clip length in seconds (preferred length control).' },
+          frames: { type: 'number', description: 'Exact frame count, rejected if beyond the model max.' },
+          fps: { type: 'number', description: 'Frames per second of the output clip.' },
+        }),
       },
       // prompt intentionally NOT required: image-to-video can animate a still
       // without an explicit text prompt, and small models sometimes omit it —

@@ -30,7 +30,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
-import { gateCreateTools, wantsMediaTools, CREATE_TOOLS } from '../../lib/tool-selection'
+import { gateCreateTools, wantsMediaTools, CREATE_TOOLS, GATE_OPENING_TOOLS, isGatedTool } from '../../lib/tool-selection'
 import { toolRegistry, DEFAULT_PERMISSIONS } from '../../api/mcp'
 
 const src = readFileSync(
@@ -61,20 +61,32 @@ describe('a plain coding turn does not carry the generators', () => {
     expect(out).toContain('todo_write')
   })
 
-  it('removes exactly three tools from the real coding catalog and nothing else', () => {
+  it('removes exactly the gated tools from the real coding catalog and nothing else', () => {
+    // A6 widened the gate from the three generators to five: pr_resume and
+    // delegate_task shipped a schema on every step of every run that never
+    // mentions a PR or a fan-out.
     const before = names(codingCatalog())
     const after = names(gateCreateTools(codingCatalog(), 'fix the failing test in parser.ts'))
-    expect(before.length - after.length).toBe(3)
-    expect(before.filter((n) => !after.includes(n)).sort()).toEqual([...CREATE_TOOLS].sort())
+    expect(before.length - after.length).toBe(5)
+    expect(before.filter((n) => !after.includes(n)).sort()).toEqual([...GATE_OPENING_TOOLS].sort())
   })
 
-  it('leaves delegate_task alone, which shares the workflow category', () => {
+  it('still gates per tool, not by category', () => {
     // The naive version of this gate filters by category. delegate_task is
     // category 'workflow' (sub-agent.ts) and joined the Code tab in audit B11
-    // precisely because it was unreachable; a category filter would take the
-    // sub-agent fan-out out again by accident.
-    const out = names(gateCreateTools(codingCatalog(), 'refactor the auth guard'))
+    // precisely because it was unreachable; a category filter would take
+    // run_workflow out with it on a delegate ask, and vice versa.
+    const out = names(gateCreateTools(codingCatalog(), 'split the work and fan out over the four files'))
     expect(out).toContain('delegate_task')
+    expect(out).not.toContain('run_workflow')
+    expect(out).not.toContain('image_generate')
+  })
+
+  it('a PR ask brings pr_resume back and nothing else', () => {
+    const out = names(gateCreateTools(codingCatalog(), 'continue the pull request from yesterday'))
+    expect(out).toContain('pr_resume')
+    expect(out).not.toContain('delegate_task')
+    expect(out).not.toContain('image_generate')
   })
 })
 
@@ -192,9 +204,35 @@ describe('a run that discovers halfway through that it needs a picture', () => {
   })
 
   it('useCodex flips it on the call itself, not on the offered list', () => {
-    expect(src).toMatch(/if \(CREATE_TOOLS\.includes\(name\)\) createGateOpened = true/)
+    // A6 leaves the callsite shape alone and only widens the predicate; the
+    // patch that turns CREATE_TOOLS into isGatedTool is a one-liner, so this
+    // accepts either spelling and still fails if the flip disappears.
+    expect(src).toMatch(/if \((?:CREATE_TOOLS\.includes\(name\)|isGatedTool\(name\))\) createGateOpened = true/)
     // Declared per run, so one run's discovery does not leak into the next.
     expect(src).toMatch(/let createGateOpened = false/)
+  })
+
+  it('the self-heal covers the two tools A6 gated, by name and run-wide', () => {
+    // Same hole, same cure: a run that turns out to be a PR after all, or that
+    // decides at step six to fan out, must get the schema back rather than
+    // calling blind for the remaining twenty steps.
+    const defs = [{ name: 'file_read' }, { name: 'pr_resume' }, { name: 'delegate_task' }]
+    const ask = 'clean up the parser'
+    expect(gateCreateTools(defs, ask).map((d) => d.name)).toEqual(['file_read'])
+    // Per-name reopening: only the tool that actually ran comes back.
+    expect(gateCreateTools(defs, ask, ['pr_resume']).map((d) => d.name)).toEqual(['file_read', 'pr_resume'])
+    // The run-wide boolean the current callsite passes opens everything.
+    expect(gateCreateTools(defs, ask, true).map((d) => d.name)).toEqual(
+      ['file_read', 'pr_resume', 'delegate_task'],
+    )
+  })
+
+  it('isGatedTool names exactly the gated five, and nothing that always ships', () => {
+    for (const n of [...CREATE_TOOLS, 'pr_resume', 'delegate_task']) expect(isGatedTool(n), n).toBe(true)
+    for (const n of ['file_read', 'file_edit', 'shell_execute', 'todo_write', 'web_search']) {
+      expect(isGatedTool(n), n).toBe(false)
+    }
+    expect([...GATE_OPENING_TOOLS].sort()).toEqual([...CREATE_TOOLS, 'pr_resume', 'delegate_task'].sort())
   })
 
   it('a closed gate still tells the model the hatch is there', () => {
