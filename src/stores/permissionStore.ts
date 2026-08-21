@@ -117,7 +117,7 @@ export const usePermissionStore = create<PermissionState>()(
     }),
     {
       name: 'locally-uncensored-permissions',
-      version: 2,
+      version: 3,
       migrate: migratePermissionState,
     }
   )
@@ -131,6 +131,38 @@ export const usePermissionStore = create<PermissionState>()(
 export function migratePermissionState(persisted: any, version: number) {
   if (version < 2 && persisted?.globalPermissions?.video === 'blocked') {
     persisted.globalPermissions.video = DEFAULT_PERMISSIONS.video
+  }
+  // v3 (2.6.6 tool merge): the typed shell wrappers are gone, their calls run
+  // through shell_execute now. A per-tool override on a retired name would be
+  // silently dead, so lift the overrides onto shell_execute. Most restrictive
+  // wins: a user who forced confirmation on git_push keeps that protection on
+  // the tool the push actually runs through.
+  if (version < 3 && persisted?.perToolOverrides) {
+    // Frozen copy of the names retired in 2.6.6, NOT imported from
+    // builtin-tools: a migration describes the past and must not drift with
+    // the live registry (and the import would drag the whole tool module
+    // into store init).
+    const RETIRED_V3 = [
+      'git_status', 'git_log', 'git_diff', 'git_commit', 'git_push',
+      'run_tests', 'gh_pr_create', 'project_init', 'code_execute',
+      'system_info', 'process_list', 'get_current_time',
+      'shell_execute_background', 'shell_task_status', 'shell_task_kill', 'shell_task_list',
+    ]
+    const overrides = persisted.perToolOverrides as Record<string, string>
+    const RANK: Record<string, number> = { auto: 0, confirm: 1, blocked: 2 }
+    let strictest: string | undefined
+    for (const name of RETIRED_V3) {
+      const level = overrides[name]
+      if (!level) continue
+      delete overrides[name]
+      if (strictest === undefined || (RANK[level] ?? 0) > (RANK[strictest] ?? 0)) strictest = level
+    }
+    if (strictest !== undefined) {
+      const own = overrides['shell_execute']
+      if (own === undefined || (RANK[strictest] ?? 0) > (RANK[own] ?? 0)) {
+        overrides['shell_execute'] = strictest
+      }
+    }
   }
   return persisted
 }

@@ -56,10 +56,11 @@ interface AgentCtxState {
   /** Chat-tools artifact mode: when true, file_write captures instead of
    *  writing to disk, so plain chat shows files inline (ChatGPT-style). */
   artifactMode: boolean
+  readOnlyShellTurn: boolean
   artifacts: CapturedArtifact[]
 }
 const _g = globalThis as typeof globalThis & { __LU_AGENT_CTX?: AgentCtxState }
-const ctx: AgentCtxState = _g.__LU_AGENT_CTX ?? (_g.__LU_AGENT_CTX = { chatId: null, conversationId: null, workspace: null, model: null, artifactMode: false, artifacts: [] })
+const ctx: AgentCtxState = _g.__LU_AGENT_CTX ?? (_g.__LU_AGENT_CTX = { chatId: null, conversationId: null, workspace: null, model: null, artifactMode: false, readOnlyShellTurn: false, artifacts: [] })
 
 /**
  * The text model driving the current agent loop. Pinned by useAgentChat right
@@ -111,7 +112,24 @@ export function clearActiveChatId(): void {
   ctx.workspace = null
   ctx.model = null
   ctx.artifactMode = false
+  ctx.readOnlyShellTurn = false
   ctx.artifacts = []
+}
+
+// ── Read-only turn (2.6.6 tool merge, plan E4 point 1) ─────────
+//
+// /review and Code-Review Mode used to strip the mutating tools BY NAME and
+// keep the typed inspectors (git_status, git_diff, …). Those names are gone;
+// the one terminal stays in the catalog and this flag makes its EXECUTOR the
+// gate: only commands the conservative read-only classifier accepts run while
+// it is set. Set at run start by useCodex, cleared in its finally.
+
+export function setReadOnlyShellTurn(on: boolean): void {
+  ctx.readOnlyShellTurn = !!on
+}
+
+export function isReadOnlyShellTurn(): boolean {
+  return ctx.readOnlyShellTurn
 }
 
 // ── Chat-tools artifact mode (David 2026-06-12) ────────────────

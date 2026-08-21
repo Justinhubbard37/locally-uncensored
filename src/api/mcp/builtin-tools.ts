@@ -3,7 +3,7 @@
 import type { MCPToolDefinition } from './types'
 import type { ToolRegistry } from './tool-registry'
 import { backendCall, fetchExternal } from '../backend'
-import { getActiveChatId, getActiveConversationId, getActiveWorkspace, isChatArtifactMode, captureChatArtifact } from '../agent-context'
+import { getActiveChatId, getActiveConversationId, getActiveWorkspace, isChatArtifactMode, captureChatArtifact, isReadOnlyShellTurn } from '../agent-context'
 import { useAgentWorkflowStore } from '../../stores/agentWorkflowStore'
 import { WorkflowEngine } from '../../lib/workflow-engine'
 import type { StepResult } from '../../types/agent-workflows'
@@ -85,7 +85,7 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
       'Search the web via the configured provider (Brave, Tavily, or auto). Returns a ranked list of {title, url, snippet}. '
       + 'PREFER web_fetch on promising URLs for full content — snippets are teasers, not answers. '
       + 'DO NOT call more than 3x per turn with similar queries; refine the query instead of re-searching. '
-      + 'For current date/time, use get_current_time — do NOT web_search for it.',
+      + 'For the current date/time, trust the date line in the system prompt; do NOT web_search for it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -222,209 +222,25 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
   {
     name: 'shell_execute',
     description:
-      'Run a shell command. PowerShell on Windows, bash on Unix. Returns stdout, stderr, exit code. '
-      + 'PREFER dedicated tools where available: file_read over `cat`, file_list over `ls`/`dir`, file_search over `grep`, get_current_time over `date`. '
-      + 'Use shell_execute for git, npm, cargo, docker, package managers, or platform utilities without a dedicated tool. '
-      + 'This is also how you open things on the desktop: a folder, a file, or an application. The system prompt states which OS this is and gives the exact command. '
-      + 'NEVER use to permanently delete without confirmation (rm -rf, Remove-Item -Recurse, git reset --hard). '
-      + 'Default timeout 120 s; set higher only for known long-running builds.',
+      'THE terminal. Run a shell command: PowerShell on Windows, bash on Unix. Returns stdout, stderr, exit code. '
+      + 'Everything runs here: git, tests, package managers, gh, python, platform utilities. This is also how you open things on the desktop: files, folders, apps (the system prompt states the OS and the exact open command). '
+      + 'Useful forms: `git status --porcelain=2 --branch` and a recognised test run (`npm test`, `npx vitest run`, `cargo test`, `pytest`) return a parsed summary; `git log --oneline -n 20`; `git diff`; `git add -A && git commit -m "msg"`; `git push`; `gh pr create --title "t" --body "b"`. '
+      + 'Feed a script via `stdin` instead of quoting it: set command to `python3 -` or `bash -s` and put the source in `stdin` (fresh process each call, no REPL state). '
+      + 'Long-running work: set `background: true` to get a task id back immediately; follow it by calling again with `task: "status"` and `task_id` (or `task: "list"` / `task: "kill"`). '
+      + 'PREFER dedicated tools where available: file_read over `cat`, file_list over `ls`/`dir`, file_search over `grep`. '
+      + '`git commit --no-verify` is refused. NEVER permanently delete without confirmation (rm -rf, Remove-Item -Recurse, git reset --hard). '
+      + 'Default timeout 120 s (recognised test runs get 300 s); set higher only for known long builds.',
     inputSchema: {
       type: 'object',
       properties: {
-        command: { type: 'string', description: 'The full command to execute' },
+        command: { type: 'string', description: 'The full command to execute. Omit only for task actions.' },
         cwd: { type: 'string', description: 'Working directory (optional, absolute preferred)' },
         timeout: { type: 'number', description: 'Timeout in milliseconds (default: 120000)' },
         shell: { type: 'string', description: 'Override shell: "powershell" | "cmd" | "bash" (default: auto)' },
-      },
-      required: ['command'],
-    },
-    category: 'terminal',
-    source: 'builtin',
-  },
-  {
-    name: 'code_execute',
-    description:
-      'Execute Python code in a fresh subprocess. Returns stdout, stderr, exit code. '
-      + 'Use for math, data transforms, JSON/CSV parsing, one-off scripts. '
-      + 'NOT a REPL — state does not persist between calls; import everything you need each time. '
-      + 'For system commands and shell utilities, PREFER shell_execute. '
-      + 'Default timeout 30 s.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        code: { type: 'string', description: 'The Python source to execute (UTF-8)' },
-        language: { type: 'string', description: 'Programming language: "python" or "shell"', enum: ['python', 'shell'] },
-      },
-      required: ['code'],
-    },
-    category: 'terminal',
-    source: 'builtin',
-  },
-  {
-    name: 'shell_execute_background',
-    description:
-      'Spawn a shell command on the bridge as a LONG-RUNNING BACKGROUND task. '
-      + 'Returns an opaque task `id` immediately — the user can close the browser, '
-      + 'come back later, and use `shell_task_status` to read the tail of stdout/stderr. '
-      + 'USE for batch refactors, large `pnpm install`, `cargo build`, dataset transforms — '
-      + 'anything that would time out a normal `shell_execute` call.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        command: { type: 'string', description: 'Shell command to run.' },
-        cwd: { type: 'string', description: 'Working directory.' },
-      },
-      required: ['command'],
-    },
-    category: 'terminal',
-    source: 'builtin',
-  },
-  {
-    name: 'shell_task_status',
-    description:
-      'Read the status of a background task started via `shell_execute_background`. '
-      + 'Returns running/finished, exit code, cancelled flag, and the last ~64 KiB of '
-      + 'output. Poll periodically while a task is running.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        id: { type: 'string', description: 'Task id returned by shell_execute_background.' },
-      },
-      required: ['id'],
-    },
-    category: 'terminal',
-    source: 'builtin',
-  },
-  {
-    name: 'shell_task_kill',
-    description:
-      'Cancel a running background task. No-op if the task already finished.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        id: { type: 'string', description: 'Task id to cancel.' },
-      },
-      required: ['id'],
-    },
-    category: 'terminal',
-    source: 'builtin',
-  },
-  {
-    name: 'shell_task_list',
-    description:
-      'List all background tasks the bridge knows about (newest first). Use for '
-      + '"what is still running?" queries.',
-    inputSchema: { type: 'object', properties: {}, required: [] },
-    category: 'terminal',
-    source: 'builtin',
-  },
-  {
-    name: 'git_status',
-    description:
-      'Run `git status --porcelain=2 --branch` and return a STRUCTURED summary: '
-      + 'branch, ahead/behind counts, per-file status codes, clean-tree flag. '
-      + 'PREFER over shell_execute for "what changed" queries — output is greppable.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        cwd: { type: 'string', description: 'Working directory (defaults to chat workspace).' },
-      },
-      required: [],
-    },
-    category: 'terminal',
-    source: 'builtin',
-  },
-  {
-    name: 'git_commit',
-    description:
-      'Stage files (or all tracked changes) and create a commit with `message`. '
-      + 'When `allTracked` is true → `git add -A` then `git commit`; '
-      + 'when `files` is given → only those paths are staged; '
-      + 'otherwise commits whatever is already staged. '
-      + 'NEVER passes `--no-verify` — fix hook failures, don\'t skip them. '
-      + 'Output includes the new commit SHA on success.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        message: { type: 'string', description: 'Commit message (multi-line OK).' },
-        allTracked: { type: 'boolean', description: 'Stage every tracked change first.' },
-        files: { type: 'array', items: { type: 'string' }, description: 'Specific files to stage.' },
-        cwd: { type: 'string', description: 'Working directory.' },
-      },
-      required: ['message'],
-    },
-    category: 'terminal',
-    source: 'builtin',
-  },
-  {
-    name: 'git_push',
-    description:
-      'Run `git push`. With no args pushes the current branch to its tracked upstream. '
-      + 'WARN: not for `main`/`master` without explicit user instruction — '
-      + 'check git_status first.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        remote: { type: 'string', description: 'Remote name (default: origin).' },
-        branch: { type: 'string', description: 'Branch to push (default: current).' },
-        setUpstream: { type: 'boolean', description: 'Pass `-u` for first-time push.' },
-        cwd: { type: 'string', description: 'Working directory.' },
-      },
-      required: [],
-    },
-    category: 'terminal',
-    source: 'builtin',
-  },
-  {
-    name: 'git_log',
-    description:
-      'Recent commits in one-line format. Returns parsed [{sha, subject}]. '
-      + 'PREFER over shell_execute when answering "what changed recently" — output is greppable.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        limit: { type: 'number', description: 'Max commits to return (default 20).' },
-        cwd: { type: 'string', description: 'Working directory.' },
-      },
-      required: [],
-    },
-    category: 'terminal',
-    source: 'builtin',
-  },
-  {
-    name: 'git_diff',
-    description:
-      'Run `git diff` between HEAD (or a ref) and the working tree. '
-      + 'Returns the raw unified diff — pair with file_search if you only need a path. '
-      + 'For staged changes pass `staged: true`.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        ref: { type: 'string', description: 'Base ref (e.g. main, HEAD~3). Defaults to HEAD.' },
-        path: { type: 'string', description: 'Limit to a path.' },
-        staged: { type: 'boolean', description: 'Diff the index instead of the working tree.' },
-        cwd: { type: 'string', description: 'Working directory.' },
-      },
-      required: [],
-    },
-    category: 'terminal',
-    source: 'builtin',
-  },
-  {
-    name: 'project_init',
-    description:
-      'Scaffold a new project from a known stack recipe. With no `recipe` arg, lists '
-      + 'available stacks (next-postgres, next-supabase, next-stripe, rust-axum, vite-react). '
-      + 'With a `recipe` arg, returns a markdown plan of ordered shell commands the model '
-      + 'can then execute via shell_execute. Workspace-sandboxed IDEs can\'t do this — LU '
-      + 'can because the bridge has real shell + filesystem access.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        recipe: {
-          type: 'string',
-          description: 'Stack id (e.g. "next-postgres"). Omit to list available recipes.',
-        },
+        stdin: { type: 'string', description: 'Text piped to the command\'s stdin, e.g. a Python script for `python3 -`.' },
+        background: { type: 'boolean', description: 'Run detached; returns a task id immediately instead of waiting.' },
+        task: { type: 'string', enum: ['status', 'list', 'kill'], description: 'Background-task action instead of running a command.' },
+        task_id: { type: 'string', description: 'Task id for task "status" or "kill".' },
       },
       required: [],
     },
@@ -449,80 +265,8 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
     category: 'terminal',
     source: 'builtin',
   },
-  {
-    name: 'gh_pr_create',
-    description:
-      'Open a new GitHub pull request via the `gh` CLI. Requires the user to be authed against GitHub locally. '
-      + 'Pushes the current branch first if it has no upstream. Returns the PR URL on success.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        title: { type: 'string', description: 'PR title (under 70 chars).' },
-        body: { type: 'string', description: 'PR description in markdown.' },
-        base: { type: 'string', description: 'Base branch (default: repo default).' },
-        cwd: { type: 'string', description: 'Working directory.' },
-      },
-      required: ['title'],
-    },
-    category: 'terminal',
-    source: 'builtin',
-  },
-  {
-    name: 'run_tests',
-    description:
-      'Run the project test suite and return a STRUCTURED summary: passed/failed counts, '
-      + 'failing test names, last 40 output lines. AUTO-DETECTS the runner '
-      + '(vitest, jest, cargo, pytest) from files in the working directory unless `runner` is given. '
-      + 'PREFER this over shell_execute when the user says "run the tests", "make this green", '
-      + 'or you are iterating on a failing assertion — the output is greppable instead of an opaque dump. '
-      + 'Default timeout 300 s. Pass `command` to override the auto-detected command (e.g. a single-file scope).',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        runner: {
-          type: 'string',
-          description: 'Force a runner: "vitest" | "jest" | "cargo" | "pytest". Auto if omitted.',
-          enum: ['vitest', 'jest', 'cargo', 'pytest'],
-        },
-        command: {
-          type: 'string',
-          description: 'Override the test command entirely. Use for single-file runs (`pnpm exec vitest run path/to/x.test.ts`).',
-        },
-        cwd: {
-          type: 'string',
-          description: 'Override working directory. Defaults to the chat workspace.',
-        },
-        timeout: {
-          type: 'number',
-          description: 'Timeout in ms (default 300_000 — tests can take a while).',
-        },
-      },
-      required: [],
-    },
-    category: 'terminal',
-    source: 'builtin',
-  },
 
   // System
-  {
-    name: 'system_info',
-    description:
-      'Return desktop system info: OS, architecture, hostname, username, total RAM, CPU count. Zero arguments. '
-      + 'Call once when output needs to be tailored to the user\'s platform; do not call repeatedly in a loop.',
-    inputSchema: { type: 'object', properties: {}, required: [] },
-    category: 'system',
-    source: 'builtin',
-  },
-  {
-    name: 'process_list',
-    description:
-      'List the top 30 running processes sorted by memory: {name, pid, memory, cpu%}. Zero arguments. '
-      + 'Use for task-manager-style queries ("is Chrome running?", "which process is eating RAM?"). '
-      + 'There is NO process_kill tool — to kill a process use shell_execute with taskkill (Windows) or kill (Unix).',
-    inputSchema: { type: 'object', properties: {}, required: [] },
-    category: 'system',
-    source: 'builtin',
-  },
 
   // Desktop
   {
@@ -662,20 +406,6 @@ const BUILTIN_TOOLS: MCPToolDefinition[] = [
   DELEGATE_TASK_TOOL_DEF,
 
   // Local clock — so the agent never googles "what day is it".
-  {
-    name: 'get_current_time',
-    description:
-      "Return the user's current local date, time, and timezone. Zero arguments. "
-      + "USE FIRST for any 'what day / time / date is it' question — do NOT web_search or shell_execute `date`. "
-      + "The Rust backend probes the OS timezone on every call, so this is always authoritative.",
-    inputSchema: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-    category: 'system',
-    source: 'builtin',
-  },
 ]
 
 // ── Executors ────────────────────────────────────────────────────
@@ -891,18 +621,81 @@ async function executeFileSearch(args: Record<string, any>): Promise<string> {
 }
 
 async function executeShellExecute(args: Record<string, any>): Promise<string> {
+  // Background-task actions: the three shell_task_* tools folded in (2.6.6).
+  const task = typeof args.task === 'string' ? args.task : ''
+  if (task === 'list') return executeShellTaskList()
+  if (task === 'status' || task === 'kill') {
+    if (task === 'kill' && isReadOnlyShellTurn()) {
+      return 'Refused: this turn is read-only (/review or Code-Review Mode); killing a task changes state.'
+    }
+    const id = args.task_id ?? args.id
+    if (!id) return `shell_execute: task "${task}" needs a task_id.`
+    return task === 'status' ? executeShellTaskStatus({ id }) : executeShellTaskKill({ id })
+  }
+
+  const command = typeof args.command === 'string' ? args.command.trim() : ''
+  if (!command) return 'shell_execute: `command` is required (or pass task: "status" | "list" | "kill").'
+
+  const { rejectShellCommand, commandTimeoutMs, commandKind, isReadOnlyCommand } = await import(
+    '../../lib/shell-command-classify'
+  )
+  // Read-only turn (/review …): the classifier is the gate now that the typed
+  // read-only inspectors are gone. Conservative on purpose: chained commands
+  // are refused outright, a read-only mode that can be talked around is none.
+  if (isReadOnlyShellTurn() && (args.background || !isReadOnlyCommand(command))) {
+    return 'Refused: this turn is read-only (/review or Code-Review Mode). Only inspection commands run here: git status/log/diff/show/blame, ls, cat, pwd. One command, no chaining.'
+  }
+
+  if (args.background) return executeShellExecuteBg({ command, cwd: args.cwd })
+
+  // The one refusal that stays hard after the merge: --no-verify on a commit.
+  const refusal = rejectShellCommand(command)
+  if (refusal) return refusal
+
+  // An explicit timeout wins; otherwise a recognised test run keeps the old
+  // run_tests budget (300 s) instead of the shell default.
+  const timeout = args.timeout || commandTimeoutMs(command, 120000)
   const data = await backendCall('shell_execute', {
-    command: args.command,
+    command,
     args: args.args || null,
     cwd: args.cwd || null,
-    timeout: args.timeout || 120000,
+    timeout,
     shell: args.shell || null,
+    stdin: typeof args.stdin === 'string' && args.stdin ? args.stdin : null,
     ...chatCtx(),
   })
   const output = data.stdout || ''
   const err = data.stderr || ''
   if (data.timedOut) return `Timed out.\n${err}`
+
+  const kind = commandKind(command)
+  // Parsed summaries (plan E4 point 4): they used to hang on the typed tool
+  // names, small models rely on them, so they hang on the command now.
+  if (kind === 'test-run') {
+    const { parseForRunner, renderResult } = await import('../agents/test-runner')
+    const runner = /vitest/.test(command)
+      ? 'vitest'
+      : /jest/.test(command)
+        ? 'jest'
+        : /cargo/.test(command)
+          ? 'cargo'
+          : /pytest/.test(command)
+            ? 'pytest'
+            : 'unknown'
+    const combined = `${output}\n${err}`.trim()
+    const tail = combined.length > 4000 ? `…${combined.slice(-4000)}` : combined
+    return `${renderResult(parseForRunner(runner, combined))}\n---\n${tail}`
+  }
   if (data.exitCode && data.exitCode !== 0) return `Error (${data.exitCode}):\n${err || output}`
+  if (kind === 'git-status' && /--porcelain=2/.test(command)) {
+    const { parseGitStatus, renderGitStatus } = await import('../agents/git-tools')
+    return renderGitStatus(parseGitStatus(output))
+  }
+  if (kind === 'git-commit') {
+    const combined = `${output}\n${err}`.trim()
+    const m = combined.match(/\[(\S+)\s+([0-9a-f]{7,40})\]/)
+    return m ? `Committed on ${m[1]} as ${m[2]}.\n${combined}` : combined || 'Done.'
+  }
   return output || (err ? `stderr: ${err}` : 'Done.')
 }
 
@@ -1543,27 +1336,11 @@ const EXECUTOR_MAP: Record<string, (args: Record<string, any>) => Promise<string
   file_list: executeFileList,
   file_search: executeFileSearch,
   shell_execute: executeShellExecute,
-  code_execute: executeCodeExecute,
-  run_tests: executeRunTests,
-  shell_execute_background: executeShellExecuteBg,
-  shell_task_status: executeShellTaskStatus,
-  shell_task_kill: executeShellTaskKill,
-  shell_task_list: executeShellTaskList,
-  git_status: executeGitStatus,
-  git_commit: executeGitCommit,
-  git_push: executeGitPush,
-  git_log: executeGitLog,
-  git_diff: executeGitDiff,
-  gh_pr_create: executeGhPrCreate,
   pr_resume: executePrResume,
-  project_init: executeProjectInit,
-  system_info: executeSystemInfo,
-  process_list: executeProcessList,
   screenshot: executeScreenshot,
   image_generate: executeImageGenerate,
   video_generate: executeVideoGenerate,
   run_workflow: executeRunWorkflow,
-  get_current_time: executeGetCurrentTime,
   delegate_task: buildDelegateExecutor(),
 }
 
@@ -1574,4 +1351,80 @@ export function registerBuiltinTools(registry: ToolRegistry) {
       registry.registerBuiltin(tool, executor)
     }
   }
+}
+
+// ── Retired tools (2.6.6 merge, plan E5) ────────────────────────
+//
+// Sixteen typed wrappers left the catalog: their schemas cost ~109 tokens
+// each per step while every executor ended in runShell anyway. But a running
+// chat, a restored session and every model that saw the old names in its
+// context still CALLS them, and "Error: Unknown tool" burns that step. Same
+// cure as uselu's RETIRED_MODELS: the old call still runs (through the kept
+// executors), and the reply names the new way once.
+
+const RETIRED_HINT: Record<string, string> = {
+  git_status: 'shell_execute with command "git status --porcelain=2 --branch"',
+  git_log: 'shell_execute with command "git log --oneline -n 20"',
+  git_diff: 'shell_execute with command "git diff"',
+  git_commit: 'shell_execute with command "git add -A && git commit -m \\"msg\\""',
+  git_push: 'shell_execute with command "git push"',
+  run_tests: 'shell_execute with the project test command (npm test, npx vitest run, cargo test, pytest)',
+  gh_pr_create: 'shell_execute with command "gh pr create --title \\"t\\" --body \\"b\\""',
+  project_init: 'shell_execute with the scaffold commands directly',
+  code_execute: 'shell_execute with command "python3 -" and the source in stdin',
+  system_info: 'the system prompt (OS, shell, time are stated there); for hardware, shell_execute "uname -a" (Windows: Get-ComputerInfo)',
+  process_list: 'shell_execute with command "ps aux" (Windows: Get-Process)',
+  get_current_time: 'the system prompt, which states date and time at run start',
+  shell_execute_background: 'shell_execute with background: true',
+  shell_task_status: 'shell_execute with task: "status" and task_id',
+  shell_task_kill: 'shell_execute with task: "kill" and task_id',
+  shell_task_list: 'shell_execute with task: "list"',
+}
+
+const RETIRED_EXECUTORS: Record<string, (args: Record<string, any>) => Promise<string>> = {
+  git_status: executeGitStatus,
+  git_log: executeGitLog,
+  git_diff: executeGitDiff,
+  git_commit: executeGitCommit,
+  git_push: executeGitPush,
+  run_tests: executeRunTests,
+  gh_pr_create: executeGhPrCreate,
+  project_init: executeProjectInit,
+  code_execute: executeCodeExecute,
+  system_info: executeSystemInfo,
+  process_list: executeProcessList,
+  get_current_time: executeGetCurrentTime,
+  shell_execute_background: executeShellExecuteBg,
+  shell_task_status: executeShellTaskStatus,
+  shell_task_kill: executeShellTaskKill,
+  shell_task_list: executeShellTaskList,
+}
+
+const RETIRED_MUTATING = new Set([
+  'git_commit', 'git_push', 'gh_pr_create', 'project_init', 'run_tests',
+  'code_execute', 'shell_execute_background', 'shell_task_kill',
+])
+
+/** Names that still resolve through the redirect, for override migration. */
+export const RETIRED_TOOL_NAMES: ReadonlySet<string> = new Set(Object.keys(RETIRED_EXECUTORS))
+
+/**
+ * Run a retired tool under its old name, or return null when the name was
+ * never ours. The appended note is one line so the model learns the new way
+ * without the step being wasted.
+ */
+export async function runRetiredTool(
+  name: string,
+  args: Record<string, any>,
+): Promise<string | null> {
+  const run = RETIRED_EXECUTORS[name]
+  if (!run) return null
+  // The read-only gate lives on shell_execute's command classifier; a retired
+  // mutating name would walk straight past it via this redirect.
+  if (isReadOnlyShellTurn() && RETIRED_MUTATING.has(name)) {
+    return `Refused: this turn is read-only (/review or Code-Review Mode); ${name} changes state.`
+  }
+  const result = await run(args)
+  const hint = RETIRED_HINT[name]
+  return hint ? `${result}\n\n(Note: ${name} is retired, next time use ${hint}.)` : result
 }

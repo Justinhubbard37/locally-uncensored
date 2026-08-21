@@ -9,7 +9,7 @@ import { markToolsUnsupported } from '../api/tool-capability'
 import { toolRegistry } from '../api/mcp'
 import { usePermissionStore } from '../stores/permissionStore'
 import { toolStrategyFor } from '../lib/tool-support'
-import { MUTATING_TOOLS } from '../lib/mutating-tools'
+import { allowedInReadOnlyTurn } from '../lib/mutating-tools'
 import { applyGoalCommand } from '../lib/goal-command'
 import { useAgentGoalStore, renderGoalSection } from '../stores/agentGoalStore'
 import { useAgentLoopStore } from '../stores/agentLoopStore'
@@ -17,7 +17,7 @@ import { CODEX_CONFIRM_TOOLS, codexConfirmEnabled } from './codexShellGate'
 import { buildHermesToolPrompt, buildHermesToolResult, parseHermesToolCalls, stripToolCallTags, hasToolCallTags } from '../api/hermes-tool-calling'
 import { streamProviderTurn, type StreamedProviderTurn } from '../lib/provider-stream'
 import { createHermesDisplayFilter } from '../lib/hermes-stream'
-import { setActiveChatId, setActiveConversationId, clearActiveChatId, chatWorkspaceSlug, setActiveWorkspace, setActiveAgentModel } from '../api/agent-context'
+import { setActiveChatId, setActiveConversationId, clearActiveChatId, chatWorkspaceSlug, setActiveWorkspace, setActiveAgentModel, setReadOnlyShellTurn } from '../api/agent-context'
 import { resolveWorkspace } from '../api/agents/workspace-resolve'
 import { useAgentModeStore } from '../stores/agentModeStore'
 import { loadLurules, renderRulesSection, type RulesReader } from '../lib/lurules'
@@ -55,9 +55,10 @@ import { canonicalToolName } from '../lib/loose-tool-parse'
 import { selectRelevantTools, selectRelevantToolsAsync, SMALL_MODEL_MAX_TOOLS, gateCreateTools, wantsMediaTools, CREATE_TOOLS } from '../lib/tool-selection'
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
-import { toolCallCapMs, raceWithToolTimeout, SHELL_EXECUTE_DEFAULT_TIMEOUT_MS, CODE_EXECUTE_DEFAULT_TIMEOUT_MS } from '../lib/tool-timeout'
+import { toolCallCapMs, raceWithToolTimeout, SHELL_EXECUTE_DEFAULT_TIMEOUT_MS } from '../lib/tool-timeout'
 import { compactMessages, getModelMaxTokens, estimateTokens } from '../lib/context-compaction'
 import { resolveAgentNumCtx } from '../lib/agent-num-ctx'
+import { hostEnvironmentBlock } from '../lib/host-platform'
 import { AgentLoopGuard } from '../lib/agent-loop-guard'
 import { findStagedForPath, stagedReadResult, stagedListingNote } from '../lib/staged-overlay'
 import { applyAllStagedChanges } from '../lib/staged-apply'
@@ -79,11 +80,11 @@ function diagLog(_tag: string, _data: unknown): void {
 // framing for a read-only reviewer and would fight the executor gate. The
 // list-stripping below (MUTATING_TOOLS) still enforces
 // read-only programmatically even if the model tries a write tool anyway.
-const CODEX_REVIEW_SYSTEM_PROMPT = `You are the Coding Agent in REVIEW MODE, a read-only code reviewer inside LU. You DO NOT modify any files, run any commands, or change any state. Your job is to read code with file_read / file_list / file_search / git_diff / git_log and return INLINE COMMENTS only.
+const CODEX_REVIEW_SYSTEM_PROMPT = `You are the Coding Agent in REVIEW MODE, a read-only code reviewer inside LU. You DO NOT modify any files or change any state. Your job is to read code with file_read / file_list / file_search plus inspection commands over shell_execute (git status, git log, git diff, git show, git blame, ls, cat, pwd) and return INLINE COMMENTS only.
 
 REVIEW MODE CONTRACT (binding):
-- You MAY call: file_read, file_list, file_search, git_status, git_log, git_diff, system_info, process_list, get_current_time, web_fetch, web_search.
-- You MUST NOT call: file_write, file_edit, shell_execute, code_execute, run_tests, git_commit, git_push, gh_pr_create, image_generate, video_generate, run_workflow, screenshot, delegate_task. They are stripped from your tool list; attempting one fails as an unknown tool and wastes the step.
+- You MAY call: file_read, file_list, file_search, web_fetch, web_search, and shell_execute for INSPECTION ONLY (git status/log/diff/show/blame, ls, cat, pwd; one command, no chaining).
+- You MUST NOT call: file_write, file_edit, image_generate, video_generate, run_workflow, screenshot, delegate_task, or any shell command that changes state (commit, push, install, tests, deletes). Mutating tools are stripped from your list and mutating shell commands are refused; attempting one wastes the step.
 - Output format: a markdown report with sections "## Summary", "## Findings (priority order)", "## Suggested follow-ups". For each finding cite the file + line range (path:line or path:start-end).
 - Be direct. No flattery, no boilerplate. If the code is fine, say so in one sentence and stop.`
 
@@ -466,6 +467,10 @@ export function useCodex() {
     // list-stripping below (MUTATING_TOOLS) still enforces it
     // programmatically even if the model tries to call a write tool anyway.
     const reviewMode = settings.codexReviewMode === true
+    // The merged shell_execute stays offered on read-only turns (it carries
+    // git status/log/diff now); the executor refuses everything else while
+    // this flag is up. Cleared in the finally below.
+    setReadOnlyShellTurn(reviewMode || readOnlyTurn)
     // Review mode always wins; otherwise Small-Model Mode swaps in the lean
     // prompt (Knob 2) for small local models.
     const baseCodexPrompt = reviewMode
@@ -496,7 +501,10 @@ export function useCodex() {
       workDir && workDir !== '.'
         ? `Working directory: ${workDir}\nUse paths relative to it (e.g. \`package.json\`); do not prefix with \`/\` or a drive letter.`
         : 'Working directory: your private sandbox folder. Use relative paths only (e.g. `package.json`, `.`); never a leading `/` or a drive letter like `C:\\`.'
-    let systemPrompt = `${baseCodexPrompt}${assetLine}\n\n${workDirLine}`
+    // Environment block (2.6.6, plan E3): OS, shell, clock, timezone. Codex
+    // never had the platform sentence; it paid for it with system_info and
+    // get_current_time round trips instead, and those tools are gone now.
+    let systemPrompt = `${baseCodexPrompt}${assetLine}\n\n${hostEnvironmentBlock()}\n${workDirLine}`
     // Standing goal (/goal) — ahead of the rules and the repo map so it frames
     // everything that follows instead of reading as an afterthought.
     systemPrompt += renderGoalSection(useAgentGoalStore.getState().getGoal(convId))
@@ -905,7 +913,7 @@ export function useCodex() {
           // with the system prompt — covers the model ignoring the instruction
           // and trying anyway.
           const codexTools = (settings.codexReviewMode || readOnlyTurn)
-            ? codexToolsAll.filter((t) => !MUTATING_TOOLS.has(t.name))
+            ? codexToolsAll.filter((t) => allowedInReadOnlyTurn(t.name))
             : codexToolsAll
           // Tool-list sizing is a MODEL-STRENGTH decision (audit B3):
           //  - Small-Model Mode: embedding router + hard cap, ≤6 tools. A
@@ -1146,7 +1154,7 @@ export function useCodex() {
               const def = toolRegistry.getToolByName(t.name)
               if (!def) return true
               if (!(CODEX_CATEGORIES as readonly string[]).includes(def.category)) return false
-              if ((settings.codexReviewMode || readOnlyTurn) && MUTATING_TOOLS.has(t.name)) return false
+              if ((settings.codexReviewMode || readOnlyTurn) && !allowedInReadOnlyTurn(t.name)) return false
               return true
             },
           )
@@ -1327,9 +1335,9 @@ export function useCodex() {
         // every one of its six requests, and still created a file on disk.
         // Review Mode carried the identical hole since 2.5.6.
         if (settings.codexReviewMode || readOnlyTurn) {
-          const blocked = toolCalls.filter((tc) => MUTATING_TOOLS.has(tc.function?.name ?? ''))
+          const blocked = toolCalls.filter((tc) => !allowedInReadOnlyTurn(tc.function?.name ?? ''))
           if (blocked.length) {
-            toolCalls = toolCalls.filter((tc) => !MUTATING_TOOLS.has(tc.function?.name ?? ''))
+            toolCalls = toolCalls.filter((tc) => allowedInReadOnlyTurn(tc.function?.name ?? ''))
             const names = [...new Set(blocked.map((tc) => tc.function.name))].join(', ')
             messages.push({
               role: 'user',
@@ -1485,10 +1493,6 @@ export function useCodex() {
           if (toolName === 'shell_execute') {
             if (!toolArgs.cwd && hasValidWorkDir) toolArgs.cwd = workDir
             if (!toolArgs.timeout) toolArgs.timeout = SHELL_EXECUTE_DEFAULT_TIMEOUT_MS
-          }
-          if (toolName === 'code_execute') {
-            if (!toolArgs.cwd && hasValidWorkDir) toolArgs.cwd = workDir
-            if (!toolArgs.timeout) toolArgs.timeout = CODE_EXECUTE_DEFAULT_TIMEOUT_MS
           }
           // Resolve relative file paths against working directory.
           // Absolute-path detection must accept ANY drive letter (C:, D:, E:, …),
@@ -1997,7 +2001,7 @@ export function useCodex() {
           markToolsUnsupported(modelToUse)
           hint = '\n\nHint: this model does not support tool calling, so Code mode cannot use it. Pick a model that supports tool calling (Qwen 3, Llama 3.1+, Gemma 4) or an LU Cloud model shown with the tools badge.'
         } else if (/timed out/i.test(msg)) {
-          hint = '\n\nHint: a tool call exceeded its time budget. For long builds, raise the command timeout, split the work, or run it via shell_execute_background.'
+          hint = '\n\nHint: a tool call exceeded its time budget. For long builds, raise the command timeout, split the work, or start the command with background: true and poll it with task: "status".'
         }
         // An empty wallet is not a crash and no retry fixes it. Replace the
         // status-code line with the plain explanation the other surfaces use.

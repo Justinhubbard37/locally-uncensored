@@ -141,7 +141,7 @@ struct StartArgs {
 // State-wrapping layer and call these directly — same as uselu's tests
 // did against the originally `pub` fns with a hand-built `AppState`.
 
-async fn shell_task_start_impl(args: &Value) -> CmdResult {
+pub(crate) async fn shell_task_start_impl(args: &Value) -> CmdResult {
     let a: StartArgs =
         serde_json::from_value(args.clone()).map_err(|e| bad_request(e.to_string()))?;
     if a.command.trim().is_empty() {
@@ -315,7 +315,7 @@ struct IdArgs {
     id: String,
 }
 
-async fn shell_task_status_impl(args: &Value) -> CmdResult {
+pub(crate) async fn shell_task_status_impl(args: &Value) -> CmdResult {
     let a: IdArgs = serde_json::from_value(args.clone()).map_err(|e| bad_request(e.to_string()))?;
     let task = REGISTRY
         .get(&a.id)
@@ -326,7 +326,7 @@ async fn shell_task_status_impl(args: &Value) -> CmdResult {
     Ok(json!(g.status))
 }
 
-async fn shell_task_kill_impl(args: &Value) -> CmdResult {
+pub(crate) async fn shell_task_kill_impl(args: &Value) -> CmdResult {
     let a: IdArgs = serde_json::from_value(args.clone()).map_err(|e| bad_request(e.to_string()))?;
     let task = REGISTRY
         .get(&a.id)
@@ -343,7 +343,7 @@ async fn shell_task_kill_impl(args: &Value) -> CmdResult {
     }
 }
 
-async fn shell_task_list_impl(_args: &Value) -> CmdResult {
+pub(crate) async fn shell_task_list_impl(_args: &Value) -> CmdResult {
     let mut tasks = REGISTRY.list();
     // Reverse-chronological — newest first reads better in the UI.
     tasks.sort_by(|a, b| b.started_at.cmp(&a.started_at));

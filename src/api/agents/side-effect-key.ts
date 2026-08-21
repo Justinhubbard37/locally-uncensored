@@ -7,18 +7,16 @@
  * sideEffectKey and runs one group in parallel but within-group in
  * sequence.
  *
- *   - Pure reads (file_read, web_fetch, web_search, system_info,
- *     process_list, file_list, file_search, get_current_time,
- *     screenshot) → no key (fully parallel-safe).
+ *   - Pure reads (file_read, web_fetch, web_search, file_list,
+ *     file_search, screenshot) → no key (fully parallel-safe).
  *
  *   - file_write → key is `file_write:<normalized-path>`. Two writes to
  *     the SAME path serialize; writes to DIFFERENT paths remain parallel.
  *
- *   - shell_execute, code_execute, shell_execute_background, run_tests,
- *     git_commit, git_push → key 'exec'. We do not know what a shell command
- *     touches, and concurrent repo writes race on `.git/index.lock`, so batch
- *     all exec-class + repo-mutating calls onto a single queue. Read-only git_*
- *     (git_status/git_log/git_diff) stay parallel.
+ *   - shell_execute → key 'exec'. We do not know what a shell command
+ *     touches, and concurrent repo writes race on `.git/index.lock`, so all
+ *     shell calls share a single queue. (Since the 2.6.6 merge the shell IS
+ *     git, tests and background starts, so this one case covers them all.)
  *
  *   - image_generate, video_generate, run_workflow → key 'comfyui'. ComfyUI
  *     serializes internally and workflows do heavy I/O; running in parallel
@@ -35,17 +33,17 @@ export function deriveSideEffectKey(
       return path ? `file_write:${path}` : 'file_write:unknown'
     }
     case 'shell_execute':
+    // Retired names (2.6.6 merge) still execute via the registry redirect,
+    // so a model batching git_commit + git_push under the old names must
+    // still land on the same queue.
     case 'code_execute':
     case 'shell_execute_background':
     case 'run_tests':
     case 'git_commit':
     case 'git_push':
-      // Everything that shells out or mutates the repo shares ONE serial queue.
-      // We can't know what a command touches, and two concurrent git writes
-      // (e.g. git_commit + a `git push`, or two git_commits) race on
-      // `.git/index.lock` and one fails. run_tests and shell_execute_background
-      // also shell out, so they must not run against a repo mid-commit. Only the
-      // read-only git_* tools (git_status/git_log/git_diff) stay parallel.
+      // Everything that shells out shares ONE serial queue. We can't know
+      // what a command touches, and two concurrent git writes race on
+      // `.git/index.lock` and one fails.
       return 'exec'
     case 'image_generate':
     case 'video_generate':
@@ -55,8 +53,7 @@ export function deriveSideEffectKey(
       // both queued on the hand-off and a back-to-back gen could survive Stop.
       return 'comfyui'
     default:
-      // file_read, file_list, file_search, web_search, web_fetch,
-      // system_info, process_list, get_current_time, screenshot.
+      // file_read, file_list, file_search, web_search, web_fetch, screenshot.
       return undefined
   }
 }

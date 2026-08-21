@@ -60,10 +60,9 @@ export function buildHermesToolPrompt(tools: (AgentToolDef | ToolLike)[]): strin
 
   // Everything below the <tools> block is about HOW to use what is in it, so
   // each note only appears when the tool it talks about is actually offered.
-  // The old prompt closed with a fixed "Other tools: file_read, file_write,
-  // code_execute, image_generate" line that had not been updated in five
-  // releases: it named four of thirty tools and contradicted the block right
-  // above it.
+  // The old prompt closed with a fixed "Other tools: ..." line naming four
+  // hardcoded tools, and it had not been updated in five releases: it
+  // contradicted the block right above it.
   const has = (name: string) => tools.some((t) => t.name === name)
   const notes: string[] = []
   if (has('todo_write')) {

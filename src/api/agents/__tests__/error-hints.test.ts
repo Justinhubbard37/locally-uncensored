@@ -21,9 +21,6 @@ describe('error-hints — explainError', () => {
     ['file_search', 'invalid regex: unmatched parenthesis', /regex|escape/i],
     ['shell_execute', "'foo' is not recognized as an internal or external command", /installed|PATH/i],
     ['shell_execute', 'Command timed out after 120s', /break|timeout/i],
-    ['code_execute', 'SyntaxError: invalid syntax', /syntax|indent/i],
-    ['code_execute', 'ModuleNotFoundError: No module named numpy', /stdlib|pip install/i],
-    ['code_execute', "NameError: name 'x' is not defined", /persist|redefine/i],
     ['web_fetch', 'refused: private IP 192.168.1.1', /public|https/i],
     ['web_fetch', 'Error 404: page not found', /web_search/i],
     ['web_fetch', 'Error 403: forbidden', /different source/i],
@@ -55,10 +52,10 @@ describe('error-hints — explainError', () => {
   it('every built-in tool has at least one hint OR an explicit empty list (Phase 3 coverage)', () => {
     const expected = [
       'file_read', 'file_write', 'file_list', 'file_search',
-      'shell_execute', 'code_execute',
+      'shell_execute',
       'web_search', 'web_fetch',
-      'system_info', 'process_list', 'screenshot',
-      'image_generate', 'run_workflow', 'get_current_time',
+      'screenshot',
+      'image_generate', 'run_workflow',
     ]
     for (const name of expected) {
       expect(Object.hasOwn(__internal.TOOL_HINTS, name), `missing entry for ${name}`).toBe(true)

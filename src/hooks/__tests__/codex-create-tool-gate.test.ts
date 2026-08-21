@@ -58,7 +58,6 @@ describe('a plain coding turn does not carry the generators', () => {
     const out = names(gateCreateTools(codingCatalog(), 'refactor the auth guard and run the tests'))
     expect(out).toContain('file_read')
     expect(out).toContain('shell_execute')
-    expect(out).toContain('git_status')
     expect(out).toContain('todo_write')
   })
 

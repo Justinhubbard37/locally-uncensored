@@ -39,17 +39,9 @@ const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   'file_read',
   'file_list',
   'file_search',
-  'git_status',
-  'git_log',
-  'git_diff',
   // Reads a PR through `gh pr view` / `gh pr diff`. Owner and repo are
   // validated to GitHub's own character set before they reach a shell.
   'pr_resume',
-  'shell_task_status',
-  'shell_task_list',
-  'process_list',
-  'system_info',
-  'get_current_time',
   'web_search',
   'web_fetch',
 ])
@@ -60,7 +52,8 @@ describe('every built-in tool is classified', () => {
     // instead of quietly asserting over an empty list.
     expect(arrayStart).toBeGreaterThanOrEqual(0)
     expect(arrayEnd).toBeGreaterThan(arrayStart)
-    expect(BUILTIN_TOOL_NAMES.length).toBeGreaterThan(20)
+    // 14 since the 2.6.6 merge folded the twelve typed shell wrappers away.
+    expect(BUILTIN_TOOL_NAMES.length).toBeGreaterThan(12)
     expect(BUILTIN_TOOL_NAMES).toContain('shell_execute')
     expect(BUILTIN_TOOL_NAMES).toContain('pr_resume')
   })
@@ -85,11 +78,12 @@ describe('every built-in tool is classified', () => {
   it('nothing that spawns a shell is read-only unless its arguments are constrained', () => {
     // pr_resume is the one read-only tool that reaches a shell. It is allowed
     // there only because parsePrUrl rejects every metacharacter, which
-    // shell-injection.test.ts pins. If another shell tool is ever added to the
-    // read-only set, that decision needs the same proof.
+    // shell-injection.test.ts pins. The typed git readers left with the 2.6.6
+    // merge; their read-only path is shell_execute, whose command classifier
+    // (isReadOnlyCommand) carries the same proof in its own tests.
     const shellReaders = [...READ_ONLY_TOOLS].filter((n) =>
-      ['pr_resume', 'git_status', 'git_log', 'git_diff'].includes(n),
+      ['pr_resume', 'shell_execute'].includes(n),
     )
-    expect(shellReaders.sort()).toEqual(['git_diff', 'git_log', 'git_status', 'pr_resume'])
+    expect(shellReaders).toEqual(['pr_resume'])
   })
 })

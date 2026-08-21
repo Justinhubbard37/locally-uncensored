@@ -56,12 +56,6 @@ const TOOL_HINTS: Record<string, HintRule[]> = {
     { pattern: /exit code ([1-9]|1\d|2\d)/i, hint: 'Command exited non-zero. Read stderr for the root cause before retrying.' },
     { pattern: /permission denied|EACCES/i, hint: 'Permission denied. The command or its target requires elevated privileges.' },
   ],
-  code_execute: [
-    { pattern: /SyntaxError/, hint: 'Python syntax error. Re-check indentation and parentheses before retrying.' },
-    { pattern: /ModuleNotFoundError|No module named/i, hint: 'Module not in the sandbox Python. Use only stdlib, or shell_execute `pip install <name>` first.' },
-    { pattern: /NameError/i, hint: 'NameError, variable or function not defined. State does not persist between code_execute calls; redefine everything.' },
-    { pattern: /timed out/i, hint: 'Execution timed out. Shorten the code or break into chunks.' },
-  ],
   web_fetch: [
     { pattern: /refused|private IP|localhost|loopback/i, hint: 'Target URL was refused for safety. Use a public https:// URL only.' },
     { pattern: /404|not found/i, hint: 'Page 404. Search for the canonical URL via web_search first.' },
@@ -88,12 +82,9 @@ const TOOL_HINTS: Record<string, HintRule[]> = {
     { pattern: /not found/i, hint: 'Workflow name unknown. The error already lists available names, pick one.' },
     { pattern: /depth|nesting/i, hint: 'Workflow nesting limit reached. Do not call run_workflow from inside another workflow.' },
   ],
-  system_info: [],
-  process_list: [],
   screenshot: [
     { pattern: /permission|denied/i, hint: 'Screen capture denied. Tell the user to grant screen permission.' },
   ],
-  get_current_time: [],
 }
 
 /**

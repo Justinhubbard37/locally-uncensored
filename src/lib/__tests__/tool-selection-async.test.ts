@@ -40,17 +40,17 @@ describe('tool-selection — selectRelevantToolsAsync', () => {
     const tools = [
       mkTool('file_read', 'read a file on disk', 'filesystem'),
       mkTool('file_write', 'write a file on disk', 'filesystem'),
-      mkTool('get_current_time', 'return current local time', 'system'),
+      mkTool('shell_execute', 'run a terminal command', 'terminal'),
     ]
     const embedSpy = vi.fn(fakeEmbed)
     const out = await selectRelevantToolsAsync(
-      'what time is it',
+      'run the build',
       tools,
       fullPerms,
       { embed: embedSpy, embeddingThreshold: EMBEDDING_ROUTING_THRESHOLD }
     )
     expect(embedSpy).not.toHaveBeenCalled()
-    expect(out.some((t) => t.name === 'get_current_time')).toBe(true)
+    expect(out.some((t) => t.name === 'shell_execute')).toBe(true)
   })
 
   it('no embed fn provided: keyword path', async () => {
@@ -68,11 +68,7 @@ describe('tool-selection — selectRelevantToolsAsync', () => {
       mkTool('file_write', 'write a file on disk', 'filesystem'),
       mkTool('web_search', 'search the web for current information', 'web'),
       mkTool('web_fetch', 'fetch a URL and return text', 'web'),
-      mkTool('get_current_time', 'return current local date time', 'system'),
       mkTool('shell_execute', 'run a terminal command', 'terminal'),
-      mkTool('code_execute', 'execute python code', 'terminal'),
-      mkTool('system_info', 'os architecture hostname', 'system'),
-      mkTool('process_list', 'list running processes', 'system'),
       mkTool('screenshot', 'take a screenshot', 'desktop'),
       mkTool('image_generate', 'generate an image from prompt', 'image'),
       mkTool('run_workflow', 'run a saved workflow', 'workflow'),
@@ -88,9 +84,9 @@ describe('tool-selection — selectRelevantToolsAsync', () => {
       fullPerms,
       { embed: fakeEmbed, topN: 3 }
     )
-    // ALWAYS_INCLUDE means file_read and file_write + get_current_time are in.
+    // ALWAYS_INCLUDE means file_read and file_write are in.
     expect(out.some((t) => t.name === 'file_read')).toBe(true)
-    expect(out.some((t) => t.name === 'get_current_time')).toBe(true)
+    expect(out.some((t) => t.name === 'file_write')).toBe(true)
   })
 
   it('embed failure falls back silently to keyword', async () => {

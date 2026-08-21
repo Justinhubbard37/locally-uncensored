@@ -1,12 +1,13 @@
 import { useState, useEffect, memo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Search, Globe, FileText, FileEdit, Terminal, Image, Film, Loader2, Check, X, Clock, AlertCircle, FolderOpen, Cpu, Monitor, GitBranch, GitCompare, GitCommitHorizontal, GitPullRequest, FlaskConical, History, Users, Database, Download } from 'lucide-react'
+import { Search, Globe, FileText, FileEdit, Terminal, Image, Film, Loader2, Check, X, Clock, AlertCircle, FolderOpen, Monitor, GitBranch, GitCommitHorizontal, GitPullRequest, FlaskConical, History, Users, Database, Download } from 'lucide-react'
 import type { AgentToolCall } from '../../types/agent-mode'
 import { getComfyHost, getComfyPort, downloadComfyFile } from '../../api/backend'
 import { useModelPickStore } from '../../stores/modelPickStore'
 import { useGenerationStore } from '../../stores/generationStore'
 import { ModelPickerCard, ChangeModelInline, pickKindForToolCall } from './ModelPickerCard'
 import { DiffView } from './DiffView'
+import { commandIcon } from '../../lib/shell-command-classify'
 import { requestGenerationCancel } from '../../api/vram-handoff'
 import { fileUrlToPath, readLocalFileAsBlobUrl } from '../../lib/local-media-url'
 import { hiddenFromTranscript } from '../../lib/transcript-visibility'
@@ -151,6 +152,8 @@ interface Props {
 // Complete over the registry (audit D4): 16 of 29 tools had no entry and fell
 // back to the Terminal icon, so a git_commit looked like a shell command and
 // a surgical file_edit like a plain write. Every builtin has a face now.
+// Since the 2.6.6 merge, shell_execute derives its face from the COMMAND
+// (commandIcon), so a commit still looks like a commit.
 const TOOL_ICONS: Record<string, typeof Search> = {
   web_search: Search,
   web_fetch: Globe,
@@ -159,29 +162,30 @@ const TOOL_ICONS: Record<string, typeof Search> = {
   file_edit: FileEdit,
   file_list: FolderOpen,
   file_search: Search,
-  code_execute: Terminal,
   shell_execute: Terminal,
-  shell_execute_background: History,
-  shell_task_status: History,
-  shell_task_list: History,
-  shell_task_kill: X,
-  git_status: GitBranch,
-  git_diff: GitCompare,
-  git_log: GitBranch,
-  git_commit: GitCommitHorizontal,
-  git_push: GitBranch,
-  gh_pr_create: GitPullRequest,
   pr_resume: GitPullRequest,
-  project_init: FolderOpen,
-  run_tests: FlaskConical,
-  system_info: Cpu,
-  process_list: Cpu,
   screenshot: Monitor,
   image_generate: Image,
   video_generate: Film,
   run_workflow: GitBranch,
   delegate_task: Users,
-  get_current_time: Clock,
+}
+
+// The per-command faces of the merged shell tool (plan E4 point 6).
+const SHELL_COMMAND_ICONS: Record<string, typeof Search> = {
+  'git-read': GitBranch,
+  'git-commit': GitCommitHorizontal,
+  'git-push': GitBranch,
+  test: FlaskConical,
+  read: FileText,
+  terminal: Terminal,
+}
+
+function shellIconFor(toolCall: AgentToolCall): typeof Search {
+  const command = toolCall.args?.command
+  if (toolCall.args?.background || typeof toolCall.args?.task === 'string') return History
+  if (typeof command !== 'string') return Terminal
+  return SHELL_COMMAND_ICONS[commandIcon(command)] ?? Terminal
 }
 
 const STATUS_ICONS = {
@@ -211,7 +215,7 @@ function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
   // Default: collapsed (closed)
   const [open, setOpen] = useState(toolCall.status === 'pending_approval')
 
-  const ToolIcon = TOOL_ICONS[toolCall.toolName] || Terminal
+  const ToolIcon = toolCall.toolName === 'shell_execute' ? shellIconFor(toolCall) : (TOOL_ICONS[toolCall.toolName] || Terminal)
   const StatusIcon = STATUS_ICONS[toolCall.status]
   const isRunning = toolCall.status === 'running'
   const isPending = toolCall.status === 'pending_approval'

@@ -41,12 +41,12 @@ describe('Mobile CODEX_TOOLS parity', () => {
     expect(REMOTE_RS).toContain("'shell_execute'")
   })
 
-  it('includes code_execute', () => {
-    expect(REMOTE_RS).toContain("'code_execute'")
-  })
-
-  it('includes system_info', () => {
-    expect(REMOTE_RS).toContain("'system_info'")
+  it('does NOT include the tools retired by the 2.6.6 merge', () => {
+    // code_execute / system_info / get_current_time left CODEX_TOOLS when the
+    // typed wrappers folded into shell_execute plus the environment block.
+    expect(REMOTE_RS).not.toMatch(/CODEX_TOOLS = \[[^\]]*code_execute/)
+    expect(REMOTE_RS).not.toMatch(/CODEX_TOOLS = \[[^\]]*system_info/)
+    expect(REMOTE_RS).not.toMatch(/CODEX_TOOLS = \[[^\]]*get_current_time/)
   })
 
   it('includes web_search', () => {

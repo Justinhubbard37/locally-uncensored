@@ -132,7 +132,7 @@ describe('the name repair runs before both gates', () => {
   // turn passed it, and canonicalToolName then turned it into `file_write`
   // on the way to the executor.
   const repairAt = src.indexOf('const knownToolNames = toolRegistry.getAll()')
-  const readOnlyGateAt = src.indexOf('const blocked = toolCalls.filter((tc) => MUTATING_TOOLS.has')
+  const readOnlyGateAt = src.indexOf('const blocked = toolCalls.filter((tc) => !allowedInReadOnlyTurn')
   const permissionGateAt = src.indexOf('const refused = toolCalls.filter(isBlocked)')
 
   it('all three landmarks are present', () => {

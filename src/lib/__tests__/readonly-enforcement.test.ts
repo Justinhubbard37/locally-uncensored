@@ -17,15 +17,17 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
-import { MUTATING_TOOLS } from '../mutating-tools'
+import { MUTATING_TOOLS, allowedInReadOnlyTurn } from '../mutating-tools'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const read = (rel: string) => readFileSync(join(__dirname, rel), 'utf8')
 
 type Call = { function: { name: string } }
-/** The guard both hooks apply before a batch executes. */
+/** The guard both hooks apply before a batch executes. Since the 2.6.6 merge
+ * it keeps shell_execute (the executor gates by command); everything else
+ * mutating is still dropped by name. */
 const applyGuard = (calls: Call[], readOnly: boolean) =>
-  readOnly ? calls.filter((c) => !MUTATING_TOOLS.has(c.function?.name ?? '')) : calls
+  readOnly ? calls.filter((c) => allowedInReadOnlyTurn(c.function?.name ?? '')) : calls
 
 const call = (name: string): Call => ({ function: { name } })
 
@@ -35,13 +37,15 @@ describe('read-only batch guard', () => {
     expect(applyGuard(batch, true).map((c) => c.function.name)).toEqual(['file_read', 'file_search'])
   })
 
-  it('drops every mutating tool, not just the file ones', () => {
+  it('drops every mutating tool except the command-gated shell', () => {
     const batch = [...MUTATING_TOOLS].map(call)
-    expect(applyGuard(batch, true)).toEqual([])
+    // shell_execute survives the name strip on purpose: it carries the git
+    // inspectors now, and its executor refuses non-inspection commands.
+    expect(applyGuard(batch, true).map((c) => c.function.name)).toEqual(['shell_execute'])
   })
 
   it('leaves the read tools alone', () => {
-    const reads = ['file_read', 'file_list', 'file_search', 'git_status', 'git_diff', 'git_log'].map(call)
+    const reads = ['file_read', 'file_list', 'file_search'].map(call)
     expect(applyGuard(reads, true)).toHaveLength(reads.length)
   })
 
@@ -50,16 +54,18 @@ describe('read-only batch guard', () => {
     expect(applyGuard(batch, false)).toHaveLength(2)
   })
 
-  it('git inspection is not classified as mutating', () => {
-    // A reviewer still has to be able to look at the diff it is reviewing.
-    for (const t of ['git_status', 'git_diff', 'git_log', 'file_read', 'file_list', 'file_search']) {
+  it('git inspection stays reachable: shell_execute survives the strip', () => {
+    // A reviewer still has to be able to look at the diff it is reviewing,
+    // and since the merge that look goes through shell_execute.
+    expect(allowedInReadOnlyTurn('shell_execute')).toBe(true)
+    for (const t of ['file_read', 'file_list', 'file_search']) {
       expect(MUTATING_TOOLS.has(t), `${t} must stay available`).toBe(false)
     }
   })
 
   it('the tools that can actually change something are all listed', () => {
-    for (const t of ['file_write', 'file_edit', 'shell_execute', 'code_execute', 'git_commit', 'git_push', 'gh_pr_create']) {
-      expect(MUTATING_TOOLS.has(t), `${t} must be blocked`).toBe(true)
+    for (const t of ['file_write', 'file_edit', 'shell_execute', 'image_generate', 'video_generate', 'run_workflow', 'delegate_task', 'screenshot']) {
+      expect(MUTATING_TOOLS.has(t), `${t} must be listed`).toBe(true)
     }
   })
 })
@@ -68,13 +74,13 @@ describe('both hooks still carry the guard', () => {
   it('useCodex filters the batch, not just the catalog', () => {
     const src = read('../../hooks/useCodex.ts')
     expect(src).toContain('if (settings.codexReviewMode || readOnlyTurn) {')
-    expect(src).toContain('toolCalls = toolCalls.filter((tc) => !MUTATING_TOOLS.has(tc.function?.name ?? \'\'))')
+    expect(src).toContain('toolCalls = toolCalls.filter((tc) => allowedInReadOnlyTurn(tc.function?.name ?? \'\'))')
   })
 
   it('useAgentChat filters the batch too', () => {
     const src = read('../../hooks/useAgentChat.ts')
     expect(src).toContain('if (opts?.readOnly) {')
-    expect(src).toContain('toolCalls = toolCalls.filter((tc) => !MUTATING_TOOLS.has(tc.function?.name ?? \'\'))')
+    expect(src).toContain('toolCalls = toolCalls.filter((tc) => allowedInReadOnlyTurn(tc.function?.name ?? \'\'))')
   })
 
   it('the blocklist has exactly one definition', () => {

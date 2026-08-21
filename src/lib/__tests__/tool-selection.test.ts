@@ -33,9 +33,6 @@ const ALL_TOOLS: MCPToolDefinition[] = [
   makeTool('file_list', 'filesystem'),
   makeTool('file_search', 'filesystem'),
   makeTool('shell_execute', 'terminal'),
-  makeTool('code_execute', 'terminal'),
-  makeTool('system_info', 'system'),
-  makeTool('process_list', 'system'),
   makeTool('screenshot', 'desktop'),
   makeTool('image_generate', 'image'),
   makeTool('run_workflow', 'workflow'),
@@ -127,11 +124,10 @@ describe('tool-selection', () => {
       expect(names).toContain('file_search')
     })
 
-    it('selects shell/code tools for "run" keyword', () => {
+    it('selects the shell for "run" keyword', () => {
       const result = selectRelevantTools('run npm install', ALL_TOOLS, ALL_ALLOWED)
       const names = toolNames(result)
       expect(names).toContain('shell_execute')
-      expect(names).toContain('code_execute')
     })
 
     it('selects shell/code tools for "git" keyword', () => {
@@ -140,24 +136,22 @@ describe('tool-selection', () => {
       expect(names).toContain('shell_execute')
     })
 
-    it('selects shell/code tools for "python" keyword', () => {
+    it('selects the shell for "python" keyword', () => {
       const result = selectRelevantTools('run this python script', ALL_TOOLS, ALL_ALLOWED)
       const names = toolNames(result)
       expect(names).toContain('shell_execute')
-      expect(names).toContain('code_execute')
     })
 
-    it('selects system tools for "cpu" keyword', () => {
+    it('routes the "cpu" keyword to the shell (system tools retired)', () => {
       const result = selectRelevantTools('how much cpu am I using', ALL_TOOLS, ALL_ALLOWED)
       const names = toolNames(result)
-      expect(names).toContain('system_info')
-      expect(names).toContain('process_list')
+      expect(names).toContain('shell_execute')
     })
 
     it('selects system tools for "memory" keyword', () => {
       const result = selectRelevantTools('check memory usage', ALL_TOOLS, ALL_ALLOWED)
       const names = toolNames(result)
-      expect(names).toContain('system_info')
+      expect(names).toContain('shell_execute')
     })
 
     it('selects screenshot tool for "screenshot" keyword', () => {
@@ -260,23 +254,22 @@ describe('tool-selection', () => {
     })
 
     it('returns all available if all selected tools are blocked', () => {
-      // Block everything except system
+      // Block everything except terminal
       const permissions: PermissionMap = {
         filesystem: 'blocked',
-        terminal: 'blocked',
+        terminal: 'auto',
         desktop: 'blocked',
         web: 'blocked',
-        system: 'auto',
+        system: 'blocked',
         image: 'blocked',
         video: 'blocked' as any,
         workflow: 'blocked',
       }
       // Message that matches web tools (blocked) and filesystem (blocked)
       const result = selectRelevantTools('search and read', ALL_TOOLS, permissions)
-      // All selected tools blocked -> returns all available (system_info + process_list)
+      // All selected tools blocked -> returns all available (the shell)
       const names = toolNames(result)
-      expect(names).toContain('system_info')
-      expect(names).toContain('process_list')
+      expect(names).toContain('shell_execute')
     })
   })
 

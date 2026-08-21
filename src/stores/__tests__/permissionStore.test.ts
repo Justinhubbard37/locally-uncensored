@@ -188,3 +188,50 @@ describe('permissionStore', () => {
     })
   })
 })
+
+// v3 (2.6.6 tool merge) — per-tool overrides on retired names must land on
+// shell_execute, most restrictive wins, because that is the tool their work
+// actually runs through now.
+describe('retired-name override lift (v3)', () => {
+  it('lifts the strictest retired override onto shell_execute', () => {
+    const persisted = {
+      globalPermissions: { ...DEFAULT_PERMISSIONS },
+      perToolOverrides: { git_push: 'confirm', run_tests: 'auto', git_commit: 'blocked' },
+    }
+    const migrated = migratePermissionState(persisted, 2)
+    expect(migrated.perToolOverrides.shell_execute).toBe('blocked')
+    expect(migrated.perToolOverrides.git_push).toBeUndefined()
+    expect(migrated.perToolOverrides.run_tests).toBeUndefined()
+    expect(migrated.perToolOverrides.git_commit).toBeUndefined()
+  })
+
+  it('never loosens an existing shell_execute override', () => {
+    const persisted = {
+      globalPermissions: { ...DEFAULT_PERMISSIONS },
+      perToolOverrides: { shell_execute: 'blocked', git_push: 'auto' },
+    }
+    const migrated = migratePermissionState(persisted, 2)
+    expect(migrated.perToolOverrides.shell_execute).toBe('blocked')
+  })
+
+  it('tightens a loose shell_execute override when a retired name was stricter', () => {
+    const persisted = {
+      globalPermissions: { ...DEFAULT_PERMISSIONS },
+      perToolOverrides: { shell_execute: 'auto', git_push: 'confirm' },
+    }
+    const migrated = migratePermissionState(persisted, 2)
+    expect(migrated.perToolOverrides.shell_execute).toBe('confirm')
+  })
+
+  it('leaves live-tool overrides alone and is a no-op at version 3', () => {
+    const persisted = {
+      globalPermissions: { ...DEFAULT_PERMISSIONS },
+      perToolOverrides: { file_write: 'blocked', git_push: 'blocked' },
+    }
+    const same = migratePermissionState({ ...persisted, perToolOverrides: { ...persisted.perToolOverrides } }, 3)
+    expect(same.perToolOverrides).toEqual({ file_write: 'blocked', git_push: 'blocked' })
+    const migrated = migratePermissionState(persisted, 2)
+    expect(migrated.perToolOverrides.file_write).toBe('blocked')
+    expect(migrated.perToolOverrides.shell_execute).toBe('blocked')
+  })
+})

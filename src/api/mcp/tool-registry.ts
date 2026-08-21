@@ -105,7 +105,15 @@ export class ToolRegistry {
 
   async execute(name: string, args: Record<string, any>, maxRetries = 1): Promise<string> {
     const entry = this.tools.get(name)
-    if (!entry) return `Error: Unknown tool "${name}"`
+    if (!entry) {
+      // Retired names (2.6.6 tool merge) still run: a restored session or a
+      // model that knows git_status from its context must not burn the step
+      // on "Unknown tool". Dynamic import keeps the module graph acyclic.
+      const { runRetiredTool } = await import('./builtin-tools')
+      const redirected = await runRetiredTool(name, args)
+      if (redirected !== null) return redirected
+      return `Error: Unknown tool "${name}"`
+    }
 
     // Audit B2: a retry re-RUNS the tool. For a side-effecting tool that is a
     // second commit, a second push, a second shell command — never acceptable

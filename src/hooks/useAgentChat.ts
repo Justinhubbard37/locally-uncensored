@@ -11,7 +11,7 @@ import {
 import { v4 as uuid } from 'uuid'
 import { streamProviderTurn } from '../lib/provider-stream'
 import { createHermesDisplayFilter, createThinkStreamSplitter } from '../lib/hermes-stream'
-import { setActiveChatId, setActiveConversationId, clearActiveChatId, chatWorkspaceSlug, setActiveWorkspace, setActiveAgentModel, renderWorkspaceSection, setChatArtifactMode, takeChatArtifacts } from '../api/agent-context'
+import { setActiveChatId, setActiveConversationId, clearActiveChatId, chatWorkspaceSlug, setActiveWorkspace, setActiveAgentModel, renderWorkspaceSection, setChatArtifactMode, takeChatArtifacts, setReadOnlyShellTurn } from '../api/agent-context'
 import { isOllamaLocal } from '../api/backend'
 import { requestGenerationCancel } from '../api/vram-handoff'
 import { resolveWorkspace } from '../api/agents/workspace-resolve'
@@ -49,13 +49,13 @@ import { WorkflowEngine } from '../lib/workflow-engine'
 import type { AgentBlock, AgentToolCall, OllamaChatMessage } from '../types/agent-mode'
 import { selectRelevantToolsAsync, ALWAYS_INCLUDE, SMALL_MODEL_MAX_TOOLS } from '../lib/tool-selection'
 import { renderToolRoster, renderToolNames } from '../lib/tool-roster'
-import { MUTATING_TOOLS } from '../lib/mutating-tools'
+import { MUTATING_TOOLS, allowedInReadOnlyTurn } from '../lib/mutating-tools'
 import { useAgentGoalStore, renderGoalSection } from '../stores/agentGoalStore'
 import { useAgentLoopStore } from '../stores/agentLoopStore'
 import { buildLoopRecheck, loopPassSaysDone } from '../lib/agent-commands'
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
-import { toolCallCapMs, raceWithToolTimeout, SHELL_EXECUTE_DEFAULT_TIMEOUT_MS, CODE_EXECUTE_DEFAULT_TIMEOUT_MS } from '../lib/tool-timeout'
+import { toolCallCapMs, raceWithToolTimeout, SHELL_EXECUTE_DEFAULT_TIMEOUT_MS } from '../lib/tool-timeout'
 import { AgentLoopGuard } from '../lib/agent-loop-guard'
 import { budgetFromSettings } from '../api/agents/budget'
 import type { ChatMessage, ToolCall, ToolDefinition } from '../api/providers/types'
@@ -69,7 +69,7 @@ import { openPlanGap, planReconcileSteer, PLAN_RECONCILE_BUDGET } from '../lib/p
 import { PlanStaleness, planStalenessSteer } from '../lib/plan-staleness'
 import { reasoningOnlyRound, REASONING_CONTINUE_BUDGET, REASONING_CONTINUE_STEER } from '../lib/reasoning-round'
 import { useTodoStore } from '../stores/todoStore'
-import { platformPromptLine } from '../lib/host-platform'
+import { hostEnvironmentBlock } from '../lib/host-platform'
 import { httpStatusOf, isTerminalModelError, retryDelayMs } from '../lib/http-status'
 import { CREDITS_EXHAUSTED_MESSAGE } from '../lib/credits-exhausted'
 
@@ -345,6 +345,10 @@ export function useAgentChat() {
     const slug = chatWorkspaceSlug(convId, convForSlug?.title)
     setActiveChatId(slug)
     setActiveConversationId(convId)
+    // Read-only turn: shell_execute stays offered (it carries the git
+    // inspectors since the 2.6.6 merge), the executor refuses everything
+    // that is not an inspection command. clearActiveChatId() resets it.
+    setReadOnlyShellTurn(opts?.readOnly === true)
 
     // Multi-Repo Agent (B15) + workspace unification (B17): pin the
     // resolved workspace so chatCtx() in builtin-tools.ts threads it
@@ -460,7 +464,7 @@ export function useAgentChat() {
     // aren't drowned in the full ~24-tool set).
     const curated = opts?.curatedTools
     const toolMatchesCurated = (name: string) =>
-      (!curated || curated.includes(name)) && !(opts?.readOnly && MUTATING_TOOLS.has(name))
+      (!curated || curated.includes(name)) && !(opts?.readOnly && !allowedInReadOnlyTurn(name))
 
     // Build agent system prompt FIRST, then append caveman style as a modifier
     const hermesToolDefs = toolRegistry.toHermesToolDefs(permissions)
@@ -1347,9 +1351,9 @@ export function useAgentChat() {
         // 2026-07-25, where a read-only /plan created a file while every request
         // carried a read-only catalog.
         if (opts?.readOnly) {
-          const blocked = toolCalls.filter((tc) => MUTATING_TOOLS.has(tc.function?.name ?? ''))
+          const blocked = toolCalls.filter((tc) => !allowedInReadOnlyTurn(tc.function?.name ?? ''))
           if (blocked.length) {
-            toolCalls = toolCalls.filter((tc) => !MUTATING_TOOLS.has(tc.function?.name ?? ''))
+            toolCalls = toolCalls.filter((tc) => allowedInReadOnlyTurn(tc.function?.name ?? ''))
             const names = [...new Set(blocked.map((tc) => tc.function.name))].join(', ')
             // `agentMessages`, not `messages` (audit follow-up): this guard was
             // copied from useCodex, whose history array IS called messages. In
@@ -1415,9 +1419,6 @@ export function useAgentChat() {
           const toolArgs = { ...tc.function.arguments }
           if (tc.function.name === 'shell_execute' && !toolArgs.timeout) {
             toolArgs.timeout = SHELL_EXECUTE_DEFAULT_TIMEOUT_MS
-          }
-          if (tc.function.name === 'code_execute' && !toolArgs.timeout) {
-            toolArgs.timeout = CODE_EXECUTE_DEFAULT_TIMEOUT_MS
           }
           const ac: AgentToolCall = {
             id: toolCallId,
@@ -2016,7 +2017,7 @@ export function extractMediaPrompt(text: string): string {
 function buildAgentSystemPrompt(basePrompt: string, roster: string): string {
   const agentInstructions = `You are an autonomous AI agent inside LU with full access to this computer. You execute tasks end-to-end by using tools, you do NOT just describe what to do.
 
-${platformPromptLine()}
+${hostEnvironmentBlock()}
 
 Available tools:
 ${roster}
@@ -2052,7 +2053,7 @@ Other rules:
 - PATHS: use paths relative to your working directory (e.g. \`package.json\`, \`src/app.ts\`, \`.\` for the current folder). Never start a path with \`/\` or a drive letter (\`C:\\\`), that escapes your workspace and fails. To list the current folder, use file_list with path \`.\`.
 - For filesystem READ tasks: file_list first if needed, then file_read.
 - For web tasks: web_search → web_fetch on the best URL → answer based on real data. web_search returns ONLY short snippets, ALWAYS call web_fetch to read the page.
-- The OS is stated above, so do not spend a call finding it out. For hardware or exact system paths: call system_info once at the start.
+- OS, clock and timezone are stated above, so do not spend a call finding them out. For hardware details or running processes, use shell_execute (macOS/Linux: \`uname -a\`, \`ps aux\`; Windows: \`Get-ComputerInfo\`, \`Get-Process\`).
 - Chain multiple tools as needed. If a tool fails, try a different approach.
 - Be concise in text. All the work happens in tool calls.
 - Respond in the same language the user uses.`
@@ -2071,7 +2072,7 @@ Other rules:
 function buildAgentSystemPromptLean(basePrompt: string, alwaysThere: string): string {
   const lean = `You are an autonomous agent in LU with tools on this computer. Do tasks by CALLING tools, do not just describe them.
 
-${platformPromptLine()}
+${hostEnvironmentBlock()}
 
 You always have: ${alwaysThere}. Your request carries the other tools that fit the task. Read their names there, do not guess.
 

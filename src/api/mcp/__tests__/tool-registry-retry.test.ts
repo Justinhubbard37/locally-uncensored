@@ -41,8 +41,8 @@ describe('ToolRegistry.execute — retry discipline (audit B2)', () => {
   it('never retries a mutating tool, even on a transient throw', async () => {
     const registry = new ToolRegistry()
     const runs = { count: 0 }
-    registry.registerBuiltin(mkTool('git_commit'), throwingExecutor('fetch failed', runs))
-    const result = await registry.execute('git_commit', {})
+    registry.registerBuiltin(mkTool('shell_execute'), throwingExecutor('fetch failed', runs))
+    const result = await registry.execute('shell_execute', {})
     expect(runs.count).toBe(1)
     expect(result).toMatch(/^Error:/)
   })

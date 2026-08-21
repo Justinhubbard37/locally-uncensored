@@ -6,8 +6,7 @@
  * Scope is deliberately narrow: one agent TURN (from sendAgentMessage or
  * sendInstruction start until the ReAct loop exits). We do NOT cache across
  * turns because many tools return time-sensitive data (web_search results,
- * process_list, get_current_time, file_read on a file that may have just
- * been overwritten). Scoping to a single turn keeps the semantics trivial:
+ * file_read on a file that may have just been overwritten). Scoping to a single turn keeps the semantics trivial:
  * everything inside one user prompt sees a consistent view of each tool's
  * output; the next user prompt starts fresh.
  *
@@ -45,6 +44,8 @@ const NON_CACHEABLE_TOOLS = new Set<string>([
   'file_write',
   'file_edit',
   'shell_execute',
+  // Retired names (2.6.6 merge) still execute via the registry redirect and
+  // must keep exactly these semantics under their old names.
   'shell_execute_background',
   'code_execute',
   'run_tests',
@@ -68,6 +69,7 @@ const WORKSPACE_MUTATING_TOOLS = new Set<string>([
   'file_write',
   'file_edit',
   'shell_execute',
+  // Redirect-era names, same reasoning as above.
   'shell_execute_background',
   'code_execute',
   'run_tests',
@@ -77,10 +79,11 @@ const WORKSPACE_MUTATING_TOOLS = new Set<string>([
 const READ_TOOLS = new Set<string>(['file_read', 'file_list'])
 
 function isNonCacheableTool(name: string): boolean {
+  // git_* covers the redirected typed git tools, reads and writes alike.
   return NON_CACHEABLE_TOOLS.has(name) || name.startsWith('git_')
 }
 
-/** A workspace-mutating call — the disk-touching subset, plus git_*. */
+/** A workspace-mutating call, the disk-touching subset plus redirected git_*. */
 function isMutatingTool(name: string): boolean {
   return WORKSPACE_MUTATING_TOOLS.has(name) || name.startsWith('git_')
 }

@@ -58,7 +58,8 @@ const typesOf = (p: JSONSchemaProp): string[] => (Array.isArray(p.type) ? p.type
 
 describe('the registry parsed, so the rest of this file means something', () => {
   it('has the tools we expect to audit', () => {
-    expect(TOOLS.length).toBeGreaterThan(25)
+    // 15 since the 2.6.6 merge folded the typed shell wrappers away.
+    expect(TOOLS.length).toBeGreaterThan(12)
     expect(TOOLS.map((t) => t.name)).toContain('todo_write')
   })
 })

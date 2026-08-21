@@ -18,9 +18,7 @@ export type ToolName =
   | "web_fetch"
   | "file_read"
   | "file_write"
-  | "code_execute"
-  | "image_generate"
-  | "get_current_time";
+  | "image_generate";
 
 export interface ToolParameter {
   name: string;

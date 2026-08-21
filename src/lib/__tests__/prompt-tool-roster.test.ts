@@ -114,7 +114,8 @@ function candidateToolWords(text: string): string[] {
 
 describe('no prompt names a tool that does not exist', () => {
   it('the registry parsed cleanly, so the rest of this file means something', () => {
-    expect(TOOL_NAMES.length).toBeGreaterThan(25)
+    // 15 since the 2.6.6 merge folded the typed shell wrappers away.
+    expect(TOOL_NAMES.length).toBeGreaterThan(12)
     expect(TOOL_NAMES).toContain('todo_write')
     expect(TOOL_NAMES).toContain('file_edit')
   })
@@ -133,7 +134,7 @@ describe('no prompt names a tool that does not exist', () => {
   }
 
   it('the relay list parsed, and is genuinely a subset of the desktop one', () => {
-    expect(RELAY_TOOL_NAMES.length).toBeGreaterThan(10)
+    expect(RELAY_TOOL_NAMES.length).toBeGreaterThan(8)
     expect(RELAY_TOOL_NAMES.length).toBeLessThan(TOOL_NAMES.length)
     expect(RELAY_TOOL_NAMES.filter((n) => !TOOL_NAMES.includes(n))).toEqual([])
   })

@@ -17,15 +17,9 @@
  * app (npm install, cargo/gradle) routinely runs minutes; the old 30 s
  * default + 60 s JS cap killed every real build (David 2026-06-04). */
 export const SHELL_EXECUTE_DEFAULT_TIMEOUT_MS = 600_000
-export const CODE_EXECUTE_DEFAULT_TIMEOUT_MS = 120_000
 
 const LONG_RUNNING = new Set([
   'shell_execute',
-  'code_execute',
-  'shell_execute_background',
-  'run_tests',
-  'git_commit',
-  'git_push',
 ])
 
 export interface ToolTimeoutSettings {

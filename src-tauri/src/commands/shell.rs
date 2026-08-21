@@ -189,11 +189,12 @@ pub async fn shell_execute(
     cwd: Option<String>,
     timeout: Option<u64>,
     shell: Option<String>,
+    stdin: Option<String>,
     chatId: Option<String>,
     workingDirectory: Option<String>,
 ) -> Result<serde_json::Value, String> {
     tokio::task::spawn_blocking(move || {
-        shell_execute_sync(command, args, cwd, timeout, shell, chatId, workingDirectory)
+        shell_execute_sync(command, args, cwd, timeout, shell, stdin, chatId, workingDirectory)
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
@@ -205,6 +206,7 @@ fn shell_execute_sync(
     cwd: Option<String>,
     timeout: Option<u64>,
     shell: Option<String>,
+    stdin: Option<String>,
     chat_id: Option<String>,
     working_directory: Option<String>,
 ) -> Result<serde_json::Value, String> {
@@ -256,14 +258,35 @@ fn shell_execute_sync(
         cmd.current_dir(&workdir);
     }
 
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    // stdin feeds a script instead of quoting it (`python -`, `bash -s`),
+    // replacing the code_execute tool (2.6.6 merge) and its PowerShell
+    // quoting trap along the way. No stdin stays Stdio::null so interactive
+    // commands still fail fast instead of hanging on a silent read.
+    if stdin.is_some() {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     let mut child = cmd.spawn().map_err(|e| format!("Spawn shell: {}", e))?;
+
+    // Write on a thread: the child may fill its output pipes before it has
+    // consumed stdin, and a blocking write here would deadlock against the
+    // drain below.
+    if let Some(input) = stdin {
+        if let Some(mut pipe) = child.stdin.take() {
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let _ = pipe.write_all(input.as_bytes());
+                // Dropping the pipe closes it, which is the EOF `bash -s`
+                // and `python -` wait for.
+            });
+        }
+    }
 
     // Start draining both pipes immediately — see `drain`.
     let (out_buf, out_done) = match child.stdout.take() {

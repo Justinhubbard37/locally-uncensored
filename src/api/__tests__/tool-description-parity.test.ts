@@ -181,7 +181,7 @@ describe('tool-description-parity — extraction sanity', () => {
     expect(builtinTools.length).toBeGreaterThanOrEqual(13)
   })
   it('parses the mobile AGENT_TOOLS list', () => {
-    expect(mobileTools.length).toBeGreaterThanOrEqual(13)
+    expect(mobileTools.length).toBeGreaterThanOrEqual(9)
   })
 })
 
