@@ -52,7 +52,7 @@ import { CREDITS_EXHAUSTED_MESSAGE } from '../lib/credits-exhausted'
 import { streamOllamaChatWithTools } from '../lib/ollama-stream-tools'
 import { extractToolCallsWithRanges, stripRanges } from '../lib/tool-call-repair'
 import { canonicalToolName } from '../lib/loose-tool-parse'
-import { selectRelevantTools, selectRelevantToolsAsync, SMALL_MODEL_MAX_TOOLS, gateCreateTools, wantsMediaTools, CREATE_TOOLS } from '../lib/tool-selection'
+import { selectRelevantTools, selectRelevantToolsAsync, SMALL_MODEL_MAX_TOOLS, gateCreateTools, wantsMediaTools, isGatedTool } from '../lib/tool-selection'
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
 import { toolCallCapMs, raceWithToolTimeout, SHELL_EXECUTE_DEFAULT_TIMEOUT_MS } from '../lib/tool-timeout'
@@ -1838,7 +1838,7 @@ export function useCodex() {
             // A create tool the gate had closed still reaches the registry, so
             // the run self-heals: this call runs, and the next step offers the
             // schemas instead of pretending the capability is gone.
-            if (CREATE_TOOLS.includes(name)) createGateOpened = true
+            if (isGatedTool(name)) createGateOpened = true
             return dispatchTool(name, args)
           },
           lookupCache: convId ? makeInTurnCacheLookup({ convId, turnStartMs }) : undefined,

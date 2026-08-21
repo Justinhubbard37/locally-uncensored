@@ -60,7 +60,10 @@ import { DEFAULT_SETTINGS, BUILT_IN_PERSONAS } from '../lib/constants'
 // land in the now-built local mode; the visible switch flips back anytime.
 // Windows/Linux appMode reflects a real user choice and is never touched.
 // v20 (2.6.6): added settings.contextDecay (default true) and
-// settings.codexSendWindowTokens (default 64000) for the tool-result age decay
+// settings.codexSendWindowTokens (default 64000) for the tool-result age decay,
+// plus settings.memoryCloudOptIn (default false, plan A7) and
+// settings.codexDefaultMode (default 'ask', plan C1); all four ride the
+// default-merge, strictly additive, no one-shot reset (R1 downgrade contract)
 // and the paid-provider send cap. STRICTLY ADDITIVE and IDEMPOTENT: the merge
 // below fills both defaults in and preserves every existing value, and this
 // version adds NO one-shot reset the way v10 and v19 did.

@@ -52,6 +52,8 @@ export const DEFAULT_SETTINGS: Settings = {
   // default; the switch is the support way back without a rollback release.
   contextDecay: true,
   codexSendWindowTokens: 64000,
+  memoryCloudOptIn: false,
+  codexDefaultMode: 'ask' as const,
   builtinEngine: {
     ctx: 8192,
     flashAttn: 'auto',

@@ -128,6 +128,18 @@ export interface Settings {
    * costs more. Local backends ignore it.
    */
   codexSendWindowTokens: number
+  /**
+   * Auto memory extraction on lu-cloud only with explicit opt-in (2.6.6, plan
+   * A7): every extraction is a paid model call. Local and BYOK providers are
+   * not gated by this.
+   */
+  memoryCloudOptIn: boolean
+  /**
+   * Global default for the coding mode dropdown (2.6.6, plan C1). A
+   * conversation without its own remembered mode starts here. Approve-and-run
+   * after a plan never inherits bypass implicitly, it falls back to ask.
+   */
+  codexDefaultMode: 'ask' | 'bypass' | 'plan'
   // Built-in engine expert tuning (2.6.0 Engine-Sweep). Forwarded to the Rust
   // EngineTuning (whitelisted there) on every engine start/swap — Onboarding,
   // Discover, model picker and the post-offload self-heal all inherit it via
