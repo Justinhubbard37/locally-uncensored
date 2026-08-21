@@ -122,7 +122,12 @@ describe('AnthropicProvider', () => {
       )
 
       const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string)
-      expect(body.system).toBe('You are helpful.')
+      // 2.6.6 A8: the system prompt now rides in a block array so it can carry
+      // a cache_control breakpoint. Placement itself is pinned in
+      // providers/__tests__/anthropic-cache-control.test.ts.
+      expect(body.system).toEqual([
+        { type: 'text', text: 'You are helpful.', cache_control: { type: 'ephemeral' } },
+      ])
       expect(body.messages).toEqual([{ role: 'user', content: 'Hi' }])
       expect(body.messages.find((m: any) => m.role === 'system')).toBeUndefined()
       vi.restoreAllMocks()

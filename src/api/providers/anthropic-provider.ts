@@ -47,6 +47,57 @@ const CLAUDE_MODELS: ProviderModel[] = [
   { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', provider: 'anthropic', providerName: 'Anthropic', contextLength: 200000, supportsTools: true, supportsVision: true },
 ]
 
+// ── Prompt caching (2.6.6 A8) ──────────────────────────────────
+//
+// Prompt caching is GA on `anthropic-version: 2023-06-01`, the version this
+// provider already pins. The old opt-in `anthropic-beta:
+// prompt-caching-2024-07-31` is no longer required and is NOT sent: an
+// unknown beta value is a needless failure surface on the proxies people
+// front this provider with (LiteLLM, claude-relay-server, opencode-zen).
+//
+// The API allows at most 4 breakpoints per request. We place at most 3, in
+// render order (tools → system → messages):
+//   1. the last tool definition  → caches [tools]
+//   2. the system block          → caches [tools + system]
+//   3. the last STABLE message   → caches [tools + system + settled history]
+// Layered on purpose: when the system prompt moves, the tools prefix still
+// reads from cache.
+//
+// "Stable" means the youngest message the NEXT request will send unchanged,
+// so the current turn's message is deliberately skipped. Marking it would
+// write a fresh entry on every step and never read one back, because A1
+// decay and A3 compaction still rewrite the tail of the history.
+
+const CACHE_CONTROL = { type: 'ephemeral' } as const
+
+/** A message content as blocks, so a marker has something to ride on. */
+function asContentBlocks(content: string | Record<string, any>[]): Record<string, any>[] {
+  return typeof content === 'string' ? [{ type: 'text', text: content }] : content
+}
+
+/**
+ * Stamp the three ephemeral breakpoints onto a finished request body. Called
+ * from both request paths (chatStream and chatWithTools) after the body is
+ * fully built, so vision, tool and plain-text variants all carry the markers.
+ */
+function applyCacheControl(body: Record<string, any>): void {
+  if (Array.isArray(body.tools) && body.tools.length > 0) {
+    body.tools[body.tools.length - 1].cache_control = { ...CACHE_CONTROL }
+  }
+
+  if (typeof body.system === 'string' && body.system) {
+    body.system = [{ type: 'text', text: body.system, cache_control: { ...CACHE_CONTROL } }]
+  }
+
+  const messages: Record<string, any>[] = body.messages
+  if (messages.length >= 2) {
+    const stable = messages[messages.length - 2]
+    stable.content = asContentBlocks(stable.content)
+    const lastBlock = stable.content[stable.content.length - 1]
+    if (lastBlock) lastBlock.cache_control = { ...CACHE_CONTROL }
+  }
+}
+
 // ── Provider Implementation ────────────────────────────────────
 
 export class AnthropicProvider implements ProviderClient {
@@ -119,6 +170,8 @@ export class AnthropicProvider implements ProviderClient {
         input_schema: t.function.parameters,
       }))
     }
+
+    applyCacheControl(body)
 
     let res = await fetch(this.messagesUrl(), {
       method: 'POST',
@@ -257,6 +310,8 @@ export class AnthropicProvider implements ProviderClient {
         input_schema: t.function.parameters,
       }))
     }
+
+    applyCacheControl(body)
 
     let res = await fetch(this.messagesUrl(), {
       method: 'POST',
