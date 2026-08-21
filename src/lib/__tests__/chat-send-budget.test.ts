@@ -14,6 +14,7 @@ import { describe, it, expect } from 'vitest'
 import {
   applyChatSendBudget,
   applySendBudget,
+  chatBudgetApplies,
   chatSendBudget,
   sharedChatSendBudget,
 } from '../chat-send-budget'
@@ -115,6 +116,16 @@ describe('A4: a local backend is byte-identical to 2.6.5', () => {
 
   it('an unknown window resolves to no cap rather than to a tiny one', () => {
     expect(chatSendBudget({ providerId: 'lu-cloud', modelWindow: 0, contextDecay: true })).toBeNull()
+  })
+
+  it('says so before the window is looked up, so no round trip is spent on it', () => {
+    // Resolving a window is an /api/show call. Asking it for a payload that
+    // cannot be capped would put a new request on the local path.
+    expect(chatBudgetApplies('ollama', true)).toBe(false)
+    expect(chatBudgetApplies('lm-studio', true)).toBe(false)
+    expect(chatBudgetApplies('lu-cloud', false)).toBe(false)
+    expect(chatBudgetApplies('lu-cloud', true)).toBe(true)
+    expect(chatBudgetApplies('openai', undefined)).toBe(true)
   })
 })
 

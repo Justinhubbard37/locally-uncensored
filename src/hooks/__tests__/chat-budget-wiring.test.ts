@@ -47,7 +47,7 @@ describe('a group round is budgeted per model', () => {
       chat.indexOf('export function useChat'),
     )
     expect(groupTurn).toMatch(/applyChatSendBudget\(/)
-    expect(groupTurn).toMatch(/modelWindow: await getModelMaxTokens\(model\)/)
+    expect(groupTurn).toMatch(/await getModelMaxTokens\(model\)/)
     expect(groupTurn).toMatch(/capMessageCount\(\[/)
     expect(groupTurn).toMatch(/contextDecay: settings\.contextDecay/)
   })
@@ -71,6 +71,11 @@ describe('compare caps the shared base before the fan-out', () => {
 
   it('honours the contextDecay notaus', () => {
     expect(compare).toMatch(/contextDecay: settings\.contextDecay/)
+  })
+
+  it('does not spend a context lookup on a pairing it cannot cap', () => {
+    expect(compare).toMatch(/chatBudgetApplies\(providerId, settings\.contextDecay\)/)
+    expect(chat).toMatch(/chatBudgetApplies\(providerId, settings\.contextDecay\)/)
   })
 })
 

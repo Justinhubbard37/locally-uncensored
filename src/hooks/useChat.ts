@@ -9,7 +9,7 @@ import { useVoiceStore } from "../stores/voiceStore"
 import { autoSpeak } from "../lib/ttsBridge"
 import { retrieveContext } from "../api/rag"
 import { getModelMaxTokens, capMessageCount } from "../lib/context-compaction"
-import { applyChatSendBudget } from "../lib/chat-send-budget"
+import { applyChatSendBudget, chatBudgetApplies } from "../lib/chat-send-budget"
 import { getModelContextCached } from "../api/ollama"
 import { requestGenerationCancel } from "../api/vram-handoff"
 import { effectiveContextWindow } from "../lib/context-window"
@@ -91,7 +91,12 @@ async function runGroupTurn(convId: string, model: string, allModels: string[], 
     ]),
     {
       providerId,
-      modelWindow: await getModelMaxTokens(model),
+      // Only asked where the answer can change something: resolving the window
+      // is an /api/show round trip, and a local member of the line-up is not
+      // capped at all.
+      modelWindow: chatBudgetApplies(providerId, settings.contextDecay)
+        ? await getModelMaxTokens(model)
+        : 0,
       sendWindowTokens: settings.codexSendWindowTokens,
       contextDecay: settings.contextDecay,
     },

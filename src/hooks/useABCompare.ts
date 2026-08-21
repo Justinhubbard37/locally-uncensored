@@ -7,7 +7,7 @@ import { useCompareStore } from '../stores/compareStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { getProviderForModel, getProviderIdFromModel } from '../api/providers'
 import { getModelMaxTokens } from '../lib/context-compaction'
-import { applySendBudget, sharedChatSendBudget } from '../lib/chat-send-budget'
+import { applySendBudget, chatBudgetApplies, sharedChatSendBudget } from '../lib/chat-send-budget'
 import { v4 as uuid } from 'uuid'
 import type { ChatMessage } from '../api/providers/types'
 import type { Message } from '../types/chat'
@@ -53,12 +53,19 @@ export function useABCompare() {
     // the paid side's budget for both; two local models are untouched.
     const budget = sharedChatSendBudget(
       await Promise.all(
-        [modelA, modelB].map(async (m) => ({
-          providerId: getProviderIdFromModel(m),
-          modelWindow: await getModelMaxTokens(m),
-          sendWindowTokens: settings.codexSendWindowTokens,
-          contextDecay: settings.contextDecay,
-        })),
+        [modelA, modelB].map(async (m) => {
+          const providerId = getProviderIdFromModel(m)
+          return {
+            providerId,
+            // Two local models must not buy two /api/show round trips for a
+            // budget that will come back null either way.
+            modelWindow: chatBudgetApplies(providerId, settings.contextDecay)
+              ? await getModelMaxTokens(m)
+              : 0,
+            sendWindowTokens: settings.codexSendWindowTokens,
+            contextDecay: settings.contextDecay,
+          }
+        }),
       ),
     )
     const sendMessages = applySendBudget(chatMessages, budget).messages

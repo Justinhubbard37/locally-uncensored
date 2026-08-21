@@ -38,13 +38,24 @@ export interface ChatSendBudgetInput {
 }
 
 /**
+ * Whether a payload to this provider is capped at all, answerable before the
+ * model window has been looked up.
+ *
+ * Resolving that window is an /api/show round trip on Ollama, and a local
+ * backend is never capped, so it must not pay for a question whose answer
+ * cannot change anything.
+ */
+export function chatBudgetApplies(providerId: string, contextDecay?: boolean): boolean {
+  return contextDecay !== false && isPaidProvider(providerId)
+}
+
+/**
  * The budget one send may carry, or null when this surface is not capped at
  * all. Null is not "unlimited by accident": it is the explicit 2.6.5 path, and
  * callers hand the untouched array straight through on it.
  */
 export function chatSendBudget(input: ChatSendBudgetInput): number | null {
-  if (input.contextDecay === false) return null
-  if (!isPaidProvider(input.providerId)) return null
+  if (!chatBudgetApplies(input.providerId, input.contextDecay)) return null
   const window = effectiveSendWindow({
     providerId: input.providerId,
     modelWindow: input.modelWindow,
