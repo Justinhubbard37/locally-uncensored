@@ -14,6 +14,7 @@ import { writeTodos, summarizeTodos } from '../../stores/todoStore'
 import { isMlxImageHost, generateMlxImageDataUrl, listMlxImageModels, type MlxImageModel } from '../mlx-image'
 import { getVideoStatus, listVideoModels, generateVideo as generateMlxVideo, getVideoProgress, cancelVideo, type VideoModel } from '../mlx-video'
 import { pathToFileUrl } from '../../lib/local-media-url'
+import { RETIRED_MUTATING_NAMES } from '../../lib/retired-tools'
 
 /**
  * Helper: current chat id (+ folder workspace) as a fragment to spread into
@@ -1399,10 +1400,9 @@ const RETIRED_EXECUTORS: Record<string, (args: Record<string, any>) => Promise<s
   shell_task_list: executeShellTaskList,
 }
 
-const RETIRED_MUTATING = new Set([
-  'git_commit', 'git_push', 'gh_pr_create', 'project_init', 'run_tests',
-  'code_execute', 'shell_execute_background', 'shell_task_kill',
-])
+// The mutating half moved to lib/retired-tools.ts with A9: the registry's
+// permission lookup needs the same split, and a second copy of a set that
+// decides "may this run unattended" is exactly the copy that drifts.
 
 /**
  * Names that still resolve through the redirect. The canonical list lives in
@@ -1410,7 +1410,8 @@ const RETIRED_MUTATING = new Set([
  * re-exported here for the executors' callers. A test pins both to
  * RETIRED_EXECUTORS' keys.
  */
-export { RETIRED_TOOL_NAMES } from '../../lib/retired-tools'
+export { RETIRED_TOOL_NAMES, RETIRED_MUTATING_NAMES } from '../../lib/retired-tools'
+
 export const RETIRED_EXECUTOR_NAMES: ReadonlySet<string> = new Set(Object.keys(RETIRED_EXECUTORS))
 
 /**
@@ -1426,7 +1427,7 @@ export async function runRetiredTool(
   if (!run) return null
   // The read-only gate lives on shell_execute's command classifier; a retired
   // mutating name would walk straight past it via this redirect.
-  if (isReadOnlyShellTurn() && RETIRED_MUTATING.has(name)) {
+  if (isReadOnlyShellTurn() && RETIRED_MUTATING_NAMES.has(name)) {
     return `Refused: this turn is read-only (/review or Code-Review Mode); ${name} changes state.`
   }
   const result = await run(args)

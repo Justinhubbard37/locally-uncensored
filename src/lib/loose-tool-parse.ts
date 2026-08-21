@@ -22,6 +22,22 @@
 import { findBalancedObjects, balancedObjectAt } from './json-scan'
 import { repairJson } from './tool-call-repair'
 import { parseHermesToolCalls } from '../api/hermes-tool-calling'
+import { RETIRED_TOOL_NAMES } from './retired-tools'
+
+/**
+ * A9. The sixteen names the 2.6.6 merge retired are not in any `known` list
+ * any more, but they still EXECUTE: the registry redirects them and the result
+ * carries a note naming the new call form. Every recogniser in this file was
+ * gated on `known` alone, so the redirect only ever fired for a name that
+ * arrived spotless through the native channel. `functions.git_status` (the
+ * harmony recipient namespace, seen live on gpt-oss), `git_status` written
+ * into prose, `run_code` from a model that learned that spelling elsewhere:
+ * all three walked past the redirect and came back as "Unknown tool".
+ *
+ * A registered tool always wins; this list is only consulted after `known`
+ * has had its full ladder, so nothing can be rerouted away from a live tool.
+ */
+const RETIRED_NAMES: string[] = [...RETIRED_TOOL_NAMES]
 
 export interface LooseToolCall {
   name: string
@@ -119,7 +135,8 @@ function parseJsonObjectCalls(text: string, known: Set<string>): { call: LooseTo
  */
 export function parseLooseToolCalls(text: string, known: string[]): LooseParseResult {
   if (!text || !text.trim()) return { calls: [], matched: [] }
-  const knownSet = new Set(known)
+  // Retired names are recognisable AND runnable, so they belong in the net.
+  const knownSet = new Set([...known, ...RETIRED_NAMES])
   const calls: LooseToolCall[] = []
   const matched: string[] = []
   const seen = new Set<string>()
@@ -204,10 +221,17 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   text_to_video: 'video_generate', image_to_video: 'video_generate',
   web: 'web_search', search: 'web_search', fetch: 'web_fetch', read_file: 'file_read', write_file: 'file_write',
   list_files: 'file_list', search_files: 'file_search', run_shell: 'shell_execute', run_code: 'code_execute',
+  // Retired targets (A9). These resolve only because the retired list is the
+  // second ladder in canonicalToolName; while the name was registered they
+  // were dead weight, and the moment it retired they became the difference
+  // between a redirect and a wasted step.
+  execute_code: 'code_execute', run_python: 'code_execute', python_exec: 'code_execute',
+  run_test: 'run_tests', test_run: 'run_tests',
+  list_processes: 'process_list', current_time: 'get_current_time',
 }
 
 /** Exact → lowercase → alias → punctuation-insensitive. Undefined if none hit. */
-function matchKnown(name: string, known: string[]): string | undefined {
+function matchKnown(name: string, known: readonly string[]): string | undefined {
   if (!name) return undefined
   if (known.includes(name)) return name
   const lc = name.toLowerCase()
@@ -253,12 +277,18 @@ function toolNameCandidates(name: string): string[] {
  */
 export function canonicalToolName(name: string, known: string[]): string {
   if (!name) return name
-  const direct = matchKnown(name, known)
-  if (direct) return direct
-  for (const candidate of toolNameCandidates(name)) {
-    if (candidate === name) continue
-    const hit = matchKnown(candidate, known)
-    if (hit) return hit
+  // Registered tools first, all the way down the ladder, THEN the retired
+  // names (A9). Order is the safety property: a live tool can never lose a
+  // call to a retired one, and a name that is neither still comes back
+  // unchanged so the executor can say "Unknown tool" honestly.
+  for (const list of [known, RETIRED_NAMES]) {
+    const direct = matchKnown(name, list)
+    if (direct) return direct
+    for (const candidate of toolNameCandidates(name)) {
+      if (candidate === name) continue
+      const hit = matchKnown(candidate, list)
+      if (hit) return hit
+    }
   }
   return name
 }

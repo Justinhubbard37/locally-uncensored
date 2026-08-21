@@ -34,6 +34,7 @@ vi.mock('../../../lib/workflow-engine', () => ({ WorkflowEngine: class {} }))
 
 import { runRetiredTool, RETIRED_TOOL_NAMES, registerBuiltinTools } from '../builtin-tools'
 import { ToolRegistry } from '../tool-registry'
+import { DEFAULT_PERMISSIONS } from '../types'
 import { setReadOnlyShellTurn } from '../../agent-context'
 
 beforeEach(() => {
@@ -172,5 +173,52 @@ describe('retired names survive the step executor (executeParallel)', () => {
     const { RETIRED_EXECUTOR_NAMES } = await import('../builtin-tools')
     const { RETIRED_TOOL_NAMES: libNames } = await import('../../../lib/retired-tools')
     expect([...libNames].sort()).toEqual([...RETIRED_EXECUTOR_NAMES].sort())
+  })
+})
+
+// A9. The registry answers 'confirm' for every name it cannot find, and a
+// retired name has no definition to look up. So Agent mode raised an approval
+// dialog for `git_status`, a fixed `git status --porcelain=2 --branch`, and the
+// user had to click it before the run could continue. The decision is made in
+// getPermissionLevelWithOverrides (useAgentChat: needsApproval = permLevel !==
+// 'auto'), which is why it is pinned HERE and not only on the pure helper.
+describe('a retired name gets a permission, not a shrug', () => {
+  const registry = new ToolRegistry()
+  registerBuiltinTools(registry)
+  const perms = DEFAULT_PERMISSIONS
+  const level = (name: string) => registry.getPermissionLevelWithOverrides(name, perms, {})
+
+  it('read-only retired names run without an approval dialog', () => {
+    expect(perms.terminal).toBe('confirm')
+    for (const n of ['git_status', 'git_log', 'git_diff', 'shell_task_status', 'shell_task_list',
+      'system_info', 'process_list', 'get_current_time']) {
+      expect(level(n), n).toBe('auto')
+    }
+  })
+
+  it('mutating retired names still stop for the user', () => {
+    for (const n of ['git_commit', 'git_push', 'gh_pr_create', 'project_init', 'run_tests',
+      'code_execute', 'shell_execute_background', 'shell_task_kill']) {
+      expect(level(n), n).toBe('confirm')
+    }
+  })
+
+  it('negative control: a registered tool keeps its own category level', () => {
+    expect(level('shell_execute')).toBe('confirm')
+    expect(level('web_search')).toBe('auto')
+  })
+
+  it('negative control: a name that was never ours is still confirm', () => {
+    expect(level('teleport')).toBe('confirm')
+    expect(level('git_blame')).toBe('confirm')
+  })
+
+  it('a per-tool override still wins over the retired default', () => {
+    // permissionStore's overrides are the user speaking; the A9 default must
+    // not outrank them in either direction.
+    expect(registry.getPermissionLevelWithOverrides('git_status', perms, { git_status: 'confirm' }))
+      .toBe('confirm')
+    expect(registry.getPermissionLevelWithOverrides('git_commit', perms, { git_commit: 'auto' }))
+      .toBe('auto')
   })
 })

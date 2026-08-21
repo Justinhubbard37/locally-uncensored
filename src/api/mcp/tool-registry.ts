@@ -4,7 +4,7 @@ import type { MCPToolDefinition, PermissionMap, PermissionLevel } from './types'
 import type { OllamaTool } from '../../types/agent-mode'
 import type { ToolDefinition } from '../providers/types'
 import { MUTATING_TOOLS } from '../../lib/mutating-tools'
-import { RETIRED_TOOL_NAMES } from '../../lib/retired-tools'
+import { RETIRED_TOOL_NAMES, retiredPermissionLevel } from '../../lib/retired-tools'
 
 type ToolExecutor = (args: Record<string, any>) => Promise<string>
 /**
@@ -95,8 +95,13 @@ export class ToolRegistry {
 
   getPermissionLevel(toolName: string, permissions: PermissionMap): PermissionLevel {
     const tool = this.tools.get(toolName)?.definition
-    if (!tool) return 'confirm'
-    return permissions[tool.category]
+    if (tool) return permissions[tool.category]
+    // A9: a retired name has no definition to read a category off, and the
+    // 'confirm' below meant Agent mode opened an approval dialog for
+    // `git_status`, whose executor is one fixed read. Read-only retired names
+    // run unattended, mutating ones keep confirm, blocked stays blocked.
+    // Anything else is genuinely unknown and confirm is the honest answer.
+    return retiredPermissionLevel(toolName, permissions) ?? 'confirm'
   }
 
   /**
