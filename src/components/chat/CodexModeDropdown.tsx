@@ -1,0 +1,161 @@
+import { useState } from 'react'
+import { ChevronDown, ShieldCheck, Zap, ClipboardList, Cloud } from 'lucide-react'
+import { useChatStore } from '../../stores/chatStore'
+import { useCodexStore } from '../../stores/codexStore'
+import { useSettingsStore } from '../../stores/settingsStore'
+import { useGenerationStore } from '../../stores/generationStore'
+import {
+  CODEX_MODES, CODEX_MODE_LABELS, CODEX_MODE_SHORT, CODEX_MODE_DESCRIPTIONS,
+  resolveCodexMode, type CodexMode,
+} from '../../lib/codex-mode'
+
+/**
+ * Ask / Bypass / Plan for the Coding Agent (plan 2.6.6, C1).
+ *
+ * Lives in the CODE composer only, hooked in through ChatInput's
+ * `composerActions` so ChatInput itself stays surface-neutral and the Chat tab
+ * inherits nothing. The mode is remembered per conversation, with
+ * settings.codexDefaultMode as the fallback; picking one here NEVER writes the
+ * global settings, so another conversation and the Agent surface are untouched.
+ *
+ * A switch takes effect from the NEXT send. While a run is in flight the
+ * trigger says so and the pick is parked, because the running turn resolved its
+ * knobs when it started and quietly changing them mid-run is how a read-only
+ * guarantee gets lost.
+ */
+const MODE_ICON: Record<CodexMode, typeof ShieldCheck> = {
+  ask: ShieldCheck,
+  bypass: Zap,
+  plan: ClipboardList,
+}
+
+const MODE_ACCENT: Record<CodexMode, string> = {
+  ask: 'text-blue-400',
+  bypass: 'text-amber-400',
+  plan: 'text-purple-400',
+}
+
+const MODE_ACTIVE_ROW: Record<CodexMode, string> = {
+  ask: 'bg-blue-500/10 text-blue-600 dark:text-blue-400',
+  bypass: 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
+  plan: 'bg-purple-500/10 text-purple-600 dark:text-purple-400',
+}
+
+export function CodexModeDropdown({ openUpward = false }: { openUpward?: boolean } = {}) {
+  const [open, setOpen] = useState(false)
+  const activeConvId = useChatStore((s) => s.activeConversationId)
+  const defaultMode = useSettingsStore((s) => s.settings.codexDefaultMode)
+  const modeByConversation = useCodexStore((s) => s.modeByConversation)
+  const parkedByConversation = useCodexStore((s) => s.parkedModeByConversation)
+  const chooseCodexMode = useCodexStore((s) => s.chooseCodexMode)
+  const generating = useGenerationStore((s) => s.generating)
+
+  const runActive = !!activeConvId && generating[activeConvId] === true
+  const current = resolveCodexMode(
+    activeConvId ? modeByConversation[activeConvId] : undefined,
+    defaultMode,
+  )
+  const parked = activeConvId ? parkedByConversation[activeConvId] : undefined
+  // Only worth showing while a run holds the change back. Once it is applied,
+  // parked and current are the same value.
+  const pending = runActive && parked && parked !== current ? parked : null
+
+  const CurrentIcon = MODE_ICON[current]
+
+  const pick = (mode: CodexMode) => {
+    if (!activeConvId) return
+    chooseCodexMode(activeConvId, mode, runActive)
+    setOpen(false)
+  }
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        title={
+          runActive
+            ? 'A run is in flight. A change here applies to the next message.'
+            : CODEX_MODE_DESCRIPTIONS[current]
+        }
+        className="flex items-center gap-1 px-2 py-0.5 rounded border border-gray-200 dark:border-white/[0.06] hover:border-gray-400 dark:hover:border-white/15 text-gray-500 transition-colors text-[0.55rem]"
+      >
+        <CurrentIcon size={10} className={MODE_ACCENT[current]} />
+        <span className={MODE_ACCENT[current]}>{CODEX_MODE_SHORT[current]}</span>
+        {pending ? (
+          <span className="text-[0.5rem] text-amber-500">
+            {`then ${CODEX_MODE_SHORT[pending]}`}
+          </span>
+        ) : runActive ? (
+          // A run is in flight and nothing is parked yet. Say it on the
+          // trigger, not only in the panel, so "applies to the next message" is
+          // visible before the user clicks.
+          <span className="w-1 h-1 rounded-full bg-amber-400" />
+        ) : null}
+        <ChevronDown size={8} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className={`absolute right-0 z-50 w-60 rounded-lg bg-white dark:bg-[#262626] border border-gray-200 dark:border-white/10 shadow-xl py-1.5 ${openUpward ? 'bottom-full mb-1' : 'top-full mt-1'}`}>
+            {!activeConvId ? (
+              <p className="px-3 py-1.5 text-[0.5rem] text-gray-400">
+                Open a coding chat first, the mode lives on the conversation.
+              </p>
+            ) : (
+              <>
+                {runActive && (
+                  <p className="px-3 pb-1 text-[0.5rem] leading-snug text-amber-600 dark:text-amber-400/90">
+                    A run is in flight. Your pick applies from the next message.
+                  </p>
+                )}
+                <div className="px-1.5 space-y-0.5">
+                  {CODEX_MODES.map((mode) => {
+                    const Icon = MODE_ICON[mode]
+                    const isActive = mode === current
+                    const isPending = mode === pending
+                    return (
+                      <button
+                        key={mode}
+                        onClick={() => pick(mode)}
+                        className={`w-full flex items-start gap-1.5 px-2 py-1 rounded text-left transition-colors ${
+                          isActive
+                            ? MODE_ACTIVE_ROW[mode]
+                            : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-white/[0.04] hover:text-gray-700 dark:hover:text-gray-300'
+                        }`}
+                      >
+                        <Icon size={10} className={`mt-px shrink-0 ${isActive ? '' : 'text-gray-400'}`} />
+                        <span className="min-w-0">
+                          <span className="flex items-center gap-1">
+                            <span className="text-[0.55rem] font-medium">{CODEX_MODE_LABELS[mode]}</span>
+                            {isActive && <span className="text-[0.45rem] text-gray-400">active</span>}
+                            {isPending && <span className="text-[0.45rem] text-amber-500">next</span>}
+                          </span>
+                          <span className="block text-[0.5rem] leading-snug text-gray-400">
+                            {CODEX_MODE_DESCRIPTIONS[mode]}
+                          </span>
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+                {/* The one thing Bypass deliberately does NOT lift. Said here
+                    because a switch labelled "bypass permissions" that still
+                    asks would otherwise read as a broken toggle. */}
+                <div className="mt-1 pt-1 border-t border-gray-200 dark:border-white/[0.06] px-3">
+                  <p className="flex items-start gap-1 py-1 text-[0.5rem] leading-snug text-gray-400">
+                    <Cloud size={9} className="mt-px shrink-0" />
+                    <span>
+                      Bypass never lifts the cloud shell confirm. A remote model reaching your
+                      local shell unattended stays a decision you make each time.
+                    </span>
+                  </p>
+                </div>
+              </>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}

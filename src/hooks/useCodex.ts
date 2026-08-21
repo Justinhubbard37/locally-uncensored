@@ -13,11 +13,13 @@ import { allowedInReadOnlyTurn } from '../lib/mutating-tools'
 import { applyGoalCommand } from '../lib/goal-command'
 import { useAgentGoalStore, renderGoalSection } from '../stores/agentGoalStore'
 import { useAgentLoopStore } from '../stores/agentLoopStore'
-import { CODEX_CONFIRM_TOOLS, codexConfirmEnabled } from './codexShellGate'
+import { CODEX_CONFIRM_TOOLS } from './codexShellGate'
 import { buildHermesToolPrompt, buildHermesToolResult, parseHermesToolCalls, stripToolCallTags, hasToolCallTags } from '../api/hermes-tool-calling'
 import { streamProviderTurn, type StreamedProviderTurn } from '../lib/provider-stream'
 import { createHermesDisplayFilter } from '../lib/hermes-stream'
-import { setActiveChatId, setActiveConversationId, clearActiveChatId, chatWorkspaceSlug, setActiveWorkspace, setActiveAgentModel, setReadOnlyShellTurn } from '../api/agent-context'
+import { beginAgentRun, endAgentRun, chatWorkspaceSlug, setActiveAgentModel, type AgentRunContext } from '../api/agent-context'
+import { codexModeKnobs, CODEX_MODE_LABELS, type CodexMode } from '../lib/codex-mode'
+import { CODEX_PLAN_SYSTEM_PROMPT } from '../lib/codex-plan-prompt'
 import { resolveWorkspace } from '../api/agents/workspace-resolve'
 import { useAgentModeStore } from '../stores/agentModeStore'
 import { loadLurules, renderRulesSection, type RulesReader } from '../lib/lurules'
@@ -305,13 +307,24 @@ export function useCodex() {
       convId = store.createConversation(activeModel, persona?.systemPrompt || '', 'codex')
     }
 
+    // Mode of THIS conversation (plan 2.6.6, C1). A pick made while the
+    // previous run was still going has been parked; a send is where it takes
+    // effect, which is exactly what the dropdown promises. The mode is read
+    // per sendInstruction and NEVER written back into the global settings.
+    useCodexStore.getState().applyParkedMode(convId)
+    const codexMode: CodexMode = useCodexStore
+      .getState()
+      .codexModeFor(convId, settings.codexDefaultMode)
+    // A fresh instruction supersedes a plan that was waiting for approval. The
+    // approve button re-sends through here too, so it clears its own card and
+    // the plan run below is what puts a new one up.
+    useCodexStore.getState().setPlanApproval(convId, null)
+
     // Per-chat agent workspace → `~/agent-workspace/<slug>/`.
     // Slug uses the chat title so the folder is recognisable in
     // Explorer; falls back to a stable id-derived suffix when the
     // title is empty. Cleared in the finally block.
     const convForSlug = store.conversations.find((c) => c.id === convId)
-    setActiveChatId(chatWorkspaceSlug(convId, convForSlug?.title))
-    setActiveConversationId(convId)
 
     // Multi-Repo Agent (B15) + Codex/Agent workspace unification (B17):
     // pin the resolved workspace so the bridge resolves relative paths
@@ -322,7 +335,6 @@ export function useCodex() {
       perChat: useAgentModeStore.getState().workspaces[convId],
       defaultWorkspace: settings.defaultWorkspace,
     })
-    setActiveWorkspace(codexWorkspace)
 
     // Init codex thread if needed
     if (!codexStore.getThread(convId)) {
@@ -348,18 +360,19 @@ export function useCodex() {
     // Pin the tool-containment workspace to the SAME folder the model is told
     // to use (workDir). resolveWorkspace() above only sees the agent-mode
     // per-chat store + settings.defaultWorkspace — it MISSES the folder the
-    // Code tab's FileTree picker sets (codexStore.workingDirectory), which is
+    // Code tab's explorer picker sets (codexStore.workingDirectory), which is
     // the primary way to pick a repo in the Code tab. Without this, containment
     // stayed pinned to the per-chat sandbox while the model was told to work in
     // a real folder, so every file_list/file_read of the working dir failed
     // with "path escapes the allowed workspace" (live cloud find, 2026-07-11).
-    if (workDir && workDir !== '.') {
-      setActiveWorkspace({
-        kind: 'folder',
-        path: workDir,
-        extraPaths: codexWorkspace && codexWorkspace.kind === 'folder' ? codexWorkspace.extraPaths : undefined,
-      })
-    }
+    const runWorkspace =
+      workDir && workDir !== '.'
+        ? {
+            kind: 'folder' as const,
+            path: workDir,
+            extraPaths: codexWorkspace && codexWorkspace.kind === 'folder' ? codexWorkspace.extraPaths : undefined,
+          }
+        : codexWorkspace
 
     // `/goal` is bookkeeping, not a prompt. Handle it here and show the result;
     // every LATER turn picks the goal up from the system prompt below.
@@ -387,6 +400,39 @@ export function useCodex() {
       })
       return
     }
+
+    // Same for Plan mode: it is read-only for the whole conversation, so a
+    // command whose job is to change something has nowhere to land. Saying so
+    // beats narrating work that silently could not happen.
+    if (codexMode === 'plan' && slash && !slash.command.readOnly) {
+      useChatStore.getState().addMessage(convId, {
+        id: uuid(), role: 'user', content: rawInstruction, timestamp: Date.now(),
+      })
+      useChatStore.getState().addMessage(convId, {
+        id: uuid(), role: 'assistant', timestamp: Date.now(),
+        content: `Plan mode is read-only, and /${slash.command.name} needs to write files or run commands. Switch the mode dropdown to "${CODEX_MODE_LABELS.ask}" first, or use a read-only command such as /review, /plan, /diff or /explain.`,
+      })
+      return
+    }
+
+    // Read-only for the whole turn: Code-Review Mode, a read-only slash
+    // command, or Plan mode. The most restrictive of the three wins, and the
+    // runtime filter below hangs on THIS, not on the slash flag alone, so the
+    // persistent conversation mode is enforced on every step.
+    const effectiveReadOnly = settings.codexReviewMode === true || readOnlyTurn || codexMode === 'plan'
+
+    // Open the run context. Everything a tool gate needs (conversation, jail
+    // root, read-only flag, mode) travels on THIS object from here on, so a
+    // second run that starts or ends in the middle cannot move it (plan C1
+    // ERZWINGUNG, blocker S3). The finally closes it, and closing only clears
+    // the process-wide mirror when this run still owns it.
+    const run: AgentRunContext = beginAgentRun({
+      chatId: chatWorkspaceSlug(convId, convForSlug?.title),
+      conversationId: convId,
+      workspace: runWorkspace,
+      readOnlyShellTurn: effectiveReadOnly,
+      mode: codexMode,
+    })
 
     // Add instruction event
     codexStore.addEvent(convId, {
@@ -469,24 +515,43 @@ export function useCodex() {
     // list-stripping below (MUTATING_TOOLS) still enforces it
     // programmatically even if the model tries to call a write tool anyway.
     const reviewMode = settings.codexReviewMode === true
+    // Effective knobs for this run = f(mode, settings). The mode is a PRESET
+    // over the switches that already exist; nothing here is ever written back
+    // into the settings, so a Bypass in this conversation cannot reach another
+    // conversation or the Agent surface (plan C1 BINDUNG). The cloud shell
+    // gate is inside codexConfirmEnabled and stays armed in all three modes.
+    const knobs = codexModeKnobs({
+      mode: codexMode,
+      settings: {
+        codexConfirmShell: settings.codexConfirmShell,
+        codexCloudConfirmShell: settings.codexCloudConfirmShell,
+        codexStageMode: settings.codexStageMode,
+        codexReviewMode: settings.codexReviewMode,
+      },
+      providerId,
+      readOnlyTurn,
+    })
     // The merged shell_execute stays offered on read-only turns (it carries
-    // git status/log/diff now); the executor refuses everything else while
-    // this flag is up. Cleared in the finally below.
-    setReadOnlyShellTurn(reviewMode || readOnlyTurn)
-    // Review mode always wins; otherwise Small-Model Mode swaps in the lean
-    // prompt (Knob 2) for small local models.
+    // git status/log/diff now); the executor refuses everything else while the
+    // run's flag is up. The flag lives on the run object (set at
+    // beginAgentRun), not on a process-wide global.
+    // Review mode always wins; then Plan mode's own prompt; otherwise
+    // Small-Model Mode swaps in the lean prompt (Knob 2) for small local
+    // models.
     const baseCodexPrompt = reviewMode
       ? CODEX_REVIEW_SYSTEM_PROMPT
-      : settings.smallModelMode
-        ? CODEX_SYSTEM_PROMPT_LEAN
-        : CODEX_SYSTEM_PROMPT
+      : knobs.planPrompt
+        ? CODEX_PLAN_SYSTEM_PROMPT
+        : settings.smallModelMode
+          ? CODEX_SYSTEM_PROMPT_LEAN
+          : CODEX_SYSTEM_PROMPT
     // The prompt promises asset generation only while the tool list carries it.
     // Same question, same helper as the gate on the catalog below, so the two
     // cannot disagree. Never in review mode, which generates nothing.
     // A read-only slash command generates nothing either, and its own
     // MUTATING_TOOLS filter has already stripped the generators, so promising
     // them there is the same broken promise reviewMode was fixed for.
-    const assetsPossible = !reviewMode && !readOnlyTurn && !settings.smallModelMode
+    const assetsPossible = !effectiveReadOnly && !settings.smallModelMode
     const assetLine = !assetsPossible
       ? ''
       : wantsMediaTools(instruction)
@@ -581,7 +646,10 @@ export function useCodex() {
 
     // Build message history
     const conv = useChatStore.getState().conversations.find(c => c.id === convId)
-    if (!conv) return
+    // The only bail-out between opening the run and the try/finally that closes
+    // it. Close it here too, or the run context outlives a turn that never
+    // started and the next standalone tool call inherits its jail root.
+    if (!conv) { endAgentRun(run); return }
 
     void diagLog('pre-loop', {
       activeModel, providerId, strategy, workDir,
@@ -1010,7 +1078,7 @@ export function useCodex() {
           // this turn was started by a read-only slash command. Belt-and-braces
           // with the system prompt — covers the model ignoring the instruction
           // and trying anyway.
-          const codexTools = (settings.codexReviewMode || readOnlyTurn)
+          const codexTools = effectiveReadOnly
             ? codexToolsAll.filter((t) => allowedInReadOnlyTurn(t.name))
             : codexToolsAll
           // Tool-list sizing is a MODEL-STRENGTH decision (audit B3):
@@ -1252,7 +1320,7 @@ export function useCodex() {
               const def = toolRegistry.getToolByName(t.name)
               if (!def) return true
               if (!(CODEX_CATEGORIES as readonly string[]).includes(def.category)) return false
-              if ((settings.codexReviewMode || readOnlyTurn) && !allowedInReadOnlyTurn(t.name)) return false
+              if (effectiveReadOnly && !allowedInReadOnlyTurn(t.name)) return false
               return true
             },
           )
@@ -1436,14 +1504,19 @@ export function useCodex() {
         // /plan (read-only) was offered file_read/file_list/file_search only, on
         // every one of its six requests, and still created a file on disk.
         // Review Mode carried the identical hole since 2.5.6.
-        if (settings.codexReviewMode || readOnlyTurn) {
+        if (effectiveReadOnly) {
           const blocked = toolCalls.filter((tc) => !allowedInReadOnlyTurn(tc.function?.name ?? ''))
           if (blocked.length) {
             toolCalls = toolCalls.filter((tc) => allowedInReadOnlyTurn(tc.function?.name ?? ''))
             const names = [...new Set(blocked.map((tc) => tc.function.name))].join(', ')
+            const why = readOnlyTurn
+              ? `a read-only command (/${slash!.command.name})`
+              : codexMode === 'plan'
+                ? 'Plan mode'
+                : 'Code Review Mode'
             messages.push({
               role: 'user',
-              content: `${names} is not available on this turn, it is ${readOnlyTurn ? `a read-only command (/${slash!.command.name})` : 'Code Review Mode'}. Do not try to change anything. Finish with the written answer using what you have already read.`,
+              content: `${names} is not available on this turn, it is ${why}. Do not try to change anything. Finish with the written answer using what you have already read.`,
             })
           }
         }
@@ -1652,6 +1725,9 @@ export function useCodex() {
           id: e.ac.id,
           toolName: e.ac.toolName,
           args: e.injectedArgs,
+          // The run this batch belongs to. Every executor gate downstream
+          // reads it instead of the module global (plan C1 ERZWINGUNG).
+          run,
         }))
         const auditIds = new Map<string, string>()
 
@@ -1689,7 +1765,7 @@ export function useCodex() {
         // loop forever — and the timer is cleared when the tool wins (B10),
         // instead of parking a live closure for up to 615 s per call.
         const withTimeout = (name: string, args: Record<string, any>) =>
-          raceWithToolTimeout(toolRegistry.execute(name, args), name, toolCallCapMs(name, args, settings))
+          raceWithToolTimeout(toolRegistry.execute(name, args, 1, run), name, toolCallCapMs(name, args, settings))
 
         // Multi-File Stage-and-Approve (B10). When the user has codex
         // stage mode on, file_write calls don't hit the disk — they
@@ -1808,7 +1884,10 @@ export function useCodex() {
         }
 
         const dispatchTool = (name: string, args: Record<string, any>): Promise<string> => {
-          if (settings.codexStageMode) {
+          // Stage-and-Approve follows the MODE preset, not the raw setting:
+          // Ask stages every write for review, Bypass writes straight through,
+          // Plan never gets here because the write tools are stripped.
+          if (knobs.stageWrites) {
             if (name === 'file_write') return stageFileWrite(args)
             if (name === 'file_edit') return stageFileEdit(args)
             // Read-your-writes: staged content is invisible on disk, so reads
@@ -1859,11 +1938,11 @@ export function useCodex() {
           // toggle looked broken on cloud models. Same default, but the cloud arm
           // is now settings.codexCloudConfirmShell — a real switch the user owns.
           // See codexConfirmEnabled for the whole rule.
-          awaitApproval: codexConfirmEnabled({
-            confirmShell: settings.codexConfirmShell,
-            cloudConfirmShell: settings.codexCloudConfirmShell,
-            providerId,
-          })
+          //
+          // 2.6.6 (plan C1): the mode preset decides whether this gate is
+          // armed. Ask forces it on, Bypass turns the LOCAL arm off, and
+          // codexConfirmEnabled keeps the cloud arm alive in every mode.
+          awaitApproval: knobs.confirmExec
             ? async (req) => {
                 if (!CODEX_CONFIRM_TOOLS.has(req.toolName)) return true
                 const a = req.args || {}
@@ -1873,7 +1952,10 @@ export function useCodex() {
                 return useCodexConfirmStore.getState().ask({
                   toolName: req.toolName,
                   command: String(a.command ?? a.code ?? a.script ?? '').slice(0, 800),
-                  cloudReason: !settings.codexConfirmShell && providerId === 'lu-cloud',
+                  // "we ask because it is a cloud model" only holds when the
+                  // user did not ask for it themselves and Ask mode is not
+                  // what put the gate up.
+                  cloudReason: !settings.codexConfirmShell && codexMode !== 'ask' && providerId === 'lu-cloud',
                 }, abort.signal)
               }
             : undefined,
@@ -1903,6 +1985,11 @@ export function useCodex() {
               }
             }
           },
+        }, {
+          // ExecutorOptions, not the runtime: abortSignal has always belonged
+          // to the third argument, and passing it inside the runtime object
+          // meant Stop never kept the not-yet-started calls of a batch from
+          // firing. A stopped run has to stop doing things.
           abortSignal: abort.signal,
         })
 
@@ -2205,12 +2292,29 @@ export function useCodex() {
         void extractMemoriesFromPair(instruction, fullContent, convId).catch(() => {})
       }
 
+      // Plan mode finished: put the plan up for approval (plan C1, blocker
+      // S7). The card carries the FULL answer, the concrete commands and
+      // target paths, not the todo titles: the plan is a function of untrusted
+      // repo content, so the user approves what they can actually read. The
+      // mode the approval runs under is resolved in the UI and shown ON the
+      // button, and it is never Bypass unless the user picked Bypass by hand.
+      if (convId && codexMode === 'plan' && !userStoppedRef.current && fullContent.trim()) {
+        useCodexStore.getState().setPlanApproval(convId, {
+          planText: fullContent.trim(),
+          messageId: assistantMsg.id,
+          createdAt: Date.now(),
+        })
+      }
+
       setIsRunning(false)
       useGenerationStore.getState().setGenerating(convId, false)
       useGenerationStore.getState().clearAborter(convId)
       runningRef.current = false
       abortRef.current = null
-      clearActiveChatId()
+      // Close THIS run. The process-wide mirror is only cleared when this run
+      // still owns it, so a run that outlives us keeps its workspace and its
+      // read-only flag (plan C1 ERZWINGUNG, blocker S3).
+      endAgentRun(run)
 
       // The turn is done, including the hidden tool history inserted above, so
       // put it on disk now. Persistence is coalesced while the run streams

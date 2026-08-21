@@ -4,6 +4,7 @@ import type { JSONSchemaProp, MCPToolDefinition } from './types'
 import type { ToolRegistry } from './tool-registry'
 import { backendCall, fetchExternal } from '../backend'
 import { getActiveChatId, getActiveConversationId, getActiveWorkspace, isChatArtifactMode, captureChatArtifact, isReadOnlyShellTurn } from '../agent-context'
+import type { AgentRunContext } from '../agent-context'
 import { useAgentWorkflowStore } from '../../stores/agentWorkflowStore'
 import { WorkflowEngine } from '../../lib/workflow-engine'
 import type { StepResult } from '../../types/agent-workflows'
@@ -25,14 +26,14 @@ import { RETIRED_MUTATING_NAMES } from '../../lib/retired-tools'
  * a caller that needs an absolute project path to resolve MUST pass the real
  * `workingDirectory` here (it becomes the root).
  */
-function chatCtx(): { chatId?: string; workingDirectory?: string } {
-  const id = getActiveChatId()
+function chatCtx(run?: AgentRunContext): { chatId?: string; workingDirectory?: string } {
+  const id = getActiveChatId(run)
   if (!id) return {}
   // If the agent loop picked a real folder, thread it through so the
   // bridge resolves relative paths against that folder instead of the
   // per-chat sandbox. The workspace pointer is set on loop start by
   // useAgentChat / useCodex (see agent-context.setActiveWorkspace).
-  const ws = getActiveWorkspace()
+  const ws = getActiveWorkspace(run)
   if (ws?.kind === 'folder' && ws.path) {
     return { chatId: id, workingDirectory: ws.path }
   }
@@ -476,8 +477,8 @@ async function executeWebFetch(args: Record<string, any>): Promise<string> {
   }
 }
 
-async function executeFileRead(args: Record<string, any>): Promise<string> {
-  const data = await backendCall('fs_read', { path: args.path, ...chatCtx() })
+async function executeFileRead(args: Record<string, any>, run?: AgentRunContext): Promise<string> {
+  const data = await backendCall('fs_read', { path: args.path, ...chatCtx(run) })
   // A binary file comes back as a marker with its size, never as content.
   // Handing the model raw bytes-as-text is a corruption trap: it treats them as
   // content and a later file_write persists that string, mangling the file.
@@ -512,18 +513,18 @@ function mimeForName(name: string): string {
   return map[ext] || 'text/plain'
 }
 
-async function executeFileWrite(args: Record<string, any>): Promise<string> {
+async function executeFileWrite(args: Record<string, any>, run?: AgentRunContext): Promise<string> {
   const content = typeof args.content === 'string' ? args.content : String(args.content ?? '')
   // Plain-chat artifact mode (ChatGPT-style, David 2026-06-12): in the NORMAL
   // chat, a "file write" must NOT touch disk — capture it so it renders inline
   // with a preview + Download button. The Coding Agent / full Agent leave
   // artifact mode OFF and fall through to the real fs_write below.
-  if (isChatArtifactMode()) {
+  if (isChatArtifactMode(run)) {
     const name = artifactBaseName(args.path)
-    captureChatArtifact(name, content, mimeForName(name))
+    captureChatArtifact(name, content, mimeForName(name), run)
     return `Created "${name}" (${formatBytes(content.length)}). It is shown to the user right here in the chat with a preview and a Download button — nothing was written to disk. Do not call file_read on it; just tell the user it's ready.`
   }
-  const data = await backendCall('fs_write', { path: args.path, content, ...chatCtx() })
+  const data = await backendCall('fs_write', { path: args.path, content, ...chatCtx(run) })
   // Rust returns {status: 'saved'|'unchanged', path: <absolute>, bytes}. Surface
   // the real path so the model (and the file-change event) knows WHERE the write
   // landed — especially important when chatId is None and Rust routes a relative
@@ -535,11 +536,11 @@ async function executeFileWrite(args: Record<string, any>): Promise<string> {
   return JSON.stringify(data)
 }
 
-async function executeFileEdit(args: Record<string, any>): Promise<string> {
+async function executeFileEdit(args: Record<string, any>, run?: AgentRunContext): Promise<string> {
   // Plain-chat artifact mode has no files on disk — file_edit makes no sense
   // there. Steer to file_write (which captures a document artifact) instead of
   // silently reaching into the agent sandbox.
-  if (isChatArtifactMode()) {
+  if (isChatArtifactMode(run)) {
     return 'file_edit is not available in plain chat (there are no files on disk here). Use file_write to create or replace a document.'
   }
   const path = typeof args.path === 'string' ? args.path : ''
@@ -551,7 +552,7 @@ async function executeFileEdit(args: Record<string, any>): Promise<string> {
   // existing text file — for a new file the model must use file_write.
   let data: any
   try {
-    data = await backendCall('fs_read', { path, ...chatCtx() })
+    data = await backendCall('fs_read', { path, ...chatCtx(run) })
   } catch (e) {
     return `Error: file_edit could not read ${path}: ${e instanceof Error ? e.message : String(e)}. To create a new file use file_write.`
   }
@@ -574,25 +575,25 @@ async function executeFileEdit(args: Record<string, any>): Promise<string> {
     }
   }
 
-  const w = await backendCall('fs_write', { path, content: res.content, ...chatCtx() })
+  const w = await backendCall('fs_write', { path, content: res.content, ...chatCtx(run) })
   if (w.status === 'saved' && w.path) return `Edited ${w.path} (1 replacement).`
   if (w.status === 'unchanged' && w.path) return `No change written to ${w.path} (content already matched).`
   return JSON.stringify(w)
 }
 
-async function executeFileList(args: Record<string, any>): Promise<string> {
+async function executeFileList(args: Record<string, any>, run?: AgentRunContext): Promise<string> {
   const data = await backendCall('fs_list', {
     path: args.path,
     recursive: args.recursive || false,
     pattern: args.pattern || null,
     // NOTE: the model does NOT get to pick the jail root. `workingDirectory`
     // comes only from chatCtx() (the active, user-chosen workspace). The
-    // file-tree UI browser needs to list arbitrary picked folders, so it calls
-    // the `fs_list` backend command DIRECTLY (FileTree.tsx) instead of through
+    // explorer UI needs to list arbitrary picked folders, so it calls the
+    // `fs_list` backend command DIRECTLY (ExplorerPanel.tsx) instead of through
     // this model tool. Security review 2.5.7: passing the model's own
     // `workingDirectory` through here let a prompt-injected model set
     // `workingDirectory: "C:/Users/<user>/.ssh"` and enumerate any directory.
-    ...chatCtx(),
+    ...chatCtx(run),
   })
   if (Array.isArray(data.entries)) {
     return data.entries
@@ -602,12 +603,12 @@ async function executeFileList(args: Record<string, any>): Promise<string> {
   return JSON.stringify(data)
 }
 
-async function executeFileSearch(args: Record<string, any>): Promise<string> {
+async function executeFileSearch(args: Record<string, any>, run?: AgentRunContext): Promise<string> {
   const data = await backendCall('fs_search', {
     path: args.path,
     pattern: args.pattern,
     max_results: args.maxResults || 50,
-    ...chatCtx(),
+    ...chatCtx(run),
   })
   if (Array.isArray(data.results)) {
     return data.results
@@ -620,13 +621,13 @@ async function executeFileSearch(args: Record<string, any>): Promise<string> {
   return JSON.stringify(data)
 }
 
-async function executeShellExecute(args: Record<string, any>): Promise<string> {
+async function executeShellExecute(args: Record<string, any>, run?: AgentRunContext): Promise<string> {
   // Background-task actions: the three shell_task_* tools folded in (2.6.6).
   const task = typeof args.task === 'string' ? args.task : ''
   if (task === 'list') return executeShellTaskList()
   if (task === 'status' || task === 'kill') {
-    if (task === 'kill' && isReadOnlyShellTurn()) {
-      return 'Refused: this turn is read-only (/review or Code-Review Mode); killing a task changes state.'
+    if (task === 'kill' && isReadOnlyShellTurn(run)) {
+      return 'Refused: this turn is read-only (/review, Code-Review Mode or Plan mode); killing a task changes state.'
     }
     const id = args.task_id ?? args.id
     if (!id) return `shell_execute: task "${task}" needs a task_id.`
@@ -642,8 +643,8 @@ async function executeShellExecute(args: Record<string, any>): Promise<string> {
   // Read-only turn (/review …): the classifier is the gate now that the typed
   // read-only inspectors are gone. Conservative on purpose: chained commands
   // are refused outright, a read-only mode that can be talked around is none.
-  if (isReadOnlyShellTurn() && (args.background || !isReadOnlyCommand(command))) {
-    return 'Refused: this turn is read-only (/review or Code-Review Mode). Only inspection commands run here: git status/log/diff/show/blame, ls, cat, pwd. One command, no chaining.'
+  if (isReadOnlyShellTurn(run) && (args.background || !isReadOnlyCommand(command))) {
+    return 'Refused: this turn is read-only (/review, Code-Review Mode or Plan mode). Only inspection commands run here: git status/log/diff/show/blame, ls, cat, pwd. One command, no chaining.'
   }
 
   if (args.background) return executeShellExecuteBg({ command, cwd: args.cwd })
@@ -662,7 +663,7 @@ async function executeShellExecute(args: Record<string, any>): Promise<string> {
     timeout,
     shell: args.shell || null,
     stdin: typeof args.stdin === 'string' && args.stdin ? args.stdin : null,
-    ...chatCtx(),
+    ...chatCtx(run),
   })
   const output = data.stdout || ''
   const err = data.stderr || ''
@@ -699,8 +700,8 @@ async function executeShellExecute(args: Record<string, any>): Promise<string> {
   return output || (err ? `stderr: ${err}` : 'Done.')
 }
 
-async function executeCodeExecute(args: Record<string, any>): Promise<string> {
-  const data = await backendCall('execute_code', { code: args.code, timeout: 30000, ...chatCtx() })
+async function executeCodeExecute(args: Record<string, any>, run?: AgentRunContext): Promise<string> {
+  const data = await backendCall('execute_code', { code: args.code, timeout: 30000, ...chatCtx(run) })
   const output = data.stdout || ''
   const err = data.stderr || ''
   if (data.timedOut) return `Timed out.\n${err}`
@@ -708,22 +709,22 @@ async function executeCodeExecute(args: Record<string, any>): Promise<string> {
   return output || (err ? `stderr: ${err}` : 'Done.')
 }
 
-async function runShell(command: string, cwd: string | undefined, timeout = 60000) {
+async function runShell(command: string, cwd: string | undefined, timeout = 60000, run?: AgentRunContext) {
   return backendCall('shell_execute', {
     command,
     args: null,
     cwd: cwd || null,
     timeout,
     shell: null,
-    ...chatCtx(),
+    ...chatCtx(run),
   })
 }
 
-async function executeShellExecuteBg(args: Record<string, any>): Promise<string> {
+async function executeShellExecuteBg(args: Record<string, any>, run?: AgentRunContext): Promise<string> {
   const { bgStart } = await import('../agents/bg-tasks')
   // Thread the chat context through, or the task starts in LU's own directory
   // instead of the workspace the foreground shell tool uses.
-  const { id } = await bgStart({ command: args.command, cwd: args.cwd, ...chatCtx() })
+  const { id } = await bgStart({ command: args.command, cwd: args.cwd, ...chatCtx(run) })
   return `Task started: ${id}. Use shell_task_status to poll, shell_task_kill to cancel.`
 }
 
@@ -748,9 +749,9 @@ async function executeShellTaskList(): Promise<string> {
   return tasks.map(renderBgStatusOneLine).join('\n')
 }
 
-async function executeGitStatus(args: Record<string, any>): Promise<string> {
+async function executeGitStatus(args: Record<string, any>, run?: AgentRunContext): Promise<string> {
   const { parseGitStatus, renderGitStatus } = await import('../agents/git-tools')
-  const data = await runShell('git status --porcelain=2 --branch', args.cwd)
+  const data = await runShell('git status --porcelain=2 --branch', args.cwd, undefined, run)
   if (data.exitCode && data.exitCode !== 0) {
     return `git_status failed: ${data.stderr || data.stdout || `exit ${data.exitCode}`}`
   }
@@ -758,7 +759,7 @@ async function executeGitStatus(args: Record<string, any>): Promise<string> {
   return renderGitStatus(parsed)
 }
 
-async function executeGitCommit(args: Record<string, any>): Promise<string> {
+async function executeGitCommit(args: Record<string, any>, run?: AgentRunContext): Promise<string> {
   const { buildGitCommitCommand } = await import('../agents/git-tools')
   const cmd = buildGitCommitCommand({
     message: args.message,
@@ -766,7 +767,7 @@ async function executeGitCommit(args: Record<string, any>): Promise<string> {
     allTracked: !!args.allTracked,
   })
   if (!cmd) return 'git_commit: a non-empty `message` is required.'
-  const data = await runShell(cmd, args.cwd)
+  const data = await runShell(cmd, args.cwd, undefined, run)
   const output = `${data.stdout || ''}\n${data.stderr || ''}`.trim()
   if (data.exitCode && data.exitCode !== 0) {
     return `git_commit failed (exit ${data.exitCode}):\n${output}`
@@ -775,14 +776,14 @@ async function executeGitCommit(args: Record<string, any>): Promise<string> {
   return m ? `Committed on ${m[1]} as ${m[2]}.\n${output}` : output
 }
 
-async function executeGitPush(args: Record<string, any>): Promise<string> {
+async function executeGitPush(args: Record<string, any>, run?: AgentRunContext): Promise<string> {
   const { shellQuote } = await import('../agents/git-tools')
   const flags: string[] = []
   if (args.setUpstream) flags.push('-u')
   if (args.remote) flags.push(shellQuote(args.remote))
   if (args.branch) flags.push(shellQuote(args.branch))
   const cmd = `git push ${flags.join(' ')}`.trim()
-  const data = await runShell(cmd, args.cwd, 120000)
+  const data = await runShell(cmd, args.cwd, 120000, run)
   const output = `${data.stdout || ''}\n${data.stderr || ''}`.trim()
   if (data.exitCode && data.exitCode !== 0) {
     return `git_push failed (exit ${data.exitCode}):\n${output}`
@@ -790,11 +791,11 @@ async function executeGitPush(args: Record<string, any>): Promise<string> {
   return output || 'git push: ok.'
 }
 
-async function executeGitLog(args: Record<string, any>): Promise<string> {
+async function executeGitLog(args: Record<string, any>, run?: AgentRunContext): Promise<string> {
   const { parseGitLog } = await import('../agents/git-tools')
   const limit = typeof args.limit === 'number' ? Math.max(1, Math.min(200, args.limit)) : 20
   const cmd = `git log --oneline -n ${limit}`
-  const data = await runShell(cmd, args.cwd)
+  const data = await runShell(cmd, args.cwd, undefined, run)
   if (data.exitCode && data.exitCode !== 0) {
     return `git_log failed: ${data.stderr || data.stdout || `exit ${data.exitCode}`}`
   }
@@ -803,13 +804,13 @@ async function executeGitLog(args: Record<string, any>): Promise<string> {
   return entries.map((e) => `${e.sha} ${e.subject}`).join('\n')
 }
 
-async function executeGitDiff(args: Record<string, any>): Promise<string> {
+async function executeGitDiff(args: Record<string, any>, run?: AgentRunContext): Promise<string> {
   const { shellQuote } = await import('../agents/git-tools')
   const parts = ['git', 'diff']
   if (args.staged) parts.push('--cached')
   if (args.ref) parts.push(shellQuote(String(args.ref)))
   if (args.path) parts.push('--', shellQuote(String(args.path)))
-  const data = await runShell(parts.join(' '), args.cwd, 120000)
+  const data = await runShell(parts.join(' '), args.cwd, 120000, run)
   if (data.exitCode && data.exitCode !== 0 && data.exitCode !== 1) {
     return `git_diff failed: ${data.stderr || `exit ${data.exitCode}`}`
   }
@@ -838,7 +839,7 @@ async function executeProjectInit(args: Record<string, any>): Promise<string> {
   return renderInitPlan(recipe)
 }
 
-async function executePrResume(args: Record<string, any>): Promise<string> {
+async function executePrResume(args: Record<string, any>, run?: AgentRunContext): Promise<string> {
   const { parsePrUrl, normalisePrJson, renderPrResume } = await import('../agents/pr-resume')
   const { shellQuote } = await import('../agents/git-tools')
   const loc = parsePrUrl(String(args.url ?? ''))
@@ -851,6 +852,7 @@ async function executePrResume(args: Record<string, any>): Promise<string> {
     `gh pr view ${loc.number} --repo ${repo} --json title,body,state,headRefName,baseRefName,author,comments`,
     args.cwd,
     60000,
+    run,
   )
   if (view.exitCode && view.exitCode !== 0) {
     return `pr_resume: gh pr view failed (exit ${view.exitCode}): ${view.stderr || view.stdout || ''}`
@@ -866,6 +868,7 @@ async function executePrResume(args: Record<string, any>): Promise<string> {
     `gh pr diff ${loc.number} --repo ${repo}`,
     args.cwd,
     60000,
+    run,
   )
   return renderPrResume({
     ...meta,
@@ -873,7 +876,7 @@ async function executePrResume(args: Record<string, any>): Promise<string> {
   })
 }
 
-async function executeGhPrCreate(args: Record<string, any>): Promise<string> {
+async function executeGhPrCreate(args: Record<string, any>, run?: AgentRunContext): Promise<string> {
   const { buildGhPrCreateCommand } = await import('../agents/git-tools')
   const cmd = buildGhPrCreateCommand({
     title: args.title,
@@ -881,7 +884,7 @@ async function executeGhPrCreate(args: Record<string, any>): Promise<string> {
     base: args.base,
   })
   if (!cmd) return 'gh_pr_create: a non-empty `title` is required.'
-  const data = await runShell(cmd, args.cwd, 60000)
+  const data = await runShell(cmd, args.cwd, 60000, run)
   const output = `${data.stdout || ''}\n${data.stderr || ''}`.trim()
   if (data.exitCode && data.exitCode !== 0) {
     return `gh_pr_create failed (exit ${data.exitCode}):\n${output}`
@@ -891,7 +894,7 @@ async function executeGhPrCreate(args: Record<string, any>): Promise<string> {
   return urlMatch ? `Opened PR: ${urlMatch[0]}\n${output}` : output
 }
 
-async function executeRunTests(args: Record<string, any>): Promise<string> {
+async function executeRunTests(args: Record<string, any>, run?: AgentRunContext): Promise<string> {
   const { commandForRunner, detectRunnerFromFiles, parseForRunner, renderResult } =
     await import('../agents/test-runner')
 
@@ -905,7 +908,7 @@ async function executeRunTests(args: Record<string, any>): Promise<string> {
         const listing = await backendCall('fs_list', {
           path: '.',
           recursive: false,
-          ...chatCtx(),
+          ...chatCtx(run),
         })
         // fs_list returns { entries, count } — NOT `items`. Reading the wrong
         // key made `names` always [] → detectRunnerFromFiles([]) = 'unknown' →
@@ -931,7 +934,7 @@ async function executeRunTests(args: Record<string, any>): Promise<string> {
     cwd: args.cwd || null,
     timeout: args.timeout || 300000,
     shell: null,
-    ...chatCtx(),
+    ...chatCtx(run),
   }
   const data = await backendCall('shell_execute', shellArgs)
   if (data.timedOut) {
@@ -1213,14 +1216,14 @@ async function executeVideoGenerateMlx(prompt: string, merged: Record<string, an
   return 'Video generation timed out after 60 minutes; the generation was stopped.'
 }
 
-async function executeTodoWrite(args: Record<string, any>): Promise<string> {
+async function executeTodoWrite(args: Record<string, any>, run?: AgentRunContext): Promise<string> {
   // Purely conversation state: no backend call, no permission gate, nothing
   // that can fail on a machine. The one real failure is having no conversation
   // to attach the plan to, which happens when a tool runs outside a loop.
   // The CONVERSATION id, not getActiveChatId(): that one is a filesystem slug
   // derived from id + title, and PlanBar reads the plan out of chatStore by the
   // real id. Keying by the slug wrote the plan where nothing ever looks.
-  const convId = getActiveConversationId()
+  const convId = getActiveConversationId(run)
   if (!convId) return 'Error: no active conversation to attach a plan to.'
 
   const todos = writeTodos(convId, args.todos)
@@ -1381,7 +1384,7 @@ const RETIRED_HINT: Record<string, string> = {
   shell_task_list: 'shell_execute with task: "list"',
 }
 
-const RETIRED_EXECUTORS: Record<string, (args: Record<string, any>) => Promise<string>> = {
+const RETIRED_EXECUTORS: Record<string, (args: Record<string, any>, run?: AgentRunContext) => Promise<string>> = {
   git_status: executeGitStatus,
   git_log: executeGitLog,
   git_diff: executeGitDiff,
@@ -1422,15 +1425,16 @@ export const RETIRED_EXECUTOR_NAMES: ReadonlySet<string> = new Set(Object.keys(R
 export async function runRetiredTool(
   name: string,
   args: Record<string, any>,
+  run?: AgentRunContext,
 ): Promise<string | null> {
-  const run = RETIRED_EXECUTORS[name]
-  if (!run) return null
+  const exec = RETIRED_EXECUTORS[name]
+  if (!exec) return null
   // The read-only gate lives on shell_execute's command classifier; a retired
   // mutating name would walk straight past it via this redirect.
-  if (isReadOnlyShellTurn() && RETIRED_MUTATING_NAMES.has(name)) {
-    return `Refused: this turn is read-only (/review or Code-Review Mode); ${name} changes state.`
+  if (isReadOnlyShellTurn(run) && RETIRED_MUTATING_NAMES.has(name)) {
+    return `Refused: this turn is read-only (/review, Code-Review Mode or Plan mode); ${name} changes state.`
   }
-  const result = await run(args)
+  const result = await exec(args, run)
   const hint = RETIRED_HINT[name]
   return hint ? `${result}\n\n(Note: ${name} is retired, next time use ${hint}.)` : result
 }

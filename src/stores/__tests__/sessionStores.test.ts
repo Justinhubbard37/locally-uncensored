@@ -11,7 +11,6 @@ describe('codexStore', () => {
       chatMode: 'lu',
       threads: {},
       workingDirectory: '',
-      fileTree: [],
     })
   })
 

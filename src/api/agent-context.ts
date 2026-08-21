@@ -43,7 +43,41 @@ export interface CapturedArtifact {
   content: string
   mime: string
 }
+/**
+ * The context of ONE agent run, threaded explicitly (plan 2.6.6 C1,
+ * ERZWINGUNG / blocker S3).
+ *
+ * The singleton below is still here for callers outside a loop, but it can
+ * never be the ENFORCEMENT point: two runs are reachable from the UI at once
+ * (a Codex run survives the tab switch, a second Codex conversation frees the
+ * send, the Chat/Agent send is not locked). With only the global, a Bypass run
+ * B flipped the read-only flag of a Plan run A mid-run, B's cleanup nulled A's
+ * workspace, A's todo_write landed in the wrong conversation, and a chat
+ * artifact run captured Codex writes.
+ *
+ * So every run gets its own object, the hook hands it to the executor, the
+ * executor hands it to the tool, and the tool's gate reads ITS run. Nothing
+ * about run B can be observed by a tool call belonging to run A.
+ */
+export interface AgentRunContext {
+  /** Unique per run. Ownership token for the singleton mirror below. */
+  token: string
+  chatId: string | null
+  conversationId: string | null
+  workspace: AgentWorkspace | null
+  artifactMode: boolean
+  readOnlyShellTurn: boolean
+  /**
+   * Coding-agent preset this run started under ('ask' | 'bypass' | 'plan'),
+   * null off the Code tab. Carried so a gate can name the reason it refused.
+   */
+  mode: string | null
+  artifacts: CapturedArtifact[]
+}
+
 interface AgentCtxState {
+  /** Token of the run that currently owns the singleton mirror. */
+  runToken: string | null
   chatId: string | null
   /** The conversation this loop belongs to, VERBATIM. Distinct from `chatId`,
    *  which is a filesystem-safe workspace SLUG derived from id + title. Any UI
@@ -60,7 +94,66 @@ interface AgentCtxState {
   artifacts: CapturedArtifact[]
 }
 const _g = globalThis as typeof globalThis & { __LU_AGENT_CTX?: AgentCtxState }
-const ctx: AgentCtxState = _g.__LU_AGENT_CTX ?? (_g.__LU_AGENT_CTX = { chatId: null, conversationId: null, workspace: null, model: null, artifactMode: false, readOnlyShellTurn: false, artifacts: [] })
+const ctx: AgentCtxState = _g.__LU_AGENT_CTX ?? (_g.__LU_AGENT_CTX = { runToken: null, chatId: null, conversationId: null, workspace: null, model: null, artifactMode: false, readOnlyShellTurn: false, artifacts: [] })
+
+let _runSeq = 0
+
+/**
+ * Open a run context and mirror it into the singleton for every caller that
+ * does not thread (standalone tool calls, older surfaces). Returns the object
+ * the caller must pass down to its tool calls.
+ */
+export function beginAgentRun(init: {
+  chatId?: string | null
+  conversationId?: string | null
+  workspace?: AgentWorkspace | null
+  artifactMode?: boolean
+  readOnlyShellTurn?: boolean
+  mode?: string | null
+}): AgentRunContext {
+  _runSeq += 1
+  const run: AgentRunContext = {
+    token: `run-${Date.now().toString(36)}-${_runSeq}`,
+    chatId: init.chatId ? String(init.chatId) : null,
+    conversationId: init.conversationId ? String(init.conversationId) : null,
+    workspace: normalizeWorkspace(init.workspace),
+    artifactMode: init.artifactMode === true,
+    readOnlyShellTurn: init.readOnlyShellTurn === true,
+    mode: init.mode ?? null,
+    artifacts: [],
+  }
+  ctx.runToken = run.token
+  ctx.chatId = run.chatId
+  ctx.conversationId = run.conversationId
+  ctx.workspace = run.workspace
+  ctx.artifactMode = run.artifactMode
+  ctx.readOnlyShellTurn = run.readOnlyShellTurn
+  ctx.artifacts = run.artifacts
+  return run
+}
+
+/**
+ * Close a run. The singleton is only cleared when THIS run still owns it, so a
+ * short Bypass run that started and finished inside a long Plan run cannot
+ * strip the Plan run's workspace or read-only flag on its way out.
+ */
+export function endAgentRun(run: AgentRunContext | null | undefined): void {
+  if (!run) {
+    clearActiveChatId()
+    return
+  }
+  run.artifacts = []
+  if (ctx.runToken !== run.token) return
+  clearActiveChatId()
+}
+
+/** Read a field from the run when one was threaded, else from the singleton. */
+function pick<K extends keyof AgentCtxState & keyof AgentRunContext>(
+  run: AgentRunContext | null | undefined,
+  key: K,
+): AgentRunContext[K] | AgentCtxState[K] {
+  return run ? run[key] : ctx[key]
+}
 
 /**
  * The text model driving the current agent loop. Pinned by useAgentChat right
@@ -86,16 +179,16 @@ export function setActiveChatId(id: string | null | undefined): void {
   ctx.chatId = id ? String(id) : null
 }
 
-export function getActiveChatId(): string | null {
-  return ctx.chatId
+export function getActiveChatId(run?: AgentRunContext | null): string | null {
+  return pick(run, 'chatId')
 }
 
 export function setActiveConversationId(id: string | null | undefined): void {
   ctx.conversationId = id ? String(id) : null
 }
 
-export function getActiveConversationId(): string | null {
-  return ctx.conversationId
+export function getActiveConversationId(run?: AgentRunContext | null): string | null {
+  return pick(run, 'conversationId')
 }
 
 export function setActiveAgentModel(model: ActiveAgentModel | null | undefined): void {
@@ -107,6 +200,7 @@ export function getActiveAgentModel(): ActiveAgentModel | null {
 }
 
 export function clearActiveChatId(): void {
+  ctx.runToken = null
   ctx.chatId = null
   ctx.conversationId = null
   ctx.workspace = null
@@ -128,8 +222,8 @@ export function setReadOnlyShellTurn(on: boolean): void {
   ctx.readOnlyShellTurn = !!on
 }
 
-export function isReadOnlyShellTurn(): boolean {
-  return ctx.readOnlyShellTurn
+export function isReadOnlyShellTurn(run?: AgentRunContext | null): boolean {
+  return pick(run, 'readOnlyShellTurn')
 }
 
 // ── Chat-tools artifact mode (David 2026-06-12) ────────────────
@@ -146,16 +240,30 @@ export function setChatArtifactMode(on: boolean): void {
   if (!on) ctx.artifacts = []
 }
 
-export function isChatArtifactMode(): boolean {
-  return ctx.artifactMode
+export function isChatArtifactMode(run?: AgentRunContext | null): boolean {
+  return pick(run, 'artifactMode')
 }
 
-export function captureChatArtifact(name: string, content: string, mime: string): void {
-  ctx.artifacts.push({ name, content, mime })
+export function captureChatArtifact(
+  name: string,
+  content: string,
+  mime: string,
+  run?: AgentRunContext | null,
+): void {
+  const sink = run ? run.artifacts : ctx.artifacts
+  sink.push({ name, content, mime })
 }
 
 /** Return the captured artifacts and clear the buffer (drain). */
-export function takeChatArtifacts(): CapturedArtifact[] {
+export function takeChatArtifacts(run?: AgentRunContext | null): CapturedArtifact[] {
+  if (run) {
+    const taken = run.artifacts
+    run.artifacts = []
+    // The singleton mirrors the same array while this run owns it, so hand it
+    // a fresh one instead of leaving the drained reference behind.
+    if (ctx.runToken === run.token) ctx.artifacts = []
+    return taken
+  }
   const out = ctx.artifacts
   ctx.artifacts = []
   return out
@@ -175,7 +283,7 @@ export function takeChatArtifacts(): CapturedArtifact[] {
  * useAgentChat / useCodex right after setActiveChatId. Sandbox mode
  * passes null so the bridge falls back to ~/agent-workspace/<slug>/.
  */
-export function setActiveWorkspace(ws: AgentWorkspace | null | undefined): void {
+export function normalizeWorkspace(ws: AgentWorkspace | null | undefined): AgentWorkspace | null {
   if (ws && ws.kind === 'folder' && ws.path) {
     // Defensive: filter out blanks + dedupe extras + drop the primary if
     // a caller accidentally listed it as both. Keeps the public shape
@@ -189,21 +297,35 @@ export function setActiveWorkspace(ws: AgentWorkspace | null | undefined): void 
           ),
         )
       : []
-    ctx.workspace = {
+    return {
       kind: 'folder',
       path: ws.path,
       extraPaths: cleanedExtras.length > 0 ? cleanedExtras : undefined,
     }
-  } else {
-    // Sandbox (or unset) → leave pointer null so the bridge falls back
-    // to its own per-chat sandbox path. Setting it to { kind: 'sandbox' }
-    // would just duplicate state the bridge already owns.
-    ctx.workspace = null
   }
+  // Sandbox (or unset) leaves the pointer null so the bridge falls back to its
+  // own per-chat sandbox path. Setting it to { kind: 'sandbox' } would just
+  // duplicate state the bridge already owns.
+  return null
 }
 
-export function getActiveWorkspace(): AgentWorkspace | null {
-  return ctx.workspace
+export function setActiveWorkspace(
+  ws: AgentWorkspace | null | undefined,
+  run?: AgentRunContext | null,
+): void {
+  const normalized = normalizeWorkspace(ws)
+  if (run) {
+    run.workspace = normalized
+    // Mirror only while this run owns the singleton, so a second run cannot
+    // repoint a first run's jail root (plan C1 ERZWINGUNG).
+    if (ctx.runToken === run.token) ctx.workspace = normalized
+    return
+  }
+  ctx.workspace = normalized
+}
+
+export function getActiveWorkspace(run?: AgentRunContext | null): AgentWorkspace | null {
+  return pick(run, 'workspace')
 }
 
 /**

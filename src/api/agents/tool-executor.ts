@@ -17,6 +17,7 @@
  */
 
 import type { AgentToolCall } from '../../types/agent-mode'
+import type { AgentRunContext } from '../agent-context'
 import { deriveSideEffectKey } from './side-effect-key'
 import { validateToolArgs, formatValidationErrors, type JsonSchema } from './args-validator'
 import { stableArgsHash } from './block-helpers'
@@ -35,6 +36,14 @@ export interface ExecutionRequest {
   args: Record<string, any>
   /** Optional parent id for sub-agent lineage. */
   parentToolCallId?: string
+  /**
+   * The run this call belongs to (plan 2.6.6 C1, ERZWINGUNG). Carries the
+   * conversation id and the coding-agent mode down to the executor gates, so
+   * they check against THIS run instead of a process-wide global that a second,
+   * interleaving run can overwrite. Undefined on surfaces that do not thread
+   * yet; those keep the singleton behaviour.
+   */
+  run?: AgentRunContext
 }
 
 export interface ExecutionResult {
@@ -60,13 +69,22 @@ export interface ExecutionResult {
   validationError?: string
 }
 
-export type ExecutorFn = (args: Record<string, any>) => Promise<string>
+/**
+ * Dispatch one registered tool. The third argument is the run the call belongs
+ * to (see ExecutionRequest.run); a runtime that does not care simply declares
+ * two parameters.
+ */
+export type ExecutorFn = (
+  name: string,
+  args: Record<string, any>,
+  run?: AgentRunContext,
+) => Promise<string>
 
 export interface ExecutorRuntime {
   /** Resolve a tool by name — returns undefined for unknown tools. */
   getTool: (name: string) => ExecutorToolDef | undefined
   /** Execute a registered tool against args; returns string result. */
-  execute: ExecutorFn & ((name: string, args: Record<string, any>) => Promise<string>)
+  execute: ExecutorFn
   /** Optional — called before dispatch to gate on user approval. */
   awaitApproval?: (req: ExecutionRequest, tool: ExecutorToolDef) => Promise<boolean>
   /** Optional — cache lookup pre-dispatch (Phase 6). Returns a cached result or undefined. */
@@ -313,7 +331,7 @@ async function runSingle(
 
   // Dispatch.
   try {
-    const result = await runtime.execute(req.toolName, dispatchedArgs)
+    const result = await runtime.execute(req.toolName, dispatchedArgs, req.run)
     return finalize({
       id: req.id,
       toolName: req.toolName,

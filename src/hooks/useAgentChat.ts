@@ -11,7 +11,7 @@ import {
 import { v4 as uuid } from 'uuid'
 import { streamProviderTurn } from '../lib/provider-stream'
 import { createHermesDisplayFilter, createThinkStreamSplitter } from '../lib/hermes-stream'
-import { setActiveChatId, setActiveConversationId, clearActiveChatId, chatWorkspaceSlug, setActiveWorkspace, setActiveAgentModel, renderWorkspaceSection, setChatArtifactMode, takeChatArtifacts, setReadOnlyShellTurn } from '../api/agent-context'
+import { beginAgentRun, endAgentRun, chatWorkspaceSlug, setActiveAgentModel, renderWorkspaceSection, takeChatArtifacts, type AgentRunContext } from '../api/agent-context'
 import { isOllamaLocal } from '../api/backend'
 import { requestGenerationCancel } from '../api/vram-handoff'
 import { resolveWorkspace } from '../api/agents/workspace-resolve'
@@ -346,12 +346,6 @@ export function useAgentChat() {
     // title from colliding.
     const convForSlug = useChatStore.getState().conversations.find((c) => c.id === convId)
     const slug = chatWorkspaceSlug(convId, convForSlug?.title)
-    setActiveChatId(slug)
-    setActiveConversationId(convId)
-    // Read-only turn: shell_execute stays offered (it carries the git
-    // inspectors since the 2.6.6 merge), the executor refuses everything
-    // that is not an inspection command. clearActiveChatId() resets it.
-    setReadOnlyShellTurn(opts?.readOnly === true)
 
     // Multi-Repo Agent (B15) + workspace unification (B17): pin the
     // resolved workspace so chatCtx() in builtin-tools.ts threads it
@@ -363,12 +357,31 @@ export function useAgentChat() {
       perChat: useAgentModeStore.getState().workspaces[convId],
       defaultWorkspace: settings.defaultWorkspace,
     })
-    setActiveWorkspace(resolvedWorkspace)
 
-    // Chat-tools (plain chat) → "file writes" become in-chat artifacts (preview
-    // + download), never disk writes (ChatGPT-style, David 2026-06-12). Full
-    // Agent mode keeps writing to disk, so this is ON only for chatToolsMode.
-    setChatArtifactMode(opts?.chatToolsMode === true)
+    // Open the run context (plan 2.6.6 C1, ERZWINGUNG). Everything a tool gate
+    // needs travels on THIS object and is handed to each tool call, so a
+    // Coding run that starts or ends while this one is in flight cannot flip
+    // our read-only flag, repoint our workspace, or capture our writes.
+    //
+    // Read-only turn: shell_execute stays offered (it carries the git
+    // inspectors since the 2.6.6 merge), the executor refuses everything that
+    // is not an inspection command.
+    //
+    // Chat-tools (plain chat) → "file writes" become in-chat artifacts
+    // (preview + download), never disk writes (ChatGPT-style, David
+    // 2026-06-12). Full Agent mode keeps writing to disk, so artifactMode is
+    // ON only for chatToolsMode.
+    const run: AgentRunContext = beginAgentRun({
+      chatId: slug,
+      conversationId: convId,
+      workspace: resolvedWorkspace,
+      readOnlyShellTurn: opts?.readOnly === true,
+      artifactMode: opts?.chatToolsMode === true,
+      // The Ask/Bypass/Plan presets are a Code-tab concept. The Agent surface
+      // keeps reading the plain settings, which is the whole point of C1's
+      // BINDUNG: a Bypass in a coding conversation must not reach here.
+      mode: null,
+    })
 
     // Feature EE (v2.5.0) — pin the text model driving this loop so the VRAM
     // hand-off orchestrator (image/video generation) knows which model to
@@ -1554,6 +1567,7 @@ export function useAgentChat() {
           id: e.ac.id,
           toolName: e.ac.toolName,
           args: e.ac.args,
+          run,
         }))
         const auditIds = new Map<string, string>()
 
@@ -1562,8 +1576,8 @@ export function useAgentChat() {
           // Timeout backstop shared with Codex (audit B9): before this the
           // Agent loop had NO ceiling around a tool call, so one hung tool
           // wedged the whole run with no way out but a restart.
-          execute: (name: string, args: Record<string, any>) =>
-            raceWithToolTimeout(toolRegistry.execute(name, args), name, toolCallCapMs(name, args, settings)),
+          execute: (name: string, args: Record<string, any>, callRun?: AgentRunContext) =>
+            raceWithToolTimeout(toolRegistry.execute(name, args, 1, callRun), name, toolCallCapMs(name, args, settings)),
           lookupCache: convId ? makeInTurnCacheLookup({ convId, turnStartMs }) : undefined,
           explainError: (toolName, err) => explainToolError(toolName, err),
           awaitApproval: async (req) => {
@@ -1610,6 +1624,11 @@ export function useAgentChat() {
               }
             }
           },
+        }, {
+          // ExecutorOptions, not the runtime: abortSignal has always belonged
+          // to the third argument, and passing it inside the runtime object
+          // meant Stop never kept the not-yet-started calls of a batch from
+          // firing. A stopped run has to stop doing things.
           abortSignal: abort.signal,
         })
 
@@ -1978,9 +1997,9 @@ export function useAgentChat() {
       abortRef.current = null
       // Chat-tools artifact mode: attach any files the model "wrote" (captured
       // in-memory, NOT on disk) to the assistant message so they render inline
-      // with a preview + Download button. takeChatArtifacts drains the buffer;
-      // clearActiveChatId() then resets the mode for the next run.
-      const capturedArtifacts = takeChatArtifacts()
+      // with a preview + Download button. takeChatArtifacts drains this run's
+      // buffer; endAgentRun() then closes the run context.
+      const capturedArtifacts = takeChatArtifacts(run)
       if (capturedArtifacts.length) {
         useChatStore.getState().updateMessageArtifacts(
           convId!, assistantMessage.id,
@@ -1993,8 +2012,10 @@ export function useAgentChat() {
       // this is where the result becomes durable.
       void flushChatPersist()
       // Drop the per-run workspace scope so standalone tool calls from
-      // other tabs don't accidentally land in this chat's folder.
-      clearActiveChatId()
+      // other tabs don't accidentally land in this chat's folder. Only when
+      // this run still owns the shared mirror, so a Coding run that outlives
+      // us keeps its own jail root (plan C1 ERZWINGUNG).
+      endAgentRun(run)
       // Reject any pending approvals so their promises don't hang forever
       drainApprovals(convId)
 

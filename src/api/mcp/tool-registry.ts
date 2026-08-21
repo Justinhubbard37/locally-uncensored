@@ -5,8 +5,18 @@ import type { OllamaTool } from '../../types/agent-mode'
 import type { ToolDefinition } from '../providers/types'
 import { MUTATING_TOOLS } from '../../lib/mutating-tools'
 import { RETIRED_TOOL_NAMES, retiredPermissionLevel } from '../../lib/retired-tools'
+import type { AgentRunContext } from '../agent-context'
 
-type ToolExecutor = (args: Record<string, any>) => Promise<string>
+/**
+ * The optional second argument is the run this call belongs to (plan 2.6.6 C1).
+ * Tools whose gate depends on the run (read-only turn, todo target
+ * conversation, artifact capture, workspace jail) read it from there instead of
+ * the process-wide singleton, so a second interleaving run cannot move their
+ * goalposts mid-call. Tools that do not care simply ignore it.
+ */
+type ToolExecutor = (args: Record<string, any>, run?: AgentRunContext) => Promise<string>
+/** The pre-2.6.6 shape, still accepted from external servers and tests. */
+type LegacyToolExecutor = (args: Record<string, any>) => Promise<string>
 /**
  * External-tool executor gets the tool name too, because one MCP server
  * owns many tools and routes by name. The registry wraps it into a
@@ -41,7 +51,7 @@ export class ToolRegistry {
   registerExternal(
     serverId: string,
     tools: MCPToolDefinition[],
-    executor: ExternalToolExecutor | ToolExecutor
+    executor: ExternalToolExecutor | LegacyToolExecutor
   ) {
     const isTwoArg = executor.length >= 2
     for (const tool of tools) {
@@ -49,7 +59,7 @@ export class ToolRegistry {
       const bound: ToolExecutor = isTwoArg
         ? (args: Record<string, any>) =>
             (executor as ExternalToolExecutor)(name, args)
-        : (executor as ToolExecutor)
+        : (executor as LegacyToolExecutor)
       this.tools.set(name, {
         definition: { ...tool, source: 'external', serverId },
         executor: bound,
@@ -123,14 +133,19 @@ export class ToolRegistry {
 
   // ── Execution ─────────────────────────────────────────────────
 
-  async execute(name: string, args: Record<string, any>, maxRetries = 1): Promise<string> {
+  async execute(
+    name: string,
+    args: Record<string, any>,
+    maxRetries = 1,
+    run?: AgentRunContext,
+  ): Promise<string> {
     const entry = this.tools.get(name)
     if (!entry) {
       // Retired names (2.6.6 tool merge) still run: a restored session or a
       // model that knows git_status from its context must not burn the step
       // on "Unknown tool". Dynamic import keeps the module graph acyclic.
       const { runRetiredTool } = await import('./builtin-tools')
-      const redirected = await runRetiredTool(name, args)
+      const redirected = await runRetiredTool(name, args, run)
       if (redirected !== null) return redirected
       return `Error: Unknown tool "${name}"`
     }
@@ -144,7 +159,7 @@ export class ToolRegistry {
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        const result = await entry.executor(args)
+        const result = await entry.executor(args, run)
         // If result is an error and we have retries left, retry
         if (result.startsWith('Error:') && attempt < maxRetries) {
           // Only retry on transient errors (timeout, network)

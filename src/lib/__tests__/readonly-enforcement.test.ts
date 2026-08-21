@@ -73,7 +73,12 @@ describe('read-only batch guard', () => {
 describe('both hooks still carry the guard', () => {
   it('useCodex filters the batch, not just the catalog', () => {
     const src = read('../../hooks/useCodex.ts')
-    expect(src).toContain('if (settings.codexReviewMode || readOnlyTurn) {')
+    // Since 2.6.6 C1 the three read-only reasons are one flag, and the runtime
+    // filter hangs on the PERSISTENT conversation mode as well as the slash
+    // turn, so Plan mode is enforced on every step and not only when a
+    // read-only command started the turn.
+    expect(src).toContain("const effectiveReadOnly = settings.codexReviewMode === true || readOnlyTurn || codexMode === 'plan'")
+    expect(src).toContain('if (effectiveReadOnly) {')
     expect(src).toContain('toolCalls = toolCalls.filter((tc) => allowedInReadOnlyTurn(tc.function?.name ?? \'\'))')
   })
 

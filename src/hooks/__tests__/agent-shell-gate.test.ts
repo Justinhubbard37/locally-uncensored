@@ -67,8 +67,12 @@ describe('wiring in useAgentChat', () => {
 
   it('NEGATIVE CONTROL: the Codex side of the gate is untouched', () => {
     const codex = read('../useCodex.ts')
-    expect(codex).toContain('confirmShell: settings.codexConfirmShell')
-    expect(codex).toContain('cloudConfirmShell: settings.codexCloudConfirmShell')
+    // Since 2.6.6 C1 the Code tab feeds the SAME two settings into the shared
+    // gate through the mode preset instead of calling it inline. Same inputs,
+    // same helper, and the cloud arm survives all three modes.
+    expect(codex).toContain('codexModeKnobs({')
+    expect(codex).toContain('codexConfirmShell: settings.codexConfirmShell')
+    expect(codex).toContain('codexCloudConfirmShell: settings.codexCloudConfirmShell')
   })
 
   it('the settings toggle is always visible now, since it governs Agent too', () => {

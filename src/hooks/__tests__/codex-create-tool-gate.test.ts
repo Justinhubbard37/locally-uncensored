@@ -169,7 +169,10 @@ describe('the wiring in useCodex', () => {
   it('the asset line never fires in review mode or on a read-only command', () => {
     // A read-only slash command strips MUTATING_TOOLS for the turn, so the
     // generators are gone there too. Promising them is the same broken promise.
-    expect(src).toMatch(/!reviewMode && !readOnlyTurn && !settings\.smallModelMode/)
+    // Since 2.6.6 C1 the three read-only reasons (Code-Review Mode, a read-only
+    // slash command, Plan mode) are one flag, and the asset line reads it.
+    expect(src).toMatch(/const assetsPossible = !effectiveReadOnly && !settings\.smallModelMode/)
+    expect(src).toMatch(/const effectiveReadOnly = settings\.codexReviewMode === true \|\| readOnlyTurn \|\| codexMode === 'plan'/)
   })
 
   it('the asset promise left the always-on prompt body', () => {

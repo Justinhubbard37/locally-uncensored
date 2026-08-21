@@ -15,6 +15,8 @@ import { SmallModelModeToggle } from './SmallModelModeToggle'
 import { WorkingAnchor } from './WorkingAnchor'
 import { useCodexConfirmStore } from '../../stores/codexConfirmStore'
 import { PluginsDropdown } from './PluginsDropdown'
+import { CodexModeDropdown } from './CodexModeDropdown'
+import { PlanApprovalBar } from './PlanApprovalBar'
 import { ModelSelector } from '../models/ModelSelector'
 import { GoalBar } from './GoalBar'
 import { LoopBar } from './LoopBar'
@@ -508,8 +510,11 @@ export function CodexView() {
           isGenerating={isRunning || codexGenerating}
           slashCommands
           composerModel={<ModelSelector openUpward surface="code" />}
-          composerAbove={<><LoopBar onStop={stopCodex} /><GoalBar /></>}
-          composerActions={<PluginsDropdown openUpward />}
+          composerAbove={<><LoopBar onStop={stopCodex} /><GoalBar /><PlanApprovalBar onApprove={(text) => sendInstruction(text)} /></>}
+          // Ask / Bypass / Plan sits here, in the CODE composer only (plan
+          // C1). ChatInput stays surface-neutral, so the Chat tab inherits
+          // nothing from it.
+          composerActions={<><CodexModeDropdown openUpward /><PluginsDropdown openUpward /></>}
         />
       </div>
 

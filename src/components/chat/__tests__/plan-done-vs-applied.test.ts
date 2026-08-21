@@ -65,7 +65,9 @@ describe('the plan moved into the panel (C2)', () => {
 
   it('the coding composer no longer carries a plan', () => {
     const src = read('../CodexView.tsx')
-    expect(src).toMatch(/composerAbove=\{<><LoopBar onStop=\{stopCodex\} \/><GoalBar \/><\/>\}/)
+    // C1 added the plan APPROVAL card here (a button plus the plan text the
+    // user is approving); the plan itself still lives only in the panel.
+    expect(src).toMatch(/composerAbove=\{<><LoopBar onStop=\{stopCodex\} \/><GoalBar \/><PlanApprovalBar /)
     expect(src).not.toMatch(/PlanBar/)
   })
 
