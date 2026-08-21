@@ -78,6 +78,20 @@ export async function getModelMaxTokens(modelName: string): Promise<number> {
 
 const KEEP_RECENT = 4 // Always keep at least the last N messages untouched
 
+/** Hard ceiling on how many messages one request may carry, independent of
+ * tokens. The LU Cloud proxy rejects anything above 400 messages, and a chat
+ * of many SHORT turns sits under every token budget while the count keeps
+ * growing — the token-only compaction never fired and the chat hard-400ed on
+ * every send, permanently (yaserrieh, 2026-08-21: "[network] HTTP 400 too
+ * many messages" after ~7 coding tasks in one chat). 380 mirrors the web
+ * app's MAX_SEND_MESSAGES and leaves room for the pin and the trim notice. */
+export const MAX_SEND_MESSAGES = 380
+
+/** Suffix quota inside compactMessages: system prompt, pinned task and trim
+ * notice ride on top of the kept window, so the window itself stays 3 short
+ * of the ceiling. */
+const COUNT_BUDGET = MAX_SEND_MESSAGES - 3
+
 /** How much of the pinned first user message survives compaction. Enough for
  * any real instruction; a pasted 200 KB file does not ride along forever. */
 const PINNED_TASK_MAX_CHARS = 8000
@@ -139,14 +153,35 @@ function isToolResultMessage(msg: OllamaChatMessage): boolean {
  * Dropping is honest: the model re-reads with file_read when it needs the bytes
  * again, instead of trusting a lossy stub.
  */
+/**
+ * Count-only cap for paths that never token-compact (the plain chat path).
+ * Keeps the system prompt plus the newest messages and never starts the kept
+ * window on an orphan tool result. Token budgets are compactMessages' job;
+ * this only guarantees the proxy's message-count gate can't be tripped.
+ */
+export function capMessageCount<T extends { role: string; content?: unknown }>(
+  messages: T[],
+  max = MAX_SEND_MESSAGES,
+): T[] {
+  if (messages.length <= max) return messages
+  const sys = messages[0]?.role === 'system' ? [messages[0]] : []
+  const rest = sys.length ? messages.slice(1) : messages
+  const kept = rest.slice(-(max - sys.length))
+  while (kept.length > 0 && isToolResultMessage(kept[0] as unknown as OllamaChatMessage)) {
+    kept.shift()
+  }
+  return [...sys, ...kept]
+}
+
 export function compactMessages(
   messages: OllamaChatMessage[],
   maxTokens: number
 ): OllamaChatMessage[] {
   const currentTokens = estimateMessageTokens(messages)
 
-  // Already within budget
-  if (currentTokens <= maxTokens) return messages
+  // Already within budget — BOTH budgets. A history that fits the token
+  // window but exceeds the message-count ceiling still has to shrink.
+  if (currentTokens <= maxTokens && messages.length <= MAX_SEND_MESSAGES) return messages
 
   // Separate system prompt (always kept)
   const systemMsg = messages[0]?.role === 'system' ? messages[0] : null
@@ -197,6 +232,10 @@ export function compactMessages(
   const kept: OllamaChatMessage[] = []
   let used = 0
   for (let i = capped.length - 1; i >= 0; i--) {
+    // Count bound first: it holds even where the token check would keep
+    // adding, otherwise a many-short-turns history fits every token budget
+    // and still trips the proxy's message-count cap.
+    if (kept.length >= COUNT_BUDGET) break
     const t = estimateMessageTokens([capped[i]])
     if (used + t > suffixBudget && kept.length >= KEEP_RECENT) break
     kept.unshift(capped[i])

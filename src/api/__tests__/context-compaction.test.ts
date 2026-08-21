@@ -290,3 +290,68 @@ describe('compactMessages — oversized tool results', () => {
     expect(notice!.content).toMatch(/never repeat a call/)
   })
 })
+
+// ── Message-count ceiling (yaserrieh, 2026-08-21) ────────────────
+// A chat of many SHORT turns sits under every token budget while the count
+// grows past the LU Cloud proxy's 400-message gate; from then on every send
+// 400s ("too many messages") and the chat is a permanent dead end. The cap
+// must fire on COUNT alone.
+
+import { MAX_SEND_MESSAGES, capMessageCount } from '../../lib/context-compaction'
+
+describe('message-count ceiling', () => {
+  const tiny = (n: number): OllamaChatMessage[] => [
+    { role: 'system', content: 'sys' },
+    ...Array.from({ length: n }, (_, i) => ({
+      role: (i % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant',
+      content: `m${i}`,
+    })),
+  ]
+
+  it('compactMessages shrinks a count-heavy history even under the token budget', () => {
+    const messages = tiny(450)
+    // Huge token budget: the OLD code returned this unchanged.
+    const out = compactMessages(messages, 10_000_000)
+    expect(out.length).toBeLessThanOrEqual(MAX_SEND_MESSAGES)
+    expect(out[0].role).toBe('system')
+    expect(out[out.length - 1].content).toBe('m449')
+  })
+
+  it('compactMessages leaves a history under both budgets alone', () => {
+    const messages = tiny(100)
+    expect(compactMessages(messages, 10_000_000)).toEqual(messages)
+  })
+
+  it('count trim announces itself like a token trim', () => {
+    const out = compactMessages(tiny(450), 10_000_000)
+    const notice = out.find(
+      (m) => m.role === 'system' && typeof m.content === 'string' && m.content.includes('trimmed'),
+    )
+    expect(notice).toBeTruthy()
+  })
+
+  it('capMessageCount keeps system prompt and the newest messages', () => {
+    const out = capMessageCount(tiny(450))
+    expect(out.length).toBe(MAX_SEND_MESSAGES)
+    expect(out[0].content).toBe('sys')
+    expect(out[out.length - 1].content).toBe('m449')
+  })
+
+  it('capMessageCount never starts the window on an orphan tool result', () => {
+    const msgs: OllamaChatMessage[] = [
+      { role: 'system', content: 'sys' },
+      ...Array.from({ length: 500 }, (_, i) => ({
+        role: (i % 2 === 0 ? 'assistant' : 'tool') as 'assistant' | 'tool',
+        content: `m${i}`,
+      })),
+    ]
+    const out = capMessageCount(msgs)
+    expect(out[1].role).not.toBe('tool')
+    expect(out.length).toBeLessThanOrEqual(MAX_SEND_MESSAGES)
+  })
+
+  it('capMessageCount is the identity under the ceiling', () => {
+    const messages = tiny(50)
+    expect(capMessageCount(messages)).toBe(messages)
+  })
+})

@@ -8,7 +8,7 @@ import { useMemoryStore } from "../stores/memoryStore"
 import { useVoiceStore } from "../stores/voiceStore"
 import { autoSpeak } from "../lib/ttsBridge"
 import { retrieveContext } from "../api/rag"
-import { getModelMaxTokens } from "../lib/context-compaction"
+import { getModelMaxTokens, capMessageCount } from "../lib/context-compaction"
 import { getModelContextCached } from "../api/ollama"
 import { requestGenerationCancel } from "../api/vram-handoff"
 import { effectiveContextWindow } from "../lib/context-window"
@@ -73,10 +73,12 @@ async function runGroupTurn(convId: string, model: string, allModels: string[], 
   useChatStore.getState().addMessage(convId, assistantMessage)
 
   const personaPrompt = conv.personaEnabled === true ? conv.systemPrompt : ''
-  const messages = [
+  // Same count cap as the plain path: a long group chat must not outgrow the
+  // proxy's message gate either.
+  const messages = capMessageCount([
     { role: 'system' as const, content: groupSystemPrompt(model, allModels, personaPrompt) },
     ...groupHistory(conv.messages, model),
-  ]
+  ])
 
   const providerId = getProviderIdFromModel(model)
   const canThink = isThinkingCompatible(model)
@@ -469,7 +471,12 @@ export function useChat() {
       ? (await import('../lib/constants')).CAVEMAN_REMINDERS?.[settings.cavemanMode as 'lite' | 'full' | 'ultra'] || ''
       : ''
 
-    const messages = [
+    // Count cap (web parity, MAX_SEND_MESSAGES): plain chat sends the whole
+    // history verbatim, and a long chat of many short turns stays under every
+    // token budget while the count climbs past the LU Cloud proxy's
+    // 400-message gate — after which EVERY send 400s and the chat is a
+    // permanent dead end (yaserrieh, 2026-08-21).
+    const messages = capMessageCount([
       ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
       ...conv.messages
         .filter((m) => m.content.trim() !== '')
@@ -480,7 +487,7 @@ export function useChat() {
             : m.content,
           ...(m.images?.length ? { images: m.images.map(img => ({ data: img.data, mimeType: img.mimeType })) } : {}),
         })),
-    ]
+    ])
 
     const abort = new AbortController()
     abortRef.current = abort
