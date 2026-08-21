@@ -4,6 +4,53 @@ All notable changes to Locally Uncensored are documented here.
 
 ## [Unreleased]
 
+## [2.6.6] - 2026-08-21
+
+The release that makes an agent or coding run cost less to do the same work,
+and gives the Code view a mode menu, a plan panel and a real file explorer.
+
+### Added
+
+- **A mode menu in the Code composer.** Ask permissions, Bypass permissions or
+  Plan mode, chosen per conversation with a global default in Settings. Bypass
+  never lifts the cloud shell lock, and the menu says so. Plan mode explores
+  read only and stops for your yes; Approve and run then carries the whole plan
+  out in the same run and never lands in Bypass on its own, showing the mode it
+  will run in and the real commands first.
+- **A file explorer in the Code view.** A real tree you expand folder by folder
+  and widen by dragging its edge, with the width kept across a restart. Click a
+  file to preview it: code with highlighting, images inline, HTML in a sandboxed
+  frame with scripts off until you ask. node_modules, .git, target and dist stay
+  out of the way.
+- **Prompt caching for your own Anthropic key.** Requests carry cache markers on
+  the system block, the last tool and the last stable message, so a repeated
+  request reads from the cache instead of paying for the whole prompt again.
+
+### Changed
+
+- **Agent and Code mode send far less context per step.** Older tool results are
+  trimmed out of what goes upstream while the newest step is kept in full, the
+  amount sent on a paid step is capped, and the stable half of the prompt stays
+  put so the upstream cache keeps working across a long run. The coding tool
+  catalog is leaner too. A setting turns the trimming off if a run ever
+  misbehaves.
+- **The plan moved into the right panel**, live above the file explorer, instead
+  of sitting over the composer.
+- **Plain chat, group chat and A/B compare cap the history they send to paid
+  models**, so a long conversation stops getting more expensive without you
+  noticing. A group round still bills once per model, and the composer says so.
+- **The credits meter counts against the send cap**, not the whole model window,
+  so its warning fires before a paid step gets expensive rather than after.
+
+### Fixed
+
+- **An agent run stopped firing a hidden memory step on every round.** The
+  automatic memory step on LU Cloud now runs only if you turn it on, and then on
+  the cheapest capable model rather than the one you are chatting with.
+- **Old images stop riding along.** A follow up in the same conversation no
+  longer re-attaches pictures from many messages back on every later step where
+  nothing looks at them.
+
 ## [2.6.5] - 2026-08-16
 
 The release that makes updating possible again, plus the work you already

@@ -59,11 +59,10 @@ describe('the notes table', () => {
 
   it('the shipping entry covers what actually shipped, not the state it was written in', () => {
     // The existence guard above has a blind spot: an entry written early stays
-    // green while the branch moves on. The 2.6.5 sheet was written on
-    // 2026-08-12 and ten commits landed after it, including the three features
-    // customers asked for by name. A customer reading the sheet would not learn
-    // that the thing they filed an issue about is in the build they just
-    // installed. Each anchor below is one of those late arrivals.
+    // green while the branch moves on, so the shipping note is pinned to the
+    // headline features of the release it ships with. For 2.6.6 those are the
+    // context and cost work and the reworked Code view, and each anchor below
+    // names one of them, so a note that forgets them fails here.
     const shipping = JSON.parse(
       readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../package.json'), 'utf8'),
     ).version as string
@@ -75,7 +74,7 @@ describe('the notes table', () => {
     ]
       .join('\n')
       .toLowerCase()
-    for (const anchor of ['lora', 'python environment', 'conversation', 'cancel', 'withdrawn']) {
+    for (const anchor of ['context', 'credit', 'plan mode', 'explorer', 'prompt caching']) {
       expect(prose, `${shipping}: nothing about "${anchor}"`).toContain(anchor)
     }
   })
