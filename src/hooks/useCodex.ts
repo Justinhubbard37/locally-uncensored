@@ -892,7 +892,7 @@ export function useCodex() {
           // moves every step is a prompt prefix that is never the same twice.
           // Whole messages are dropped here, never shortened: decay stays on
           // the send copy alone, so the store keeps every result complete.
-          messages = trimWorkingHistory(messages, sendWindow, { enabled: decayOn }).messages
+          messages = trimWorkingHistory(messages, sendWindow, { enabled: decayOn, hysteresis: decayOn }).messages
           const built = buildRequestMessages(messages, {
             budgetTokens: sendWindow,
             enabled: decayOn,

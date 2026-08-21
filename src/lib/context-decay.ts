@@ -360,18 +360,23 @@ export function pruneSupersededPlans<T extends DecayMessage>(
  *
  * Stateless: the decision comes from the array being carried, never from a
  * watermark, so a step aborted halfway strands nothing.
+ *
+ * With `hysteresis` off the band collapses to the plain budget, which is what
+ * the contextDecay notaus wants: a support case that flips the switch should
+ * land on the 2.6.5 window, not on a third behaviour nobody has ever seen.
  */
 export function trimWorkingHistory<T extends DecayMessage>(
   messages: T[],
   budgetTokens: number,
-  opts: DecayOptions<T> = {},
+  opts: DecayOptions<T> & { hysteresis?: boolean } = {},
 ): { messages: T[]; dropped: number } {
   const sizeOf = (list: T[]) =>
     estimateMessageTokens(
       applyToolResultDecay(list, opts).messages as unknown as Parameters<typeof estimateMessageTokens>[0],
     )
-  const trigger = Math.floor(budgetTokens * COMPACT_TRIGGER_RATIO)
-  const target = Math.floor(budgetTokens * COMPACT_TARGET_RATIO)
+  const banded = opts.hysteresis !== false
+  const trigger = banded ? Math.floor(budgetTokens * COMPACT_TRIGGER_RATIO) : budgetTokens
+  const target = banded ? Math.floor(budgetTokens * COMPACT_TARGET_RATIO) : budgetTokens
   if (budgetTokens <= 0 || sizeOf(messages) <= trigger) return { messages, dropped: 0 }
 
   const systemMsg = messages[0]?.role === 'system' ? messages[0] : null

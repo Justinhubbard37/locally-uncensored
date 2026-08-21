@@ -205,6 +205,48 @@ describe('A3: the prefix holds still at the plateau, with decay running', () => 
     }
   })
 
+  it('the notaus lands on the plain budget, not on a third behaviour', () => {
+    // Flipping contextDecay off is a support move. It has to reproduce what
+    // 2.6.5 did: full results, and a window trimmed to the budget itself
+    // rather than to 70 percent of it.
+    let history: DecayMessage[] = [
+      { role: 'system', content: 'SYSTEM' },
+      { role: 'user', content: 'go' },
+    ]
+    for (let step = 1; step <= 12; step++) {
+      history = appendStep(history, step, 12000)
+      history = trimWorkingHistory(history, BUDGET, { enabled: false, hysteresis: false }).messages
+    }
+    const off = buildRequestMessages(history, { budgetTokens: BUDGET, enabled: false, hysteresis: false })
+    expect(off.trimmedCount).toBe(0)
+    expect(off.prunedPlans).toBe(0)
+    for (const m of off.messages) {
+      expect(String(m.content ?? '')).not.toContain('truncated')
+    }
+    expect(off.promptTokens).toBeLessThanOrEqual(BUDGET)
+  })
+
+  it('the notaus trims at the budget while the band waits for 15 percent more', () => {
+    // A history sitting between the budget and the trigger is exactly where
+    // the two behaviours part company.
+    let history: DecayMessage[] = [
+      { role: 'system', content: 'SYSTEM' },
+      { role: 'user', content: 'go' },
+    ]
+    let step = 0
+    while (estimateMessageTokens(history as never) <= BUDGET && step < 40) {
+      history = appendStep(history, ++step, 12000)
+    }
+    const raw = estimateMessageTokens(history as never)
+    expect(raw).toBeGreaterThan(BUDGET)
+    expect(raw).toBeLessThan(BUDGET * COMPACT_TRIGGER_RATIO)
+
+    const banded = trimWorkingHistory(history, BUDGET, { enabled: false, hysteresis: true })
+    const plain = trimWorkingHistory(history, BUDGET, { enabled: false, hysteresis: false })
+    expect(banded.dropped).toBe(0)
+    expect(plain.dropped).toBeGreaterThan(0)
+  })
+
   it('trimming never opens the window on an orphan tool result', () => {
     let history: DecayMessage[] = [
       { role: 'system', content: 'SYSTEM' },

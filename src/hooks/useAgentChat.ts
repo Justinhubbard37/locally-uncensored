@@ -769,7 +769,7 @@ export function useAgentChat() {
           // moves every step is a prompt prefix that is never the same twice.
           // Whole messages are dropped here, never shortened: decay stays on
           // the send copy alone, so the store keeps every result complete.
-          agentMessages = trimWorkingHistory(agentMessages, sendWindow, { enabled: decayOn }).messages
+          agentMessages = trimWorkingHistory(agentMessages, sendWindow, { enabled: decayOn, hysteresis: decayOn }).messages
           const built = buildRequestMessages(agentMessages, {
             budgetTokens: sendWindow,
             enabled: decayOn,
