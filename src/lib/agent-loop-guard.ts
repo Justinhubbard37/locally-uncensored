@@ -131,11 +131,26 @@ export class AgentLoopGuard {
    * Record one iteration's tool-call batch BEFORE executing it. `args` must
    * be the serialized (stringified) arguments so identity is byte-exact —
    * the same convention the in-turn cache uses.
+   *
+   * `trimmedReadKeys` carries the reads whose newest result the request
+   * builder sent CAPPED (2.6.6 age decay, plan A1). Those re-reads are the
+   * feature working as designed, not a loop: the model cannot see the bytes
+   * any more, so fetching them again is the correct move. Detectors 2 and 3
+   * therefore skip them, and the steer text never tells the model to "use the
+   * result from before" for a key whose result from before is a stub. That
+   * sentence is an order to work against content it cannot see, which is the
+   * exact failure the decay rules exist to prevent.
    */
-  recordBatch(calls: Array<{ name: string; args: string }>): LoopGuardVerdict {
+  recordBatch(
+    calls: Array<{ name: string; args: string }>,
+    opts: { trimmedReadKeys?: ReadonlySet<string> } = {},
+  ): LoopGuardVerdict {
     if (calls.length === 0) return { action: 'ok' }
     const keys = calls.map((c) => `${c.name}|${c.args}`)
     const sig = [...keys].sort().join('||')
+    const trimmed = opts.trimmedReadKeys
+    const isTrimmed = (k: string) => trimmed?.has(k) ?? false
+    const batchHasTrimmedRead = keys.some((k, i) => READ_ONLY_TOOLS.has(calls[i].name) && isTrimmed(k))
 
     // (1) Back-to-back identical batches, any tool class.
     if (sig === this.lastSig) {
@@ -150,8 +165,11 @@ export class AgentLoopGuard {
 
     const hasMutation = calls.some((c) => !READ_ONLY_TOOLS.has(c.name))
 
-    // (2) Windowed repeats among pure-read batches (alternation).
-    if (!hasMutation) {
+    // (2) Windowed repeats among pure-read batches (alternation). A batch that
+    // re-reads something the builder capped is not part of that pattern and is
+    // kept out of the window entirely, so it neither halts nor pushes an
+    // honest repeat out of the six-step view.
+    if (!hasMutation && !batchHasTrimmedRead) {
       this.pureWindow.push(sig)
       if (this.pureWindow.length > BATCH_WINDOW) this.pureWindow.shift()
       const repeats = this.pureWindow.filter((s) => s === sig).length
@@ -167,6 +185,14 @@ export class AgentLoopGuard {
     let steer: LoopGuardVerdict | null = null
     for (let i = 0; i < calls.length; i++) {
       if (!READ_ONLY_TOOLS.has(calls[i].name)) continue
+      if (isTrimmed(keys[i])) {
+        // The result aged out of the prompt, so this read returns information
+        // the model genuinely no longer has. Clear the counter rather than
+        // just skipping it: the epoch before the cap says nothing about the
+        // epoch after it.
+        this.readCounts.delete(keys[i])
+        continue
+      }
       const n = (this.readCounts.get(keys[i]) ?? 0) + 1
       this.readCounts.set(keys[i], n)
       if (n >= READ_HALT_AT) {

@@ -76,7 +76,7 @@ export async function getModelMaxTokens(modelName: string): Promise<number> {
 
 // ── Message Compaction ──────────────────────────────────────────
 
-const KEEP_RECENT = 4 // Always keep at least the last N messages untouched
+export const KEEP_RECENT = 4 // Always keep at least the last N messages untouched
 
 /** Hard ceiling on how many messages one request may carry, independent of
  * tokens. The LU Cloud proxy rejects anything above 400 messages, and a chat
@@ -173,15 +173,48 @@ export function capMessageCount<T extends { role: string; content?: unknown }>(
   return [...sys, ...kept]
 }
 
+/**
+ * Hysteresis (2.6.6, plan A3). Trimming to exactly the budget every step moves
+ * the prompt prefix every step, and a moved prefix is a cold upstream cache:
+ * the whole history is billed at full price again. So compaction waits until
+ * the history is 15 percent OVER budget and then drops in one big block down
+ * to 70 percent of it. In between, the array passes through byte-for-byte and
+ * the cache keeps hitting.
+ *
+ * The decision is taken from the messages array alone, with no watermark kept
+ * anywhere, so a run aborted mid-step strands no state (plan A3, Runde 2).
+ */
+export const COMPACT_TRIGGER_RATIO = 1.15
+export const COMPACT_TARGET_RATIO = 0.7
+
+/**
+ * How many messages one drop step removes when the carried history has to
+ * shrink (trimWorkingHistory in context-decay).
+ *
+ * The hysteresis pair above is what keeps the prefix still; this is the step
+ * size of the search for how much to drop, and it is a block rather than a
+ * single message because each probe re-measures the whole decayed history.
+ * One at a time would make a long run quadratic for no gain.
+ */
+export const COMPACT_DROP_BLOCK = 16
+
+export interface CompactOptions {
+  /** Wait for budget × 1.15, then drop to budget × 0.7. */
+  hysteresis?: boolean
+}
+
 export function compactMessages(
   messages: OllamaChatMessage[],
-  maxTokens: number
+  maxTokens: number,
+  opts: CompactOptions = {},
 ): OllamaChatMessage[] {
   const currentTokens = estimateMessageTokens(messages)
+  const triggerTokens = opts.hysteresis ? Math.floor(maxTokens * COMPACT_TRIGGER_RATIO) : maxTokens
+  const targetTokens = opts.hysteresis ? Math.floor(maxTokens * COMPACT_TARGET_RATIO) : maxTokens
 
   // Already within budget — BOTH budgets. A history that fits the token
   // window but exceeds the message-count ceiling still has to shrink.
-  if (currentTokens <= maxTokens && messages.length <= MAX_SEND_MESSAGES) return messages
+  if (currentTokens <= triggerTokens && messages.length <= MAX_SEND_MESSAGES) return messages
 
   // Separate system prompt (always kept)
   const systemMsg = messages[0]?.role === 'system' ? messages[0] : null
@@ -191,7 +224,7 @@ export function compactMessages(
   if (nonSystem.length <= KEEP_RECENT) return messages
 
   const systemTokens = systemMsg ? estimateMessageTokens([systemMsg]) : 0
-  const budget = Math.max(0, maxTokens - systemTokens)
+  const budget = Math.max(0, targetTokens - systemTokens)
 
   // Cap oversized TOOL RESULTS before fitting the suffix. KEEP_RECENT below
   // keeps the newest messages even when they exceed the budget — without this
