@@ -983,7 +983,7 @@ export function useCodex() {
             // way. One audit row per step that actually shortened something
             // is the cheapest possible answer to "why did it read that again"
             // (plan A1, SICHTBARKEIT).
-            if (built.trimmedCount > 0 || built.prunedPlans > 0) {
+            if (built.trimmedCount > 0 || built.prunedPlans > 0 || built.droppedImages > 0) {
               const auditId = useToolAuditStore.getState().record({
                 convId,
                 toolCallId: `decay-${i}`,
@@ -993,6 +993,8 @@ export function useCodex() {
                   trimmedResults: built.trimmedCount,
                   savedChars: built.savedChars,
                   prunedPlanMessages: built.prunedPlans,
+                  droppedImages: built.droppedImages,
+                  savedImageChars: built.savedImageChars,
                   sendWindow,
                 },
               })
@@ -1002,6 +1004,9 @@ export function useCodex() {
                 resultPreview:
                   `Shortened ${built.trimmedCount} aged tool result${built.trimmedCount === 1 ? '' : 's'} ` +
                   `and dropped ${built.prunedPlans} superseded plan message${built.prunedPlans === 1 ? '' : 's'}, ` +
+                  (built.droppedImages > 0
+                    ? `aged out ${built.droppedImages} old image${built.droppedImages === 1 ? '' : 's'} (${built.savedImageChars} chars kept off the wire), `
+                    : '') +
                   `saving ${built.savedChars} characters. Request: ~${built.promptTokens} of ${sendWindow} tokens.`,
               })
             }

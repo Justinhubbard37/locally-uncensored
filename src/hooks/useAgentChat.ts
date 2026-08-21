@@ -44,9 +44,9 @@ import { resolveAgentNumCtx } from '../lib/agent-num-ctx'
 import { useMemoryStore } from '../stores/memoryStore'
 import { useVoiceStore } from '../stores/voiceStore'
 import { autoSpeak } from '../lib/ttsBridge'
-import { getProviderForModel, getProviderIdFromModel } from '../api/providers'
+import { getProviderIdFromModel } from '../api/providers'
 import { markToolsUnsupported } from '../api/tool-capability'
-import { buildExtractionPrompt, parseExtractionResponse } from '../lib/memory-extraction'
+import { extractMemoriesFromPair } from './useMemory'
 import { useAgentWorkflowStore } from '../stores/agentWorkflowStore'
 import { WorkflowEngine } from '../lib/workflow-engine'
 import type { AgentBlock, AgentToolCall } from '../types/agent-mode'
@@ -75,39 +75,6 @@ import { useTodoStore } from '../stores/todoStore'
 import { platformPromptLine, hostClockLine } from '../lib/host-platform'
 import { httpStatusOf, isTerminalModelError, retryDelayMs } from '../lib/http-status'
 import { CREDITS_EXHAUSTED_MESSAGE } from '../lib/credits-exhausted'
-
-// ── Standalone memory extraction (usable outside React hooks) ──
-
-async function extractMemories(userMsg: string, assistantMsg: string, conversationId: string) {
-  const { activeModel } = useModelStore.getState()
-  if (!activeModel) return
-
-  const memState = useMemoryStore.getState()
-  const existingSummary = memState.entries.slice(-20).map(e => `- [${e.type}] ${e.title}`).join('\n')
-  const messages = buildExtractionPrompt(userMsg, assistantMsg, existingSummary)
-
-  const { provider, modelId } = getProviderForModel(activeModel)
-  // Same num_ctx as the turn that just finished. This call runs on the SAME
-  // model right after it, and Ollama reloads whenever num_ctx changes — sending
-  // nothing here dropped the user's context back to Ollama's default and cost a
-  // second model load on every single turn (seen live 2026-07-25).
-  const numCtx = await resolveAgentNumCtx(
-    modelId, getProviderIdFromModel(activeModel), useSettingsStore.getState().settings.contextWindowOverride, activeModel,
-  )
-  let fullResponse = ''
-  const stream = provider.chatStream(modelId, messages, { temperature: 0.1, maxTokens: 500, contextWindow: numCtx })
-  for await (const chunk of stream) {
-    if (chunk.content) fullResponse += chunk.content
-    if (chunk.done) break
-  }
-
-  const result = parseExtractionResponse(fullResponse)
-  if (result.shouldSave) {
-    for (const memory of result.memories) {
-      memState.addMemory({ ...memory, source: conversationId })
-    }
-  }
-}
 
 // ── Hook ──────────────────────────────────────────────────────
 
@@ -800,7 +767,7 @@ export function useAgentChat() {
               trimmedResults: built.trimmedCount,
               savedChars: built.savedChars,
             })
-            if (built.trimmedCount > 0 || built.prunedPlans > 0) {
+            if (built.trimmedCount > 0 || built.prunedPlans > 0 || built.droppedImages > 0) {
               const auditId = useToolAuditStore.getState().record({
                 convId,
                 toolCallId: `decay-${stepNo}`,
@@ -810,6 +777,8 @@ export function useAgentChat() {
                   trimmedResults: built.trimmedCount,
                   savedChars: built.savedChars,
                   prunedPlanMessages: built.prunedPlans,
+                  droppedImages: built.droppedImages,
+                  savedImageChars: built.savedImageChars,
                   sendWindow,
                 },
               })
@@ -819,6 +788,9 @@ export function useAgentChat() {
                 resultPreview:
                   `Shortened ${built.trimmedCount} aged tool result${built.trimmedCount === 1 ? '' : 's'} ` +
                   `and dropped ${built.prunedPlans} superseded plan message${built.prunedPlans === 1 ? '' : 's'}, ` +
+                  (built.droppedImages > 0
+                    ? `aged out ${built.droppedImages} old image${built.droppedImages === 1 ? '' : 's'} (${built.savedImageChars} chars kept off the wire), `
+                    : '') +
                   `saving ${built.savedChars} characters. Request: ~${built.promptTokens} of ${sendWindow} tokens.`,
               })
             }
@@ -2029,10 +2001,12 @@ export function useAgentChat() {
         }
       }
 
-      // Auto-extract memories (fire-and-forget, agent mode always qualifies)
-      const memSettings = useMemoryStore.getState().settings
-      if (memSettings.autoExtractEnabled && contentRef.current.trim() && convId) {
-        extractMemories(userContent, contentRef.current, convId).catch(() => {})
+      // Auto-extract memories (fire-and-forget). The shared extractor carries
+      // the A7 cost policy: no silent lu-cloud call without the opt-in, then
+      // the cheapest catalogue model, plus the every-3rd-turn rate limit the
+      // agent loop never had.
+      if (contentRef.current.trim() && convId) {
+        void extractMemoriesFromPair(userContent, contentRef.current, convId).catch(() => {})
       }
 
       // ── /loop driver ───────────────────────────────────────────────────
