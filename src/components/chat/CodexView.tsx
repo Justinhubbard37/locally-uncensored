@@ -17,7 +17,6 @@ import { useCodexConfirmStore } from '../../stores/codexConfirmStore'
 import { PluginsDropdown } from './PluginsDropdown'
 import { ModelSelector } from '../models/ModelSelector'
 import { GoalBar } from './GoalBar'
-import { PlanBar } from './PlanBar'
 import { LoopBar } from './LoopBar'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useModelStore } from '../../stores/modelStore'
@@ -509,17 +508,16 @@ export function CodexView() {
           isGenerating={isRunning || codexGenerating}
           slashCommands
           composerModel={<ModelSelector openUpward surface="code" />}
-          composerAbove={<><LoopBar onStop={stopCodex} /><GoalBar /><PlanBar /></>}
+          composerAbove={<><LoopBar onStop={stopCodex} /><GoalBar /></>}
           composerActions={<PluginsDropdown openUpward />}
         />
       </div>
 
-      {/* Right sidebar: File Tree */}
-      <div className="w-48 shrink-0">
-        <FileTree />
-      </div>
+      {/* Right column: plan (C2) + explorer tree + file preview (C3). It
+          owns its own width and collapsed state, both persisted in uiStore. */}
+      <ExplorerPanel />
     </div>
   )
 }
 
-import { FileTree } from './FileTree'
+import { ExplorerPanel } from './ExplorerPanel'

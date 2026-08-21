@@ -1,14 +1,18 @@
-// The model's own plan for the current task, above the composer in Code and in
-// Agent (audit C4).
+// The model's own plan for the current task.
 //
 // On a long run the transcript scrolls away and the user is left guessing which
 // step the agent is on and whether it still remembers the goal. The agent writes
 // this list through `todo_write` and keeps it current, so progress is one glance
 // instead of a scroll back through twenty tool calls.
 //
-// Collapsed to the current step by default: this sits directly above the
-// composer and a ten-item list would push the input off screen. Expanded state
-// is per session, not persisted, because a plan is short-lived.
+// Two homes since 2.6.6 C2:
+//   - 'composer' (Agent tab): above the input, inside the composer's 70% width
+//     wrapper. Collapsed to the current step by default, because a ten-item
+//     list would push the input off screen.
+//   - 'panel' (Code tab): the top section of the Explorer column, full column
+//     width and expanded by default. It has vertical room there, and the plan
+//     stops stealing the prompt window it used to sit in.
+// Expanded state is per session, not persisted, because a plan is short-lived.
 
 import { useState } from 'react'
 import { CheckCircle2, Circle, ChevronDown, ChevronRight, Loader2, ListTodo, X } from 'lucide-react'
@@ -23,7 +27,14 @@ export function planDoneLabel(pendingChanges: number): string {
   return `every step done, ${pendingChanges} change${pendingChanges === 1 ? '' : 's'} still waiting for your approval`
 }
 
-export function PlanBar() {
+export type PlanBarVariant = 'composer' | 'panel'
+
+interface Props {
+  variant?: PlanBarVariant
+}
+
+export function PlanBar({ variant = 'composer' }: Props) {
+  const panel = variant === 'panel'
   const activeConversationId = useChatStore((s) => s.activeConversationId)
   const todos = useTodoStore((s) =>
     activeConversationId ? s.byConversation[activeConversationId] : undefined,
@@ -35,7 +46,7 @@ export function PlanBar() {
     activeConversationId ? (s.byChat[activeConversationId]?.length ?? 0) : 0,
   )
   const clearTodos = useTodoStore((s) => s.clearTodos)
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useState(panel)
 
   if (!activeConversationId || !todos || todos.length === 0) return null
 
@@ -48,7 +59,10 @@ export function PlanBar() {
   const headline = current ?? todos.find((t) => t.status === 'pending') ?? todos[todos.length - 1]
 
   return (
-    <div className="w-full max-w-[70%] mx-auto px-3 pb-1 flex justify-center">
+    <div
+      className={panel ? 'w-full p-1.5' : 'w-full max-w-[70%] mx-auto px-3 pb-1 flex justify-center'}
+      data-testid={panel ? 'plan-panel' : 'plan-composer'}
+    >
       <div className="w-full rounded-md border border-blue-500/20 bg-blue-500/[0.04]">
         <div className="flex items-center gap-1.5 px-2 py-1">
           <button
@@ -84,8 +98,9 @@ export function PlanBar() {
         </div>
 
         {expanded && (
-          // Capped so a fifteen-step plan cannot push the composer off screen.
-          <ul className="px-2 pb-1.5 space-y-0.5 max-h-40 overflow-y-auto">
+          // Capped so a fifteen-step plan cannot push the composer off screen,
+          // and in the panel so it cannot push the file tree out of view.
+          <ul className={`px-2 pb-1.5 space-y-0.5 overflow-y-auto ${panel ? 'max-h-48 scrollbar-thin' : 'max-h-40'}`}>
             {todos.map((t, i) => (
               <li key={`${i}-${t.content}`} className="flex items-start gap-1.5">
                 {t.status === 'completed' ? (
@@ -111,14 +126,18 @@ export function PlanBar() {
           </ul>
         )}
 
-        {!expanded && allDone && (
+        {(panel || !expanded) && allDone && (
+          // In the composer this is the collapsed summary line. In the panel the
+          // list is open by default, so the line has to stay: "every step done"
+          // while six writes sit refused in the queue is exactly the sentence
+          // Morgan believed.
           <div className="px-2 pb-1 flex items-center gap-1.5" data-testid="plan-all-done">
             <CheckCircle2
               size={9}
               className={`${pending > 0 ? 'text-amber-400' : 'text-emerald-400'} shrink-0`}
             />
             <span
-              className={`text-[0.55rem] ${pending > 0 ? 'text-amber-400/90' : 'text-emerald-400/80'}`}
+              className={`text-[0.55rem] leading-snug ${pending > 0 ? 'text-amber-400/90' : 'text-emerald-400/80'}`}
             >
               {planDoneLabel(pending)}
             </span>
