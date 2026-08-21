@@ -2338,16 +2338,125 @@ button{-webkit-appearance:none;appearance:none}
     return false;
   }
 
+  // ── A1 mobile: age decay for tool results ─────────────────────────
+  // Same rule and the same numbers as the desktop (src/lib/context-decay.ts):
+  // a result the model looked at two iterations ago has already done its job,
+  // so it rides along head+tail-capped, while the newest iteration stays
+  // byte-for-byte intact. That last half is the binding behavioural rule: the
+  // model must never edit against content it can no longer see.
+  //
+  // What it fixes here: the loop pushed every observation at full length and
+  // the compaction below always kept the last four messages, so ONE 200 KB
+  // file_read sat in the window forever. Ollama then truncated the request
+  // from the FRONT, which eats the system prompt and the original task, and
+  // the run answered "I'm ready to receive the task" mid-loop. That is the
+  // documented mobile task-forgetting, and it was never a compaction bug: the
+  // compaction was doing exactly what it was told with a number that could
+  // never be reached.
+  //
+  // The visible transcript is untouched. appendAgentStep('observation', obs)
+  // runs on the FULL text before the push, so the user keeps the whole result
+  // and only the model's copy is capped.
+  var DECAY_RESULT_CHARS = 4000;
+  var RESTORE_RESULT_CHARS = 1500;
+  var DECAY_AFTER_ITERATIONS = 2;
+  var TRUNCATION_MARKER = '…[truncated ';
+  var MARKER_SLACK = 64;
+  // How many messages may still carry their images. Base64 image bytes were
+  // invisible to the budget below, so a photo turn could be ten times over it
+  // and compaction saw nothing to do.
+  var IMAGE_KEEP_RECENT = 2;
+
+  // True when this text already IS the output of a cut at `budget`. Cutting a
+  // second time would land on different bytes every step, so the check has to
+  // come before the cut, not after.
+  function isDecayedAt(text, budget){
+    var s = String(text == null ? '' : text);
+    return s.length <= budget + MARKER_SLACK && s.indexOf(TRUNCATION_MARKER) !== -1;
+  }
+
+  // Head-heavy split, same 2/3 as the desktop: the start of a result carries
+  // the most signal (top of a file, first compiler error), the tail keeps the
+  // exit code and the final error.
+  function capToolResult(text, maxChars){
+    var s = String(text == null ? '' : text);
+    if(s.length <= maxChars) return s;
+    if(isDecayedAt(s, maxChars)) return s;
+    var headChars = Math.max(0, Math.floor(maxChars * 0.66));
+    var tailChars = Math.max(0, maxChars - headChars);
+    var head = s.slice(0, headChars);
+    var tail = tailChars > 0 ? s.slice(s.length - tailChars) : '';
+    var dropped = s.length - head.length - tail.length;
+    return head + '\n\n' + TRUNCATION_MARKER + dropped + ' chars]…\n\n' + tail;
+  }
+
+  // Cap every tool result older than DECAY_AFTER_ITERATIONS. Messages without
+  // an iteration are restored history, i.e. as old as it gets. In place and
+  // final: capToolResult returns an already-capped result unchanged, so the
+  // prompt prefix stops moving after the one step that did the cutting.
+  function decayToolResults(messages, currentIter){
+    if(!Array.isArray(messages)) return messages;
+    var cutoff = currentIter - DECAY_AFTER_ITERATIONS;
+    for(var i=0;i<messages.length;i++){
+      var m = messages[i];
+      if(!m || m.role !== 'tool') continue;
+      var it = (typeof m.iter === 'number') ? m.iter : -Infinity;
+      if(it > cutoff) continue;
+      m.content = capToolResult(m.content, DECAY_RESULT_CHARS);
+    }
+    return messages;
+  }
+
+  // Characters this message really costs. Base64 images are the whole point:
+  // they are the biggest thing in a payload and the old count ignored them.
+  function msgChars(m){
+    if(!m) return 0;
+    var n = String(m.content || '').length;
+    if(Array.isArray(m.images)){
+      for(var i=0;i<m.images.length;i++) n += String(m.images[i] || '').length;
+    }
+    return n;
+  }
+
+  function totalChars(messages){
+    var n = 0;
+    for(var i=0;i<messages.length;i++) n += msgChars(messages[i]);
+    return n;
+  }
+
+  // Only the newest `keepRecent` messages that carry images send them again.
+  // An older picture is replaced by a one-line placeholder so the model still
+  // knows a picture was there.
+  function dropOldImages(messages, keepRecent){
+    if(!Array.isArray(messages)) return messages;
+    var withImages = [];
+    for(var i=0;i<messages.length;i++){
+      var m = messages[i];
+      if(m && Array.isArray(m.images) && m.images.length) withImages.push(i);
+    }
+    var firstKept = Math.max(0, withImages.length - keepRecent);
+    for(var k=0;k<firstKept;k++){
+      var msg = messages[withImages[k]];
+      var count = msg.images.length;
+      delete msg.images;
+      msg.content = String(msg.content || '') +
+        '\n[' + count + ' image(s) from an earlier message omitted]';
+    }
+    return messages;
+  }
+
   // Conservative compaction — keep system prompt + the first user message
   // (anchors the task) + the most recent N turns. Drops only the OLDEST
   // tool-result chains, which is the cheapest data to lose. Fires when
   // total chars exceed budget (~24 KB by default = ~6K tokens).
   function compactApiMessages(messages, charBudget){
-    if(!Array.isArray(messages) || messages.length < 6) return messages;
+    if(!Array.isArray(messages)) return messages;
     var budget = charBudget || 24000;
-    var total = 0;
-    for(var i=0;i<messages.length;i++) total += String(messages[i].content || '').length;
-    if(total <= budget) return messages;
+    // Unconditional, and before the early return: an old image is bytes the
+    // model has already been shown and cannot act on twice.
+    dropOldImages(messages, IMAGE_KEEP_RECENT);
+    if(messages.length < 6) return messages;
+    if(totalChars(messages) <= budget) return messages;
     // Always keep [0] (system) and [1] (first user) if present.
     var head = [];
     if(messages.length > 0 && messages[0].role === 'system') head.push(messages[0]);
@@ -2356,11 +2465,28 @@ button{-webkit-appearance:none;appearance:none}
     if(firstUserIdx !== -1 && messages[firstUserIdx] !== head[0]) head.push(messages[firstUserIdx]);
     // Drop oldest tail messages until we fit.
     var tail = messages.slice(firstUserIdx + 1);
+    var headChars = totalChars(head);
     while(tail.length > 4){
-      var headChars = head.reduce(function(a,m){return a + String(m.content||'').length;}, 0);
-      var tailChars = tail.reduce(function(a,m){return a + String(m.content||'').length;}, 0);
-      if(headChars + tailChars <= budget) break;
+      if(headChars + totalChars(tail) <= budget) break;
       tail.shift();
+    }
+    // The floor of four can still be bigger than the whole budget when one of
+    // those four is a single huge result: the newest iteration is never
+    // decayed, so a fresh 200 KB read lands here at full length. Leaving it
+    // means Ollama truncates from the front and eats the system prompt and the
+    // task, so cap what is left instead, oldest first, and touch the newest
+    // result only when nothing else gets us under. Two fixed rungs, never a
+    // budget derived from the payload, so the same history always produces the
+    // same bytes.
+    if(headChars + totalChars(tail) > budget){
+      var rungs = [DECAY_RESULT_CHARS, RESTORE_RESULT_CHARS];
+      for(var r=0;r<rungs.length;r++){
+        for(var t=0;t<tail.length;t++){
+          if(headChars + totalChars(tail) <= budget) break;
+          if(!tail[t] || tail[t].role !== 'tool') continue;
+          tail[t].content = capToolResult(tail[t].content, rungs[r]);
+        }
+      }
     }
     return head.concat(tail);
   }
@@ -3961,6 +4087,15 @@ button{-webkit-appearance:none;appearance:none}
       if(m.role==='user' && cm!=='off' && CAVEMAN_REMINDERS[cm]){
         content = CAVEMAN_REMINDERS[cm] + '\n' + content;
       }
+      // A restored tool result is a PREVIOUS turn's work, already summarised
+      // by the answer the user can see, so it comes back tighter than the
+      // in-run cap. One exception, and it is the stability rule: a result the
+      // run already sent capped at 4k is restored at exactly those 4k bytes,
+      // otherwise the same result would arrive with different bytes depending
+      // on which turn asked for it.
+      if(m.role === 'tool' && !isDecayedAt(content, DECAY_RESULT_CHARS)){
+        content = capToolResult(content, RESTORE_RESULT_CHARS);
+      }
       var apiMsg = {role: m.role, content: content};
       // Carry over tool_calls on assistant messages so Ollama sees the
       // full native tool-call history (assistant→tool pairs).
@@ -3987,6 +4122,12 @@ button{-webkit-appearance:none;appearance:none}
         return;
       }
       iter++;
+
+      // Decay first, then compaction, and the order is the point (plan A1). A
+      // decayed history is what the budget check should be looking at;
+      // measuring full results and then dropping whole messages throws away
+      // old context that would have fitted at 4k.
+      decayToolResults(apiMessages, iter);
 
       // Compaction — keeps Ollama from silently truncating the system
       // prompt + first user message after a few iterations of file reads
@@ -4209,8 +4350,10 @@ button{-webkit-appearance:none;appearance:none}
             }
             appendAgentStep('observation', obs);
 
-            // Push tool result into the LLM history
-            apiMessages.push({role:'tool', content:obs});
+            // Push tool result into the LLM history. The iteration rides with
+            // it so decayToolResults can tell the newest results (kept whole)
+            // from the ones that have done their job (A1).
+            apiMessages.push({role:'tool', content:obs, iter:iter});
 
             // runAgentTool resolves on graceful 200+{error} too — we have
             // to inspect the observation text to know whether the tool
@@ -4240,7 +4383,7 @@ button{-webkit-appearance:none;appearance:none}
             appendAgentStep('error', errMsg);
 
             // Push error as tool result so the model can adapt
-            apiMessages.push({role:'tool', content:'Error: '+errMsg});
+            apiMessages.push({role:'tool', content:'Error: '+errMsg, iter:iter});
 
             consecutiveErrors++;
             if(consecutiveErrors >= maxConsecutiveErrors){
@@ -5714,5 +5857,149 @@ mod remote_path_tests {
         let merged = super::merge_remote_permissions(&current, body);
         assert!(merged.shell, "desktop-set shell must survive a remote update");
         assert!(merged.filesystem, "non-RCE perms still apply");
+    }
+}
+
+/// A1 MOBILE (plan 2.6.6): the served page has to carry the decay, and it has
+/// to carry the DESKTOP's numbers.
+///
+/// The behaviour of those helpers is proven in
+/// src/api/__tests__/mobile-context-decay.test.ts, which cuts them out of this
+/// file and runs them. What Rust owns is the other half: that the block is in
+/// what ships, that the loop calls it, and that the two platforms did not
+/// quietly grow two different caps. A relay that decays at 8k while the
+/// desktop decays at 4k is a support case nobody can reproduce.
+#[cfg(test)]
+mod mobile_decay_tests {
+    /// The page exactly as a phone receives it.
+    fn page() -> String {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { super::mobile_landing().await.0 })
+    }
+
+    /// A `const NAME = 123` or `var NAME = 123;` out of either language.
+    fn number_after(source: &str, name: &str) -> Option<i64> {
+        let at = source.find(name)?;
+        let rest = &source[at + name.len()..];
+        let eq = rest.find('=')?;
+        rest[eq + 1..]
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .ok()
+    }
+
+    #[test]
+    fn the_served_page_carries_the_decay_helpers() {
+        let html = page();
+        for needle in [
+            "function capToolResult(",
+            "function isDecayedAt(",
+            "function decayToolResults(",
+            "function msgChars(",
+            "function dropOldImages(",
+        ] {
+            assert!(html.contains(needle), "mobile page is missing {}", needle);
+        }
+    }
+
+    #[test]
+    fn the_loop_pushes_the_iteration_with_every_observation() {
+        // Without the iteration the decay cannot tell the newest result from
+        // the ones that have done their job, and capping the newest is the one
+        // thing it must never do.
+        let html = page();
+        assert!(html.contains("apiMessages.push({role:'tool', content:obs, iter:iter})"));
+        assert!(html.contains("apiMessages.push({role:'tool', content:'Error: '+errMsg, iter:iter})"));
+    }
+
+    /// Offset of a statement that really RUNS: the line it sits on may hold
+    /// nothing but whitespace before it. A plain `find` also matches the same
+    /// text inside a `//` comment, which is exactly how a disabled call slips
+    /// past a guard.
+    fn live_statement(source: &str, statement: &str) -> Option<usize> {
+        let mut from = 0;
+        while let Some(rel) = source[from..].find(statement) {
+            let at = from + rel;
+            let line_start = source[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            if source[line_start..at].trim().is_empty() {
+                return Some(at);
+            }
+            from = at + statement.len();
+        }
+        None
+    }
+
+    #[test]
+    fn decay_runs_before_compaction() {
+        // Order matters: measuring full results and then dropping whole
+        // messages throws away old context that would have fitted at 4k.
+        let html = page();
+        let decay = live_statement(&html, "decayToolResults(apiMessages, iter);")
+            .expect("the decay call is missing or commented out");
+        let compact = live_statement(&html, "apiMessages = compactApiMessages(apiMessages, 24000);")
+            .expect("the compaction call is missing or commented out");
+        assert!(decay < compact, "compaction runs before the decay");
+    }
+
+    #[test]
+    fn the_comment_blind_spot_is_really_closed() {
+        // A guard on the guard: the first version of decay_runs_before_compaction
+        // used a plain find and stayed green with the call commented out.
+        assert_eq!(live_statement("  doThing();", "doThing();"), Some(2));
+        assert_eq!(live_statement("  // doThing();", "doThing();"), None);
+        assert_eq!(live_statement("  // doThing();\n  doThing();", "doThing();"), Some(18));
+    }
+
+    #[test]
+    fn the_budget_counts_image_bytes() {
+        let html = page();
+        assert!(html.contains("if(Array.isArray(m.images)){"), "msgChars ignores images");
+        assert!(
+            live_statement(&html, "dropOldImages(messages, IMAGE_KEEP_RECENT);").is_some(),
+            "old images are never dropped"
+        );
+        assert!(
+            live_statement(&html, "if(totalChars(messages) <= budget) return messages;").is_some(),
+            "the budget check does not run over the image-aware count"
+        );
+        // The old accumulator counted content only. It must not come back.
+        assert!(
+            !html.contains("total += String(messages[i].content || '').length"),
+            "the content-only budget is back"
+        );
+    }
+
+    #[test]
+    fn the_relay_caps_at_the_same_numbers_as_the_desktop() {
+        let html = page();
+        let desktop = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("src")
+                .join("lib")
+                .join("context-decay.ts"),
+        )
+        .expect("desktop decay module not found");
+
+        for name in ["DECAY_RESULT_CHARS", "RESTORE_RESULT_CHARS", "DECAY_AFTER_ITERATIONS"] {
+            let mine = number_after(&html, name)
+                .unwrap_or_else(|| panic!("{} missing from the mobile page", name));
+            let theirs = number_after(&desktop, name)
+                .unwrap_or_else(|| panic!("{} missing from context-decay.ts", name));
+            assert_eq!(mine, theirs, "{} drifted between relay and desktop", name);
+        }
+    }
+
+    #[test]
+    fn the_number_reader_really_reads_numbers() {
+        // A guard on the guard: if number_after returned None for everything
+        // the drift test above would only ever panic on the message, and if it
+        // returned the same wrong value twice it would pass for free.
+        assert_eq!(number_after("var DECAY_RESULT_CHARS = 4000;", "DECAY_RESULT_CHARS"), Some(4000));
+        assert_eq!(number_after("export const X = 12 ", "X"), Some(12));
+        assert_eq!(number_after("nothing here", "X"), None);
     }
 }
