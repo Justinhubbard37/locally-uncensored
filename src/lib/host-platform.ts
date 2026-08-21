@@ -75,6 +75,24 @@ export function hostEnvironmentBlock(
   p: HostPlatform = hostPlatform(),
   now: Date = new Date(),
 ): string {
+  return [platformPromptLine(p), hostClockLine(now)].join('\n')
+}
+
+/**
+ * The clock half of the environment block, on its own.
+ *
+ * This one line is the single most expensive character sequence in the whole
+ * system prompt (2.6.6, plan A5). It changes every minute, and it used to sit
+ * near the TOP of the prompt, ahead of the persona, the rules and the repo
+ * map. An upstream prefix cache matches from byte 0 and stops at the first
+ * difference, so a timestamp up there means every new turn re-prices the ENTIRE
+ * prompt as a cache miss. Everything volatile now goes last, and the stable
+ * head in front of it is byte-identical from turn to turn.
+ *
+ * The wording is unchanged, only the position: it still replaces the retired
+ * clock tool, so it still has to name the date of the run.
+ */
+export function hostClockLine(now: Date = new Date()): string {
   let tz = ''
   try {
     tz = Intl.DateTimeFormat().resolvedOptions().timeZone ?? ''
@@ -82,8 +100,5 @@ export function hostEnvironmentBlock(
     // No timezone is better than a wrong one.
   }
   const stamp = now.toLocaleString('en-GB', { dateStyle: 'full', timeStyle: 'short' })
-  return [
-    platformPromptLine(p),
-    `Date and time at the start of this run: ${stamp}${tz ? ` (${tz})` : ''}. Trust this line; there is no clock tool.`,
-  ].join('\n')
+  return `Date and time at the start of this run: ${stamp}${tz ? ` (${tz})` : ''}. Trust this line; there is no clock tool.`
 }

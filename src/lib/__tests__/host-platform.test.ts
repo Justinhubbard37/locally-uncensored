@@ -115,12 +115,18 @@ describe('the tools really are gone', () => {
   it('the agent prompt states the platform instead of spending a call on it', () => {
     // There is no render harness in this repo, so the prompt is guarded at the
     // source, like DownloadBadge-autoclose.test.ts does.
+    // 2.6.6 plan A5 split the block in two: the platform sentence is stable
+    // and stays where it was, the clock is volatile and moved to the very end
+    // of the prompt so a prefix cache can still match everything in front of
+    // it. Both halves still have to be there.
     const agent = read('hooks', 'useAgentChat.ts')
-    expect(agent).toMatch(/hostEnvironmentBlock\(\)/)
-    expect(agent).toMatch(/OS, clock and timezone are stated above/)
+    expect(agent).toMatch(/platformPromptLine\(\)/)
+    expect(agent).toMatch(/hostClockLine\(\)/)
+    expect(agent).toMatch(/OS, clock and timezone are stated in this prompt/)
     // Codex pays for the block too now (it never had the platform sentence).
     const codex = read('hooks', 'useCodex.ts')
-    expect(codex).toMatch(/hostEnvironmentBlock\(\)/)
+    expect(codex).toMatch(/platformPromptLine\(\)/)
+    expect(codex).toMatch(/hostClockLine\(\)/)
   })
 })
 

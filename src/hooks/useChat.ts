@@ -389,6 +389,7 @@ export function useChat() {
     let systemPrompt = conv.personaEnabled === true ? conv.systemPrompt : ''
     const ragState = useRAGStore.getState()
     const ragEnabled = ragState.ragEnabled[convId] ?? false
+    let ragSuffix = ''
 
     if (ragEnabled) {
       // Ensure chunks are loaded from IndexedDB before retrieval
@@ -410,8 +411,13 @@ export function useChat() {
             const contextBlock = ragContext.chunks
               .map((c, i) => `[Source ${i + 1}]\n${c.content}`)
               .join("\n\n")
-            const ragPrefix = `Use the following document context to help answer the user's question. If the context is not relevant, ignore it and answer normally.\n\n---\n${contextBlock}\n---\n\n`
-            systemPrompt = ragPrefix + (systemPrompt || "")
+            // The retrieval block is the most volatile thing in the prompt:
+            // every turn pulls different chunks. It used to sit at byte 0,
+            // ahead of the persona, so an upstream prefix cache, which
+            // matches from the first byte and stops at the first difference,
+            // missed the ENTIRE prompt on every RAG turn. It moves to the very
+            // end, behind persona and memory, and is appended below (plan A5).
+            ragSuffix = `\n\nUse the following document context to help answer the user's question. If the context is not relevant, ignore it and answer normally.\n\n---\n${contextBlock}\n---`
           }
         } catch (err) {
           log.error("RAG retrieval failed, continuing without context", { err })
@@ -470,6 +476,11 @@ export function useChat() {
     const cavemanReminder = (settings.cavemanMode && settings.cavemanMode !== 'off')
       ? (await import('../lib/constants')).CAVEMAN_REMINDERS?.[settings.cavemanMode as 'lite' | 'full' | 'ultra'] || ''
       : ''
+
+    // Volatile last (plan A5): the retrieval block goes behind persona,
+    // memory, thinking and caveman, so everything a prefix cache could match
+    // stays byte-identical from turn to turn.
+    if (ragSuffix) systemPrompt = (systemPrompt || '') + ragSuffix
 
     // Count cap (web parity, MAX_SEND_MESSAGES): plain chat sends the whole
     // history verbatim, and a long chat of many short turns stays under every

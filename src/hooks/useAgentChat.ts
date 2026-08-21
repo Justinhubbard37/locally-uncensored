@@ -36,7 +36,10 @@ import { parseLooseToolCalls, stripMatchedCalls, stripToolCallText, canonicalToo
 import { mediaCallSucceeded } from '../lib/media-result'
 import { summarizeTurn } from '../lib/turn-summary'
 import { buildVisionFeedback } from '../api/vision-feedback'
-import { compactMessages, getModelMaxTokens, estimateTokens } from '../lib/context-compaction'
+import { getModelMaxTokens, estimateTokens } from '../lib/context-compaction'
+import { buildRequestMessages, trimWorkingHistory } from '../lib/context-decay'
+import { effectiveSendWindow } from '../lib/send-window'
+import { useSendSizeStore } from '../stores/sendSizeStore'
 import { resolveAgentNumCtx } from '../lib/agent-num-ctx'
 import { useMemoryStore } from '../stores/memoryStore'
 import { useVoiceStore } from '../stores/voiceStore'
@@ -46,7 +49,7 @@ import { markToolsUnsupported } from '../api/tool-capability'
 import { buildExtractionPrompt, parseExtractionResponse } from '../lib/memory-extraction'
 import { useAgentWorkflowStore } from '../stores/agentWorkflowStore'
 import { WorkflowEngine } from '../lib/workflow-engine'
-import type { AgentBlock, AgentToolCall, OllamaChatMessage } from '../types/agent-mode'
+import type { AgentBlock, AgentToolCall } from '../types/agent-mode'
 import { selectRelevantToolsAsync, ALWAYS_INCLUDE, SMALL_MODEL_MAX_TOOLS } from '../lib/tool-selection'
 import { renderToolRoster, renderToolNames } from '../lib/tool-roster'
 import { MUTATING_TOOLS, allowedInReadOnlyTurn } from '../lib/mutating-tools'
@@ -69,7 +72,7 @@ import { openPlanGap, planReconcileSteer, PLAN_RECONCILE_BUDGET } from '../lib/p
 import { PlanStaleness, planStalenessSteer } from '../lib/plan-staleness'
 import { reasoningOnlyRound, REASONING_CONTINUE_BUDGET, REASONING_CONTINUE_STEER } from '../lib/reasoning-round'
 import { useTodoStore } from '../stores/todoStore'
-import { hostEnvironmentBlock } from '../lib/host-platform'
+import { platformPromptLine, hostClockLine } from '../lib/host-platform'
 import { httpStatusOf, isTerminalModelError, retryDelayMs } from '../lib/http-status'
 import { CREDITS_EXHAUSTED_MESSAGE } from '../lib/credits-exhausted'
 
@@ -415,6 +418,7 @@ export function useAgentChat() {
     let systemPrompt = conv.personaEnabled === true ? conv.systemPrompt : ''
     const ragState = useRAGStore.getState()
     const ragEnabled = ragState.ragEnabled[convId] ?? false
+    let ragSuffix = ''
 
     if (ragEnabled) {
       // Guard the lock: a throw here (before the main try/finally below) would
@@ -429,7 +433,12 @@ export function useAgentChat() {
             const contextBlock = ragContext.chunks
               .map((c: any, i: number) => `[Source ${i + 1}]\n${c.content}`)
               .join('\n\n')
-            systemPrompt = `Use the following document context to help answer the user's question. If the context is not relevant, ignore it and answer normally.\n\n---\n${contextBlock}\n---\n\n${systemPrompt || ''}`
+            // Retrieval is the most volatile thing in the whole prompt:
+            // every turn pulls different chunks. In front of the persona it
+            // put a fresh byte at offset 0 and made the upstream prefix cache
+            // miss the ENTIRE prompt on every RAG turn, so it rides at the end
+            // now, behind persona and memory (plan A5).
+            ragSuffix = `\n\nUse the following document context to help answer the user's question. If the context is not relevant, ignore it and answer normally.\n\n---\n${contextBlock}\n---`
           }
         } catch (err) {
           log.error('RAG retrieval failed', { err })
@@ -526,6 +535,13 @@ export function useAgentChat() {
     } catch (e) {
       log.warn('agent.caveman_load_failed', { e: String(e) })
     }
+
+    // Everything volatile goes LAST (plan A5): the retrieval chunks that
+    // change every turn and the clock that changes every minute. A prefix
+    // cache matches from byte 0 and stops at the first difference, so one
+    // early timestamp re-prices the whole prompt.
+    agentSystemPrompt += ragSuffix
+    agentSystemPrompt += `\n\n${hostClockLine()}`
 
     // Build messages array
     let agentMessages: ChatMessage[] = [
@@ -647,10 +663,22 @@ export function useAgentChat() {
     // rightly weakened. Windowed batch repeats, per-epoch identical reads and
     // repeated narration now watch this loop too.
     const loopGuard = new AgentLoopGuard()
+    // Which read produced which result message, so the request builder can
+    // tell the guard that a re-read of a CAPPED result is legitimate rather
+    // than a loop (plan A1, LOOP-GUARD). Keyed by the message object, which
+    // works across all three transports.
+    const guardKeyOfResult = new WeakMap<object, string>()
+    const guardKeyFor = (tc: { function: { name: string; arguments?: unknown } }): string =>
+      `${tc.function.name}|${JSON.stringify(tc.function.arguments ?? {})}`
+    const NO_TRIMMED_KEYS: ReadonlySet<string> = new Set<string>()
 
+    // Step number for the decay audit trail. The loop is a while, so it has
+    // no index of its own.
+    let stepNo = 0
     try {
       // ── Agent Loop ──────────────────────────────────────────
       while (runningRef.current && !abort.signal.aborted) {
+        stepNo++
         budget.addIteration()
         const exceed = budget.exceeded()
         if (exceed.kind !== 'none') {
@@ -714,16 +742,77 @@ export function useAgentChat() {
         // Keep the compaction budget == the actual num_ctx we send, so we never
         // trim to the model's full context (e.g. 128k) while Ollama only has the
         // capped num_ctx allocated — that mismatch caused prompt overflow.
-        const maxCtx = agentCtx
-        // Small-Model Mode (Knob 4): keep the REAL prompt short (the true lever,
-        // NOT num_ctx) — tighter ratio + an absolute cap.
-        const compactBudget = settings.smallModelMode
-          ? Math.floor(Math.min(maxCtx * 0.5, 6000))
-          : Math.floor(maxCtx * 0.8)
-        agentMessages = compactMessages(
-          agentMessages as OllamaChatMessage[],
-          compactBudget
-        ) as ChatMessage[]
+        // ── Request build (2.6.6, plan A1/A2/A3) ─────────────────────
+        // Age decay, then the send budget, then compaction, in that order:
+        // reversed, the budget counts full results and drops whole messages
+        // to make room the decay would have freed anyway.
+        //
+        // agentMessages itself is never decayed. The store, the transcript
+        // and the next turn keep the complete result; only the copy on the
+        // wire is shortened, which is what makes it reversible from one
+        // settings switch. Small-Model Mode (Knob 4) and the paid-provider
+        // send cap both live in effectiveSendWindow.
+        const decayOn = settings.contextDecay !== false
+        const sendWindow = effectiveSendWindow({
+          providerId,
+          modelWindow: agentCtx,
+          sendWindowTokens: settings.codexSendWindowTokens,
+          capEnabled: decayOn,
+          smallModelMode: settings.smallModelMode,
+        })
+        let sendMessages: ChatMessage[] = agentMessages.slice()
+        let trimmedReadKeys: ReadonlySet<string> = NO_TRIMMED_KEYS
+        try {
+          // Bound the carried history FIRST, in whole blocks and measured on
+          // the decayed sizes. Trimming to the exact budget inside the builder
+          // would move the window start every single step, and a window that
+          // moves every step is a prompt prefix that is never the same twice.
+          // Whole messages are dropped here, never shortened: decay stays on
+          // the send copy alone, so the store keeps every result complete.
+          agentMessages = trimWorkingHistory(agentMessages, sendWindow, { enabled: decayOn }).messages
+          const built = buildRequestMessages(agentMessages, {
+            budgetTokens: sendWindow,
+            enabled: decayOn,
+            hysteresis: decayOn,
+            keyOf: (m) => guardKeyOfResult.get(m as unknown as object),
+          })
+          sendMessages = built.messages
+          trimmedReadKeys = new Set(built.trimmedKeys)
+          if (convId) {
+            useSendSizeStore.getState().report(convId, {
+              tokens: built.promptTokens,
+              window: sendWindow,
+              atMessageCount:
+                useChatStore.getState().conversations.find((c) => c.id === convId)?.messages.length ?? 0,
+              trimmedResults: built.trimmedCount,
+              savedChars: built.savedChars,
+            })
+            if (built.trimmedCount > 0 || built.prunedPlans > 0) {
+              const auditId = useToolAuditStore.getState().record({
+                convId,
+                toolCallId: `decay-${stepNo}`,
+                toolName: 'context_decay',
+                args: {
+                  step: stepNo,
+                  trimmedResults: built.trimmedCount,
+                  savedChars: built.savedChars,
+                  prunedPlanMessages: built.prunedPlans,
+                  sendWindow,
+                },
+              })
+              useToolAuditStore.getState().complete(auditId, {
+                status: 'completed',
+                completedAt: Date.now(),
+                resultPreview:
+                  `Shortened ${built.trimmedCount} aged tool result${built.trimmedCount === 1 ? '' : 's'} ` +
+                  `and dropped ${built.prunedPlans} superseded plan message${built.prunedPlans === 1 ? '' : 's'}, ` +
+                  `saving ${built.savedChars} characters. Request: ~${built.promptTokens} of ${sendWindow} tokens.`,
+              })
+            }
+          }
+        } catch {
+          sendMessages = agentMessages.slice()
+        }
 
         // Honouring a long `retry-after` means the run goes quiet for up to a
         // minute, and a silent gap reads as a freeze (which is exactly the
@@ -785,7 +874,7 @@ export function useAgentChat() {
               .find((c) => c.id === convId)?.messages.find((m) => m.id === assistantMessage.id)?.usage
             if (!existingUsage || existingUsage.estimated) {
               const estPrompt =
-                estimateTokens(agentMessages.map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n')) +
+                estimateTokens(sendMessages.map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n')) +
                 estimateTokens(JSON.stringify(tools))
               useChatStore.getState().updateMessageUsage(convId!, assistantMessage.id, {
                 promptTokens: estPrompt, completionTokens: 0, totalTokens: estPrompt, estimated: true,
@@ -819,7 +908,7 @@ export function useAgentChat() {
               try {
                 turn = await streamOllamaChatWithTools(
                   modelToUse,
-                  agentMessages,
+                  sendMessages,
                   tools,
                   {
                     temperature: chatOptions.temperature,
@@ -848,6 +937,9 @@ export function useAgentChat() {
                 // it to its text fallback and retry — the run must survive a
                 // wrong vision guess. A user-attached image stays untouched.
                 if (isMultimodalUnsupportedError(String(thinkErr?.message ?? '')) && stripVisionFeedbackMessages(agentMessages)) {
+                  // The send copy carries the same attachment; strip it there
+                  // too or the retry resends exactly what just failed.
+                  stripVisionFeedbackMessages(sendMessages)
                   visionRefused = true
                   log.warn('agent.vision_feedback_healed', { model: modelToUse })
                   continue
@@ -861,7 +953,7 @@ export function useAgentChat() {
                   && (thinkErr?.message?.includes('does not support thinking') || httpStatusOf(thinkErr) === 400)) {
                   turn = await streamOllamaChatWithTools(
                     modelToUse,
-                    agentMessages,
+                    sendMessages,
                     tools,
                     {
                       temperature: chatOptions.temperature,
@@ -932,13 +1024,14 @@ export function useAgentChat() {
             let connRetries = 0
             for (;;) {
               try {
-                turn = await streamProviderTurn(provider, modelToUse, agentMessages, streamOpts, onLiveContent, onLiveThinking)
+                turn = await streamProviderTurn(provider, modelToUse, sendMessages, streamOpts, onLiveContent, onLiveThinking)
                 break
               } catch (thinkErr: any) {
                 // G22 parity with the Ollama branch: heal a wrong vision
                 // guess instead of ending the run (R20 witness: LM Studio,
                 // gemma-3-4b-it-abliterated, text-only conversion).
                 if (isMultimodalUnsupportedError(String(thinkErr?.message ?? '')) && stripVisionFeedbackMessages(agentMessages)) {
+                  stripVisionFeedbackMessages(sendMessages)
                   visionRefused = true
                   log.warn('agent.vision_feedback_healed', { model: modelToUse, provider: providerId })
                   continue
@@ -950,7 +1043,7 @@ export function useAgentChat() {
                 // 400 twice (review 2026-08-14).
                 if (streamOpts.thinking !== undefined
                   && (thinkErr?.message?.includes('does not support thinking') || httpStatusOf(thinkErr) === 400)) {
-                  turn = await streamProviderTurn(provider, modelToUse, agentMessages, { ...streamOpts, thinking: undefined as unknown as boolean }, onLiveContent, () => {})
+                  turn = await streamProviderTurn(provider, modelToUse, sendMessages, { ...streamOpts, thinking: undefined as unknown as boolean }, onLiveContent, () => {})
                   break
                 }
                 const transient = thinkErr?.name !== 'AbortError' && !isTerminalModelError(thinkErr)
@@ -1017,7 +1110,7 @@ export function useAgentChat() {
           const hermesTurn = await streamProviderTurn(
             provider,
             modelToUse,
-            agentMessages.map(m => ({ role: m.role, content: m.content })),
+            sendMessages.map(m => ({ role: m.role, content: m.content })),
             { ...chatOptions, thinking: undefined as unknown as boolean },
             (_full, delta) => feedUI(splitter.feed(display.feed(delta))),
           )
@@ -1376,15 +1469,32 @@ export function useAgentChat() {
           ? narrationVerdict
           : loopGuard.recordBatch(
               toolCalls.map((tc) => ({ name: tc.function.name, args: JSON.stringify(tc.function.arguments ?? {}) })),
+              // Reads the builder just sent capped: re-reading those is the
+              // decay working as designed, not a loop (plan A1, LOOP-GUARD).
+              { trimmedReadKeys },
             )
         if (batchVerdict.action === 'halt') {
           contentRef.current =
             (contentRef.current ? contentRef.current + '\n\n' : '') +
             `_(halted: ${batchVerdict.reason}. The model is looping. Try a stronger model for multi-step tasks, or rephrase the instruction.)_`
           scheduleUIUpdate()
+          addBlock(convId!, assistantMessage.id, {
+            id: uuid(),
+            phase: 'reflection',
+            content: `⛔ Loop guard halted the run: ${batchVerdict.reason}.`,
+            timestamp: Date.now(),
+          })
           break
         }
         const pendingSteer = batchVerdict.action === 'steer' ? batchVerdict.message : null
+        if (pendingSteer) {
+          addBlock(convId!, assistantMessage.id, {
+            id: uuid(),
+            phase: 'reflection',
+            content: `↻ Loop guard steered the model: ${pendingSteer}`,
+            timestamp: Date.now(),
+          })
+        }
 
         type BatchEntry = { tc: typeof toolCalls[number]; ac: AgentToolCall; blockId: string }
         const batch: BatchEntry[] = []
@@ -1610,6 +1720,14 @@ export function useAgentChat() {
         // branch (not the id-less `native` one below) — otherwise DeepInfra 422s
         // "ChatCompletionToolMessage.tool_call_id: Field required" and every
         // follow-up turn fails. Ollama/LM-Studio are lenient; only cloud bit.
+        // Remember which read produced which result message, so a later step
+        // that sends that result capped can tell the loop guard the re-read is
+        // legitimate. Registered on the pushed OBJECT, so it works for all
+        // three transports even though only one of them carries call ids.
+        const rememberResult = (msg: ChatMessage, tc: { function: { name: string; arguments?: unknown } }) => {
+          guardKeyOfResult.set(msg as unknown as object, guardKeyFor(tc))
+          return msg
+        }
         if (providerId === 'openai' || providerId === 'anthropic' || providerId === 'lu-cloud') {
           agentMessages.push({
             role: 'assistant',
@@ -1618,11 +1736,11 @@ export function useAgentChat() {
           })
           for (const { tc } of batch) {
             const result = results.find((r) => r.id === batch.find((b) => b.tc === tc)?.ac.id)!
-            agentMessages.push({
+            agentMessages.push(rememberResult({
               role: 'tool',
               content: resultTextFor(result) + mediaNote(tc.function.name, result),
               tool_call_id: tc.id,
-            })
+            }, tc))
           }
         } else if (strategy === 'native') {
           agentMessages.push({
@@ -1634,10 +1752,10 @@ export function useAgentChat() {
           })
           for (const { tc } of batch) {
             const result = results.find((r) => r.id === batch.find((b) => b.tc === tc)?.ac.id)!
-            agentMessages.push({
+            agentMessages.push(rememberResult({
               role: 'tool',
               content: resultTextFor(result) + mediaNote(tc.function.name, result),
-            })
+            }, tc))
           }
         } else {
           for (const { tc } of batch) {
@@ -1646,10 +1764,10 @@ export function useAgentChat() {
               role: 'assistant',
               content: `<tool_call>\n{"name": "${tc.function.name}", "arguments": ${JSON.stringify(tc.function.arguments)}}\n</tool_call>`,
             })
-            agentMessages.push({
+            agentMessages.push(rememberResult({
               role: 'user',
               content: buildHermesToolResult(tc.function.name, resultTextFor(result) + mediaNote(tc.function.name, result)),
-            })
+            }, tc))
           }
         }
 
@@ -1661,6 +1779,12 @@ export function useAgentChat() {
           results.map((r) => ({ name: r.toolName, failed: r.status === 'failed', error: r.error, args: r.dispatchedArgs })),
         )
         if (failVerdict.action === 'halt') {
+          addBlock(convId!, assistantMessage.id, {
+            id: uuid(),
+            phase: 'reflection',
+            content: `⛔ Loop guard halted the run: ${failVerdict.reason}.`,
+            timestamp: Date.now(),
+          })
           contentRef.current =
             (contentRef.current ? contentRef.current + '\n\n' : '') +
             `_(halted: ${failVerdict.reason}. The model is looping. Try a stronger model for multi-step tasks, or rephrase the instruction.)_`
@@ -2014,7 +2138,7 @@ export function extractMediaPrompt(text: string): string {
 function buildAgentSystemPrompt(basePrompt: string, roster: string): string {
   const agentInstructions = `You are an autonomous AI agent inside LU with full access to this computer. You execute tasks end-to-end by using tools, you do NOT just describe what to do.
 
-${hostEnvironmentBlock()}
+${platformPromptLine()}
 
 Available tools:
 ${roster}
@@ -2050,7 +2174,7 @@ Other rules:
 - PATHS: use paths relative to your working directory (e.g. \`package.json\`, \`src/app.ts\`, \`.\` for the current folder). Never start a path with \`/\` or a drive letter (\`C:\\\`), that escapes your workspace and fails. To list the current folder, use file_list with path \`.\`.
 - For filesystem READ tasks: file_list first if needed, then file_read.
 - For web tasks: web_search → web_fetch on the best URL → answer based on real data. web_search returns ONLY short snippets, ALWAYS call web_fetch to read the page.
-- OS, clock and timezone are stated above, so do not spend a call finding them out. For hardware details or running processes, use shell_execute (macOS/Linux: \`uname -a\`, \`ps aux\`; Windows: \`Get-ComputerInfo\`, \`Get-Process\`).
+- OS, clock and timezone are stated in this prompt (platform up top, clock at the very end, where a volatile line cannot spoil the prompt cache), so do not spend a call finding them out. For hardware details or running processes, use shell_execute (macOS/Linux: \`uname -a\`, \`ps aux\`; Windows: \`Get-ComputerInfo\`, \`Get-Process\`).
 - Chain multiple tools as needed. If a tool fails, try a different approach.
 - Be concise in text. All the work happens in tool calls.
 - Respond in the same language the user uses.`
@@ -2069,7 +2193,7 @@ Other rules:
 function buildAgentSystemPromptLean(basePrompt: string, alwaysThere: string): string {
   const lean = `You are an autonomous agent in LU with tools on this computer. Do tasks by CALLING tools, do not just describe them.
 
-${hostEnvironmentBlock()}
+${platformPromptLine()}
 
 You always have: ${alwaysThere}. Your request carries the other tools that fit the task. Read their names there, do not guess.
 

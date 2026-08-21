@@ -56,15 +56,17 @@ import { selectRelevantTools, selectRelevantToolsAsync, SMALL_MODEL_MAX_TOOLS, g
 import { generateEmbeddings } from '../api/rag'
 import { truncateToolResult } from '../lib/truncate-tool-result'
 import { toolCallCapMs, raceWithToolTimeout, SHELL_EXECUTE_DEFAULT_TIMEOUT_MS } from '../lib/tool-timeout'
-import { compactMessages, getModelMaxTokens, estimateTokens } from '../lib/context-compaction'
+import { getModelMaxTokens, estimateTokens } from '../lib/context-compaction'
+import { buildRequestMessages, trimWorkingHistory, decayRestoredToolResult, isToolResult } from '../lib/context-decay'
+import { effectiveSendWindow } from '../lib/send-window'
+import { useSendSizeStore } from '../stores/sendSizeStore'
 import { resolveAgentNumCtx } from '../lib/agent-num-ctx'
-import { hostEnvironmentBlock } from '../lib/host-platform'
+import { platformPromptLine, hostClockLine } from '../lib/host-platform'
 import { AgentLoopGuard } from '../lib/agent-loop-guard'
 import { findStagedForPath, stagedReadResult, stagedListingNote } from '../lib/staged-overlay'
 import { applyAllStagedChanges } from '../lib/staged-apply'
 import { useMemoryStore } from '../stores/memoryStore'
 import { extractMemoriesFromPair } from './useMemory'
-import type { OllamaChatMessage } from '../types/agent-mode'
 import { useCodexConfirmStore } from '../stores/codexConfirmStore'
 
 // No-op diagnostic hook. Kept as a call site so future debugging can swap
@@ -504,7 +506,11 @@ export function useCodex() {
     // Environment block (2.6.6, plan E3): OS, shell, clock, timezone. Codex
     // never had the platform sentence; it paid for it with system_info and
     // get_current_time round trips instead, and those tools are gone now.
-    let systemPrompt = `${baseCodexPrompt}${assetLine}\n\n${hostEnvironmentBlock()}\n${workDirLine}`
+    // Only the STABLE half lives here (plan A5): the platform sentence reads
+    // the same on every turn, while the clock changes every minute and now
+    // rides at the very end of the prompt, behind everything a prefix cache
+    // could otherwise have matched.
+    let systemPrompt = `${baseCodexPrompt}${assetLine}\n\n${platformPromptLine()}\n${workDirLine}`
     // Standing goal (/goal) — ahead of the rules and the repo map so it frames
     // everything that follows instead of reading as an afterthought.
     systemPrompt += renderGoalSection(useAgentGoalStore.getState().getGoal(convId))
@@ -583,6 +589,15 @@ export function useCodex() {
       systemPromptHead: systemPrompt.slice(0, 500),
       cavemanReminder: cavemanReminder.slice(0, 120),
     })
+    // Session restore (2.6.6, plan A1): the hidden tool chain of PREVIOUS turns
+    // is the cheapest thing in the whole history to shrink. Its job is to tell
+    // the model what it already did, and a 60k build log from three turns ago
+    // does that no better than its head and tail, and it is paid for on every
+    // single step of this turn. A result the run already sent capped
+    // comes back at exactly those bytes (decayRestoredToolResult is a pure
+    // function of the stored text), so a restore never re-cuts with a second
+    // budget and never moves the prefix.
+    const decayRestored = settings.contextDecay !== false
     let messages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
       ...conv.messages
@@ -593,6 +608,9 @@ export function useCodex() {
             content: m.role === 'user' && cavemanReminder
               ? `${cavemanReminder}\n${m.content}`
               : m.content,
+          }
+          if (decayRestored && m.hidden && isToolResult(msg)) {
+            msg.content = decayRestoredToolResult(msg.content)
           }
           // Carry over tool_calls from hidden assistant messages so the
           // model sees the full tool-call chain from previous turns
@@ -711,6 +729,13 @@ export function useCodex() {
       }
     }
 
+    // LAST, after architect and repo map (plan A5): the one line that changes
+    // every minute closes the prompt instead of opening it. A prefix cache
+    // matches from byte 0 and stops at the first difference, so a clock near
+    // the top re-prices the whole prompt on every new turn.
+    systemPrompt += `\n\n${hostClockLine()}`
+    messages[0] = { role: 'system', content: systemPrompt }
+
     let fullContent = ''
 
     // Phase 6: pin turn start so in-turn cache scopes to this user prompt.
@@ -755,6 +780,16 @@ export function useCodex() {
       // it forever while the budget allowed 200 iterations of the loop
       // (Morgan's 5-minute file_read loop, 2026-07-26).
       const loopGuard = new AgentLoopGuard()
+      // Which read produced which result message. The request builder reports
+      // back the results it sent CAPPED, and this map turns those messages
+      // into the loop-guard keys that must not be counted as a repeat (plan
+      // A1, LOOP-GUARD). Keyed by message object, so it survives every
+      // transport shape and every reordering the builder does; a WeakMap so a
+      // dropped message takes its entry with it.
+      const guardKeyOfResult = new WeakMap<object, string>()
+      const guardKeyFor = (tc: { function: { name: string; arguments: unknown } }): string =>
+        `${tc.function.name}|${JSON.stringify(tc.function.arguments)}`
+      const NO_TRIMMED_KEYS: ReadonlySet<string> = new Set<string>()
       // Echo guard — small models occasionally re-emit the system prompt
       // ("Hello, I am the Coding Agent, an autonomous coding agent…") after a
       // tool error. The user asked to silence those silently rather than
@@ -825,24 +860,87 @@ export function useCodex() {
           signal: abort.signal,
         }
 
-        // Context compaction — keep recent N messages intact, summarise older.
-        // Without this the conversation grows unbounded across iterations;
-        // 8K-context local models blow past their window after a few tool
-        // calls and Ollama starts silently truncating or errors out.
+        // ── Request build (2.6.6, plan A1/A2/A3) ─────────────────────────
+        // Age decay, then the send budget, then compaction, in that order.
+        // The other way round the budget counts full results, drops whole
+        // messages to make room, and the decay that would have made them fit
+        // never happens.
+        //
+        // The working array is never decayed. What the store keeps, what the
+        // transcript shows and what the next turn restores stays complete;
+        // only the copy that goes on the wire is shortened, which is what
+        // makes the whole thing reversible from one settings switch.
+        //
+        // Small-Model Mode (Knob 4) keeps the REAL prompt short, which is the
+        // actual lever for small models, NOT num_ctx (the num_ctx-as-ceiling
+        // fear is largely a myth). effectiveSendWindow carries that profile,
+        // and on a paid provider it also carries the send cap.
+        const decayOn = settings.contextDecay !== false
+        const sendWindow = effectiveSendWindow({
+          providerId,
+          modelWindow: numCtx,
+          sendWindowTokens: settings.codexSendWindowTokens,
+          capEnabled: decayOn,
+          smallModelMode: settings.smallModelMode,
+        })
+        let sendMessages: ChatMessage[] = messages.slice()
+        let trimmedReadKeys: ReadonlySet<string> = NO_TRIMMED_KEYS
         try {
-          // Small-Model Mode (Knob 4): keep the REAL prompt short — that is the
-          // actual lever for small models, NOT num_ctx (research found the
-          // num_ctx-as-ceiling fear is largely a myth). Tighter ratio + an
-          // absolute cap so history stays small regardless of the allocation.
-          const compactBudget = settings.smallModelMode
-            ? Math.floor(Math.min(numCtx * 0.5, 6000))
-            : Math.floor(numCtx * 0.8)
-          messages = compactMessages(
-            messages as unknown as OllamaChatMessage[],
-            compactBudget,
-          ) as unknown as ChatMessage[]
+          // Bound the carried history FIRST, in whole blocks and measured on
+          // the decayed sizes. Trimming to the exact budget inside the builder
+          // would move the window start every single step, and a window that
+          // moves every step is a prompt prefix that is never the same twice.
+          // Whole messages are dropped here, never shortened: decay stays on
+          // the send copy alone, so the store keeps every result complete.
+          messages = trimWorkingHistory(messages, sendWindow, { enabled: decayOn }).messages
+          const built = buildRequestMessages(messages, {
+            budgetTokens: sendWindow,
+            enabled: decayOn,
+            hysteresis: decayOn,
+            keyOf: (m) => guardKeyOfResult.get(m as unknown as object),
+          })
+          sendMessages = built.messages
+          trimmedReadKeys = new Set(built.trimmedKeys)
+          if (convId) {
+            useSendSizeStore.getState().report(convId, {
+              tokens: built.promptTokens,
+              window: sendWindow,
+              atMessageCount:
+                useChatStore.getState().conversations.find((c) => c.id === convId)?.messages.length ?? 0,
+              trimmedResults: built.trimmedCount,
+              savedChars: built.savedChars,
+            })
+            // Without a trace, support cannot tell decay apart from model
+            // flakiness: a run that re-reads a file looks identical either
+            // way. One audit row per step that actually shortened something
+            // is the cheapest possible answer to "why did it read that again"
+            // (plan A1, SICHTBARKEIT).
+            if (built.trimmedCount > 0 || built.prunedPlans > 0) {
+              const auditId = useToolAuditStore.getState().record({
+                convId,
+                toolCallId: `decay-${i}`,
+                toolName: 'context_decay',
+                args: {
+                  step: i + 1,
+                  trimmedResults: built.trimmedCount,
+                  savedChars: built.savedChars,
+                  prunedPlanMessages: built.prunedPlans,
+                  sendWindow,
+                },
+              })
+              useToolAuditStore.getState().complete(auditId, {
+                status: 'completed',
+                completedAt: Date.now(),
+                resultPreview:
+                  `Shortened ${built.trimmedCount} aged tool result${built.trimmedCount === 1 ? '' : 's'} ` +
+                  `and dropped ${built.prunedPlans} superseded plan message${built.prunedPlans === 1 ? '' : 's'}, ` +
+                  `saving ${built.savedChars} characters. Request: ~${built.promptTokens} of ${sendWindow} tokens.`,
+              })
+            }
+          }
         } catch {
-          // Compaction is best-effort; fall through with raw history.
+          // Building is best-effort; fall through with the raw history.
+          sendMessages = messages.slice()
         }
 
         // Live paint for EVERY transport branch below (Ollama, openai-compat
@@ -961,7 +1059,7 @@ export function useCodex() {
             codexTools: codexTools.map(t => t.name),
             relevantDefs: relevantDefs.map(t => t.name),
             toolsSentCount: tools.length,
-            messagesLen: messages.length,
+            messagesLen: sendMessages.length,
             lastUserMsg: lastUserMsg.slice(0, 120),
           })
 
@@ -986,7 +1084,7 @@ export function useCodex() {
                 .find((c) => c.id === convId)?.messages.find((m) => m.id === assistantMsg.id)?.usage
               if (!existingUsage || existingUsage.estimated) {
                 const estPrompt =
-                  estimateTokens(messages.map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n')) +
+                  estimateTokens(sendMessages.map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n')) +
                   estimateTokens(JSON.stringify(tools))
                 useChatStore.getState().updateMessageUsage(convId!, assistantMsg.id, {
                   promptTokens: estPrompt, completionTokens: 0, totalTokens: estPrompt, estimated: true,
@@ -994,9 +1092,9 @@ export function useCodex() {
               }
             }
             try {
-              void diagLog('streamWithTools-enter', { iter: i, messagesLen: messages.length, toolsCount: tools.length, thinking: chatOptions.thinking })
+              void diagLog('streamWithTools-enter', { iter: i, messagesLen: sendMessages.length, toolsCount: tools.length, thinking: chatOptions.thinking })
               turn = await streamWithTools(
-                modelToUse, messages, tools,
+                modelToUse, sendMessages, tools,
                 { temperature: 0.1, thinking: chatOptions.thinking, maxTokens: chatOptions.maxTokens, contextWindow: numCtx, signal: abort.signal },
                 liveContent,
                 (t) => {
@@ -1016,7 +1114,7 @@ export function useCodex() {
               })
               if (httpStatusOf(thinkErr) === 400 || thinkErr?.message?.includes('does not support thinking')) {
                 turn = await streamWithTools(
-                  modelToUse, messages, tools,
+                  modelToUse, sendMessages, tools,
                   { temperature: 0.1, thinking: undefined, maxTokens: chatOptions.maxTokens, contextWindow: numCtx, signal: abort.signal },
                   liveContent,
                   () => {},
@@ -1114,10 +1212,10 @@ export function useCodex() {
               }
             }
             try {
-              turn = await streamProviderTurn(provider, modelToUse, messages, streamOpts, liveContent, liveThinking)
+              turn = await streamProviderTurn(provider, modelToUse, sendMessages, streamOpts, liveContent, liveThinking)
             } catch (thinkErr: any) {
               if (thinkErr?.message?.includes('does not support thinking') || httpStatusOf(thinkErr) === 400) {
-                turn = await streamProviderTurn(provider, modelToUse, messages, { ...streamOpts, thinking: undefined as unknown as boolean }, liveContent, () => {})
+                turn = await streamProviderTurn(provider, modelToUse, sendMessages, { ...streamOpts, thinking: undefined as unknown as boolean }, liveContent, () => {})
               } else {
                 throw thinkErr
               }
@@ -1159,7 +1257,11 @@ export function useCodex() {
             },
           )
           const hermesSystem = buildHermesToolPrompt(hermesTools) + `\n\n${systemPrompt}`
+          // Both arrays: the working one so the NEXT step's budget still
+          // counts the hermes tool prompt, the send one because that is what
+          // actually goes out.
           messages[0] = { role: 'system', content: hermesSystem }
+          sendMessages[0] = messages[0]
           // Streamed prompt-transport turn (David 2026-07-31): prose renders
           // token by token while the display filter keeps <tool_call> XML
           // from ever flashing into the bubble. The parse below still runs
@@ -1172,7 +1274,7 @@ export function useCodex() {
           const hermesTurn = await streamProviderTurn(
             provider,
             modelToUse,
-            messages.map(m => ({ role: m.role, content: m.content })),
+            sendMessages.map(m => ({ role: m.role, content: m.content })),
             { ...chatOptions, thinking: undefined as unknown as boolean, contextWindow: numCtx },
             (_full, delta) => {
               shown += display.feed(delta)
@@ -1452,11 +1554,25 @@ export function useCodex() {
           ? narrationVerdict
           : loopGuard.recordBatch(
               toolCalls.map((tc) => ({ name: tc.function.name, args: JSON.stringify(tc.function.arguments) })),
+              // Reads whose newest result the builder just sent capped. Those
+              // re-reads are the decay working as designed: the bytes are gone
+              // from the prompt, so fetching them again is the correct move,
+              // not a loop (plan A1, LOOP-GUARD).
+              { trimmedReadKeys },
             )
         if (batchVerdict.action === 'halt') {
           void diagLog('loop-guard-halt', { iter: i, reason: batchVerdict.reason })
           const msg = `\n\n_(halted: ${batchVerdict.reason}. The model is looping. Try a stronger model for multi-step code tasks, or rephrase the instruction.)_`
           useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent + msg)
+          // A halt has to be visible in the thread itself, not only as a
+          // suffix on the answer: support cannot otherwise tell a loop halt
+          // apart from a model that simply stopped (plan A1, SICHTBARKEIT).
+          addBlock({
+            id: uuid(),
+            phase: 'reflection',
+            content: `⛔ Loop guard halted the run: ${batchVerdict.reason}.`,
+            timestamp: Date.now(),
+          })
           break
         }
         // Steer is appended AFTER this iteration's assistant+tool messages
@@ -1469,6 +1585,12 @@ export function useCodex() {
           // but put the anti-repeat instruction in front of the NEXT turn.
           void diagLog('loop-guard-steer', { iter: i })
           pendingSteer = batchVerdict.message
+          addBlock({
+            id: uuid(),
+            phase: 'reflection',
+            content: `↻ Loop guard steered the model: ${batchVerdict.message}`,
+            timestamp: Date.now(),
+          })
         }
 
         type BatchEntry = { tc: typeof toolCalls[number]; ac: AgentToolCall; blockId: string; injectedArgs: Record<string, any> }
@@ -1881,11 +2003,19 @@ export function useCodex() {
         // "messages.N…ChatCompletionToolMessage.tool_call_id: Field required"
         // and every follow-up turn in the conversation fails. Ollama/LM-Studio
         // are lenient, which is why this only bit the cloud path.
+        // Remember which read produced which result message, so a later step
+        // that sends that result capped can tell the loop guard the re-read is
+        // legitimate. Registered on the pushed OBJECT, which is why it works
+        // for all three transports even though only one of them carries ids.
+        const rememberResult = (msg: ChatMessage, tc: { function: { name: string; arguments: unknown } }) => {
+          guardKeyOfResult.set(msg as unknown as object, guardKeyFor(tc))
+          return msg
+        }
         if (providerId === 'openai' || providerId === 'anthropic' || providerId === 'lu-cloud') {
           messages.push({ role: 'assistant', content: turnContent || '', tool_calls: toolCalls })
           for (const { tc } of batch) {
             const result = results.find((r) => r.id === batch.find((b) => b.tc === tc)?.ac.id)!
-            messages.push({ role: 'tool', content: resultTextFor(result), tool_call_id: tc.id })
+            messages.push(rememberResult({ role: 'tool', content: resultTextFor(result), tool_call_id: tc.id }, tc))
           }
         } else if (strategy === 'native') {
           messages.push({
@@ -1897,7 +2027,7 @@ export function useCodex() {
           })
           for (const { tc } of batch) {
             const result = results.find((r) => r.id === batch.find((b) => b.tc === tc)?.ac.id)!
-            messages.push({ role: 'tool', content: resultTextFor(result) })
+            messages.push(rememberResult({ role: 'tool', content: resultTextFor(result) }, tc))
           }
         } else {
           for (const entry of batch) {
@@ -1906,7 +2036,10 @@ export function useCodex() {
               role: 'assistant',
               content: `<tool_call>\n{"name": "${entry.ac.toolName}", "arguments": ${JSON.stringify(entry.injectedArgs)}}\n</tool_call>`,
             })
-            messages.push({ role: 'user', content: buildHermesToolResult(entry.ac.toolName, resultTextFor(result)) })
+            messages.push(rememberResult(
+              { role: 'user', content: buildHermesToolResult(entry.ac.toolName, resultTextFor(result)) },
+              entry.tc,
+            ))
           }
         }
 
@@ -1920,6 +2053,12 @@ export function useCodex() {
         if (failVerdict.action === 'halt') {
           const msg = `\n\n_(halted: ${failVerdict.reason}. The model is looping. Try a stronger model for multi-step code tasks, or rephrase the instruction.)_`
           useChatStore.getState().updateMessageContent(convId, assistantMsg.id, fullContent + msg)
+          addBlock({
+            id: uuid(),
+            phase: 'reflection',
+            content: `⛔ Loop guard halted the run: ${failVerdict.reason}.`,
+            timestamp: Date.now(),
+          })
           break
         }
 
