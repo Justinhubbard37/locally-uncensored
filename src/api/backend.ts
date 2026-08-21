@@ -478,6 +478,10 @@ export async function backendCall<T = any>(
     // Agent tools (Phase 1 — new commands)
     shell_execute: { path: "/local-api/shell-execute", method: "POST" },
     fs_read: { path: "/local-api/fs-read", method: "POST" },
+    // Capped, jailed byte read for the Explorer image preview (2.6.6 C3).
+    // Without this entry the browser dev surface answered "Unknown backend
+    // command" and every preview fell over.
+    fs_read_bytes: { path: "/local-api/fs-read-bytes", method: "POST" },
     fs_write: { path: "/local-api/fs-write", method: "POST" },
     fs_list: { path: "/local-api/fs-list", method: "POST" },
     fs_search: { path: "/local-api/fs-search", method: "POST" },

@@ -12,6 +12,7 @@ import { dirname } from 'path'
 import os from 'os'
 import dns from 'node:dns'
 import net from 'node:net'
+import { devResolveWithinJail, effectiveByteCap, JailEscapeError } from './src/lib/dev-fs-jail'
 
 // ── Dev-server SSRF guard ───────────────────────────────────────
 // The dev proxies that fetch a *user-supplied* ?url= (proxy-image,
@@ -1510,6 +1511,53 @@ function comfyLauncher(): Plugin {
           } catch (err) {
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ error: String(err) }))
+          }
+        })
+      })
+
+      // API: FS read bytes — base64 payload of ONE file for the Explorer image
+      // preview (2.6.6 C3). Parity port of the `fs_read_bytes` Tauri command:
+      // SAME jail (workspace root, then containment — see lib/dev-fs-jail) and
+      // the SAME 16 MiB ceiling, because a preview is a picture on a 280px
+      // panel, not a payload. Deliberately stricter than the fs-read
+      // middleware above, which predates the jail and stays as it is.
+      server.middlewares.use('/local-api/fs-read-bytes', (req, res) => {
+        if (req.method !== 'POST') { res.writeHead(405); res.end(); return }
+        let body = ''
+        req.on('data', (c: any) => { body += c })
+        req.on('end', () => {
+          const fail = (status: number, error: string) => {
+            res.writeHead(status, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error }))
+          }
+          try {
+            const { path: filePath, chatId, workingDirectory, maxBytes } = JSON.parse(body)
+            if (typeof filePath !== 'string' || !filePath) {
+              fail(400, 'Missing path')
+              return
+            }
+            const resolved = devResolveWithinJail({
+              path: filePath,
+              homeDir: os.homedir(),
+              chatId,
+              workingDirectory,
+            })
+            const fs = require('fs')
+            if (!existsSync(resolved) || !statSync(resolved).isFile()) {
+              fail(400, `File not found: ${resolved}`)
+              return
+            }
+            const cap = effectiveByteCap(maxBytes)
+            const size = statSync(resolved).size
+            if (size > cap) {
+              fail(400, `File is too large to preview: ${size} bytes (limit ${cap})`)
+              return
+            }
+            const buf = fs.readFileSync(resolved)
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ base64: buf.toString('base64'), bytes: buf.length }))
+          } catch (err) {
+            fail(err instanceof JailEscapeError ? 403 : 400, String(err instanceof Error ? err.message : err))
           }
         })
       })
