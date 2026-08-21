@@ -182,14 +182,31 @@ const TYPE_SECTION_HEADERS: Record<MemoryType, string> = {
 const TYPE_ORDER: MemoryType[] = ['user', 'feedback', 'project', 'reference']
 
 /**
+ * Hard ceiling for the injected memory block, in tokens (plan 2.6.6 A7).
+ *
+ * The budget tiers hand out up to 4000 tokens of memory on a large-context
+ * model, and that block rides along in EVERY request of EVERY turn — it is
+ * paid for again on each step of an agent run, forever, whether or not a
+ * single memory was relevant. 1k is the ceiling; a block that already fits
+ * under it is injected in full and unchanged, so the cap only ever bites the
+ * oversized case.
+ */
+export const MEMORY_CONTEXT_TOKEN_CAP = 1000
+
+/**
  * Render an ALREADY-ORDERED, ALREADY-FILTERED list of memories into the
  * grouped <remembered_context> block, respecting the tier's char budget and
  * sanitizing every injected line. Shared by the sync (keyword) and async
  * (embedding-blended) retrieval paths — ONLY the candidate ordering differs
  * between them, so the output formatting lives here once.
+ *
+ * The A7 cap is applied HERE, at the one place the string is built, so every
+ * injection site (useChat, useAgentChat, useCodex, the remote dispatcher)
+ * inherits it and none of them can drift.
  */
 function renderRememberedContext(ordered: MemoryFile[], budgetTokens: number): string {
   if (ordered.length === 0) return ''
+  const cappedTokens = Math.min(budgetTokens, MEMORY_CONTEXT_TOKEN_CAP)
 
   // Group by type for structured output (preserve incoming order within type).
   const grouped: Record<MemoryType, MemoryFile[]> = {
@@ -197,7 +214,7 @@ function renderRememberedContext(ordered: MemoryFile[], budgetTokens: number): s
   }
   for (const entry of ordered) grouped[entry.type].push(entry)
 
-  const maxChars = budgetTokens * 4
+  const maxChars = cappedTokens * 4
   let result = ''
 
   for (const type of TYPE_ORDER) {

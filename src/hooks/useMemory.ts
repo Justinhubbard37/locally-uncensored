@@ -23,6 +23,7 @@ import {
 } from '../lib/memory-extraction'
 import { generateEmbeddings, cosineSimilarity } from '../api/rag'
 import { loadVectors } from '../lib/memoryEmbedDB'
+import { silentCallAllowed, pickSilentCallModel } from '../lib/silent-model-calls'
 import type { MemoryFile } from '../types/agent-mode'
 
 // Rate limit: only extract every Nth turn to reduce cost
@@ -43,8 +44,35 @@ const NOOP_THRESHOLD = 0.92
 const RESOLUTION_TOP_K = 3
 
 /**
+ * The provider + model a SILENT memory call may run on, or null when the cost
+ * policy forbids the call outright (plan 2.6.6 A7).
+ *
+ * Resolving it HERE, one level below every extraction path, is the point: the
+ * gate and the cheap-model choice apply to `extractMemoriesFromPair` and to
+ * the write-decision resolution alike, so no hook, listener or background job
+ * has to remember them. Adding a caller cannot add a silent cloud call.
+ *
+ * lu-cloud without the opt-in → null → no request leaves the app.
+ * lu-cloud with the opt-in → the cheapest catalogue model, not the active one.
+ * Local / BYOK → the active model, ungated, exactly as before.
+ */
+function resolveSilentCall(
+  activeModel: string,
+): { provider: ReturnType<typeof getProviderForModel>['provider']; modelId: string; callModel: string } | null {
+  const providerId = getProviderIdFromModel(activeModel)
+  const { memoryCloudOptIn } = useSettingsStore.getState().settings
+  if (!silentCallAllowed(providerId, memoryCloudOptIn)) return null
+  const callModel = pickSilentCallModel(activeModel, providerId, useModelStore.getState().models)
+  const { provider, modelId } = getProviderForModel(callModel)
+  return { provider, modelId, callModel }
+}
+
+/**
  * Pure extraction routine — safe to call from anywhere (hooks, Tauri listeners,
  * background jobs). Fire-and-forget: never throws, errors are swallowed.
+ *
+ * The A7 cost policy lives INSIDE (see resolveSilentCall), so every caller
+ * below inherits it without a line of its own.
  *
  * Used by:
  *  - useMemory().extractAndSave (LU chat)
@@ -85,18 +113,24 @@ export async function extractMemoriesFromPair(
 
     const messages = buildExtractionPrompt(userMessage, assistantResponse, existingSummary)
 
-    // Use active provider for extraction call
-    const { provider, modelId } = getProviderForModel(activeModel)
+    // Cost gate + cheapest suitable model (plan A7). Null = this call is not
+    // allowed to happen at all; on lu-cloud without the opt-in that is the
+    // default, and the turn ends here with no request on the wire.
+    const call = resolveSilentCall(activeModel)
+    if (!call) return
+    const { provider, modelId, callModel } = call
 
     // Same num_ctx as the chat that just ran on this model. Ollama reloads the
     // model whenever num_ctx changes between requests, so an options-less
     // extraction call silently dropped the user's context back to the default
-    // and paid a second model load per turn.
+    // and paid a second model load per turn. Resolved for the model this call
+    // ACTUALLY runs on — on lu-cloud that is the cheap one, whose window has
+    // nothing to do with the active model's.
     const numCtx = await resolveAgentNumCtx(
       modelId,
-      getProviderIdFromModel(activeModel),
+      getProviderIdFromModel(callModel),
       useSettingsStore.getState().settings.contextWindowOverride,
-      activeModel,
+      callModel,
     )
 
     // Collect full response via streaming
@@ -232,7 +266,12 @@ async function resolveAndSaveMemory(memory: ExtractedMemory, conversationId: str
   try {
     const { activeModel } = useModelStore.getState()
     if (!activeModel) return // candidate already added; leave as ADD
-    const { provider, modelId } = getProviderForModel(activeModel)
+    // Second silent call of the turn — same cost policy as the extraction
+    // itself (plan A7). Gated out means the candidate simply stays a plain
+    // ADD, which is the same outcome a failed resolution already produces.
+    const call = resolveSilentCall(activeModel)
+    if (!call) return
+    const { provider, modelId } = call
     const messages = buildResolutionPrompt(
       { title: memory.title, content: memory.content },
       topK,
