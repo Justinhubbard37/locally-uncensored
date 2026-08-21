@@ -18,6 +18,7 @@ import { ModelSelector } from '../models/ModelSelector'
 import { GoalBar } from './GoalBar'
 import { PlanBar } from './PlanBar'
 import { LoopBar } from './LoopBar'
+import { GroupCostHint } from './GroupCostHint'
 import { MemoryDebugToggle } from './MemoryDebugPanel'
 import { TokenCounter } from './TokenCounter'
 import { ContextDropdown } from './ContextDropdown'
@@ -339,7 +340,7 @@ export function ChatView() {
                 slashCommands={isAgentActive}
                 onAttachDocs={appMode !== 'cloud' ? () => setRagPanelOpen(true) : undefined}
                 composerModel={<ModelSelector openUpward />}
-                composerAbove={<><LoopBar onStop={stopGeneration} /><GoalBar /><PlanBar /></>}
+                composerAbove={<><LoopBar onStop={stopGeneration} /><GoalBar /><GroupCostHint /><PlanBar /></>}
                 composerActions={
                   <>
                     {/* Documents (RAG) — local-embeddings only, so hide in

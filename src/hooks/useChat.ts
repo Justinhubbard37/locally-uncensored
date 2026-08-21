@@ -9,6 +9,7 @@ import { useVoiceStore } from "../stores/voiceStore"
 import { autoSpeak } from "../lib/ttsBridge"
 import { retrieveContext } from "../api/rag"
 import { getModelMaxTokens, capMessageCount } from "../lib/context-compaction"
+import { applyChatSendBudget } from "../lib/chat-send-budget"
 import { getModelContextCached } from "../api/ollama"
 import { requestGenerationCancel } from "../api/vram-handoff"
 import { effectiveContextWindow } from "../lib/context-window"
@@ -73,14 +74,29 @@ async function runGroupTurn(convId: string, model: string, allModels: string[], 
   useChatStore.getState().addMessage(convId, assistantMessage)
 
   const personaPrompt = conv.personaEnabled === true ? conv.systemPrompt : ''
+  const providerId = getProviderIdFromModel(model)
   // Same count cap as the plain path: a long group chat must not outgrow the
   // proxy's message gate either.
-  const messages = capMessageCount([
-    { role: 'system' as const, content: groupSystemPrompt(model, allModels, personaPrompt) },
-    ...groupHistory(conv.messages, model),
-  ])
+  //
+  // And the same TOKEN budget, per model per round (plan A4, GELTUNG). This is
+  // the most multiplied surface in the app: one round sends the whole shared
+  // history to two to four models, so an uncapped group chat bills history
+  // level times N every time the user says anything. The budget is resolved per
+  // model because the line-up can mix a 262k cloud model with a local one, and
+  // a local one is not billed and stays exactly as it was.
+  const messages = applyChatSendBudget(
+    capMessageCount([
+      { role: 'system' as const, content: groupSystemPrompt(model, allModels, personaPrompt) },
+      ...groupHistory(conv.messages, model),
+    ]),
+    {
+      providerId,
+      modelWindow: await getModelMaxTokens(model),
+      sendWindowTokens: settings.codexSendWindowTokens,
+      contextDecay: settings.contextDecay,
+    },
+  ).messages
 
-  const providerId = getProviderIdFromModel(model)
   const canThink = isThinkingCompatible(model)
   const useThinking: boolean | undefined = canThink ? settings.thinkingEnabled === true : undefined
   const keepThinking = useThinking === true
@@ -425,9 +441,16 @@ export function useChat() {
       }
     }
 
+    // The model's context window, resolved once: the memory budget below reads
+    // it, and so does the send budget further down (plan A4). Zero means the
+    // lookup failed, and a zero window resolves to no cap at all, which is the
+    // pre-2.6.6 payload.
+    let modelWindowTokens = 0
+
     // Memory context injection (context-aware, sanitized)
     try {
       const contextTokens = await getModelMaxTokens(activeModel)
+      modelWindowTokens = contextTokens
       // Embedding-first retrieval; falls back to keyword scoring offline.
       // excludeToolResults: this is a PLAIN chat (agent already delegated
       // above) — remembered tool RESULTS read as worked tool-call examples
@@ -487,18 +510,32 @@ export function useChat() {
     // token budget while the count climbs past the LU Cloud proxy's
     // 400-message gate — after which EVERY send 400s and the chat is a
     // permanent dead end (yaserrieh, 2026-08-21).
-    const messages = capMessageCount([
-      ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
-      ...conv.messages
-        .filter((m) => m.content.trim() !== '')
-        .map((m) => ({
-          role: m.role as 'user' | 'assistant' | 'system' | 'tool',
-          content: m.role === 'user' && cavemanReminder
-            ? `${cavemanReminder}\n${m.content}`
-            : m.content,
-          ...(m.images?.length ? { images: m.images.map(img => ({ data: img.data, mimeType: img.mimeType })) } : {}),
-        })),
-    ])
+    // Token budget (plan A4), on top of the count cap and only where a token
+    // sent is a token billed. Plain chat rebuilt the ENTIRE history on every
+    // send, so turn 60 of a long chat paid for turns 1 to 59 again just to ask
+    // "and shorter please", and every attachment ever made rode along with it,
+    // invisible to the token estimator the whole way. Local backends and the
+    // contextDecay notaus get the untouched array, byte for byte.
+    const messages = applyChatSendBudget(
+      capMessageCount([
+        ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
+        ...conv.messages
+          .filter((m) => m.content.trim() !== '')
+          .map((m) => ({
+            role: m.role as 'user' | 'assistant' | 'system' | 'tool',
+            content: m.role === 'user' && cavemanReminder
+              ? `${cavemanReminder}\n${m.content}`
+              : m.content,
+            ...(m.images?.length ? { images: m.images.map(img => ({ data: img.data, mimeType: img.mimeType })) } : {}),
+          })),
+      ]),
+      {
+        providerId,
+        modelWindow: modelWindowTokens,
+        sendWindowTokens: settings.codexSendWindowTokens,
+        contextDecay: settings.contextDecay,
+      },
+    ).messages
 
     const abort = new AbortController()
     abortRef.current = abort

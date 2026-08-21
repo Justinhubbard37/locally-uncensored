@@ -32,6 +32,7 @@
  */
 
 import { truncateToolResult } from './truncate-tool-result'
+import { ageOutImages } from './context-images'
 import {
   compactMessages,
   estimateMessageTokens,
@@ -416,11 +417,19 @@ export interface BuildRequestOptions<T> extends DecayOptions<T> {
   hysteresis?: boolean
   /** Prune superseded todo_write pairs (plan A5). Off with decay off. */
   prunePlans?: boolean
+  /** Age out attachments of older user turns (plan A4). Off with decay off. */
+  ageImages?: boolean
+  /** How many of the newest user turns keep their attachments (plan A4). */
+  keepImages?: number
 }
 
 export interface BuiltRequest<T> extends DecayReport<T> {
   /** Superseded plan messages dropped or blanked. */
   prunedPlans: number
+  /** Attachments left behind by the image rule (plan A4). */
+  droppedImages: number
+  /** Base64 characters the image rule kept off the wire. */
+  savedImageChars: number
   /** Estimated size of the request as it goes out. */
   promptTokens: number
 }
@@ -431,12 +440,25 @@ export interface BuiltRequest<T> extends DecayReport<T> {
  * The order is binding (plan A1): decay first, then the budget, then
  * compaction. The other way round the budget counts full results, decides to
  * drop whole messages, and the decay it would have needed never happens.
+ *
+ * Attachments age out ahead of all of it (plan A4). They are the one thing the
+ * token estimator cannot see, so leaving them for later would mean every budget
+ * decision on the way is taken on a size that is not the size being billed. It
+ * is the same builder both agent loops already call, which is why the picture a
+ * user attached three turns ago stops riding on every step without either loop
+ * having to know about the rule.
  */
 export function buildRequestMessages<T extends DecayMessage>(
   messages: T[],
   opts: BuildRequestOptions<T>,
 ): BuiltRequest<T> {
-  const decayed = applyToolResultDecay(messages, opts)
+  const aged =
+    opts.enabled !== false && opts.ageImages !== false
+      ? ageOutImages(messages as unknown as Array<{ role: string; content?: unknown }>, {
+          keepRecent: opts.keepImages,
+        })
+      : { messages: messages.slice(), strippedImages: 0, savedChars: 0 }
+  const decayed = applyToolResultDecay(aged.messages as unknown as T[], opts)
   let working = decayed.messages
   let prunedPlans = 0
   if (opts.enabled !== false && opts.prunePlans !== false) {
@@ -455,6 +477,8 @@ export function buildRequestMessages<T extends DecayMessage>(
     savedChars: decayed.savedChars,
     trimmedKeys: decayed.trimmedKeys,
     prunedPlans,
+    droppedImages: aged.strippedImages,
+    savedImageChars: aged.savedChars,
     promptTokens: estimateMessageTokens(
       compacted as unknown as Parameters<typeof estimateMessageTokens>[0],
     ),

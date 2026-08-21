@@ -5,7 +5,9 @@
 import { useCallback, useRef } from 'react'
 import { useCompareStore } from '../stores/compareStore'
 import { useSettingsStore } from '../stores/settingsStore'
-import { getProviderForModel } from '../api/providers'
+import { getProviderForModel, getProviderIdFromModel } from '../api/providers'
+import { getModelMaxTokens } from '../lib/context-compaction'
+import { applySendBudget, sharedChatSendBudget } from '../lib/chat-send-budget'
 import { v4 as uuid } from 'uuid'
 import type { ChatMessage } from '../api/providers/types'
 import type { Message } from '../types/chat'
@@ -42,6 +44,25 @@ export function useABCompare() {
       chatMessages.push({ role: m.role as 'user' | 'assistant', content: m.content })
     }
 
+    // Send budget on the SHARED base, before the fan-out (plan A4). Compare was
+    // the only surface with no cap of any kind: it sent the full history to two
+    // models on every round, so a long comparison billed history level twice
+    // per question and grew without end. Capping the shared array rather than
+    // each side keeps the comparison honest, since two models that were handed
+    // different prompts are not being compared at all. A mixed pairing takes
+    // the paid side's budget for both; two local models are untouched.
+    const budget = sharedChatSendBudget(
+      await Promise.all(
+        [modelA, modelB].map(async (m) => ({
+          providerId: getProviderIdFromModel(m),
+          modelWindow: await getModelMaxTokens(m),
+          sendWindowTokens: settings.codexSendWindowTokens,
+          contextDecay: settings.contextDecay,
+        })),
+      ),
+    )
+    const sendMessages = applySendBudget(chatMessages, budget).messages
+
     const opts = {
       temperature: settings.temperature,
       topP: settings.topP,
@@ -59,7 +80,7 @@ export function useABCompare() {
       let tokenCount = 0
       try {
         const { provider, modelId } = getProviderForModel(modelA)
-        const stream = provider.chatStream(modelId, chatMessages, { ...opts, signal: abortA.current!.signal })
+        const stream = provider.chatStream(modelId, sendMessages, { ...opts, signal: abortA.current!.signal })
         for await (const chunk of stream) {
           if (chunk.content) {
             fullContent += chunk.content
@@ -84,7 +105,7 @@ export function useABCompare() {
       let tokenCount = 0
       try {
         const { provider, modelId } = getProviderForModel(modelB)
-        const stream = provider.chatStream(modelId, chatMessages, { ...opts, signal: abortB.current!.signal })
+        const stream = provider.chatStream(modelId, sendMessages, { ...opts, signal: abortB.current!.signal })
         for await (const chunk of stream) {
           if (chunk.content) {
             fullContent += chunk.content
