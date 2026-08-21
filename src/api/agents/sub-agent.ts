@@ -156,10 +156,7 @@ export async function defaultSubAgentRunner(
     }))
     const registry = toolRegistry
     const results = await executeParallel(requests, {
-      getTool: (name) => {
-        const td = registry.getToolByName(name)
-        return td ? { name: td.name, inputSchema: td.inputSchema } : undefined
-      },
+      getTool: (name) => registry.resolveExecutable(name),
       execute: ((name: string, args: Record<string, any>) => registry.execute(name, args)) as any,
       explainError: (toolName, err) => explainToolError(toolName, err),
     })

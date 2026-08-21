@@ -128,3 +128,49 @@ describe('shell_execute refuses by COMMAND on a read-only turn (E7 priority)', (
     expect(backendCalls.some((c) => c.body?.command === 'git commit -m x')).toBe(true)
   })
 })
+
+// Live E2E 2026-08-21: the model emitted git_log on the Code surface and got
+// "Unknown tool: git_log" back. The redirect lived only in registry.execute();
+// the step executor's own getTool miss failed the call before execute() ran.
+// These tests pin the whole executor path, not just the registry.
+describe('retired names survive the step executor (executeParallel)', () => {
+  const registry = new ToolRegistry()
+  registerBuiltinTools(registry)
+  const runtime = {
+    getTool: (name: string) => registry.resolveExecutable(name),
+    execute: ((name: string, args: Record<string, any>) => registry.execute(name, args)) as any,
+  }
+
+  it('resolveExecutable: registered def, retired stub, unknown undefined', () => {
+    expect(registry.resolveExecutable('shell_execute')?.inputSchema).toBeTruthy()
+    expect(registry.resolveExecutable('git_log')).toEqual({ name: 'git_log' })
+    expect(registry.resolveExecutable('made_up_tool')).toBeUndefined()
+  })
+
+  it('git_log through executeParallel completes via the redirect', async () => {
+    const { executeParallel } = await import('../../agents/tool-executor')
+    const [res] = await executeParallel(
+      [{ id: 'r1', toolName: 'git_log', args: {} }],
+      runtime,
+    )
+    expect(res.status).toBe('completed')
+    expect(res.result).toContain('git_log is retired')
+    expect(backendCalls.some((c) => c.cmd === 'shell_execute' && String(c.body.command).startsWith('git log'))).toBe(true)
+  })
+
+  it('negative control: a name that was never ours still fails as Unknown tool', async () => {
+    const { executeParallel } = await import('../../agents/tool-executor')
+    const [res] = await executeParallel(
+      [{ id: 'r2', toolName: 'made_up_tool', args: {} }],
+      runtime,
+    )
+    expect(res.status).toBe('failed')
+    expect(res.error).toContain('Unknown tool')
+  })
+
+  it('drift guard: the lib list and the executor map name the same tools', async () => {
+    const { RETIRED_EXECUTOR_NAMES } = await import('../builtin-tools')
+    const { RETIRED_TOOL_NAMES: libNames } = await import('../../../lib/retired-tools')
+    expect([...libNames].sort()).toEqual([...RETIRED_EXECUTOR_NAMES].sort())
+  })
+})

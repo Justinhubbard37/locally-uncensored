@@ -1711,10 +1711,7 @@ export function useCodex() {
         }
 
         const results = await executeParallel(requests, {
-          getTool: (name) => {
-            const td = toolRegistry.getToolByName(name)
-            return td ? { name: td.name, inputSchema: td.inputSchema } : undefined
-          },
+          getTool: (name) => toolRegistry.resolveExecutable(name),
           execute: (name: string, args: Record<string, any>) => {
             // A create tool the gate had closed still reaches the registry, so
             // the run self-heals: this call runs, and the next step offers the

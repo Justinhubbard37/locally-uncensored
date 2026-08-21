@@ -1405,8 +1405,14 @@ const RETIRED_MUTATING = new Set([
   'code_execute', 'shell_execute_background', 'shell_task_kill',
 ])
 
-/** Names that still resolve through the redirect, for override migration. */
-export const RETIRED_TOOL_NAMES: ReadonlySet<string> = new Set(Object.keys(RETIRED_EXECUTORS))
+/**
+ * Names that still resolve through the redirect. The canonical list lives in
+ * lib/retired-tools.ts (tool-registry needs it without importing this module);
+ * re-exported here for the executors' callers. A test pins both to
+ * RETIRED_EXECUTORS' keys.
+ */
+export { RETIRED_TOOL_NAMES } from '../../lib/retired-tools'
+export const RETIRED_EXECUTOR_NAMES: ReadonlySet<string> = new Set(Object.keys(RETIRED_EXECUTORS))
 
 /**
  * Run a retired tool under its old name, or return null when the name was

@@ -4,6 +4,7 @@ import type { MCPToolDefinition, PermissionMap, PermissionLevel } from './types'
 import type { OllamaTool } from '../../types/agent-mode'
 import type { ToolDefinition } from '../providers/types'
 import { MUTATING_TOOLS } from '../../lib/mutating-tools'
+import { RETIRED_TOOL_NAMES } from '../../lib/retired-tools'
 
 type ToolExecutor = (args: Record<string, any>) => Promise<string>
 /**
@@ -76,6 +77,20 @@ export class ToolRegistry {
 
   getToolByName(name: string): MCPToolDefinition | undefined {
     return this.tools.get(name)?.definition
+  }
+
+  /**
+   * Resolve a name to something the step executor may run: registered tools
+   * by their definition, retired names (2.6.6 merge) as a schema-less stub so
+   * the executor reaches execute(), where runRetiredTool redirects them.
+   * Without this, the executor's own getTool miss fails the call as
+   * "Unknown tool" before the redirect ever runs.
+   */
+  resolveExecutable(name: string): { name: string; inputSchema?: MCPToolDefinition['inputSchema'] } | undefined {
+    const td = this.tools.get(name)?.definition
+    if (td) return { name: td.name, inputSchema: td.inputSchema }
+    if (RETIRED_TOOL_NAMES.has(name)) return { name }
+    return undefined
   }
 
   getPermissionLevel(toolName: string, permissions: PermissionMap): PermissionLevel {

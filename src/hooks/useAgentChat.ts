@@ -1448,10 +1448,7 @@ export function useAgentChat() {
         const auditIds = new Map<string, string>()
 
         const results = await executeParallel(requests, {
-          getTool: (name) => {
-            const td = toolRegistry.getToolByName(name)
-            return td ? { name: td.name, inputSchema: td.inputSchema } : undefined
-          },
+          getTool: (name) => toolRegistry.resolveExecutable(name),
           // Timeout backstop shared with Codex (audit B9): before this the
           // Agent loop had NO ceiling around a tool call, so one hung tool
           // wedged the whole run with no way out but a restart.
