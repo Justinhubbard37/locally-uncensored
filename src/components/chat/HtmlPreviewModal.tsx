@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, ExternalLink, Smartphone, Tablet, Monitor, RotateCw } from 'lucide-react'
+import { X, ExternalLink, RotateCw } from 'lucide-react'
 import { openExternal } from '../../api/backend'
+import { buildDocument, type Viewport } from '../../lib/html-preview'
+import { HtmlPreviewFrame, ViewportSwitcher } from './HtmlPreviewFrame'
 
 interface Props {
   code: string
@@ -9,61 +11,21 @@ interface Props {
   onClose: () => void
 }
 
-type Viewport = 'mobile' | 'tablet' | 'desktop'
-
-const VIEWPORTS: Record<Viewport, { width: number; height: number }> = {
-  mobile: { width: 375, height: 667 },
-  tablet: { width: 768, height: 1024 },
-  desktop: { width: 1280, height: 800 },
-}
-
 /**
- * Wrap an HTML / SVG snippet so the iframe always has a sane shell.
- *   - Bare SVG → centred dark page that hugs the artwork.
- *   - Snippet HTML (no <html>/<doctype>) → minimal doc with utf-8 + body padding.
- *   - Full document → passed through untouched.
+ * Preview for a snippet the MODEL produced. It keeps `allow-scripts` on (the
+ * user asked for that code to exist, and a generated page without its script
+ * is not a preview); the Explorer panel's file preview deliberately does not,
+ * see file-preview.ts. Neither ever gets `allow-same-origin`, so the markup
+ * lives in an opaque origin and cannot reach the app.
  *
- * The iframe runs with `sandbox="allow-scripts"` (no allow-same-origin), so
- * any user JS lives in an opaque origin and can't reach our app.
+ * The document shell lives in lib/html-preview.ts, shared with the panel.
  */
-function buildDocument(code: string, language?: string): string {
-  const lang = (language || '').toLowerCase()
-  const trimmed = code.trim()
-  const lower = trimmed.toLowerCase()
-
-  // Bare SVG.
-  if (lang === 'svg' || (lower.startsWith('<svg') && lower.includes('xmlns'))) {
-    return [
-      '<!doctype html><html><head><meta charset="utf-8"><title>SVG Preview</title>',
-      '<style>html,body{margin:0;padding:0;background:#0e0e0e;color:#fff;height:100%;display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif}svg{max-width:100%;max-height:100%}</style>',
-      '</head><body>',
-      code,
-      '</body></html>',
-    ].join('')
-  }
-
-  // Already a full document.
-  if (lower.startsWith('<!doctype') || lower.startsWith('<html')) {
-    return code
-  }
-
-  // Snippet — wrap.
-  return [
-    '<!doctype html><html><head><meta charset="utf-8"><title>HTML Preview</title>',
-    '<style>body{margin:0;padding:16px;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.5;background:#ffffff;color:#111}</style>',
-    '</head><body>',
-    code,
-    '</body></html>',
-  ].join('')
-}
-
 export function HtmlPreviewModal({ code, language, onClose }: Props) {
   const [viewport, setViewport] = useState<Viewport>('desktop')
   const [reloadKey, setReloadKey] = useState(0)
-  const iframeRef = useRef<HTMLIFrameElement>(null)
   const doc = useMemo(() => buildDocument(code, language), [code, language])
 
-  // Esc closes — matches every other overlay in the app.
+  // Esc closes, matching every other overlay in the app.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -71,8 +33,6 @@ export function HtmlPreviewModal({ code, language, onClose }: Props) {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
-
-  const dims = VIEWPORTS[viewport]
 
   const openInBrowser = () => {
     // Hand the data URL to the host browser. data: URLs work in modern
@@ -109,12 +69,7 @@ export function HtmlPreviewModal({ code, language, onClose }: Props) {
               </span>
             </div>
 
-            {/* Viewport switcher */}
-            <div className="flex items-center gap-0.5 bg-gray-100 dark:bg-white/[0.04] rounded-md p-0.5">
-              <ViewportBtn icon={Smartphone} active={viewport === 'mobile'}  onClick={() => setViewport('mobile')}  label="Mobile" />
-              <ViewportBtn icon={Tablet}     active={viewport === 'tablet'}  onClick={() => setViewport('tablet')}  label="Tablet" />
-              <ViewportBtn icon={Monitor}    active={viewport === 'desktop'} onClick={() => setViewport('desktop')} label="Desktop" />
-            </div>
+            <ViewportSwitcher viewport={viewport} onChange={setViewport} />
 
             <div className="flex items-center gap-1">
               <button
@@ -144,50 +99,12 @@ export function HtmlPreviewModal({ code, language, onClose }: Props) {
             </div>
           </div>
 
-          {/* Frame area — checkered background to make the rendered surface obvious */}
+          {/* Frame area, checkered background to make the rendered surface obvious */}
           <div className="flex-1 overflow-auto bg-[length:24px_24px] bg-[linear-gradient(45deg,rgba(0,0,0,0.04)_25%,transparent_25%,transparent_75%,rgba(0,0,0,0.04)_75%),linear-gradient(45deg,rgba(0,0,0,0.04)_25%,transparent_25%,transparent_75%,rgba(0,0,0,0.04)_75%)] bg-[position:0_0,12px_12px] dark:bg-[length:24px_24px] dark:bg-[linear-gradient(45deg,rgba(255,255,255,0.03)_25%,transparent_25%,transparent_75%,rgba(255,255,255,0.03)_75%),linear-gradient(45deg,rgba(255,255,255,0.03)_25%,transparent_25%,transparent_75%,rgba(255,255,255,0.03)_75%)] flex items-center justify-center p-4">
-            <iframe
-              key={reloadKey}
-              ref={iframeRef}
-              srcDoc={doc}
-              sandbox="allow-scripts"
-              referrerPolicy="no-referrer"
-              title="HTML Preview"
-              className="bg-white border border-gray-200 dark:border-white/10 shadow-lg rounded transition-all"
-              style={{
-                width: viewport === 'desktop' ? '100%' : `${dims.width}px`,
-                height: viewport === 'desktop' ? '100%' : `${dims.height}px`,
-                maxWidth: '100%',
-                maxHeight: '100%',
-              }}
-            />
+            <HtmlPreviewFrame doc={doc} viewport={viewport} allowScripts reloadKey={reloadKey} />
           </div>
         </motion.div>
       </motion.div>
     </AnimatePresence>
-  )
-}
-
-interface ViewportBtnProps {
-  icon: typeof Smartphone
-  active: boolean
-  onClick: () => void
-  label: string
-}
-function ViewportBtn({ icon: Icon, active, onClick, label }: ViewportBtnProps) {
-  return (
-    <button
-      onClick={onClick}
-      className={
-        'flex items-center justify-center w-7 h-7 rounded transition-colors ' +
-        (active
-          ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm'
-          : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-white')
-      }
-      aria-label={label}
-      title={label}
-    >
-      <Icon size={13} />
-    </button>
   )
 }

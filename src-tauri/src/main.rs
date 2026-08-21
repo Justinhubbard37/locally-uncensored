@@ -173,6 +173,7 @@ fn main() {
             commands::shell::shell_execute,
             // Filesystem
             commands::filesystem::fs_read,
+            commands::filesystem::fs_read_bytes,
             commands::filesystem::fs_write,
             commands::filesystem::fs_list,
             commands::filesystem::fs_search,

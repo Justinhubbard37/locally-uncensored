@@ -192,6 +192,50 @@ pub fn fs_read(path: String, chatId: Option<String>, workingDirectory: Option<St
     }
 }
 
+/// The cap for a single `fs_read_bytes` call. A preview is a picture on a
+/// 280px panel, not a payload: base64 over IPC costs 4/3 of the file in Rust
+/// plus a copy in the WebView, so the ceiling stays low on purpose.
+const READ_BYTES_CAP: u64 = 16 * 1024 * 1024;
+
+/// Raw bytes of ONE file, base64, through the SAME jail as every other fs
+/// command (`resolve_path` -> `contain_within`).
+///
+/// This exists for the Explorer panel's image preview (2.6.6 C3). The obvious
+/// alternative, a static Tauri asset scope plus convertFileSrc, knows nothing
+/// about the jail: a scope wide enough to cover whatever folder the user picks
+/// is a read surface NEXT TO the workspace jail rather than inside it. Bytes
+/// through this command become a blob URL in the WebView instead.
+///
+/// `fs_read` deliberately refuses to carry binary payloads (it answers with a
+/// marker), and it stays that way: this is a separate, capped, opt-in door
+/// that only the panel walks through.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn fs_read_bytes(
+    path: String,
+    chatId: Option<String>,
+    workingDirectory: Option<String>,
+    maxBytes: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    let full = resolve_path(&path, chatId.as_deref(), workingDirectory.as_deref())?;
+    if !full.is_file() {
+        return Err(format!("File not found: {}", full.display()));
+    }
+    let cap = maxBytes.unwrap_or(READ_BYTES_CAP).min(READ_BYTES_CAP);
+    let size = fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
+    if size > cap {
+        return Err(format!(
+            "File is too large to preview: {} bytes (limit {})",
+            size, cap
+        ));
+    }
+    let bytes = fs::read(&full).map_err(|e| format!("Read error: {}", e))?;
+    Ok(serde_json::json!({
+        "base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+        "bytes": bytes.len(),
+    }))
+}
+
 /// Match new content to the EXISTING file's line-ending + BOM convention so an
 /// edit produces a minimal diff instead of flipping every line. Local coding
 /// models emit `\n`; on a Windows repo whose files are CRLF, writing that raw
@@ -881,6 +925,114 @@ mod binary_read_tests {
         assert_eq!(v["bytes"], 8 * 1024 * 1024_u64);
         assert!(v.get("content").is_none());
         assert!(took < std::time::Duration::from_millis(200), "took {took:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+/// The Explorer panel's image preview reads bytes, and it must read them
+/// through the same jail as everything else (2.6.6 C3 security review).
+#[cfg(test)]
+mod explorer_byte_read_tests {
+    use super::*;
+    use std::fs;
+
+    fn ws(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("lu-fsbytes-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn bytes_inside_the_workspace_come_back_base64() {
+        let dir = ws("inside");
+        // A one-pixel PNG header is enough: the point is byte fidelity.
+        let raw: Vec<u8> = vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00];
+        fs::write(dir.join("pixel.png"), &raw).unwrap();
+
+        let v = fs_read_bytes(
+            "pixel.png".into(),
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+        )
+        .expect("read");
+
+        assert_eq!(v["bytes"], raw.len());
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(v["base64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, raw);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The jail, from both directions: a `..` climb and an absolute path that
+    /// points somewhere else entirely.
+    #[test]
+    fn bytes_outside_the_workspace_are_refused() {
+        let dir = ws("outside");
+        let secret = dir.parent().unwrap().join("lu-fsbytes-secret.txt");
+        fs::write(&secret, b"private").unwrap();
+        let root = dir.join("repo");
+        fs::create_dir_all(&root).unwrap();
+
+        let climb = fs_read_bytes(
+            "../lu-fsbytes-secret.txt".into(),
+            None,
+            Some(root.to_string_lossy().to_string()),
+            None,
+        );
+        assert!(climb.is_err(), "a .. climb must not read bytes");
+
+        let absolute = fs_read_bytes(
+            secret.to_string_lossy().to_string(),
+            None,
+            Some(root.to_string_lossy().to_string()),
+            None,
+        );
+        assert!(absolute.is_err(), "an outside absolute path must not read bytes");
+
+        let _ = fs::remove_file(&secret);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_over_the_cap_is_refused_instead_of_shipped() {
+        let dir = ws("cap");
+        fs::write(dir.join("wide.bin"), vec![0u8; 4096]).unwrap();
+
+        let err = fs_read_bytes(
+            "wide.bin".into(),
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            Some(1024),
+        )
+        .expect_err("over the cap");
+        assert!(err.contains("too large"), "got: {err}");
+
+        // The caller cannot raise the ceiling past the built-in one either.
+        let v = fs_read_bytes(
+            "wide.bin".into(),
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            Some(u64::MAX),
+        )
+        .expect("under the built-in cap");
+        assert_eq!(v["bytes"], 4096);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_file_is_an_error_not_an_empty_blob() {
+        let dir = ws("missing");
+        let err = fs_read_bytes(
+            "nope.png".into(),
+            None,
+            Some(dir.to_string_lossy().to_string()),
+            None,
+        )
+        .expect_err("missing");
+        assert!(err.contains("File not found"), "got: {err}");
         let _ = fs::remove_dir_all(&dir);
     }
 }
