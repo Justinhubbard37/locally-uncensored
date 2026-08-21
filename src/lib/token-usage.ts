@@ -40,6 +40,20 @@ export interface ContextFill {
   used: number
   /** True when `used` is anchored on a non-estimated, model-reported usage. */
   real: boolean
+  /** Where the number came from, so the tooltip can say so. */
+  source: 'built' | 'usage' | 'estimate'
+}
+
+/**
+ * The size of the request the builder last built for this conversation
+ * (2.6.6, plan A2). It beats every other anchor because it is not a guess
+ * about what will be sent: it IS what was sent, decay, plan pruning,
+ * compaction and all. Messages added since are counted on top.
+ */
+export interface BuiltRequestAnchor {
+  tokens: number
+  /** Messages in the conversation at build time. */
+  atMessageCount: number
 }
 
 /** Visible size of one message in a future prompt (content only, no thinking). */
@@ -49,7 +63,21 @@ function visibleTokens(m: FillMessage): number {
   return t + 4 // role overhead
 }
 
-export function computeContextFill(messages: FillMessage[]): ContextFill {
+export function computeContextFill(
+  messages: FillMessage[],
+  built?: BuiltRequestAnchor,
+): ContextFill {
+  // A real built request wins: it already contains the system prompt, the tool
+  // catalogue, the decayed results and whatever compaction dropped, none of
+  // which the visible conversation can show.
+  if (built && built.tokens > 0 && built.atMessageCount <= messages.length) {
+    let used = built.tokens
+    for (let i = built.atMessageCount; i < messages.length; i++) {
+      used += visibleTokens(messages[i])
+    }
+    return { used, real: false, source: 'built' }
+  }
+
   // Newest message carrying usage (assistant turns store it when the model
   // reports real counts; the agent path stores a provisional estimated one).
   let anchorIdx = -1
@@ -60,7 +88,11 @@ export function computeContextFill(messages: FillMessage[]): ContextFill {
 
   if (anchorIdx === -1) {
     // No usage anywhere yet — plain estimate over the visible conversation.
-    return { used: messages.reduce((sum, m) => sum + visibleTokens(m), 0), real: false }
+    return {
+      used: messages.reduce((sum, m) => sum + visibleTokens(m), 0),
+      real: false,
+      source: 'estimate',
+    }
   }
 
   const anchor = messages[anchorIdx].usage!
@@ -70,5 +102,5 @@ export function computeContextFill(messages: FillMessage[]): ContextFill {
   for (let i = anchorIdx; i < messages.length; i++) {
     used += visibleTokens(messages[i])
   }
-  return { used, real: !anchor.estimated }
+  return { used, real: !anchor.estimated, source: 'usage' }
 }

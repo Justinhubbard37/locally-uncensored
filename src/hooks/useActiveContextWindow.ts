@@ -6,6 +6,7 @@ import { getModelContextCached } from '../api/ollama'
 import { getLmStudioModelContext } from '../api/lmstudio'
 import { getModelMaxTokens } from '../lib/context-compaction'
 import { effectiveContextWindow } from '../lib/context-window'
+import { effectiveSendWindow } from '../lib/send-window'
 import { isManagedBuiltinSlot } from '../api/builtin-ensure'
 import { bundledEngineStatus, bundledCtxTrain } from '../api/engine'
 
@@ -19,6 +20,13 @@ export interface ActiveContext {
   contextWindow: number
   /** The model's ceiling, used to cap the dropdown presets (0 = unknown). */
   modelMax: number
+  /**
+   * The window one request may actually SEND (2.6.6, plan A2). Equal to
+   * contextWindow on local backends; on a paid provider it is the send cap,
+   * which is the only honest denominator for the token counter. A 262k model
+   * whose steps are capped at 64k is not "25 percent full", it is full.
+   */
+  sendWindow: number
   /** True when the value is the model's real, confirmed live context (Ollama
    *  num_ctx, or LM Studio's loaded_context_length) rather than a fallback. */
   isTrue: boolean
@@ -40,8 +48,10 @@ export function useActiveContextWindow(reloadTick = 0): ActiveContext {
   const activeModel = useModelStore((s) => s.activeModel)
   const override = useSettingsStore((s) => s.settings.contextWindowOverride)
   const builtinCtx = useSettingsStore((s) => s.settings.builtinEngine.ctx)
+  const sendWindowTokens = useSettingsStore((s) => s.settings.codexSendWindowTokens)
+  const capEnabled = useSettingsStore((s) => s.settings.contextDecay)
   const [state, setState] = useState<ActiveContext>({
-    provider: 'unknown', contextWindow: 0, modelMax: 0, isTrue: false, adjustable: false,
+    provider: 'unknown', contextWindow: 0, modelMax: 0, sendWindow: 0, isTrue: false, adjustable: false,
   })
 
   // Re-read whenever a model reload finishes anywhere (the Context dropdown
@@ -56,7 +66,7 @@ export function useActiveContextWindow(reloadTick = 0): ActiveContext {
 
   useEffect(() => {
     if (!activeModel) {
-      setState({ provider: 'unknown', contextWindow: 0, modelMax: 0, isTrue: false, adjustable: false })
+      setState({ provider: 'unknown', contextWindow: 0, modelMax: 0, sendWindow: 0, isTrue: false, adjustable: false })
       return
     }
     let cancelled = false
@@ -67,10 +77,13 @@ export function useActiveContextWindow(reloadTick = 0): ActiveContext {
       if (providerId === 'ollama') {
         const max = await getModelContextCached(activeModel).catch(() => 0)
         if (cancelled) return
+        const ollamaCtx = effectiveContextWindow(max, override)
         setState({
           provider: 'ollama',
-          contextWindow: effectiveContextWindow(max, override),
+          contextWindow: ollamaCtx,
           modelMax: max,
+          // Local backend: nothing is billed, so the send window IS the window.
+          sendWindow: ollamaCtx,
           isTrue: true,
           adjustable: true,
         })
@@ -94,16 +107,19 @@ export function useActiveContextWindow(reloadTick = 0): ActiveContext {
             provider: 'builtin',
             contextWindow: status.ctx,
             modelMax,
+            sendWindow: status.ctx,
             isTrue: true,
             adjustable: true,
           })
         } else {
           // Managed but not up (offloaded / before first send): the next
           // start uses the tuning value, so that IS the honest prediction.
+          const nextCtx = builtinCtx > 0 ? builtinCtx : 8192
           setState({
             provider: 'builtin',
-            contextWindow: builtinCtx > 0 ? builtinCtx : 8192,
+            contextWindow: nextCtx,
             modelMax,
+            sendWindow: nextCtx,
             isTrue: false,
             adjustable: true,
           })
@@ -120,12 +136,14 @@ export function useActiveContextWindow(reloadTick = 0): ActiveContext {
         if (info.loaded || info.max) {
           const loaded = info.loaded ?? 0
           const max = info.max ?? loaded
+          const lmCtx = loaded > 0
+            ? loaded                                   // TRUE: what LM Studio actually loaded
+            : (override > 0 ? override : Math.min(max || 8192, 16384))
           setState({
             provider: 'lmstudio',
-            contextWindow: loaded > 0
-              ? loaded                                   // TRUE: what LM Studio actually loaded
-              : (override > 0 ? override : Math.min(max || 8192, 16384)),
+            contextWindow: lmCtx,
             modelMax: max,
+            sendWindow: lmCtx,
             isTrue: loaded > 0,
             adjustable: true,
           })
@@ -143,13 +161,21 @@ export function useActiveContextWindow(reloadTick = 0): ActiveContext {
         provider: 'cloud',
         contextWindow: max,
         modelMax: max,
+        // Meter honesty (plan A2): a paid step never sends more than the cap,
+        // so the cap is what the counter divides by.
+        sendWindow: effectiveSendWindow({
+          providerId,
+          modelWindow: max,
+          sendWindowTokens,
+          capEnabled,
+        }),
         isTrue: false,
         adjustable: false,
       })
     })()
 
     return () => { cancelled = true }
-  }, [activeModel, override, builtinCtx, reloadTick, reloadBump])
+  }, [activeModel, override, builtinCtx, sendWindowTokens, capEnabled, reloadTick, reloadBump])
 
   return state
 }

@@ -59,7 +59,17 @@ import { DEFAULT_SETTINGS, BUILT_IN_PERSONAS } from '../lib/constants'
 // 'cloud' with no real choice, so reset them to the local default ONCE so they
 // land in the now-built local mode; the visible switch flips back anytime.
 // Windows/Linux appMode reflects a real user choice and is never touched.
-const STORE_VERSION = 19
+// v20 (2.6.6): added settings.contextDecay (default true) and
+// settings.codexSendWindowTokens (default 64000) for the tool-result age decay
+// and the paid-provider send cap. STRICTLY ADDITIVE and IDEMPOTENT: the merge
+// below fills both defaults in and preserves every existing value, and this
+// version adds NO one-shot reset the way v10 and v19 did.
+// That is a hard requirement, not a preference (plan R1, DOWNGRADE-KONTRAKT):
+// the 2.6.5/2.6.6 A/B share one WebView profile, zustand stamps the OLD
+// version back when the old build writes the store, so this migration runs
+// AGAIN on the next 2.6.6 start. A one-shot reset here would fire on every
+// build switch and quietly wipe a user preference each time.
+const STORE_VERSION = 20
 
 interface SettingsState {
   settings: Settings

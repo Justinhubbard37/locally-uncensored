@@ -110,6 +110,24 @@ export interface Settings {
   // providers ignore this field — they manage context themselves.
   /** User-side context-window override (forwarded as Ollama's num_ctx). 0 = auto. */
   contextWindowOverride: number
+  /**
+   * Age decay for tool results plus the paid-provider send cap (2.6.6, plan
+   * A1/A2). ON is the shipped behaviour: results older than the newest
+   * iteration go out head+tail-capped and a step never sends more than
+   * codexSendWindowTokens on a paid provider.
+   *
+   * This is the support way back without a rollback release. If a run halts
+   * with "repeated with identical arguments", turning this off restores the
+   * 2.6.5 prompt exactly, at 2.6.5 prices.
+   */
+  contextDecay: boolean
+  /**
+   * Ceiling for one agent step on a paid provider, in tokens. The effective
+   * budget is min(0.8 × model window, this). The model's own context window
+   * and num_ctx are untouched, so raising it never breaks a model, it only
+   * costs more. Local backends ignore it.
+   */
+  codexSendWindowTokens: number
   // Built-in engine expert tuning (2.6.0 Engine-Sweep). Forwarded to the Rust
   // EngineTuning (whitelisted there) on every engine start/swap — Onboarding,
   // Discover, model picker and the post-offload self-heal all inherit it via

@@ -1,10 +1,14 @@
 import { useChatStore } from '../../stores/chatStore'
 import { computeContextFill } from '../../lib/token-usage'
 import { useActiveContextWindow } from '../../hooks/useActiveContextWindow'
+import { useSendSizeStore } from '../../stores/sendSizeStore'
 
 export function TokenCounter() {
   const activeConversationId = useChatStore((s) => s.activeConversationId)
   const conversations = useChatStore((s) => s.conversations)
+  // What the agent loops last actually built and sent for this conversation
+  // (2.6.6, plan A2). Undefined on a plain chat, where the estimate stands.
+  const sent = useSendSizeStore((s) => (activeConversationId ? s.byConv[activeConversationId] : undefined))
 
   // The denominator is the REAL context window the active model runs with —
   // provider-aware and shared with the Context dropdown so the two never drift
@@ -23,14 +27,23 @@ export function TokenCounter() {
   // forever after one looping cloud reasoner burned its whole 16,384-token
   // completion budget, while the next real prompt cost 65 tokens (David,
   // 2026-07-12). An honest dip after compaction beats a sticky wrong maximum.
-  const fill = computeContextFill(messages)
+  const fill = computeContextFill(
+    messages,
+    sent ? { tokens: sent.tokens, atMessageCount: sent.atMessageCount } : undefined,
+  )
   const rawUsed = fill.used
 
   if (!activeConversationId || messages.length === 0) return null
 
   // Resolved real context window; fall back to the VRAM-safe default only while
-  // the provider probe is still in flight (ctx not resolved yet).
-  const maxTokens = ctx.contextWindow > 0 ? ctx.contextWindow : 16384
+  // the provider probe is still in flight (ctx not resolved yet). On a paid
+  // provider the denominator is the SEND window, not the model window: a
+  // 262k-context model whose steps are capped at 64k would otherwise sit green
+  // at 25 percent forever, the red warning would never fire, and every support
+  // case would arrive with a healthy meter next to a drained wallet (plan A2,
+  // meter honesty).
+  const window = ctx.sendWindow > 0 ? ctx.sendWindow : ctx.contextWindow
+  const maxTokens = window > 0 ? window : 16384
   // Cap the numerator at the active window: a long chat carried onto a
   // smaller-context model shows "8.0k/8.0k" (full), not "20k/8k".
   const usedTokens = Math.min(rawUsed, maxTokens)
@@ -50,9 +63,15 @@ export function TokenCounter() {
       : ctx.provider === 'builtin'
         ? 'built-in engine loaded context'
         : 'model context'
-  const title = isReal
-    ? `Context: ${usedTokens.toLocaleString()} / ${maxTokens.toLocaleString()} tokens (${source}), anchored on the model's last reported usage (includes system prompt + tools + RAG); reasoning tokens are not context and aren't counted`
-    : `Estimated: ${usedTokens.toLocaleString()} / ${maxTokens.toLocaleString()} tokens (${source}), estimate until the model reports real usage`
+  const capped = ctx.sendWindow > 0 && ctx.contextWindow > ctx.sendWindow
+  const capNote = capped
+    ? `. Capped: a step sends at most ${maxTokens.toLocaleString()} of this model's ${ctx.contextWindow.toLocaleString()} tokens (Settings, send window), and tool results older than the newest step go out shortened`
+    : ''
+  const title = fill.source === 'built'
+    ? `Last request: ${usedTokens.toLocaleString()} / ${maxTokens.toLocaleString()} tokens, the size of the payload actually built for the last step, decay and compaction included${capNote}`
+    : isReal
+      ? `Context: ${usedTokens.toLocaleString()} / ${maxTokens.toLocaleString()} tokens (${source}), anchored on the model's last reported usage (includes system prompt + tools + RAG); reasoning tokens are not context and aren't counted${capNote}`
+      : `Estimated: ${usedTokens.toLocaleString()} / ${maxTokens.toLocaleString()} tokens (${source}), estimate until the model reports real usage${capNote}`
 
   return (
     <div className={`flex items-center gap-1.5 px-2 py-1 ${color}`} title={title}>

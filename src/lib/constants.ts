@@ -48,6 +48,10 @@ export const DEFAULT_SETTINGS: Settings = {
   // Bug AA v2.5.0 — Ollama num_ctx override. 0 = use Ollama default (2048
   // on most builds). Users with RAG / long chats can bump this up.
   contextWindowOverride: 0,
+  // 2.6.6 plan A1/A2: age decay and the paid-provider send cap. ON by
+  // default; the switch is the support way back without a rollback release.
+  contextDecay: true,
+  codexSendWindowTokens: 64000,
   builtinEngine: {
     ctx: 8192,
     flashAttn: 'auto',

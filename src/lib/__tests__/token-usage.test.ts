@@ -19,7 +19,7 @@ describe('computeContextFill', () => {
   it('estimates from visible content only when no usage exists', () => {
     const msgs = [user('hello there'), assistant('hi!')]
     const expected = estimateTokens('hello there') + 4 + estimateTokens('hi!') + 4
-    expect(computeContextFill(msgs)).toEqual({ used: expected, real: false })
+    expect(computeContextFill(msgs)).toEqual({ used: expected, real: false, source: 'estimate' })
   })
 
   it('never counts thinking — with or without a usage anchor', () => {
@@ -52,7 +52,7 @@ describe('computeContextFill', () => {
     const tail =
       estimateTokens('a2') + 4 +
       estimateTokens('third — not answered yet') + 4
-    expect(computeContextFill(msgs)).toEqual({ used: 900 + tail, real: true })
+    expect(computeContextFill(msgs)).toEqual({ used: 900 + tail, real: true , source: 'usage' })
   })
 
   it('a provisional (estimated) anchor is used but not reported as real', () => {
