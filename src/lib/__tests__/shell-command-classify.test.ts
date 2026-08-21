@@ -1,0 +1,125 @@
+/**
+ * The classifier is the load-bearing wall of the 2.6.6 tool merge: read-only
+ * mode, the --no-verify ban, the test timeout and the icons all hang on it.
+ * The most important property (plan E7): /review must be able to SEE the
+ * diff and must NOT be able to write, including via chained commands.
+ */
+import { describe, it, expect } from 'vitest'
+import {
+  commandKind,
+  commandIcon,
+  commandTimeoutMs,
+  isReadOnlyCommand,
+  rejectShellCommand,
+  TEST_RUN_TIMEOUT_MS,
+} from '../shell-command-classify'
+
+describe('read-only classifier', () => {
+  it('lets a reviewer read', () => {
+    for (const c of [
+      'git status --porcelain=2 --branch',
+      'git log --oneline -n 20',
+      'git diff HEAD~1',
+      'git show abc1234',
+      'git blame src/main.ts',
+      'ls -la src',
+      'cat package.json',
+      'pwd',
+    ]) {
+      expect(isReadOnlyCommand(c), c).toBe(true)
+    }
+  })
+
+  it('refuses everything that writes', () => {
+    for (const c of [
+      'git commit -m "x"',
+      'git push',
+      'rm -rf x',
+      'npm install',
+      'echo hi > file.txt',
+    ]) {
+      expect(isReadOnlyCommand(c), c).toBe(false)
+    }
+  })
+
+  it('refuses chaining instead of parsing it, a read-only mode that can be talked around is not one', () => {
+    for (const c of [
+      'git log; rm -rf x',
+      'git status && git push',
+      'git diff | tee /tmp/out',
+      'cat `which node`',
+      'ls $(pwd)/..',
+      'git log || rm x',
+    ]) {
+      expect(isReadOnlyCommand(c), c).toBe(false)
+    }
+  })
+
+  it('does not mistake a prefix-lookalike for a read', () => {
+    // "lsof" starts with "ls" as characters but not as a command word.
+    expect(isReadOnlyCommand('lsof -i :3000')).toBe(false)
+    expect(isReadOnlyCommand('catalog-tool run')).toBe(false)
+  })
+})
+
+describe('command kinds', () => {
+  it('recognises the git verbs', () => {
+    expect(commandKind('git status')).toBe('git-status')
+    expect(commandKind('git log --oneline -n 20')).toBe('git-log')
+    expect(commandKind('git diff HEAD~1')).toBe('git-diff')
+    expect(commandKind('git commit -m "msg"')).toBe('git-commit')
+    expect(commandKind('git add -A && git commit -m "msg"')).toBe('git-commit')
+    expect(commandKind('git push origin main')).toBe('git-push')
+  })
+
+  it('recognises test runs across runners', () => {
+    for (const c of [
+      'npm test',
+      'npm run test',
+      'pnpm test',
+      'npx vitest run src/foo.test.ts',
+      'npx jest',
+      'cargo test',
+      'go test ./...',
+      'pytest tests/',
+      'python -m pytest',
+    ]) {
+      expect(commandKind(c), c).toBe('test-run')
+    }
+  })
+
+  it('everything else is generic', () => {
+    expect(commandKind('npm install')).toBe('generic')
+    expect(commandKind('node script.js')).toBe('generic')
+  })
+})
+
+describe('the --no-verify ban survives the merge', () => {
+  it('refuses a commit with --no-verify, with a reason', () => {
+    const msg = rejectShellCommand('git commit --no-verify -m "x"')
+    expect(msg).toBeTruthy()
+    expect(msg).toContain('--no-verify')
+  })
+
+  it('lets a normal commit through', () => {
+    expect(rejectShellCommand('git commit -m "x"')).toBeNull()
+  })
+
+  it('does not fire on --no-verify outside a commit', () => {
+    expect(rejectShellCommand('grep -rn -- --no-verify docs/')).toBeNull()
+  })
+})
+
+describe('timeout and icon follow the command', () => {
+  it('a recognised test run keeps the 300 s budget', () => {
+    expect(commandTimeoutMs('npm test', 600_000)).toBe(TEST_RUN_TIMEOUT_MS)
+    expect(commandTimeoutMs('npm install', 600_000)).toBe(600_000)
+  })
+
+  it('a commit still looks like a commit', () => {
+    expect(commandIcon('git commit -m "x"')).toBe('git-commit')
+    expect(commandIcon('git push')).toBe('git-push')
+    expect(commandIcon('npx vitest run')).toBe('test')
+    expect(commandIcon('node x.js')).toBe('terminal')
+  })
+})

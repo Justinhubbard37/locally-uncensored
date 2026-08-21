@@ -18,7 +18,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { hostPlatform, platformPromptLine, type HostPlatform } from '../host-platform'
+import { hostPlatform, platformPromptLine, hostEnvironmentBlock, type HostPlatform } from '../host-platform'
 
 describe('hostPlatform', () => {
   it('recognises the three platforms LU ships on', () => {
@@ -73,7 +73,8 @@ describe('platformPromptLine', () => {
   it('invents nothing on an unknown platform', () => {
     const line = platformPromptLine('unknown')
     expect(line).toMatch(/unknown/i)
-    expect(line).toMatch(/system_info/)
+    // system_info is retired (2.6.6); the shell itself is the probe now.
+    expect(line).toMatch(/uname -s/)
     // A wrong incantation is worse than none.
     for (const cmd of ['open ', 'explorer', 'xdg-open', 'Invoke-Item', 'gtk-launch']) {
       expect(line).not.toContain(cmd)
@@ -112,7 +113,25 @@ describe('the tools really are gone', () => {
     // There is no render harness in this repo, so the prompt is guarded at the
     // source, like DownloadBadge-autoclose.test.ts does.
     const agent = read('hooks', 'useAgentChat.ts')
-    expect(agent).toMatch(/platformPromptLine\(\)/)
-    expect(agent).toMatch(/The OS is stated above, so do not spend a call finding it out/)
+    expect(agent).toMatch(/hostEnvironmentBlock\(\)/)
+    expect(agent).toMatch(/OS, clock and timezone are stated above/)
+    // Codex pays for the block too now (it never had the platform sentence).
+    const codex = read('hooks', 'useCodex.ts')
+    expect(codex).toMatch(/hostEnvironmentBlock\(\)/)
+  })
+})
+
+describe('hostEnvironmentBlock', () => {
+  it('carries platform sentence, clock and timezone in one block', () => {
+    const fixed = new Date('2026-08-21T12:00:00Z')
+    const block = hostEnvironmentBlock('macos', fixed)
+    expect(block).toContain('macOS')
+    expect(block).toContain('2026')
+    expect(block).toMatch(/Trust this line/)
+  })
+
+  it('replaces the clock tool, so it must name the date of the run', () => {
+    const fixed = new Date('2026-08-21T12:00:00Z')
+    expect(hostEnvironmentBlock('linux', fixed)).toMatch(/August 2026/)
   })
 })

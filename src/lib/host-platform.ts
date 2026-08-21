@@ -54,8 +54,36 @@ export function platformPromptLine(p: HostPlatform = hostPlatform()): string {
     case 'linux':
       return 'This machine runs Linux and shell_execute runs bash. Open a file or folder with `xdg-open <path>`, start an application with `gtk-launch <name>`. There is no reveal, so open the containing folder instead.'
     default:
-      // Never invent a platform: a wrong incantation is worse than none, and
-      // system_info is still there for the agent that really needs to know.
-      return 'The operating system of this machine is unknown. Call system_info before running a platform-specific command.'
+      // Never invent a platform: a wrong incantation is worse than none. The
+      // shell itself is the probe now that system_info is gone (2.6.6).
+      return 'The operating system of this machine is unknown. Probe it with shell_execute (`uname -s`, and on failure assume Windows PowerShell) before running a platform-specific command.'
   }
+}
+
+/**
+ * The environment block for agent system prompts: platform sentence plus
+ * clock, timezone and (when known) working directory.
+ *
+ * This retires system_info and get_current_time from the tool catalog
+ * (2.6.6, plan section E3) with the same argument that removed desktop_open
+ * and app_launch above: a few prompt tokens replace two schemas (~218 tokens
+ * per step) AND the round trip small models spent asking what machine they
+ * are on. The timestamp is taken when the run starts; that is what the old
+ * tool call would have returned too.
+ */
+export function hostEnvironmentBlock(
+  p: HostPlatform = hostPlatform(),
+  now: Date = new Date(),
+): string {
+  let tz = ''
+  try {
+    tz = Intl.DateTimeFormat().resolvedOptions().timeZone ?? ''
+  } catch {
+    // No timezone is better than a wrong one.
+  }
+  const stamp = now.toLocaleString('en-GB', { dateStyle: 'full', timeStyle: 'short' })
+  return [
+    platformPromptLine(p),
+    `Date and time at the start of this run: ${stamp}${tz ? ` (${tz})` : ''}. Trust this line; there is no clock tool.`,
+  ].join('\n')
 }
