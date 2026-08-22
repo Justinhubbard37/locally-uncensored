@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { User, Copy, Check, Pencil, RefreshCw, X, Wrench, Trash2, Scissors } from 'lucide-react'
+import { User, Copy, Check, Pencil, RefreshCw, X, Wrench, Trash2, Scissors, Unlink } from 'lucide-react'
 import { useState, useRef, useEffect, useMemo, memo } from 'react'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ThinkingBlock } from './ThinkingBlock'
@@ -12,6 +12,7 @@ import { ChatArtifactCard } from './ChatArtifactCard'
 import type { Message } from '../../types/chat'
 import { stripModelNoise } from '../../lib/strip-model-noise'
 import { truncationNotice } from '../../lib/answer-notes'
+import { unbackedLinksNotice } from '../../lib/unbacked-links'
 import { useAgentModeStore } from '../../stores/agentModeStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useModelStore } from '../../stores/modelStore'
@@ -379,6 +380,16 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
                     <div className="mt-1 inline-flex items-center gap-1 text-[0.6rem] text-amber-600/80 dark:text-amber-300/70">
                       <Scissors size={9} className="shrink-0" />
                       <span>{truncationNotice(message.finishReason)}</span>
+                    </div>
+                  )}
+                  {/* Z36 finding 3: the model cited links no tool returned and
+                      ignored the corrective steer. The answer stays untouched,
+                      it is the model's text (G14-2); this labelled app notice
+                      names the links that came from nowhere. */}
+                  {unbackedLinksNotice(message.unbackedLinks) && (
+                    <div className="mt-1 flex items-start gap-1 text-[0.6rem] text-amber-600/80 dark:text-amber-300/70">
+                      <Unlink size={9} className="mt-0.5 shrink-0" />
+                      <span>{unbackedLinksNotice(message.unbackedLinks)}</span>
                     </div>
                   )}
                   {/* A reasoning-only reply used to print a stand-in sentence
