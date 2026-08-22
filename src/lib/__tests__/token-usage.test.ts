@@ -8,6 +8,8 @@
  * Run: npx vitest run src/lib/__tests__/token-usage.test.ts
  */
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { computeContextFill, type FillMessage } from '../token-usage'
 import { estimateTokens } from '../context-compaction'
 
@@ -81,5 +83,60 @@ describe('computeContextFill', () => {
     ]
     // Anchored on the NEWEST usage (1200), not the conversation maximum.
     expect(computeContextFill(msgs).used).toBeLessThan(1400)
+  })
+})
+
+describe('a brand new chat starts at nothing', () => {
+  const COUNTER = readFileSync(
+    resolve(__dirname, '..', '..', 'components', 'chat', 'TokenCounter.tsx'),
+    'utf8',
+  )
+
+  it('an empty conversation has no fill', () => {
+    expect(computeContextFill([])).toEqual({ used: 0, real: false, source: 'estimate' })
+  })
+
+  it('the counter draws nothing at all while the chat is empty', () => {
+    // No render harness in this repo, so the empty-state exit is guarded at
+    // the source, the way send-window.test.ts guards the denominator.
+    expect(COUNTER).toMatch(/if \(!activeConversationId \|\| messages\.length === 0\) return null/)
+  })
+})
+
+describe('the tool chain a run writes back is not new context', () => {
+  // A coding run reports the size of the request it built while the store
+  // still holds [user, assistant placeholder]. The hidden tool chain is
+  // written back at run END and spliced in BEFORE the assistant message
+  // (useCodex insertMessagesBefore). Those results were inside the built
+  // request already, so adding them again doubles the meter on the very
+  // first run of a fresh chat: 15k of real prompt read as 30k.
+  const toolResult = (content: string): FillMessage =>
+    ({ role: 'tool', content, hidden: true })
+
+  const built = { tokens: 15000, atMessageCount: 2 }
+
+  it('counts the persisted chain once, not twice', () => {
+    const afterRun: FillMessage[] = [
+      user('refactor the parser'),
+      toolResult('x'.repeat(40000)),
+      toolResult('y'.repeat(40000)),
+      assistant('done'),
+    ]
+    const fill = computeContextFill(afterRun, built)
+    expect(fill.source).toBe('built')
+    expect(fill.used).toBe(15000 + estimateTokens('done') + 4)
+  })
+
+  it('still adds what the user typed after the build', () => {
+    const afterRun: FillMessage[] = [
+      user('refactor the parser'),
+      toolResult('x'.repeat(40000)),
+      assistant('done'),
+      user('now run the suite'),
+    ]
+    const fill = computeContextFill(afterRun, built)
+    expect(fill.used).toBe(
+      15000 + estimateTokens('done') + 4 + estimateTokens('now run the suite') + 4,
+    )
   })
 })

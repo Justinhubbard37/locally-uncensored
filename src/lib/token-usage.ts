@@ -27,6 +27,8 @@ export interface FillMessage {
   content: string
   thinking?: string
   toolCallSummary?: string
+  /** Written by an agent run, not by the user. See computeContextFill. */
+  hidden?: boolean
   usage?: {
     promptTokens: number
     completionTokens: number
@@ -73,6 +75,14 @@ export function computeContextFill(
   if (built && built.tokens > 0 && built.atMessageCount <= messages.length) {
     let used = built.tokens
     for (let i = built.atMessageCount; i < messages.length; i++) {
+      // A hidden message that shows up behind the anchor is the tool chain the
+      // finished run wrote back into the store (useCodex splices it in BEFORE
+      // its assistant message), and every byte of it was inside the request
+      // this anchor measured. Counting it again doubled the meter on the first
+      // run of a fresh chat: 15k of real prompt read as 30k, and it stayed
+      // wrong until the next turn built a new anchor. Only what the user adds
+      // after the build is new context.
+      if (messages[i].hidden) continue
       used += visibleTokens(messages[i])
     }
     return { used, real: false, source: 'built' }
