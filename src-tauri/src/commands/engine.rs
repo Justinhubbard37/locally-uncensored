@@ -368,18 +368,70 @@ fn resolve_engine_binary(app: &AppHandle) -> Option<PathBuf> {
 
 // ── Health probe ─────────────────────────────────────────────────────────────
 
-/// Save or restore llama-server's KV slot 0 (GH #85). The webview cannot fetch
-/// the engine port directly (CSP; all engine traffic rides the Rust proxy), so
-/// the handoff calls this instead. One fixed filename: the handoff carries at
-/// most one conversation across one eviction at a time. `ok:false` is a normal
-/// outcome (old binary, empty slot, ctx mismatch after a settings change) and
-/// means the next turn re-processes the history, exactly the pre-#85 cost.
+/// The slot that actually holds the conversation. llama-server distributes
+/// requests across its `-np` parallel slots by prompt similarity, so slot 0
+/// is only right by luck: the Z36 counter-check (2026-08-22) watched the
+/// 626 MB history sit in slot 3 while the save hit slot 0 and wrote a
+/// 20 byte husk. A used slot carries `n_prompt_tokens` in GET /slots and an
+/// untouched one does not carry the field at all (measured on the bundled
+/// b1-049326a engine), so the biggest value marks the history worth saving.
+/// Any surprise falls back to 0, exactly the old behaviour.
+pub(crate) fn pick_save_slot(slots: &serde_json::Value) -> u32 {
+    let arr = match slots.as_array() {
+        Some(a) => a,
+        None => return 0,
+    };
+    let mut best = 0u32;
+    let mut best_tokens = -1i64;
+    for s in arr {
+        let id = s.get("id").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let toks = s.get("n_prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+        if toks > best_tokens {
+            best_tokens = toks;
+            best = id;
+        }
+    }
+    best
+}
+
+/// Save or restore llama-server's KV cache across the VRAM handoff (GH #85).
+/// The webview cannot fetch the engine port directly (CSP; all engine traffic
+/// rides the Rust proxy), so the handoff calls this instead. One fixed
+/// filename: the handoff carries at most one conversation across one eviction
+/// at a time. A save asks GET /slots first and targets the slot that really
+/// holds the tokens (see `pick_save_slot`); a restore loads into slot 0 and
+/// the server's own prompt-similarity slot selection routes the next turn to
+/// the restored cache. `ok:false` is a normal outcome (old binary, empty
+/// slot, ctx mismatch after a settings change) and means the next turn
+/// re-processes the history, exactly the pre-#85 cost.
 #[tauri::command]
 pub async fn kv_slot_action(port: u16, action: String) -> Result<serde_json::Value, String> {
     if action != "save" && action != "restore" {
         return Err("action must be 'save' or 'restore'".to_string());
     }
-    let url = format!("http://127.0.0.1:{port}/slots/0?action={action}");
+    let slot_id = if action == "save" {
+        match reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(probe) => match probe
+                .get(format!("http://127.0.0.1:{port}/slots"))
+                .send()
+                .await
+            {
+                Ok(res) => res
+                    .json::<serde_json::Value>()
+                    .await
+                    .map(|v| pick_save_slot(&v))
+                    .unwrap_or(0),
+                Err(_) => 0,
+            },
+            Err(_) => 0,
+        }
+    } else {
+        0
+    };
+    let url = format!("http://127.0.0.1:{port}/slots/{slot_id}?action={action}");
     let client = reqwest::Client::builder()
         // Serializing a multi-GB KV cache to disk takes a while on slow disks.
         .timeout(Duration::from_secs(120))
@@ -1508,7 +1560,7 @@ mod tests {
 
 #[cfg(test)]
 mod diag_tests {
-    use super::tail_lines;
+    use super::{pick_save_slot, tail_lines};
 
     #[test]
     fn tail_keeps_the_last_lines_and_drops_blanks() {
@@ -1523,5 +1575,44 @@ mod diag_tests {
     fn tail_of_a_short_log_is_the_whole_log() {
         assert_eq!(tail_lines("only line", 12), "only line");
         assert_eq!(tail_lines("", 12), "");
+    }
+
+    // Z36 counter-check 2026-08-22: the KV save hit slot 0 while the engine
+    // held the 626 MB history in slot 3, so the handoff wrote a 20 byte husk
+    // and the next turn re-processed everything. `pick_save_slot` reads the
+    // real GET /slots shape of the bundled engine (b1-049326a): a used slot
+    // carries n_prompt_tokens, an untouched one does not carry the field.
+    #[test]
+    fn save_slot_follows_the_tokens_not_slot_zero() {
+        let slots = serde_json::json!([
+            { "id": 0, "n_ctx": 8192, "is_processing": false },
+            { "id": 1, "n_ctx": 8192, "is_processing": false },
+            { "id": 2, "n_ctx": 8192, "is_processing": false },
+            { "id": 3, "n_ctx": 8192, "is_processing": false, "n_prompt_tokens": 732 }
+        ]);
+        assert_eq!(pick_save_slot(&slots), 3);
+    }
+
+    #[test]
+    fn the_biggest_history_wins_when_several_slots_are_used() {
+        let slots = serde_json::json!([
+            { "id": 0, "n_prompt_tokens": 34 },
+            { "id": 1, "n_prompt_tokens": 945 },
+            { "id": 2, "n_prompt_tokens": 12 }
+        ]);
+        assert_eq!(pick_save_slot(&slots), 1);
+    }
+
+    #[test]
+    fn negative_control_untouched_engine_and_garbage_stay_on_slot_zero() {
+        // All slots untouched (no token field anywhere): the old behaviour.
+        let idle = serde_json::json!([
+            { "id": 0, "n_ctx": 8192 }, { "id": 1, "n_ctx": 8192 }
+        ]);
+        assert_eq!(pick_save_slot(&idle), 0);
+        // Not an array, an empty array, or plain garbage: fall back to 0.
+        assert_eq!(pick_save_slot(&serde_json::json!({})), 0);
+        assert_eq!(pick_save_slot(&serde_json::json!([])), 0);
+        assert_eq!(pick_save_slot(&serde_json::json!(null)), 0);
     }
 }
