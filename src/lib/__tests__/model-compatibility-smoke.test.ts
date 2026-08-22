@@ -22,6 +22,7 @@ import {
   isPlainTextPlanner,
   getToolCallingStrategy,
   getRecommendedAgentModels,
+  isVisionCompatible,
 } from '../model-compatibility'
 
 // ── Agent Compatibility ─────────────────────────────────────────────────
@@ -178,5 +179,43 @@ describe('getRecommendedAgentModels', () => {
       expect(m.label).toBeTruthy()
       expect(m.reason).toBeTruthy()
     }
+  })
+})
+
+// ── Qwen 3.8 (August 2026) ──────────────────────────────────────────────
+// The family arrives on three routes with three different name shapes: an
+// Ollama tag, a GGUF file name in the built-in engine, and LM Studio's
+// quant-less publisher key. All three have to reach the same verdict, or the
+// image button and the Think toggle disagree with the model that is loaded.
+
+describe('Qwen 3.8 across all three routes', () => {
+  const names = [
+    'qwen3.8:latest',
+    'qwen3.8:27b',
+    'Qwen3.8-27B-UD-Q4_K_M.gguf',
+    'Qwen3.8-27B-Uncensored-Q4_K_M.gguf',
+    'Huihui-Qwen3.8-27B-abliterated-Q4_K.gguf',
+    'huihui_ai/Qwen3.8-abliterated:27b',
+    'qwen/qwen3.8-27b',
+  ]
+
+  it('reads images on every route', () => {
+    for (const n of names) expect(isVisionCompatible(n), n).toBe(true)
+  })
+
+  it('takes tools and the think parameter on every route', () => {
+    for (const n of names) {
+      expect(isAgentCompatible(n), n).toBe(true)
+      expect(isThinkingCompatible(n), n).toBe(true)
+    }
+  })
+
+  it('does not bleed into unrelated families', () => {
+    expect(isVisionCompatible('llama3.1:8b')).toBe(false)
+    expect(isVisionCompatible('hermes3:8b')).toBe(false)
+  })
+
+  it('offers Qwen 3.8 as a recommended local pick', () => {
+    expect(getRecommendedAgentModels().some(m => m.name === 'qwen3.8:latest')).toBe(true)
   })
 })

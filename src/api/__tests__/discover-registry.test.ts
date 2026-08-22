@@ -7,6 +7,8 @@ import {
   CUSTOM_NODE_REGISTRY,
   COMPONENT_REGISTRY,
   lookupFileMeta,
+  mmprojFileName,
+  planModelDownload,
 } from '../discover'
 
 describe('discover — data validation', () => {
@@ -403,6 +405,98 @@ describe('discover — data validation', () => {
           }
         }
       }
+    })
+  })
+
+  // ─── Vision projectors (mmproj) ───
+  // A text GGUF has no image tower. An entry that promises Vision on a direct
+  // download has to bring the projector, or the model loads and answers and
+  // simply cannot see, which is the silent failure this pairing prevents.
+
+  describe('mmproj pairing', () => {
+    const all = [...getUncensoredTextModels(), ...getMainstreamTextModels()]
+
+    it('every projector is a full, downloadable pair', () => {
+      for (const m of all) {
+        if (!m.mmprojUrl) continue
+        expect(m.mmprojUrl, `${m.name}: projector URL`).toMatch(/^https:\/\//)
+        expect(m.downloadUrl, `${m.name}: projector without a model file`).toBeTruthy()
+        expect(m.filename, `${m.name}: projector without a model filename`).toBeTruthy()
+        expect(m.mmprojSizeGB, `${m.name}: projector size`).toBeGreaterThan(0)
+        expect(m.tags, `${m.name}: projector but no Vision tag`).toContain('Vision')
+      }
+    })
+
+    it('every Qwen 3.8 download that claims Vision carries a projector', () => {
+      const claiming = all.filter(m => m.downloadUrl && m.name.includes('Qwen 3.8') && m.tags.includes('Vision'))
+      expect(claiming.length).toBeGreaterThan(0)
+      for (const m of claiming) {
+        expect(m.mmprojUrl, `${m.name}: Vision tag without a projector`).toBeTruthy()
+      }
+    })
+
+    it('the 9B distill stays honest about being text only', () => {
+      const nine = all.filter(m => m.name.includes('Qwen 3.8 9B'))
+      expect(nine.length).toBeGreaterThan(0)
+      for (const m of nine) {
+        expect(m.tags, `${m.name}`).not.toContain('Vision')
+        expect(m.mmprojUrl).toBeUndefined()
+      }
+    })
+
+    it('names the projector after the model, not after the repo', () => {
+      expect(mmprojFileName('Qwen3.8-27B-UD-Q4_K_M.gguf')).toBe('Qwen3.8-27B-UD-Q4_K_M.mmproj.gguf')
+      expect(mmprojFileName('A.GGUF')).toBe('A.mmproj.gguf')
+      // Dots inside the name survive: a stem cut at the last dot would mangle it.
+      expect(mmprojFileName('qwen3.8-27b.gguf')).toBe('qwen3.8-27b.mmproj.gguf')
+    })
+  })
+
+  describe('planModelDownload', () => {
+    const vision = getMainstreamTextModels().find(m => m.name === 'Qwen 3.8 27B')!
+    const textOnly = getMainstreamTextModels().find(m => m.name === 'Qwen 3.8 9B Distill')!
+
+    it('adds the projector as a second file in the same folder', () => {
+      const plan = planModelDownload(vision, vision.downloadUrl!, vision.filename!, 100)
+      expect(plan).toHaveLength(2)
+      expect(plan[0]).toEqual({ url: vision.downloadUrl, filename: vision.filename, expectedBytes: 100 })
+      expect(plan[1].url).toBe(vision.mmprojUrl)
+      expect(plan[1].filename).toBe(mmprojFileName(vision.filename!))
+      expect(plan[1].expectedBytes).toBe(Math.round(vision.mmprojSizeGB! * 1_073_741_824))
+    })
+
+    it('follows the RESOLVED model name, not the catalog guess', () => {
+      // The HF tree corrects a wrong guessed filename; the projector has to
+      // follow it or the engine looks for a sibling that is not there.
+      const plan = planModelDownload(vision, 'https://x/y.gguf', 'Corrected-Name-Q4_K_M.gguf')
+      expect(plan[1].filename).toBe('Corrected-Name-Q4_K_M.mmproj.gguf')
+    })
+
+    it('leaves a text-only model at exactly one file', () => {
+      const plan = planModelDownload(textOnly, textOnly.downloadUrl!, textOnly.filename!, 42)
+      expect(plan).toEqual([{ url: textOnly.downloadUrl, filename: textOnly.filename, expectedBytes: 42 }])
+    })
+  })
+
+  describe('Qwen 3.8 catalog entries', () => {
+    it('lists both uncensored 27B families with a projector each', () => {
+      const groups = new Set(getUncensoredTextModels().filter(m => m.mmprojUrl).map(m => m.group))
+      expect(groups).toContain('Qwen 3.8 27B Uncensored')
+      expect(groups).toContain('Qwen 3.8 27B Abliterated')
+    })
+
+    it('lists the official 27B and the small distill', () => {
+      const names = getMainstreamTextModels().map(m => m.name)
+      expect(names).toContain('Qwen 3.8 27B')
+      expect(names).toContain('Qwen 3.8 9B Distill')
+    })
+
+    it('offers the Ollama tags, where the projector ships inside the tag', () => {
+      const tags = [...getUncensoredTextModels(), ...getMainstreamTextModels()]
+        .map(m => m.ollamaModel)
+        .filter(Boolean)
+      expect(tags).toContain('qwen3.8')
+      expect(tags).toContain('huihui_ai/Qwen3.8-abliterated:27b')
     })
   })
 })

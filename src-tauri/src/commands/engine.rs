@@ -118,11 +118,49 @@ pub(crate) fn effective_ctx(tuning: &EngineTuning) -> u32 {
     if tuning.ctx == 0 { 8192 } else { tuning.ctx }
 }
 
+/// Name a vision projector gets on disk: `<model stem>.mmproj.gguf`, written
+/// next to the model. Mirrors `mmprojFileName` in src/api/discover.ts, which is
+/// what the downloader writes. Derived from the model name rather than kept
+/// under the upstream name because the built-in models dir is FLAT: two vision
+/// models in it would otherwise both claim one `mmproj-F16.gguf`.
+pub(crate) fn mmproj_sibling_path(model_path: &str) -> PathBuf {
+    let p = Path::new(model_path);
+    let stem = p
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.strip_suffix(".gguf").or_else(|| s.strip_suffix(".GGUF")).unwrap_or(s))
+        .unwrap_or("");
+    p.with_file_name(format!("{stem}.mmproj.gguf"))
+}
+
+/// True for a file name that is a vision projector, not a model. Keeps
+/// projectors out of the model picker: they are GGUFs in the same folder, so
+/// the plain "every .gguf is a model" scan would offer them as chat models and
+/// llama-server would refuse to load them. Covers our own `.mmproj.gguf`
+/// convention and the upstream `mmproj-*.gguf` names a user may drop in by hand.
+pub(crate) fn is_projector_file(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    let stem = lower.strip_suffix(".gguf").unwrap_or(&lower);
+    stem.ends_with(".mmproj") || stem.starts_with("mmproj")
+}
+
+/// Absolute path of the projector belonging to `model_path`, if it is on disk.
+/// Absence is the normal case (text-only model) and never an error.
+fn existing_mmproj(model_path: &str) -> Option<String> {
+    let p = mmproj_sibling_path(model_path);
+    p.is_file().then(|| p.to_string_lossy().to_string())
+}
+
 /// Build the `llama-server` argv for a chat engine. `-ngl 999` offloads every
 /// layer to the GPU (Metal on mac); llama-server clamps to the real layer
 /// count, so an over-large value is the idiomatic "all layers" request.
 /// Default tuning yields exactly the legacy argv (pinned by regression test).
-pub(crate) fn build_server_args(model_path: &str, tuning: &EngineTuning, port: u16, slot_save_dir: Option<&str>) -> Vec<String> {
+///
+/// `mmproj` turns the model multimodal. A text GGUF has no image tower, so
+/// without the flag a vision model loads and answers, it just cannot see, which
+/// is exactly the silent failure the Discover download avoids by fetching the
+/// projector with the model.
+pub(crate) fn build_server_args(model_path: &str, tuning: &EngineTuning, port: u16, slot_save_dir: Option<&str>, mmproj: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-m".into(),
         model_path.into(),
@@ -161,13 +199,18 @@ pub(crate) fn build_server_args(model_path: &str, tuning: &EngineTuning, port: u
     if tuning.no_mmap {
         args.push("--no-mmap".into());
     }
+    if let Some(path) = mmproj {
+        args.push("--mmproj".into());
+        args.push(path.into());
+    }
     // GH #85 (I-Am-LongXi): enable llama-server's slot save/restore API so the
     // VRAM handoff can serialize the KV cache to disk before evicting the
     // engine for a render, and restore it after the reload instead of
     // re-processing the whole conversation. The flag only enables the
-    // endpoint; nothing is written until a save is requested. (llama.cpp
-    // cannot save slots with an mmproj loaded; the built-in engine never
-    // loads one, so that limitation does not apply here.)
+    // endpoint; nothing is written until a save is requested. With an mmproj
+    // loaded llama.cpp refuses the save (check_no_mtmd) and answers with a
+    // plain error instead of writing a file, which the handoff already treats
+    // as "not saved" and skips the restore. So the flag stays on either way.
     if let Some(dir) = slot_save_dir {
         args.push("--slot-save-path".into());
         args.push(dir.into());
@@ -270,6 +313,17 @@ pub(crate) fn scan_gguf_models(dir: &Path) -> Vec<BundledModel> {
             .map(|e| e.eq_ignore_ascii_case("gguf"))
             .unwrap_or(false);
         if !is_gguf {
+            continue;
+        }
+        // Vision projectors live next to their model and are GGUFs too, but
+        // they are not chat models. Listing them would put a file in the
+        // picker that llama-server cannot serve.
+        if path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(is_projector_file)
+            .unwrap_or(false)
+        {
             continue;
         }
         let name = path
@@ -548,7 +602,10 @@ fn start_bundled_engine_blocking(
             std::fs::create_dir_all(&dir).ok()?;
             Some(dir.to_string_lossy().to_string())
         });
-    let desired_args = build_server_args(&model_path, &tuning, port, slot_dir.as_deref());
+    // Vision projector sitting next to the model (written by the Discover
+    // download). Present = start multimodal, absent = unchanged text argv.
+    let mmproj = existing_mmproj(&model_path);
+    let desired_args = build_server_args(&model_path, &tuning, port, slot_dir.as_deref(), mmproj.as_deref());
 
     // Already serving this exact argv and healthy → no-op. The argv is the
     // idempotence key: a ctx/KV-quant/flash-attn change restarts the server,
@@ -946,6 +1003,16 @@ pub(crate) fn scan_lmstudio_models(root: &Path) -> Vec<ImportCandidate> {
             if !is_gguf {
                 continue;
             }
+            // A projector is not a model. It rides along with its model in
+            // import_model_file instead of being offered as its own import.
+            if path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(is_projector_file)
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
@@ -985,7 +1052,46 @@ pub(crate) fn import_model_file(src: &Path, dest_dir: &Path, name: &str) -> Resu
              or copy the file there yourself."
         )
     })?;
+    // A vision model without its projector loads and answers but cannot see, so
+    // the projector comes along. Best effort: the model is already linked and
+    // usable, and a missing projector is exactly what a text-only model looks
+    // like. (Ollama sources are content-addressed blobs with no sibling to
+    // find; those import text-only, which is why vision models are worth
+    // pulling through Ollama itself.)
+    if let Some(projector) = find_projector_sibling(src) {
+        let _ = std::fs::hard_link(&projector, mmproj_sibling_path(&target.to_string_lossy()));
+    }
     Ok(target)
+}
+
+/// The projector belonging to a model file in another tool's store. Prefers our
+/// own `<stem>.mmproj.gguf` naming, then falls back to a single upstream
+/// `mmproj*.gguf` in the same folder (LM Studio keeps one repo per folder). Two
+/// or more candidates mean guessing, and a wrong projector is worse than none.
+fn find_projector_sibling(model: &Path) -> Option<PathBuf> {
+    let exact = mmproj_sibling_path(&model.to_string_lossy());
+    if exact.is_file() {
+        return Some(exact);
+    }
+    let dir = model.parent()?;
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.file_name()
+                    .and_then(|s| s.to_str())
+                    .map(is_projector_file)
+                    .unwrap_or(false)
+        })
+        .collect();
+    found.sort();
+    if found.len() == 1 {
+        found.pop()
+    } else {
+        None
+    }
 }
 
 /// GGUFs found in local Ollama and LM Studio stores, ready to link into the
@@ -1249,10 +1355,10 @@ mod tests {
     #[test]
     fn slot_save_dir_appends_the_flag_and_none_stays_legacy() {
         // GH #85: the KV-slot flag rides at the end so every earlier pin holds.
-        let with = build_server_args("/m.gguf", &EngineTuning::default(), 8127, Some("/data/kv-slots"));
+        let with = build_server_args("/m.gguf", &EngineTuning::default(), 8127, Some("/data/kv-slots"), None);
         let tail: Vec<&str> = with.iter().rev().take(2).map(String::as_str).collect();
         assert_eq!(tail, vec!["/data/kv-slots", "--slot-save-path"]);
-        let without = build_server_args("/m.gguf", &EngineTuning::default(), 8127, None);
+        let without = build_server_args("/m.gguf", &EngineTuning::default(), 8127, None, None);
         assert!(!without.iter().any(|a| a == "--slot-save-path"));
     }
 
@@ -1260,7 +1366,7 @@ mod tests {
     fn default_tuning_args_match_legacy_shape() {
         // Pin: absent/default tuning must produce EXACTLY the argv the app has
         // shipped since 2.5.7 — expert settings are opt-in, never a drift.
-        let args = build_server_args("/models/qwen.gguf", &EngineTuning::default(), 8127, None);
+        let args = build_server_args("/models/qwen.gguf", &EngineTuning::default(), 8127, None, None);
         assert_eq!(
             args,
             vec![
@@ -1271,6 +1377,111 @@ mod tests {
                 "-ngl", "999",
             ]
         );
+    }
+
+    #[test]
+    fn mmproj_rides_the_argv_only_when_a_projector_exists() {
+        let with = build_server_args(
+            "/models/qwen3.8.gguf",
+            &EngineTuning::default(),
+            8127,
+            None,
+            Some("/models/qwen3.8.mmproj.gguf"),
+        );
+        let at = with.iter().position(|a| a == "--mmproj").expect("--mmproj missing");
+        assert_eq!(with[at + 1], "/models/qwen3.8.mmproj.gguf");
+        // Negative control: a model without a projector keeps the legacy argv,
+        // so a text-only model can never gain a flag it cannot honour.
+        let without = build_server_args("/models/qwen3.8.gguf", &EngineTuning::default(), 8127, None, None);
+        assert!(!without.iter().any(|a| a == "--mmproj"));
+        assert_eq!(without.len(), with.len() - 2);
+    }
+
+    #[test]
+    fn mmproj_stays_ahead_of_the_slot_save_flag() {
+        // The KV-slot flag is pinned to the tail (GH #85); the projector has to
+        // slot in before it or that pin breaks.
+        let args = build_server_args(
+            "/m.gguf",
+            &EngineTuning::default(),
+            8127,
+            Some("/data/kv-slots"),
+            Some("/m.mmproj.gguf"),
+        );
+        let tail: Vec<&str> = args.iter().rev().take(2).map(String::as_str).collect();
+        assert_eq!(tail, vec!["/data/kv-slots", "--slot-save-path"]);
+        assert!(args.iter().any(|a| a == "--mmproj"));
+    }
+
+    #[test]
+    fn mmproj_sibling_path_follows_the_model_name() {
+        assert_eq!(
+            mmproj_sibling_path("/models/Qwen3.8-27B-UD-Q4_K_M.gguf"),
+            PathBuf::from("/models/Qwen3.8-27B-UD-Q4_K_M.mmproj.gguf")
+        );
+        // Upper-case extension is the same file to the OS on mac/Windows.
+        assert_eq!(
+            mmproj_sibling_path("/models/A.GGUF"),
+            PathBuf::from("/models/A.mmproj.gguf")
+        );
+        // Dots inside the name must survive: file_stem would cut at ".8".
+        assert_eq!(
+            mmproj_sibling_path("/models/qwen3.8-27b.gguf"),
+            PathBuf::from("/models/qwen3.8-27b.mmproj.gguf")
+        );
+    }
+
+    #[test]
+    fn import_takes_the_projector_along_and_leaves_text_models_alone() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        // Vision model in an LM Studio style folder: model plus upstream mmproj.
+        std::fs::write(src.path().join("Qwen3.8-27B-UD-Q4_K_M.gguf"), b"weights").unwrap();
+        std::fs::write(src.path().join("mmproj-F16.gguf"), b"projector").unwrap();
+        let target = import_model_file(
+            &src.path().join("Qwen3.8-27B-UD-Q4_K_M.gguf"),
+            dest.path(),
+            "Qwen3.8-27B-UD-Q4_K_M.gguf",
+        )
+        .unwrap();
+        assert!(target.is_file());
+        assert!(dest.path().join("Qwen3.8-27B-UD-Q4_K_M.mmproj.gguf").is_file());
+        // The projector must not be offered as a model of its own.
+        assert!(!scan_gguf_models(dest.path()).iter().any(|m| m.name.contains("mmproj")));
+        assert_eq!(scan_gguf_models(dest.path()).len(), 1);
+
+        // Negative control: a text-only model imports without inventing one.
+        let plain = tempfile::tempdir().unwrap();
+        std::fs::write(plain.path().join("text.gguf"), b"weights").unwrap();
+        let dest2 = tempfile::tempdir().unwrap();
+        import_model_file(&plain.path().join("text.gguf"), dest2.path(), "text.gguf").unwrap();
+        assert!(!dest2.path().join("text.mmproj.gguf").exists());
+    }
+
+    #[test]
+    fn an_ambiguous_projector_is_left_alone() {
+        // Two projectors in one folder means guessing; a wrong image tower is
+        // worse than a model that is honestly text-only.
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("m.gguf"), b"weights").unwrap();
+        std::fs::write(src.path().join("mmproj-F16.gguf"), b"a").unwrap();
+        std::fs::write(src.path().join("mmproj-BF16.gguf"), b"b").unwrap();
+        assert!(find_projector_sibling(&src.path().join("m.gguf")).is_none());
+        // The exact-name convention still wins over the ambiguous pair.
+        std::fs::write(src.path().join("m.mmproj.gguf"), b"c").unwrap();
+        assert_eq!(
+            find_projector_sibling(&src.path().join("m.gguf")),
+            Some(src.path().join("m.mmproj.gguf"))
+        );
+    }
+
+    #[test]
+    fn projectors_are_not_offered_as_models() {
+        assert!(is_projector_file("Qwen3.8-27B-UD-Q4_K_M.mmproj.gguf"));
+        assert!(is_projector_file("mmproj-F16.gguf"));
+        assert!(is_projector_file("mmproj-model-bf16.gguf"));
+        assert!(!is_projector_file("Qwen3.8-27B-UD-Q4_K_M.gguf"));
+        assert!(!is_projector_file("Huihui-Qwen3.8-27B-abliterated-Q4_K.gguf"));
     }
 
     #[test]
@@ -1285,7 +1496,7 @@ mod tests {
             mlock: true,
             no_mmap: true,
         };
-        let args = build_server_args("/m.gguf", &tuning, 8127, None);
+        let args = build_server_args("/m.gguf", &tuning, 8127, None, None);
         assert_eq!(
             args,
             vec![
@@ -1318,7 +1529,7 @@ mod tests {
             mlock: false,
             no_mmap: false,
         };
-        let args = build_server_args("/m.gguf", &tuning, 8127, None);
+        let args = build_server_args("/m.gguf", &tuning, 8127, None, None);
         assert_eq!(
             args,
             vec![
@@ -1334,7 +1545,7 @@ mod tests {
     #[test]
     fn gpu_layers_zero_means_cpu_only_not_all() {
         let tuning = EngineTuning { gpu_layers: 0, ..Default::default() };
-        let args = build_server_args("/m.gguf", &tuning, 8127, None);
+        let args = build_server_args("/m.gguf", &tuning, 8127, None, None);
         let ngl = args.iter().position(|a| a == "-ngl").unwrap();
         assert_eq!(args[ngl + 1], "0");
     }

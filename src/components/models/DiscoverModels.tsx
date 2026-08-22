@@ -9,7 +9,7 @@ import {
   getUncensoredTextModels, getMainstreamTextModels,
   detectProviderModelPath, startModelDownloadToPath,
   startModelDownload, searchCivitaiModels,
-  installBundleComplete, checkBundlesInstalled, resolveHfGgufFiles,
+  installBundleComplete, checkBundlesInstalled, resolveHfGgufFiles, planModelDownload,
   type DiscoverModel, type DownloadProgress, type ModelBundle, type CivitAIModelResult, type HfGgufFile,
 } from '../../api/discover'
 import { getSystemVRAM } from '../../api/comfyui'
@@ -564,20 +564,33 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
       setInstallError('Could not determine model directory. Please check app permissions.')
       return
     }
+    // A vision GGUF carries no image tower: llama.cpp reads it from a separate
+    // mmproj file that has to sit in the model folder BEFORE the server starts,
+    // or the model silently loads text-only. It goes down the same path as the
+    // model, so progress, pause, resume and retry work on it unchanged.
+    const plan = planModelDownload(model, realUrl, realName, realBytes)
     try {
-      dlStore.getState().setMeta(realName, realUrl, 'gguf', targetDir)
-      await startModelDownloadToPath(realUrl, targetDir, realName, realBytes)
+      if (plan.length > 1) {
+        dlStore.getState().setBundleGroup(model.group || model.name, plan.map(f => f.filename))
+      }
+      for (const f of plan) {
+        dlStore.getState().setMeta(f.filename, f.url, 'gguf', targetDir)
+        await startModelDownloadToPath(f.url, targetDir, f.filename, f.expectedBytes)
+      }
       dlStore.getState().startPolling()
       if (isActiveBuiltin) {
         // Built-in engine: await the flat GGUF, then (re)boot llama-server on
         // it so the freshly-added model is chat-ready without a manual switch.
-        await new Promise<void>((resolve, reject) => {
+        // The projector is awaited too: booting before it lands would bring the
+        // model up text-only and the image button would lie.
+        const awaitFile = (fname: string) => new Promise<void>((resolve, reject) => {
           const poll = setInterval(() => {
-            const d = dlStore.getState().downloads[realName]
+            const d = dlStore.getState().downloads[fname]
             if (d?.status === 'complete') { clearInterval(poll); resolve() }
             else if (d?.status === 'error') { clearInterval(poll); reject(new Error(d.error || 'Download failed')) }
           }, 500)
         })
+        for (const f of plan) await awaitFile(f.filename)
         try {
           await startBundledEngine(`${targetDir}/${realName}`)
         } catch (e) {

@@ -25,6 +25,14 @@ and gives the Code view a mode menu, a plan panel and a real file explorer.
 - **Prompt caching for your own Anthropic key.** Requests carry cache markers on
   the system block, the last tool and the last stable message, so a repeated
   request reads from the cache instead of paying for the whole prompt again.
+- **Qwen 3.8 in the Model Manager, with working vision.** The viral uncensored
+  27B, the huihui abliterated 27B, the official 27B in Unsloth's dynamic quants,
+  a 9B distill for small cards, and the two Ollama tags. A vision GGUF keeps its
+  image tower in a separate mmproj file, so a catalog entry can now carry one:
+  the download writes it next to the model as `<model>.mmproj.gguf` and the
+  built-in engine starts llama-server with `--mmproj`. Ollama tags bring their
+  own projector layer. The 9B distill is listed as text only, because its repo
+  ships no projector.
 
 ### Changed
 

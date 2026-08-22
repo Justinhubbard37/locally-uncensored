@@ -34,7 +34,7 @@ const AGENT_COMPATIBLE = [
   // ── Hermes: THE uncensored agent model ──
   'hermes3', 'hermes-3', 'hermes',
   // ── Standard models with native tool calling ──
-  'qwen3.6', 'qwen3-coder-next', 'qwen3-coder', 'qwen3', 'qwen2.5',
+  'qwen3.8', 'qwen3.6', 'qwen3-coder-next', 'qwen3-coder', 'qwen3', 'qwen2.5',
   'llama3.1', 'llama3.2', 'llama3.3', 'llama4',
   'mistral', 'mistral-nemo', 'mistral-small', 'mistral-large',
   // Ministral (Mistral's 3B/8B edge line) has native tool calling like its
@@ -165,6 +165,7 @@ export const hasNativeToolCalling = isAgentCompatible
 const THINKING_COMPATIBLE = [
   'qwq',
   'deepseek-r1',
+  'qwen3.8',     // Qwen 3.8 takes thinking on/off per request
   'qwen3.6',     // Qwen 3.6 — thinking preservation
   'qwen3',       // Qwen 3.x has native thinking
   'qwen3.5',
@@ -218,7 +219,11 @@ const VISION_COMPATIBLE = [
   'gemma3', 'gemma4',                 // Gemma 3/4 are natively multimodal
   'llava', 'bakllava',
   'llama3.2-vision', 'llama4',        // Llama 3.2 Vision, Llama 4
-  'qwen2.5-vl', 'qwen3-vl', 'qwen-vl', 'qwen3.6',
+  // Qwen 3.8 is natively vision-language. On Ollama the tag carries the
+  // projector; for a GGUF the catalog downloads the repo's mmproj next to the
+  // model and the built-in engine starts with --mmproj, so the image button is
+  // right to offer on every route.
+  'qwen2.5-vl', 'qwen3-vl', 'qwen-vl', 'qwen3.8', 'qwen3.6',
   'minicpm-v', 'moondream', 'pixtral',
   'mistral-small3.1', 'mistral-small3.2',
   // Entries must be in POST-normalizeFamily form. `glm-4v` normalizes to
@@ -311,6 +316,7 @@ export interface RecommendedModel {
 export function getRecommendedAgentModels(): RecommendedModel[] {
   return [
     // Local — HOT picks
+    { name: 'qwen3.8:latest', label: 'Qwen 3.8 27B', reason: 'Newest Qwen dense. Vision + tools + switchable thinking, 262K context.', hot: true, provider: 'ollama' },
     { name: 'qwen3.6:latest', label: 'Qwen 3.6 35B MoE', reason: '35B brain, 3B active. Vision + agentic coding + thinking. Brand new.', hot: true, provider: 'ollama' },
     { name: 'qwen3.5:35b-a3b', label: 'Qwen 3.5 35B MoE', reason: '35B brain, 3B active. Best agentic + 256K context. SWE-bench leader.', hot: true, provider: 'ollama' },
     { name: 'gemma4:26b', label: 'Gemma 4 26B MoE', reason: '26B brain, runs like 4B. Native tools + vision. Apache 2.0.', hot: true, provider: 'ollama' },

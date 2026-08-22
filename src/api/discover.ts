@@ -15,6 +15,14 @@ export interface DiscoverModel {
   filename?: string
   subfolder?: string  // ComfyUI models subfolder: checkpoints, diffusion_models, vae, text_encoders
   sizeGB?: number
+  // Vision projector that belongs to `downloadUrl`. A text GGUF carries no
+  // image tower: llama.cpp keeps it in a separate mmproj file and only sees
+  // images when the server is started with `--mmproj`. When this is set the
+  // download writes BOTH files into the model folder and the built-in engine
+  // picks the projector up by name (see `mmprojFileName`). Ollama entries never
+  // need it, their tag already ships a projector layer.
+  mmprojUrl?: string
+  mmprojSizeGB?: number
   // Discovery flags
   hot?: boolean       // Featured/trending model
   agent?: boolean     // Supports Agent Mode tool calling
@@ -496,6 +504,52 @@ export const COMPONENT_REGISTRY: Record<string, ComponentRequirements> = {
 
 const HF = (repo: string, file: string) => `https://huggingface.co/${repo}/resolve/main/${file}`
 
+/**
+ * On-disk name of the vision projector that belongs to `modelFilename`:
+ * `<model stem>.mmproj.gguf`, written next to the model.
+ *
+ * Derived, never hand-written in the catalog, because the built-in engine has
+ * to find the projector from the model path alone (src-tauri engine.rs mirrors
+ * this exact rule). The upstream repos disagree on naming (`mmproj-F16.gguf`,
+ * `mmproj-model-bf16.gguf`, `Qwen3.8-27B-Uncensored-vision-f16.gguf`), and the
+ * built-in models dir is FLAT, so keeping the upstream name would leave two
+ * models fighting over one projector file. Tying the name to the model also
+ * keeps the pairing right when a user downloads several quants of one model.
+ */
+export function mmprojFileName(modelFilename: string): string {
+  const stem = modelFilename.replace(/\.gguf$/i, '')
+  return `${stem}.mmproj.gguf`
+}
+
+/** One file a catalog entry writes into the model folder. */
+export interface PlannedDownload {
+  url: string
+  filename: string
+  expectedBytes?: number
+}
+
+/**
+ * Everything a catalog entry has to put on disk: the model, and its vision
+ * projector when it has one. `url` / `filename` / `bytes` are the RESOLVED
+ * model file (the HF tree corrects the catalog's guess), the projector rides
+ * along under the derived name.
+ *
+ * Pure on purpose: the download UI only loops over the result, so the "does
+ * this model need a second file, and what is it called" decision is unit
+ * testable without rendering the Models tab.
+ */
+export function planModelDownload(model: DiscoverModel, url: string, filename: string, bytes?: number): PlannedDownload[] {
+  const plan: PlannedDownload[] = [{ url, filename, expectedBytes: bytes }]
+  if (model.mmprojUrl) {
+    plan.push({
+      url: model.mmprojUrl,
+      filename: mmprojFileName(filename),
+      expectedBytes: model.mmprojSizeGB ? Math.round(model.mmprojSizeGB * 1_073_741_824) : undefined,
+    })
+  }
+  return plan
+}
+
 /** Sort models by release date, newest first */
 function sortByRelease(models: DiscoverModel[]): DiscoverModel[] {
   return models.sort((a, b) => (b.released ?? '').localeCompare(a.released ?? ''))
@@ -532,6 +586,27 @@ export function getUncensoredTextModels(): DiscoverModel[] {
     { name: 'Qwen 3.5 9B Abliterated', description: 'Qwen 3.5 abliterated · newest, strongest reasoning + coding.', pulls: '10K+', tags: ['9B', 'Q4_K_M', '6 GB'], updated: 'Hot', agent: true, released: '2026-03', downloadUrl: HF('mradermacher/Qwen3.5-9B-abliterated-GGUF', 'Qwen3.5-9B-abliterated.Q4_K_M.gguf'), filename: 'Qwen3.5-9B-abliterated.Q4_K_M.gguf', sizeGB: 5 },
     // ── HOT: GPT-OSS Abliterated ──
     { name: 'GPT-OSS 20B Abliterated', description: 'OpenAI GPT-OSS · abliterated open-source GPT model.', pulls: '15K+', tags: ['20B', 'Q4_K_M', '13 GB'], updated: 'Hot', agent: true, released: '2026-03', downloadUrl: HF('bartowski/huihui-ai_Huihui-gpt-oss-20b-BF16-abliterated-GGUF', 'huihui-ai_Huihui-gpt-oss-20b-BF16-abliterated-Q4_K_M.gguf'), filename: 'huihui-ai_Huihui-gpt-oss-20b-BF16-abliterated-Q4_K_M.gguf', sizeGB: 13 },
+    // ── Qwen 3.8 27B UNCENSORED (August 2026) ──
+    // Two independent uncensors of the same dense 27B base. Both are native
+    // vision-language models, so every entry carries the repo's own mmproj and
+    // LU downloads it with the model (see `mmprojFileName`). The MTP head that
+    // ships inside these GGUFs loads fine on the pinned llama.cpp b9949, which
+    // implements the qwen35 MTP block, so we point at the plain files and not
+    // at JonathanColetti's noMTP cut.
+    { name: 'Qwen 3.8 27B Uncensored', group: 'Qwen 3.8 27B Uncensored', description: 'Qwen 3.8 27B dense · the viral uncensored build. Vision + thinking, 262K context. Recommended quant. The 0.9 GB vision projector comes with it.', pulls: '1M+', tags: ['27B', 'Vision', 'Q4_K_M', '17 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('JonathanColetti/Qwen3.8-27B-Uncensored-GGUF', 'Qwen3.8-27B-Uncensored-Q4_K_M.gguf'), filename: 'Qwen3.8-27B-Uncensored-Q4_K_M.gguf', sizeGB: 16.8, mmprojUrl: HF('JonathanColetti/Qwen3.8-27B-Uncensored-GGUF', 'Qwen3.8-27B-Uncensored-vision-f16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B Uncensored IQ2_M', group: 'Qwen 3.8 27B Uncensored', description: 'Qwen 3.8 27B uncensored · smallest quant, fits a 12 GB card. Real quality tradeoff, but it runs.', pulls: '1M+', tags: ['27B', 'Vision', 'IQ2_M', '11 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('JonathanColetti/Qwen3.8-27B-Uncensored-GGUF', 'Qwen3.8-27B-Uncensored-IQ2_M.gguf'), filename: 'Qwen3.8-27B-Uncensored-IQ2_M.gguf', sizeGB: 10.6, mmprojUrl: HF('JonathanColetti/Qwen3.8-27B-Uncensored-GGUF', 'Qwen3.8-27B-Uncensored-vision-f16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B Uncensored IQ4_XS', group: 'Qwen 3.8 27B Uncensored', description: 'Qwen 3.8 27B uncensored · IQ4_XS, the cheapest 4 bit. Close to Q4_K_M on 16 GB cards.', pulls: '1M+', tags: ['27B', 'Vision', 'IQ4_XS', '15 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('JonathanColetti/Qwen3.8-27B-Uncensored-GGUF', 'Qwen3.8-27B-Uncensored-IQ4_XS.gguf'), filename: 'Qwen3.8-27B-Uncensored-IQ4_XS.gguf', sizeGB: 15.3, mmprojUrl: HF('JonathanColetti/Qwen3.8-27B-Uncensored-GGUF', 'Qwen3.8-27B-Uncensored-vision-f16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B Uncensored Q5_K_M', group: 'Qwen 3.8 27B Uncensored', description: 'Qwen 3.8 27B uncensored · Q5, higher quality. For 24 GB cards.', pulls: '1M+', tags: ['27B', 'Vision', 'Q5_K_M', '20 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('JonathanColetti/Qwen3.8-27B-Uncensored-GGUF', 'Qwen3.8-27B-Uncensored-Q5_K_M.gguf'), filename: 'Qwen3.8-27B-Uncensored-Q5_K_M.gguf', sizeGB: 19.5, mmprojUrl: HF('JonathanColetti/Qwen3.8-27B-Uncensored-GGUF', 'Qwen3.8-27B-Uncensored-vision-f16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B Uncensored Q6_K', group: 'Qwen 3.8 27B Uncensored', description: 'Qwen 3.8 27B uncensored · Q6, near-lossless. High-VRAM setups.', pulls: '1M+', tags: ['27B', 'Vision', 'Q6_K', '22 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('JonathanColetti/Qwen3.8-27B-Uncensored-GGUF', 'Qwen3.8-27B-Uncensored-Q6_K.gguf'), filename: 'Qwen3.8-27B-Uncensored-Q6_K.gguf', sizeGB: 22.4, mmprojUrl: HF('JonathanColetti/Qwen3.8-27B-Uncensored-GGUF', 'Qwen3.8-27B-Uncensored-vision-f16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B Uncensored Q8_0', group: 'Qwen 3.8 27B Uncensored', description: 'Qwen 3.8 27B uncensored · Q8, full quality. 32 GB+ or CPU with lots of RAM.', pulls: '1M+', tags: ['27B', 'Vision', 'Q8_0', '29 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('JonathanColetti/Qwen3.8-27B-Uncensored-GGUF', 'Qwen3.8-27B-Uncensored-Q8_0.gguf'), filename: 'Qwen3.8-27B-Uncensored-Q8_0.gguf', sizeGB: 29, mmprojUrl: HF('JonathanColetti/Qwen3.8-27B-Uncensored-GGUF', 'Qwen3.8-27B-Uncensored-vision-f16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B Abliterated', group: 'Qwen 3.8 27B Abliterated', description: 'huihui Qwen 3.8 27B abliterated · clean uncensor of the newest Qwen dense model. Vision + thinking. Note the quant is called Q4_K, not Q4_K_M.', pulls: '635K+', tags: ['27B', 'Vision', 'Q4_K', '17 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'Huihui-Qwen3.8-27B-abliterated-Q4_K.gguf'), filename: 'Huihui-Qwen3.8-27B-abliterated-Q4_K.gguf', sizeGB: 16.8, mmprojUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'mmproj-model-bf16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B Abliterated Q2_K', group: 'Qwen 3.8 27B Abliterated', description: 'huihui Qwen 3.8 27B abliterated · smallest quant for 12 GB cards.', pulls: '635K+', tags: ['27B', 'Vision', 'Q2_K', '11 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'Huihui-Qwen3.8-27B-abliterated-Q2_K.gguf'), filename: 'Huihui-Qwen3.8-27B-abliterated-Q2_K.gguf', sizeGB: 10.9, mmprojUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'mmproj-model-bf16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B Abliterated Q5_K', group: 'Qwen 3.8 27B Abliterated', description: 'huihui Qwen 3.8 27B abliterated · Q5, higher quality. For 24 GB cards.', pulls: '635K+', tags: ['27B', 'Vision', 'Q5_K', '20 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'Huihui-Qwen3.8-27B-abliterated-Q5_K.gguf'), filename: 'Huihui-Qwen3.8-27B-abliterated-Q5_K.gguf', sizeGB: 19.5, mmprojUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'mmproj-model-bf16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B Abliterated Q6_K', group: 'Qwen 3.8 27B Abliterated', description: 'huihui Qwen 3.8 27B abliterated · Q6, near-lossless.', pulls: '635K+', tags: ['27B', 'Vision', 'Q6_K', '22 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'Huihui-Qwen3.8-27B-abliterated-Q6_K.gguf'), filename: 'Huihui-Qwen3.8-27B-abliterated-Q6_K.gguf', sizeGB: 22.4, mmprojUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'mmproj-model-bf16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B Abliterated Q8_0', group: 'Qwen 3.8 27B Abliterated', description: 'huihui Qwen 3.8 27B abliterated · Q8, full quality.', pulls: '635K+', tags: ['27B', 'Vision', 'Q8_0', '29 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'Huihui-Qwen3.8-27B-abliterated-Q8_0.gguf'), filename: 'Huihui-Qwen3.8-27B-abliterated-Q8_0.gguf', sizeGB: 29, mmprojUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'mmproj-model-bf16.gguf'), mmprojSizeGB: 0.93 },
+    // Ollama ships the projector as a layer of the tag, so vision works there
+    // without a second file.
+    { name: 'Qwen 3.8 27B Abliterated (Ollama)', description: 'huihui Qwen 3.8 27B abliterated · one-command pull, projector included. Vision + tools + thinking out of the box.', pulls: '24K+', tags: ['27B', 'Vision', 'Tools', '18 GB'], updated: 'Hot', agent: true, released: '2026-08', ollamaModel: 'huihui_ai/Qwen3.8-abliterated:27b', sizeGB: 17.7 },
     // ── HOT: Qwen 3.6 Unfiltered (April 2026) ──
     { name: 'Qwen 3.6 27B Samantha Unfiltered', description: 'Qwen 3.6 27B dense · Samantha personality, unfiltered finetune. Released April 22 2026. Needs GGUF conversion (see HF).', pulls: 'New', tags: ['27B', 'Vision', 'Unfiltered', '50 GB'], updated: 'Hot', agent: true, released: '2026-04', url: 'https://huggingface.co/cloudbjorn/Qwen3.6-27B_Samantha-Uncensored', canPull: false, sizeGB: 50 },
     { name: 'Qwen 3.6 35B MoE Abliterated', description: 'Qwen 3.6 35B MoE abliterated · brand new unfiltered. 3B active, vision + agentic coding + thinking. 256K context.', pulls: '1K+', tags: ['35B MoE', 'Vision', 'Q4_K_M', '24 GB'], updated: 'Hot', agent: true, released: '2026-04', ollamaModel: 'huihui_ai/Qwen3.6-abliterated:35b', sizeGB: 24 },
@@ -630,6 +705,25 @@ export function getMainstreamTextModels(): DiscoverModel[] {
     { name: 'Gemma 4 12B (Q8)', group: 'Gemma 4 12B', description: 'Google Gemma 4 12B · Q8_0, near-lossless full quality. Native tools + vision, 128K context, ~13 GB. lmstudio-community build (LM-Studio-curated) with a fixed tool-template, so tool calling works out of the box. Best on LM Studio (Ollama cannot load the gemma4 vision projector yet).', pulls: '100K+', tags: ['12B', 'Q8_0', '13 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('lmstudio-community/gemma-4-12b-it-GGUF', 'gemma-4-12B-it-Q8_0.gguf'), filename: 'gemma-4-12B-it-Q8_0.gguf', sizeGB: 13 },
     { name: 'Gemma 4 E4B', description: 'Gemma 4 E4B · lightweight 4.5B, great for small GPUs.', pulls: '100K+', tags: ['4.5B', 'Q4_K_M', '5 GB'], updated: 'Hot', released: '2026-04', downloadUrl: HF('unsloth/gemma-4-E4B-it-GGUF', 'gemma-4-E4B-it-Q4_K_M.gguf'), filename: 'gemma-4-E4B-it-Q4_K_M.gguf', sizeGB: 5 },
     { name: 'Gemma 4 E2B', description: 'Gemma 4 E2B · ultra-light 2.3B, runs on anything.', pulls: '100K+', tags: ['2.3B', 'Q4_K_M', '3 GB'], updated: 'New', released: '2026-04', downloadUrl: HF('unsloth/gemma-4-E2B-it-GGUF', 'gemma-4-E2B-it-Q4_K_M.gguf'), filename: 'gemma-4-E2B-it-Q4_K_M.gguf', sizeGB: 3 },
+    // ── Qwen 3.8 (August 2026) ──
+    // Qwen shipped no GGUF of its own, so the 27B rides on unsloth's dynamic
+    // quants (the most-downloaded conversion by a wide margin). Every 27B entry
+    // pairs with the repo's mmproj so vision works on the built-in engine and in
+    // LM Studio; the Ollama tag brings its own projector layer. The 9B distill
+    // has no projector upstream and is therefore text-only.
+    { name: 'Qwen 3.8 27B', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B dense · vision + tools + switchable thinking, 262K context. Unsloth dynamic Q4, the recommended default.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-Q4_K_M', '16 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-Q4_K_M.gguf'), filename: 'Qwen3.8-27B-UD-Q4_K_M.gguf', sizeGB: 16.5, mmprojUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'mmproj-F16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B UD-IQ2_XXS', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · smallest dynamic quant, runs on an 8 GB card.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-IQ2_XXS', '7 GB'], updated: 'New', released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-IQ2_XXS.gguf'), filename: 'Qwen3.8-27B-UD-IQ2_XXS.gguf', sizeGB: 7.3, mmprojUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'mmproj-F16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B UD-IQ3_XXS', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · 3 bit dynamic, fits 12 GB with context to spare.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-IQ3_XXS', '11 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-IQ3_XXS.gguf'), filename: 'Qwen3.8-27B-UD-IQ3_XXS.gguf', sizeGB: 10.9, mmprojUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'mmproj-F16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B UD-Q3_K_XL', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · Q3 dynamic, the 12 GB sweet spot.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-Q3_K_XL', '13 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-Q3_K_XL.gguf'), filename: 'Qwen3.8-27B-UD-Q3_K_XL.gguf', sizeGB: 13.1, mmprojUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'mmproj-F16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B UD-Q4_K_XL', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · better quality per GB than plain Q4. For 20 GB+ cards.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-Q4_K_XL', '18 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-Q4_K_XL.gguf'), filename: 'Qwen3.8-27B-UD-Q4_K_XL.gguf', sizeGB: 17.6, mmprojUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'mmproj-F16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B UD-Q5_K_M', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · Q5 dynamic, higher quality. For 24 GB cards.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-Q5_K_M', '20 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-Q5_K_M.gguf'), filename: 'Qwen3.8-27B-UD-Q5_K_M.gguf', sizeGB: 19.8, mmprojUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'mmproj-F16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B UD-Q6_K', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · Q6 dynamic, near-lossless.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-Q6_K', '22 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-Q6_K.gguf'), filename: 'Qwen3.8-27B-UD-Q6_K.gguf', sizeGB: 22, mmprojUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'mmproj-F16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B Q8_0', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · Q8, full quality. 32 GB+ or CPU with lots of RAM.', pulls: '6M+', tags: ['27B', 'Vision', 'Q8_0', '29 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-Q8_0.gguf'), filename: 'Qwen3.8-27B-Q8_0.gguf', sizeGB: 29, mmprojUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'mmproj-F16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B (Ollama)', description: 'Qwen 3.8 27B · one-command pull, projector included. Vision + tools + thinking out of the box.', pulls: '570K+', tags: ['27B', 'Vision', 'Tools', '18 GB'], updated: 'Hot', agent: true, released: '2026-08', ollamaModel: 'qwen3.8', sizeGB: 17.7 },
+    { name: 'Qwen 3.8 9B Distill', group: 'Qwen 3.8 9B Distill', description: 'Qwen 3.8 9B distill · the 27B reasoning in a size that fits an 8 GB card. Text only, the repo ships no vision projector.', pulls: '126K+', tags: ['9B', 'Q4_K_M', '6 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('empero-ai/Qwen3.8-9B-Distill-GGUF', 'Qwen3.8-9B-Q4_K_M.gguf'), filename: 'Qwen3.8-9B-Q4_K_M.gguf', sizeGB: 5.8 },
+    { name: 'Qwen 3.8 9B Distill Q5_K_M', group: 'Qwen 3.8 9B Distill', description: 'Qwen 3.8 9B distill · Q5, higher quality. Text only.', pulls: '126K+', tags: ['9B', 'Q5_K_M', '7 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('empero-ai/Qwen3.8-9B-Distill-GGUF', 'Qwen3.8-9B-Q5_K_M.gguf'), filename: 'Qwen3.8-9B-Q5_K_M.gguf', sizeGB: 6.6 },
+    { name: 'Qwen 3.8 9B Distill Q6_K', group: 'Qwen 3.8 9B Distill', description: 'Qwen 3.8 9B distill · Q6, near-lossless. Text only.', pulls: '126K+', tags: ['9B', 'Q6_K', '8 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('empero-ai/Qwen3.8-9B-Distill-GGUF', 'Qwen3.8-9B-Q6_K.gguf'), filename: 'Qwen3.8-9B-Q6_K.gguf', sizeGB: 7.6 },
+    { name: 'Qwen 3.8 9B Distill Q8_0', group: 'Qwen 3.8 9B Distill', description: 'Qwen 3.8 9B distill · Q8, full quality. Text only.', pulls: '126K+', tags: ['9B', 'Q8_0', '10 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('empero-ai/Qwen3.8-9B-Distill-GGUF', 'Qwen3.8-9B-Q8_0.gguf'), filename: 'Qwen3.8-9B-Q8_0.gguf', sizeGB: 9.8 },
     // ── Qwen 3.6 27B DENSE (April 21, 2026 · new release) ──
     { name: 'Qwen 3.6 27B', group: 'Qwen 3.6 27B', description: 'Qwen 3.6 27B dense · vision + agentic coding + thinking preservation. 256K context. Recommended default.', pulls: 'New', tags: ['27B', 'Vision', 'Q4_K_M', '16 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('unsloth/Qwen3.6-27B-GGUF', 'Qwen3.6-27B-Q4_K_M.gguf'), filename: 'Qwen3.6-27B-Q4_K_M.gguf', sizeGB: 16 },
     { name: 'Qwen 3.6 27B Q3_K_M', group: 'Qwen 3.6 27B', description: 'Qwen 3.6 27B · Q3 quant, fits 12GB VRAM completely. For GPU-only inference.', pulls: 'New', tags: ['27B', 'Vision', 'Q3_K_M', '13 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('unsloth/Qwen3.6-27B-GGUF', 'Qwen3.6-27B-Q3_K_M.gguf'), filename: 'Qwen3.6-27B-Q3_K_M.gguf', sizeGB: 13 },
