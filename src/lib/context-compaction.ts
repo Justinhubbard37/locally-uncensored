@@ -125,6 +125,20 @@ function toolNamesIn(msg: OllamaChatMessage): string[] {
 }
 
 /**
+ * The trim notice block, wherever it rides. Kept as a factory because a
+ * shared /g regex carries lastIndex state between .test and .replace calls.
+ */
+const trimNoticeRe = () =>
+  /\s*\[\d+ earlier messages? (?:was|were) trimmed to fit the context window\.[^\]]*\]\s*/g
+
+/** Remove an earlier trim notice from a message body, so repeated compaction
+ *  rounds never stack notices inside the pinned task or the kept window. */
+export function stripTrimNotice(text: string): string {
+  if (!trimNoticeRe().test(text)) return text
+  return text.replace(trimNoticeRe(), '\n\n').replace(/\n{3,}/g, '\n\n').trim()
+}
+
+/**
  * True for a message that is a tool RESULT — either the native `tool` role or
  * a Hermes `<tool_response>` carried on a user message. Used to trim a leading
  * orphan result whose originating tool_call fell outside the kept window.
@@ -216,9 +230,15 @@ export function compactMessages(
   // window but exceeds the message-count ceiling still has to shrink.
   if (currentTokens <= triggerTokens && messages.length <= MAX_SEND_MESSAGES) return messages
 
-  // Separate system prompt (always kept)
+  // Separate system prompt (always kept). A stray system message deeper in
+  // the history that is only an old trim notice is dropped outright here:
+  // strict Jinja chat templates raise on any mid-conversation system message
+  // ("System message must be at the beginning", Discord #bug-reports
+  // 2026-08-21), so one may never survive a compaction round.
   const systemMsg = messages[0]?.role === 'system' ? messages[0] : null
-  const nonSystem = systemMsg ? messages.slice(1) : [...messages]
+  const nonSystem = (systemMsg ? messages.slice(1) : [...messages]).filter(
+    (m) => !(m.role === 'system' && typeof m.content === 'string' && trimNoticeRe().test(m.content)),
+  )
 
   // If we have fewer messages than KEEP_RECENT, can't compact further
   if (nonSystem.length <= KEEP_RECENT) return messages
@@ -246,14 +266,20 @@ export function compactMessages(
   // results imply instead of what was asked. Keep the first user message
   // (capped) out of the drop zone, alongside the system prompt.
   const firstUserIdx = capped.findIndex((m) => m.role === 'user')
-  const pinnedTask =
+  // Strip an earlier round's trim notice BEFORE capping, so the notice this
+  // round appends below never stacks and never gets sliced apart by the cap.
+  const rawTask =
     firstUserIdx >= 0 && typeof capped[firstUserIdx].content === 'string'
+      ? stripTrimNotice(capped[firstUserIdx].content)
+      : null
+  const pinnedTask =
+    rawTask !== null
       ? {
           ...capped[firstUserIdx],
           content:
-            capped[firstUserIdx].content.length > PINNED_TASK_MAX_CHARS
-              ? truncateToolResult(capped[firstUserIdx].content, PINNED_TASK_MAX_CHARS)
-              : capped[firstUserIdx].content,
+            rawTask.length > PINNED_TASK_MAX_CHARS
+              ? truncateToolResult(rawTask, PINNED_TASK_MAX_CHARS)
+              : rawTask,
         }
       : null
   const pinnedTokens = pinnedTask ? estimateMessageTokens([pinnedTask]) : 0
@@ -288,9 +314,7 @@ export function compactMessages(
   const droppedCount = capped.length - kept.length - (pinNeeded ? 1 : 0)
   const compacted: OllamaChatMessage[] = []
   if (systemMsg) compacted.push(systemMsg)
-  if (pinNeeded && pinnedTask) {
-    compacted.push(pinnedTask)
-  }
+  let notice: string | null = null
   if (droppedCount > 0) {
     // What was dropped is exactly the record of the work already done, while
     // the pin keeps the instruction alive forever. Measured on the installed
@@ -316,10 +340,29 @@ export function compactMessages(
     // with file_read.") actively FED a re-read loop — every iteration the
     // model was told to read again what it had just read. Keep the honest
     // recovery path but make it single-shot and anti-repeat.
-    compacted.push({
-      role: 'system',
-      content: `[${droppedCount} earlier message${droppedCount === 1 ? '' : 's'} were trimmed to fit the context window. The original task above still stands. Results you already saw still hold.${doneLine} If a detail is genuinely missing, re-read that specific file once; never repeat a call that already ran.]`,
-    })
+    notice = `[${droppedCount} earlier message${droppedCount === 1 ? ' was' : 's were'} trimmed to fit the context window. The original task still stands. Results you already saw still hold.${doneLine} If a detail is genuinely missing, re-read that specific file once; never repeat a call that already ran.]`
+  }
+
+  // The notice used to be its own role:'system' message pushed right here,
+  // between the pin and the window — a system message mid conversation, which
+  // strict Jinja chat templates refuse with "System message must be at the
+  // beginning" (platorius, Discord #bug-reports 2026-08-21: "the problem is
+  // only in LU", same prompts fine elsewhere because compaction only fires
+  // once the history is long). It now rides inside user material: appended to
+  // the pinned task, else prefixed to the first kept user turn, else as its
+  // own user turn. After compaction, system only ever sits at index 0.
+  if (pinNeeded && pinnedTask) {
+    compacted.push(
+      notice ? { ...pinnedTask, content: `${pinnedTask.content}\n\n${notice}` } : pinnedTask,
+    )
+    notice = null
+  }
+  if (notice) {
+    if (kept[0]?.role === 'user' && typeof kept[0].content === 'string') {
+      kept[0] = { ...kept[0], content: `${notice}\n\n${stripTrimNotice(kept[0].content)}` }
+    } else {
+      compacted.push({ role: 'user', content: notice })
+    }
   }
   compacted.push(...kept)
   return compacted

@@ -1731,3 +1731,200 @@ function readSettingNumber(key: 'imageGenTimeoutMinutes' | 'videoGenTimeoutMinut
     return null
   }
 }
+
+// ..................................................................
+// Create-tab render juggling (Z36 finding 1, W3 run 2026-08-16)
+//
+// The Create/music/video lanes used to free VRAM with one bare
+// `offload_local_models` call: both llama processes died with no KV save and
+// nobody reloaded them, so the next chat turn paid a measured 62 s cold
+// start. These two functions give that path the same discipline the agent
+// hand-off above has: capture what is resident, save the built-in engine's
+// KV slot, evict, and after the render bring everything back warm.
+//
+// The eviction itself stays as eager as before. The render should own the
+// whole card; a resident chat model forces ComfyUI into heavy CPU offload
+// even when nothing OOMs, so unlike the agent path there is no fits-or-not
+// math here. One exception: exclusiveVramMode 'never' now really means
+// never, matching decideUnload's contract for the agent path.
+
+export interface RenderEviction {
+  /** Ollama model that was resident in VRAM and should come back. */
+  ollamaModel: string | null
+  /** LM Studio model (with its loaded context length) to reload. */
+  lms: LmsTextModel | null
+  /** Built-in llama-server to restart, and whether its KV slot was saved. */
+  bundled: (BundledTarget & { slotSaved: boolean }) | null
+}
+
+const EMPTY_EVICTION: RenderEviction = { ollamaModel: null, lms: null, bundled: null }
+
+function evictionEmpty(e: RenderEviction): boolean {
+  return !e.ollamaModel && !e.lms && !e.bundled
+}
+
+// Evict/restore pairs run serialised through one chain so they never overlap.
+// A finished render parks its haul in _pendingRestore for a short grace
+// window; a NEW eviction inside that window inherits the haul instead of
+// letting it load, so back-to-back renders skip the pointless reload cycle.
+let _renderJuggle: Promise<unknown> = Promise.resolve()
+let _renderEpoch = 0
+let _pendingRestore: RenderEviction | null = null
+export const RENDER_RESTORE_GRACE_MS = 2_000
+
+/** Test-only: reset the render-juggle chain state between unit tests. */
+export function __resetRenderJuggleForTests(): void {
+  _renderJuggle = Promise.resolve()
+  _renderEpoch = 0
+  _pendingRestore = null
+}
+
+function mergeEvictions(base: RenderEviction | null, add: RenderEviction): RenderEviction {
+  if (!base) return add
+  return {
+    ollamaModel: add.ollamaModel ?? base.ollamaModel,
+    lms: add.lms ?? base.lms,
+    bundled: add.bundled ?? base.bundled,
+  }
+}
+
+/**
+ * Free the GPU for a Create-tab render, remembering what was evicted so
+ * restoreChatBackendsAfterRender can bring it back. Never throws; a failed
+ * probe just means that backend is not in the haul.
+ */
+export function evictChatBackendsForRender(): Promise<RenderEviction> {
+  _renderEpoch++
+  const run = _renderJuggle.catch(() => {}).then(() => evictBody())
+  _renderJuggle = run.catch(() => {})
+  return run.catch(() => ({ ...EMPTY_EVICTION }))
+}
+
+async function evictBody(): Promise<RenderEviction> {
+  // A restore that has not run yet is inherited wholesale: whatever it wanted
+  // to bring back stays evicted and becomes THIS render's restore duty.
+  const inherited = _pendingRestore
+  _pendingRestore = null
+
+  if (getExclusiveVramMode() === 'never') {
+    // The user opted out of VRAM juggling; do not touch the resident chat
+    // backends. An inherited haul still needs restoring after this render.
+    return inherited ?? { ...EMPTY_EVICTION }
+  }
+
+  const result: RenderEviction = { ...EMPTY_EVICTION }
+
+  // Capture BEFORE the kill so the restore list is honest.
+  if (isOllamaLocal()) {
+    try {
+      const resident = await getResidentModels()
+      const target = pickResidentOllamaTarget(resident, getActiveAgentModel())
+      if (target) result.ollamaModel = target.name
+    } catch { /* nothing resident to remember */ }
+  }
+  try {
+    const lms = (await detectLmsTextModel(getActiveAgentModel())) ?? (await detectAnyLoadedLmsModel())
+    if (lms) result.lms = lms
+  } catch { /* LM Studio absent */ }
+  const bundled = await detectBundledEngine()
+  if (bundled) {
+    // GH #85 discipline for the Create path too: serialize the KV cache so
+    // the reload after the render does not re-process the whole history.
+    const saved = await backendCall<{ ok?: boolean }>('kv_slot_action', { port: bundled.port, action: 'save' }).catch(() => null)
+    if (saved?.ok !== true) log.warn('render_juggle.kv_save_failed', { port: bundled.port })
+    result.bundled = { ...bundled, slotSaved: saved?.ok === true }
+  }
+
+  // The actual eviction, exactly the pair of calls the Create tab always
+  // made: offload_local_models stops Ollama residents and both managed
+  // sidecars, lmstudio_unload_model clears LM Studio. Best effort, a failed
+  // call must never block a render.
+  await Promise.all([
+    backendCall('offload_local_models', { includeComfyui: false }).catch(() => {}),
+    backendCall('lmstudio_unload_model', { model: '--all' }).catch(() => {}),
+  ])
+
+  // Merge an inherited haul: it describes models that are STILL evicted from
+  // an earlier render whose restore never ran. Fresh captures win on
+  // conflict, they are the newer truth about the same backend.
+  const merged = inherited ? mergeEvictions(inherited, result) : result
+  log.info('render_juggle.evicted', {
+    ollama: merged.ollamaModel,
+    lms: merged.lms?.id ?? null,
+    bundled: merged.bundled?.modelPath ?? null,
+  })
+  return merged
+}
+
+/**
+ * Bring the evicted chat backends back after a render (success, failure or
+ * cancel). Waits a short grace window first so a follow-up render can take
+ * over the haul instead of paying reload-then-evict. Never throws.
+ */
+export function restoreChatBackendsAfterRender(
+  evicted: RenderEviction,
+  graceMs: number = RENDER_RESTORE_GRACE_MS,
+): Promise<void> {
+  // Snapshot the epoch AT CALL TIME, not when the body gets its turn on the
+  // chain: an eviction that lands in between must count as "newer render".
+  const myEpoch = _renderEpoch
+  const run = _renderJuggle.catch(() => {}).then(() => restoreBody(evicted, graceMs, myEpoch))
+  _renderJuggle = run.catch(() => {})
+  return run.catch(() => {})
+}
+
+async function restoreBody(evicted: RenderEviction, graceMs: number, myEpoch: number): Promise<void> {
+  if (evictionEmpty(evicted)) return
+  _pendingRestore = mergeEvictions(_pendingRestore, evicted)
+  if (_renderEpoch !== myEpoch) return // a newer render inherits the haul
+  if (graceMs > 0) await sleep(graceMs)
+  if (_renderEpoch !== myEpoch) return // a newer render inherits the haul
+  const todo = _pendingRestore
+  _pendingRestore = null
+  if (!todo || evictionEmpty(todo)) return
+
+  // Give the chat backends their VRAM back. freeMemory drops ComfyUI's
+  // cached checkpoint; without it the reloads below can OOM right after a
+  // big render.
+  try { await freeMemory() } catch { /* best effort */ }
+  if (todo.bundled) {
+    try {
+      await startBundledEngine(todo.bundled.modelPath)
+      if (todo.bundled.slotSaved) {
+        const restored = await backendCall<{ ok?: boolean }>('kv_slot_action', { port: todo.bundled.port, action: 'restore' }).catch(() => null)
+        if (restored?.ok !== true) {
+          // Non-fatal: the next turn re-processes the history, the pre-#85 cost.
+          log.warn('render_juggle.kv_restore_failed', { port: todo.bundled.port })
+        }
+      }
+    } catch (e) {
+      log.warn('render_juggle.bundled_reload_failed', { err: String(e instanceof Error ? e.message : e) })
+    }
+  }
+  if (todo.ollamaModel) {
+    try {
+      await loadModel(todo.ollamaModel)
+    } catch (e) {
+      // No ComfyUI-restart recovery here on purpose: on the Create tab the
+      // user's next step is usually another render, so stopping ComfyUI to
+      // rescue a chat model would be the wrong trade. Ollama lazy-loads on
+      // the next message anyway.
+      log.warn('render_juggle.ollama_reload_failed', { model: todo.ollamaModel, err: String(e instanceof Error ? e.message : e) })
+    }
+  }
+  if (todo.lms) {
+    try {
+      await backendCall('lmstudio_load_model', {
+        model: todo.lms.id,
+        ...(todo.lms.contextLength ? { contextLength: todo.lms.contextLength } : {}),
+      })
+    } catch (e) {
+      log.warn('render_juggle.lms_reload_failed', { model: todo.lms.id, err: String(e instanceof Error ? e.message : e) })
+    }
+  }
+  log.info('render_juggle.restored', {
+    ollama: todo.ollamaModel,
+    lms: todo.lms?.id ?? null,
+    bundled: todo.bundled?.modelPath ?? null,
+  })
+}

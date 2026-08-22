@@ -15,9 +15,11 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 
+// Normalize to LF: a Windows checkout with core.autocrlf=true materializes
+// CRLF, and the multi-line pins below would fail on line endings alone.
 const src = readFileSync(
   resolve(dirname(fileURLToPath(import.meta.url)), '../useAgentChat.ts'), 'utf8',
-)
+).replace(/\r\n/g, '\n')
 
 describe('both branches check before they resend', () => {
   it('the ollama branch guards on the value it would drop', () => {

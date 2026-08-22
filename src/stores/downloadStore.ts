@@ -1,6 +1,59 @@
 import { create } from 'zustand'
-import { getDownloadProgress, pauseDownload, cancelDownload, resumeDownload, startModelDownload, startModelDownloadToPath, lookupFileMeta, type DownloadProgress } from '../api/discover'
+import { getDownloadProgress, pauseDownload, cancelDownload, resumeDownload, startModelDownload, startModelDownloadToPath, lookupFileMeta, modelsNotVisibleInComfy, ENUM_SUBFOLDERS, type DownloadProgress } from '../api/discover'
+import { waitForModelsVisible } from '../lib/bundle-install'
 import { log } from '../lib/logger'
+
+/** Files whose visibility wait is already running. The poller ticks once a
+ *  second and a wait lives for up to a minute, so without this the same file
+ *  would start a fresh wait on every tick. */
+const awaitingVisibility = new Set<string>()
+
+/** Tell everyone a model arrived, and keep telling them until ComfyUI can
+ *  actually see it.
+ *
+ *  The Model Manager half of C8. A finished download is not a finished
+ *  install: ComfyUI serves what its own directory scan has picked up, and on
+ *  the big files that scan is still running when the last byte lands. Create
+ *  learned to wait for that on 2026-08-13 (Voxyl AI, Aldrich Ironhart). This
+ *  path never did. It fired one event, useModels ran one fetch against a
+ *  stale /object_info, and the model was simply absent from the Installed tab
+ *  and every picker until the user reloaded by hand. Same slow scan, same too
+ *  short window, quieter symptom.
+ *
+ *  Deliberately NOT the healing engine restart Create does. That decision
+ *  belongs to a surface that knows whether a render is in flight; a background
+ *  poller must never stop the engine under somebody's job.
+ *
+ *  Best effort throughout: a file we cannot judge, an engine that is not up
+ *  and a probe that throws all leave the single event that was already there. */
+async function announceUntilVisible(filename: string, subfolder: string | undefined): Promise<void> {
+  // Only the enumerated subfolders can be judged at all. loras, upscale models
+  // and the GGUF text downloads never show up in these lists, so waiting on
+  // them would be a minute of certain failure.
+  if (!subfolder || !ENUM_SUBFOLDERS.has(subfolder)) return
+  if (awaitingVisibility.has(filename)) return
+  awaitingVisibility.add(filename)
+  try {
+    const { checkComfyConnection, refreshComfyModels } = await import('../api/comfyui')
+    // One cheap probe first: with the engine down the wait would spend its
+    // whole budget on requests that cannot be answered.
+    if (!(await checkComfyConnection())) return
+    const left = await waitForModelsVisible({
+      missing: () => modelsNotVisibleInComfy([filename]),
+      refresh: async () => {
+        await refreshComfyModels().catch(() => false)
+        window.dispatchEvent(new CustomEvent('comfyui-model-downloaded', { detail: { filename } }))
+      },
+    })
+    if (left.length > 0) {
+      log.warn('[downloads] ComfyUI still does not list the finished download', { filename })
+    }
+  } catch (err) {
+    log.warn('[downloads] visibility wait failed', { filename, err })
+  } finally {
+    awaitingVisibility.delete(filename)
+  }
+}
 
 // Maps filename → bundle name for grouped display
 type BundleMap = Record<string, string>
@@ -53,10 +106,16 @@ export const useDownloadStore = create<DownloadStoreState>()((set, get) => ({
       const prog = await getDownloadProgress()
       const prev = get().downloads
 
-      // Detect newly completed downloads and dispatch event
+      // Detect newly completed downloads and dispatch event. The filename
+      // rides along now so a listener can tell WHICH model arrived; every
+      // existing listener ignores the detail, so nothing had to change.
       for (const [id, d] of Object.entries(prog)) {
         if (d.status === 'complete' && prev[id]?.status !== 'complete') {
-          window.dispatchEvent(new CustomEvent('comfyui-model-downloaded'))
+          window.dispatchEvent(new CustomEvent('comfyui-model-downloaded', { detail: { filename: id } }))
+          // And then keep saying it until ComfyUI lists the file, because one
+          // event against a scan that has not finished reaches nobody.
+          const meta = get().downloadMeta[id] ?? lookupFileMeta(id) ?? undefined
+          void announceUntilVisible(id, meta?.subfolder)
         }
       }
 

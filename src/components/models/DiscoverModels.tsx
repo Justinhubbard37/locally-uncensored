@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { bundleIsComplete, bundleIsDownloading, bundleHasErrors } from '../../lib/bundle-state'
 import { motion } from 'framer-motion'
 import { Search, XCircle, Loader2, Sparkles, Unlock, ShieldCheck, ExternalLink, Download, CheckCircle } from 'lucide-react'
 import { X } from 'lucide-react'
@@ -320,34 +321,17 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
     dlStore.getState().startPolling()
   }
 
-  const isBundleComplete = (bundle: ModelBundle): boolean => {
-    // If any file has error status, bundle is NOT complete
-    const hasError = bundle.files.some(f => f.filename && downloads[f.filename]?.status === 'error')
-    if (hasError) return false
-    // Check 1: Download store says all files complete (current session downloads)
-    const dlComplete = bundle.files.every(f => f.filename && downloads[f.filename]?.status === 'complete')
-    if (dlComplete) return true
-    // Check 2: Disk check says all files are complete (size validated)
-    return bundleStatuses[bundle.name] === true
-  }
+  // The three card states live in lib/bundle-state.ts, pure, because bundles
+  // share files and the reasoning about whose row is whose is the whole of
+  // GH #113. See that file for what one shared row used to do to this list.
+  const isBundleComplete = (bundle: ModelBundle): boolean =>
+    bundleIsComplete(bundle.files, downloads, bundleStatuses[bundle.name] === true)
 
-  const isBundleDownloading = (bundle: ModelBundle): boolean => {
-    return bundle.files.some(f => f.filename && (downloads[f.filename]?.status === 'downloading' || downloads[f.filename]?.status === 'connecting'))
-  }
+  const isBundleDownloading = (bundle: ModelBundle): boolean =>
+    bundleIsDownloading(bundle.files, downloads)
 
-  const hasBundleErrors = (bundle: ModelBundle): boolean => {
-    // Check for explicit error status in download store
-    if (bundle.files.some(f => f.filename && downloads[f.filename]?.status === 'error')) return true
-    // Also check: some files show complete in store but bundle is NOT fully installed on disk
-    // This catches the case where error entries were dismissed but the bundle is still incomplete
-    const hasAnyDownloadEntry = bundle.files.some(f => f.filename && downloads[f.filename])
-    if (hasAnyDownloadEntry && !bundleStatuses[bundle.name]) {
-      const someComplete = bundle.files.some(f => f.filename && downloads[f.filename]?.status === 'complete')
-      const allComplete = bundle.files.every(f => f.filename && downloads[f.filename]?.status === 'complete')
-      if (someComplete && !allComplete) return true
-    }
-    return false
-  }
+  const hasBundleErrors = (bundle: ModelBundle): boolean =>
+    bundleHasErrors(bundle.files, downloads, bundleStatuses[bundle.name] === true)
 
   const getModelDownloadState = (model: DiscoverModel): DownloadProgress | null => {
     if (!model.filename) return null

@@ -190,6 +190,105 @@ fn torch_index_for_cap(cap_major: Option<u32>) -> &'static str {
     }
 }
 
+/// PyTorch's ROCm channel, which is what an AMD card needs instead of a CUDA
+/// build. Measured against download.pytorch.org on 2026-08-19: the rocm6.2,
+/// rocm6.3, rocm6.4 and rocm7.0 channels all exist and every torch wheel in
+/// every one of them is `manylinux_2_28_x86_64`. There is no win_amd64 ROCm
+/// wheel anywhere, which is the whole reason the Windows branch below refuses
+/// instead of downloading something. rocm6.4 carries torch 2.9.1 and is the
+/// older of the two living channels, so it is the smaller step from the CUDA
+/// builds the trainer is proven on.
+const ROCM_INDEX: &str = "https://download.pytorch.org/whl/rocm6.4";
+
+/// What the two pip steps should do about torch on THIS machine.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TorchPlan {
+    /// Install from this wheel index, and say this while doing it.
+    Wheels { index: &'static str, note: String },
+    /// No wheel exists that could drive this GPU on this OS. Nothing is
+    /// downloaded and the sentence is the whole answer.
+    NoWheels(String),
+}
+
+/// Pure: which torch belongs on a machine, kept apart from the probes so the
+/// decision is testable on any host.
+///
+/// The old rule was `torch_index_for_cap(detect_nvidia_compute_cap_major())`
+/// and nothing else, so it only ever asked nvidia-smi. On numbrain's and
+/// lapbo's AMD boxes that probe is silent, silence was read as "no GPU", and
+/// the trainer installed the same CUDA wheels a machine with no card at all
+/// gets. Those wheels import fine and see no device, so the environment
+/// passed every check and the run died in step 1 with a raw CUDA traceback.
+///
+/// NVIDIA wins on a box that has both: it is the card that can actually
+/// finish a run today.
+pub(crate) fn trainer_torch_plan(
+    has_nvidia: bool,
+    nvidia_cap_major: Option<u32>,
+    has_amd: bool,
+    os: &str,
+) -> TorchPlan {
+    if has_nvidia || nvidia_cap_major.is_some() || !has_amd {
+        let index = torch_index_for_cap(nvidia_cap_major);
+        return TorchPlan::Wheels {
+            index,
+            note: format!(
+                "GPU compute capability: {}, PyTorch wheels: {index}",
+                nvidia_cap_major.map_or("unknown".to_string(), |c| format!("{c}.x")),
+            ),
+        };
+    }
+    if os == "linux" {
+        return TorchPlan::Wheels {
+            index: ROCM_INDEX,
+            note: format!(
+                concat!(
+                    "AMD GPU detected, PyTorch wheels: {} (the ROCm build). ",
+                    "Honest limit: the training step runs an 8 bit optimizer that we ",
+                    "have only ever proven on CUDA, so this environment may still stop there.",
+                ),
+                ROCM_INDEX,
+            ),
+        };
+    }
+    TorchPlan::NoWheels(
+        concat!(
+            "Training a character needs a PyTorch build that can drive your AMD card, ",
+            "and PyTorch ships those for Linux only (checked 2026-08-19: the rocm6.2, ",
+            "rocm6.3, rocm6.4 and rocm7.0 channels all exist and every wheel in them ",
+            "is a Linux wheel, there is no Windows one). ZLUDA does not close that gap ",
+            "either, it stands in for the CUDA runtime and not for the CUDA PyTorch ",
+            "build. So this machine needs an NVIDIA card or Linux with ROCm to train. ",
+            "Everything else in LU keeps running on your AMD card, and nothing was ",
+            "downloaded.",
+        )
+        .to_string(),
+    )
+}
+
+/// Which vendors this machine actually has, from the same probe the hardware
+/// picker uses, so a card that shows up in Settings is a card the trainer
+/// knows about. That probe already survives a missing rocm-smi, which is the
+/// only reason an AMD card is visible here at all.
+fn gpu_vendors_present() -> (bool, bool) {
+    let gpus = crate::commands::gpu::detect_gpus().unwrap_or_default();
+    (
+        gpus.iter().any(|g| g.vendor == "nvidia"),
+        gpus.iter().any(|g| g.vendor == "amd"),
+    )
+}
+
+/// The card a training run would use, as a name for messages. None means the
+/// machine really has no GPU, which is the only case where a torch that sees
+/// no device is normal rather than wrong.
+fn training_gpu_label() -> Option<&'static str> {
+    match gpu_vendors_present() {
+        (true, _) => Some("NVIDIA"),
+        (false, true) => Some("AMD"),
+        (false, false) => None,
+    }
+}
+
 /// Every site-packages of the trainer venv. Windows puts one at
 /// `venv/Lib/site-packages`, POSIX one per python version under `venv/lib`.
 fn site_packages_dirs(root: &Path) -> Vec<PathBuf> {
@@ -232,20 +331,26 @@ fn musubi_installed(root: &Path) -> bool {
 /// preflight_verdict below. The trainer package is probed with find_spec
 /// rather than a real import: importing it pulls the whole training stack and
 /// would turn a cheap check into seconds of work and a second CUDA context.
-const TORCH_PREFLIGHT_PY: &str = "import importlib.util\nimport torch\nprint('TORCH_OK', torch.__version__)\nif torch.cuda.is_available():\n    cap = torch.cuda.get_device_capability(0)\n    print('CAP', cap[0], cap[1])\n    print('ARCHS', ' '.join(torch.cuda.get_arch_list()))\nif importlib.util.find_spec('musubi_tuner') is not None:\n    print('MUSUBI_OK')\n";
+const TORCH_PREFLIGHT_PY: &str = "import importlib.util\nimport torch\nprint('TORCH_OK', torch.__version__)\ncuda = torch.cuda.is_available()\nprint('CUDA', '1' if cuda else '0')\nif cuda:\n    cap = torch.cuda.get_device_capability(0)\n    print('CAP', cap[0], cap[1])\n    print('ARCHS', ' '.join(torch.cuda.get_arch_list()))\nif importlib.util.find_spec('musubi_tuner') is not None:\n    print('MUSUBI_OK')\n";
 
-/// What the preflight found. Three failure classes that all used to surface as
+/// What the preflight found. Four failure classes that all used to surface as
 /// a raw error deep inside the run: torch not importable (half install), a
 /// torch build whose kernel list stops below the GPU's compute capability
 /// (cu121 on Blackwell, which imports fine and even reports CUDA as
-/// available), and the trainer package missing (an install that died after
-/// torch). Each one is repairable, which is why they are distinguished rather
-/// than collapsed into one error string.
+/// available), a torch that reaches no card at all on a machine that has one
+/// (the CUDA wheels an AMD box used to be handed), and the trainer package
+/// missing (an install that died after torch). Each one is repairable, which
+/// is why they are distinguished rather than collapsed into one error string.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Preflight {
     Ok,
     TorchBroken(String),
     KernelsTooOld { cap: u32, max: u32 },
+    /// torch imports, runs, and reports no device at all on a machine that
+    /// has a card. A CUDA build on an AMD box does exactly this. It used to
+    /// pass the check as an ordinary processor only environment and then die
+    /// in step 1 with whatever traceback the training script produced.
+    GpuUnreachable { vendor: String },
     PackageMissing,
 }
 
@@ -254,10 +359,16 @@ impl Preflight {
         matches!(self, Preflight::Ok)
     }
 
-    /// Only a wrong-kernel torch has to be pushed out of the way; the other
-    /// two classes install into what is missing.
+    /// A torch that is there but wrong has to be pushed out of the way, which
+    /// is the kernel gap and the card it cannot reach; the other two classes
+    /// install into what is missing.
     pub(crate) fn needs_torch_reinstall(&self) -> bool {
-        matches!(self, Preflight::TorchBroken(_) | Preflight::KernelsTooOld { .. })
+        matches!(
+            self,
+            Preflight::TorchBroken(_)
+                | Preflight::KernelsTooOld { .. }
+                | Preflight::GpuUnreachable { .. }
+        )
     }
 
     /// What the customer can actually DO once the automatic repair has failed
@@ -286,6 +397,9 @@ impl Preflight {
             ),
             Preflight::KernelsTooOld { cap, max } => format!(
                 "This PyTorch build has no kernels for your GPU (compute capability {cap}.x, the build stops at {max}.x). An RTX 50 card on the old cu121 build does exactly this."
+            ),
+            Preflight::GpuUnreachable { vendor } => format!(
+                "The PyTorch in the trainer environment cannot see your {vendor} card, it reports no usable GPU. That is a wrong build for this machine, not a driver fault."
             ),
             Preflight::PackageMissing => {
                 "The trainer package (musubi_tuner) is not installed in the trainer environment.".to_string()
@@ -358,6 +472,10 @@ pub(crate) fn repair_failed_message(after: &Preflight, tail: &str) -> String {
 /// a different button than every other failure here.
 fn already_explained(err: &str) -> bool {
     err.contains("Install Python in Settings")
+        // The AMD refusal is the second one: it names the OS wall, says that
+        // nothing was downloaded, and pointing at Set up trainer would only
+        // walk the customer into the same wall again.
+        || err.contains("needs an NVIDIA card or Linux with ROCm")
 }
 
 /// The repair stopped before it even finished. Same dead end for the customer
@@ -386,7 +504,11 @@ pub(crate) fn install_failed_message(err: &str) -> String {
     )
 }
 
-fn preflight_verdict(exit_ok: bool, stdout: &str, stderr: &str) -> Preflight {
+/// `gpu` is the card a run would use ("NVIDIA" / "AMD"), or None when the
+/// machine really has none. Without it a torch that sees no device is
+/// indistinguishable from a legitimate processor only environment, which is
+/// the hole numbrain's and lapbo's AMD boxes fell through.
+fn preflight_verdict(exit_ok: bool, stdout: &str, stderr: &str, gpu: Option<&str>) -> Preflight {
     if !exit_ok || !stdout.contains("TORCH_OK") {
         let tail = stderr
             .lines()
@@ -405,7 +527,18 @@ fn preflight_verdict(exit_ok: bool, stdout: &str, stderr: &str) -> Preflight {
             cap_major = rest.split_whitespace().next().and_then(|v| v.parse().ok());
         } else if let Some(rest) = l.strip_prefix("ARCHS ") {
             for arch in rest.split_whitespace() {
-                let digits: String = arch.chars().filter(|c| c.is_ascii_digit()).collect();
+                // CUDA names only. A ROCm build lists gfx1030 and gfx90a, and
+                // the old expression stripped every non digit and dropped the
+                // last one, which reads gfx1030 as 103 and gfx90a as 9. Those
+                // are not compute capabilities, so comparing one against them
+                // is meaningless in both directions.
+                let Some(num) = arch
+                    .strip_prefix("sm_")
+                    .or_else(|| arch.strip_prefix("compute_"))
+                else {
+                    continue;
+                };
+                let digits: String = num.chars().take_while(char::is_ascii_digit).collect();
                 if digits.len() >= 2 {
                     if let Ok(n) = digits[..digits.len() - 1].parse::<u32>() {
                         arch_max = Some(arch_max.map_or(n, |p| p.max(n)));
@@ -413,6 +546,12 @@ fn preflight_verdict(exit_ok: bool, stdout: &str, stderr: &str) -> Preflight {
                 }
             }
         }
+    }
+    // Asked before the kernel question, because a torch that reaches no card
+    // at all cannot have a kernel gap: there is no CAP line to compare with.
+    let sees_a_device = cap_major.is_some() || stdout.contains("CUDA 1");
+    if let (Some(vendor), false) = (gpu, sees_a_device) {
+        return Preflight::GpuUnreachable { vendor: vendor.to_string() };
     }
     if let (Some(cap), Some(max)) = (cap_major, arch_max) {
         if cap > max {
@@ -700,6 +839,20 @@ fn provision_trainer_env(
     pid_slot: &Arc<Mutex<Option<u32>>>,
 ) -> Result<(), String> {
     let tag = if repairing { "Repairing the trainer environment" } else { "Setting up the trainer" };
+
+    // Decided first, before a clone, a venv and 2.5 GB of wheels: a machine
+    // whose card has no PyTorch build should not have to pay for all of that
+    // to find out. The probe is the vendor list, not nvidia-smi alone, which
+    // is what left numbrain and lapbo indistinguishable from a machine with
+    // no GPU at all.
+    let (has_nvidia, has_amd) = gpu_vendors_present();
+    let cap = crate::commands::install::detect_nvidia_compute_cap_major();
+    let (torch_index, wheel_note) =
+        match trainer_torch_plan(has_nvidia, cap, has_amd, std::env::consts::OS) {
+            TorchPlan::Wheels { index, note } => (index, note),
+            TorchPlan::NoWheels(why) => return Err(why),
+        };
+
     let _ = fs::create_dir_all(root.join("models"));
 
     // 1) pinned clone (releases are the project's own stability advice)
@@ -738,15 +891,10 @@ fn provision_trainer_env(
     }
     let vpy = venv_python(root).to_string_lossy().to_string();
 
-    // 3) torch, routed by the same nvidia-smi probe the ComfyUI installer
-    // uses (D#37): Blackwell gets cu128, everything else keeps cu121.
+    // 3) torch, from the channel the plan above picked: Blackwell gets cu128,
+    // every other NVIDIA card keeps cu121, an AMD card on Linux gets ROCm.
     set_status(state, status_kind, &format!("{tag} (3/4): installing PyTorch into the trainer venv (~2.5 GB, one time)..."));
-    let cap = crate::commands::install::detect_nvidia_compute_cap_major();
-    let torch_index = torch_index_for_cap(cap);
-    push_log(state, &format!(
-        "GPU compute capability: {}, PyTorch wheels: {torch_index}",
-        cap.map_or("unknown".to_string(), |c| format!("{c}.x")),
-    ));
+    push_log(state, &wheel_note);
     let mut torch = Command::new(&vpy);
     let mut torch_args = vec!["-m", "pip", "install", "--progress-bar", "off", "--no-input"];
     // A finished but WRONG torch satisfies pip and would never be replaced:
@@ -972,6 +1120,10 @@ pub fn start_character_training(
         // install that stopped before the trainer package). The customer
         // should not need install instructions, so the run fixes its own
         // environment and carries on.
+        // Asked once and reused by both probes: the same vendor list the
+        // install plans from, so the check and the repair cannot disagree
+        // about what is in the machine.
+        let gpu_label = training_gpu_label();
         let probe_env = |label: &str| -> Preflight {
             let mut probe = Command::new(&vpy_s);
             probe.args(["-c", TORCH_PREFLIGHT_PY]);
@@ -983,6 +1135,7 @@ pub fn start_character_training(
                     out.status.success(),
                     &String::from_utf8_lossy(&out.stdout),
                     &String::from_utf8_lossy(&out.stderr),
+                    gpu_label,
                 ),
                 Err(e) => Preflight::TorchBroken(format!("could not run the trainer python ({label}): {e}")),
             }
@@ -1278,12 +1431,124 @@ mod tests {
     }
 
     #[test]
+    fn an_amd_box_gets_the_rocm_wheels_on_linux_and_an_honest_no_on_windows() {
+        use super::{trainer_torch_plan, TorchPlan};
+        // numbrain and lapbo: no NVIDIA card, so the old probe answered None
+        // and the plan was the same cu121 a machine with no GPU at all gets.
+        match trainer_torch_plan(false, None, true, "linux") {
+            TorchPlan::Wheels { index, note } => {
+                assert_eq!(index, "https://download.pytorch.org/whl/rocm6.4");
+                assert!(note.contains("AMD"), "the log line names the card: {note}");
+                // Never sold as proven: the 8 bit optimizer is CUDA only here.
+                assert!(note.contains("Honest limit"), "note hides the limit: {note}");
+            }
+            other => panic!("an AMD card on Linux wants the ROCm wheels, got {other:?}"),
+        }
+        // Windows and macOS have no ROCm wheel to install at all, so the only
+        // honest move is to say so before anything is downloaded.
+        for os in ["windows", "macos"] {
+            match trainer_torch_plan(false, None, true, os) {
+                TorchPlan::NoWheels(why) => {
+                    assert!(why.contains("Linux only"), "{os}: {why}");
+                    assert!(why.contains("ZLUDA"), "{os} answer ignores ZLUDA: {why}");
+                    assert!(why.contains("nothing was downloaded"), "{os}: {why}");
+                    // It carries its own way out, so the generic wrapper with
+                    // the "check your disk" step has to leave it alone.
+                    assert!(super::already_explained(&why), "{os} answer gets rewrapped");
+                }
+                other => panic!("{os} has no ROCm wheel, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn negative_control_every_nvidia_case_plans_exactly_as_before() {
+        use super::{torch_index_for_cap, trainer_torch_plan, TorchPlan};
+        // The AMD branch is new, the NVIDIA ones must not have moved. Every
+        // case has to leave the plan with the index torch_index_for_cap picks
+        // on its own, including the machine with no GPU at all.
+        for (has_nvidia, cap, has_amd) in [
+            (true, Some(12u32), false),
+            (true, Some(8), false),
+            (true, None, false),
+            (false, None, false),
+            // A box with both cards trains on the NVIDIA one.
+            (true, Some(8), true),
+        ] {
+            match trainer_torch_plan(has_nvidia, cap, has_amd, "windows") {
+                TorchPlan::Wheels { index, .. } => assert_eq!(
+                    index,
+                    torch_index_for_cap(cap),
+                    "nvidia={has_nvidia} cap={cap:?} amd={has_amd} moved channel",
+                ),
+                other => panic!("nvidia={has_nvidia} cap={cap:?} must install, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn preflight_names_a_torch_that_cannot_reach_the_amd_card() {
+        use super::{preflight_verdict, Preflight};
+        // The CUDA wheels the old plan put on numbrain's box: torch imports,
+        // reports no device, and every check passed. The run then walked into
+        // step 1 and died there with the training script's own traceback.
+        let out = "TORCH_OK 2.3.1+cu121\nCUDA 0\nMUSUBI_OK\n";
+        let v = preflight_verdict(true, out, "", Some("AMD"));
+        assert_eq!(v, Preflight::GpuUnreachable { vendor: "AMD".into() });
+        assert!(v.message().contains("AMD"));
+        assert!(v.message().contains("no usable GPU"));
+        // A wrong build is exactly what pip has to be forced past.
+        assert!(v.needs_torch_reinstall());
+        // Negative control: the identical output on a machine that really has
+        // no card is a healthy processor only environment and stays Ok.
+        assert!(preflight_verdict(true, out, "", None).is_ok());
+    }
+
+    #[test]
+    fn a_rocm_arch_list_is_not_read_as_cuda_kernel_numbers() {
+        use super::{preflight_verdict, Preflight};
+        // A ROCm build lists gfx names, not sm names, and numbrain's RX 9070
+        // XT is gfx1201. This is the environment the Linux branch of the plan
+        // now creates, so the check has to survive it.
+        let rocm = "TORCH_OK 2.9.1+rocm6.4\nCUDA 1\nCAP 12 0\nARCHS gfx1030 gfx1100 gfx1201\nMUSUBI_OK\n";
+        assert!(preflight_verdict(true, rocm, "", Some("AMD")).is_ok());
+        // What the old expression made of that list: it stripped every non
+        // digit and dropped the last one, so gfx1201 came out as 120.
+        let old_arch_max = ["gfx1030", "gfx1100", "gfx1201"]
+            .iter()
+            .filter_map(|a| {
+                let d: String = a.chars().filter(char::is_ascii_digit).collect();
+                d[..d.len() - 1].parse::<u32>().ok()
+            })
+            .max();
+        assert_eq!(old_arch_max, Some(120), "gfx1201 was read as 120");
+        // 120 is not a compute capability, and that is why nobody noticed: it
+        // sits so far above every real one that `cap > max` could not fire in
+        // either direction. The guard was inert on ROCm rather than wrong out
+        // loud, so a genuine ROCm kernel gap goes past it unnamed. Skipping
+        // the gfx names is honest about that instead of pretending to check.
+        assert!(12 <= old_arch_max.unwrap(), "the comparison could never fire");
+        // Positive control: a real CUDA arch list is still read exactly as it
+        // was, so the gfx guard did not blunt the check it sits in.
+        assert_eq!(
+            preflight_verdict(
+                true,
+                "TORCH_OK 2.3.1+cu121\nCUDA 1\nCAP 12 0\nARCHS sm_90\nMUSUBI_OK\n",
+                "",
+                Some("NVIDIA"),
+            ),
+            Preflight::KernelsTooOld { cap: 12, max: 9 },
+        );
+    }
+
+    #[test]
     fn preflight_fails_loud_when_torch_does_not_import() {
         use super::{preflight_verdict, Preflight};
         let v = preflight_verdict(
             false,
             "",
             "Traceback (most recent call last):\nModuleNotFoundError: No module named 'torch'",
+            Some("NVIDIA"),
         );
         assert_eq!(
             v,
@@ -1297,7 +1562,7 @@ mod tests {
     fn preflight_names_the_kernel_gap_on_blackwell_with_cu121() {
         use super::{preflight_verdict, Preflight};
         let out = "TORCH_OK 2.3.1+cu121\nCAP 12 0\nARCHS sm_50 sm_60 sm_70 sm_75 sm_80 sm_86 sm_90\nMUSUBI_OK\n";
-        let v = preflight_verdict(true, out, "");
+        let v = preflight_verdict(true, out, "", Some("NVIDIA"));
         assert_eq!(v, Preflight::KernelsTooOld { cap: 12, max: 9 });
         assert!(v.message().contains("compute capability 12.x"));
         assert!(v.message().contains("no kernels"));
@@ -1311,7 +1576,7 @@ mod tests {
         // sockenmonster: the install died between torch and `pip install -e .`.
         // torch imports, CUDA is fine, and the run still cannot start.
         let out = "TORCH_OK 2.7.0+cu128\nCAP 8 6\nARCHS sm_80 sm_86 sm_90\n";
-        let v = preflight_verdict(true, out, "");
+        let v = preflight_verdict(true, out, "", Some("NVIDIA"));
         assert_eq!(v, Preflight::PackageMissing);
         assert!(v.message().contains("musubi_tuner"));
         // Nothing is wrong with torch here, so it must not be reinstalled.
@@ -1322,8 +1587,10 @@ mod tests {
     fn preflight_passes_on_a_matching_build_and_on_cpu_only() {
         use super::preflight_verdict;
         let ok = "TORCH_OK 2.7.0+cu128\nCAP 12 0\nARCHS sm_80 sm_90 sm_100 sm_120 compute_120\nMUSUBI_OK\n";
-        assert!(preflight_verdict(true, ok, "").is_ok());
-        assert!(preflight_verdict(true, "TORCH_OK 2.3.1\nMUSUBI_OK\n", "").is_ok());
+        assert!(preflight_verdict(true, ok, "", Some("NVIDIA")).is_ok());
+        // No card in the machine, so a torch that sees no device is exactly
+        // what a healthy processor only environment looks like.
+        assert!(preflight_verdict(true, "TORCH_OK 2.3.1\nMUSUBI_OK\n", "", None).is_ok());
     }
 
     #[test]
@@ -1335,7 +1602,7 @@ mod tests {
         let out = "TORCH_OK 2.7.0+cu128\nCAP 8 6\nARCHS sm_80 sm_86 sm_90\n";
         let old_rule_says_ready = out.contains("TORCH_OK");
         assert!(old_rule_says_ready);
-        assert_ne!(preflight_verdict(true, out, ""), Preflight::Ok);
+        assert_ne!(preflight_verdict(true, out, "", Some("NVIDIA")), Preflight::Ok);
     }
 
     #[test]
@@ -1343,7 +1610,7 @@ mod tests {
         use super::TORCH_PREFLIGHT_PY;
         // A marker renamed on one side only would silently turn every run into
         // a repair loop, so the two are pinned against each other here.
-        for marker in ["TORCH_OK", "CAP", "ARCHS", "MUSUBI_OK"] {
+        for marker in ["TORCH_OK", "CUDA", "CAP", "ARCHS", "MUSUBI_OK"] {
             assert!(TORCH_PREFLIGHT_PY.contains(marker), "probe never prints {marker}");
         }
         // find_spec, not import: importing pulls the whole training stack.

@@ -13,6 +13,7 @@ import os from 'os'
 import dns from 'node:dns'
 import net from 'node:net'
 import { devResolveWithinJail, effectiveByteCap, JailEscapeError } from './src/lib/dev-fs-jail'
+import { postContentTypeAllowed, postContentTypeError } from './src/lib/local-api-guard'
 
 // ── Dev-server SSRF guard ───────────────────────────────────────
 // The dev proxies that fetch a *user-supplied* ?url= (proxy-image,
@@ -369,12 +370,16 @@ function comfyLauncher(): Plugin {
           return next();
         }
 
-        // 1. Strict Content-Type enforcement for POST requests
+        // 1. Strict Content-Type enforcement for POST requests. The rule is
+        // application/json everywhere except /transcribe, whose body IS the
+        // raw recorded audio and was 415'd here before the whisper handler
+        // ever saw it (GitHub #115, graysoncooper). The carve-out swaps the
+        // JSON requirement for an audio one, it does not drop the check.
         if (req.method === 'POST') {
-           const contentType = req.headers['content-type'] || '';
-           if (!contentType.includes('application/json')) {
+           const contentType = String(req.headers['content-type'] || '');
+           if (!postContentTypeAllowed(req.url, contentType)) {
                res.writeHead(415, { 'Content-Type': 'text/plain' });
-               res.end('Unsupported Media Type: Must be application/json');
+               res.end(postContentTypeError(req.url));
                return;
            }
         }

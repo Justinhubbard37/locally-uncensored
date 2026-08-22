@@ -41,6 +41,7 @@ import { buildRequestMessages, trimWorkingHistory } from '../lib/context-decay'
 import { effectiveSendWindow } from '../lib/send-window'
 import { useSendSizeStore } from '../stores/sendSizeStore'
 import { resolveAgentNumCtx } from '../lib/agent-num-ctx'
+import { ensureBuiltinAgentCtx } from '../api/builtin-ensure'
 import { useMemoryStore } from '../stores/memoryStore'
 import { useVoiceStore } from '../stores/voiceStore'
 import { autoSpeak } from '../lib/ttsBridge'
@@ -71,6 +72,7 @@ import { finalStripThinkingTags, splitOrphanCloser, splitUnclosedThink } from '.
 import { openPlanGap, planReconcileSteer, PLAN_RECONCILE_BUDGET } from '../lib/plan-reconcile'
 import { PlanStaleness, planStalenessSteer } from '../lib/plan-staleness'
 import { reasoningOnlyRound, REASONING_CONTINUE_BUDGET, REASONING_CONTINUE_STEER } from '../lib/reasoning-round'
+import { findUnbackedLinks, unbackedLinksSteer } from '../lib/unbacked-links'
 import { useTodoStore } from '../stores/todoStore'
 import { platformPromptLine, hostClockLine } from '../lib/host-platform'
 import { httpStatusOf, isTerminalModelError, retryDelayMs } from '../lib/http-status'
@@ -296,6 +298,16 @@ export function useAgentChat() {
     // signals now go true together here and false together in the finally; the
     // only early return before the try (no conv) resets both.
     setIsAgentRunning(true)
+
+    // Z36 finding 2: an agent turn carries the tool catalogue and outgrows
+    // the built-in engine's 8192 start default, and llama-server's ctx is a
+    // start-time flag no per-request option can raise. Lift the engine to
+    // the agent ceiling (min of the GGUF's trained ctx and AGENT_CONTEXT_CAP)
+    // BEFORE resolveAgentNumCtx reads the started ctx as the run budget.
+    // No-op for every other provider; never throws.
+    try {
+      await ensureBuiltinAgentCtx(modelToUse)
+    } catch { /* run with whatever the engine has */ }
 
     // Create or get conversation
     let convId = store.activeConversationId
@@ -626,6 +638,14 @@ export function useAgentChat() {
     let mediaSynthesized = false
     let forceNoThink = false
     let dudRetried = false
+    // Z36 finding 3: one corrective steer for a final answer citing links no
+    // tool returned. A second offence keeps the model's text (G14-2) and
+    // flags the message instead, never a retry loop.
+    let linksSteered = false
+    // Arms the fabrication guard, exactly the Z36 trigger: it fired only once
+    // a REAL success sat in the history. Counts completed and cached calls
+    // after the D#81 media reclassification, so a failed render never arms it.
+    let anyToolSucceeded = false
     // G16, parity with useCodex: a final turn that leaves the model's own todo
     // list unfinished gets a bounded contradiction instead of ending the run.
     let planReconcilesRemaining = PLAN_RECONCILE_BUDGET
@@ -1365,6 +1385,56 @@ export function useAgentChat() {
             agentMessages.push({ role: 'user', content: REASONING_CONTINUE_STEER })
             continue
           }
+          // Z36 finding 3: with one real success in the history the model
+          // starts fabricating the next ones, confident links no tool ever
+          // returned. The G14 guards cover text the APP invents; this one
+          // catches the MODEL inventing, deterministically: a URL absent from
+          // everything the model was shown cannot have come from a tool. One
+          // steer to really search or retract; if it insists, the text stands
+          // (it is the model's answer, G14-2) and the bubble gets a labelled
+          // notice via unbackedLinks instead.
+          //
+          // The notice is NOT gated on a prior success: the Z36 counter-check
+          // (2026-08-22, persona run) watched Hermes-3-3B write its tool
+          // calls as prose, so no call ever really ran, and the invented
+          // links stood unmarked because the old anyToolSucceeded gate never
+          // armed. On an agent turn any link no tool returned is unverified
+          // by definition, so the label always tells the truth. Only the
+          // corrective STEER stays gated on a real success (the original Z36
+          // trigger), so a run that never used tools is not sent into an
+          // extra round.
+          if (turnContent.trim()) {
+            const shownToModel = agentMessages
+              .map((m) => {
+                const c = (m as { content?: unknown }).content
+                if (typeof c === 'string') return c
+                if (Array.isArray(c)) {
+                  return c
+                    .map((p) => (p && typeof p === 'object' && 'text' in p ? String((p as { text?: unknown }).text ?? '') : ''))
+                    .join('\n')
+                }
+                return ''
+              })
+              .join('\n')
+            const invented = findUnbackedLinks(turnContent, shownToModel)
+            if (invented.length > 0) {
+              if (anyToolSucceeded && !linksSteered) {
+                linksSteered = true
+                log.info('agent.unbacked_links_steer', { count: invented.length, links: invented })
+                agentMessages.push({ role: 'assistant', content: turnContent })
+                addBlock(convId!, assistantMessage.id, {
+                  id: uuid(),
+                  phase: 'reflection',
+                  content: turnContent,
+                  timestamp: Date.now(),
+                })
+                agentMessages.push({ role: 'user', content: unbackedLinksSteer(invented) })
+                continue
+              }
+              log.info('agent.unbacked_links_flagged', { count: invented.length, links: invented })
+              useChatStore.getState().updateMessageUnbackedLinks(convId!, assistantMessage.id, invented)
+            }
+          }
           contentRef.current = turnContent
           // G21-2: after tool activity the closing thought belongs in the
           // block sequence too, in position before the final answer, not in
@@ -1622,6 +1692,7 @@ export function useAgentChat() {
           const mediaOk = mediaCallSucceeded(entry.ac.toolName, entry.ac.result)
           if (!mediaOk) entry.ac.status = 'failed'
           if ((result.status === 'completed' || result.status === 'cached') && mediaOk) {
+            anyToolSucceeded = true
             if (entry.ac.toolName === 'image_generate') imageGenDone++
             else if (entry.ac.toolName === 'video_generate') videoGenDone++
           }

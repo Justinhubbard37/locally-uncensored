@@ -50,6 +50,8 @@ interface ChatState {
   updateMessageThinking: (conversationId: string, messageId: string, thinking: string) => void
   updateMessageUsage: (conversationId: string, messageId: string, usage: { promptTokens: number; completionTokens: number; totalTokens: number; estimated?: boolean }) => void
   updateMessageFinishReason: (conversationId: string, messageId: string, finishReason: string) => void
+  /** Z36 finding 3: links in the agent answer no tool returned. */
+  updateMessageUnbackedLinks: (conversationId: string, messageId: string, unbackedLinks: string[]) => void
   updateMessageAgentBlocks: (conversationId: string, messageId: string, blocks: AgentBlock[]) => void
   updateMessageArtifacts: (conversationId: string, messageId: string, artifacts: ChatArtifact[]) => void
   deleteMessagesAfter: (conversationId: string, messageId: string) => void
@@ -278,6 +280,19 @@ export const useChatStore = create<ChatState>()(
               ? {
                 ...c,
                 messages: c.messages.map((m) => (m.id === messageId ? { ...m, finishReason } : m)),
+                updatedAt: Date.now(),
+              }
+              : c
+          ),
+        })),
+
+      updateMessageUnbackedLinks: (conversationId, messageId, unbackedLinks) =>
+        set((state) => ({
+          conversations: state.conversations.map((c) =>
+            c.id === conversationId
+              ? {
+                ...c,
+                messages: c.messages.map((m) => (m.id === messageId ? { ...m, unbackedLinks } : m)),
                 updatedAt: Date.now(),
               }
               : c

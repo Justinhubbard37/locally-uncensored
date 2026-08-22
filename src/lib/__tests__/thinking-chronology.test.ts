@@ -15,7 +15,9 @@ import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const read = (rel: string) => readFileSync(resolve(here, rel), 'utf8')
+// Normalize to LF: a Windows checkout with core.autocrlf=true materializes
+// CRLF, and pins that span a line break would fail on line endings alone.
+const read = (rel: string) => readFileSync(resolve(here, rel), 'utf8').replace(/\r\n/g, '\n')
 const agent = read('../../hooks/useAgentChat.ts')
 const bubble = read('../../components/chat/MessageBubble.tsx')
 

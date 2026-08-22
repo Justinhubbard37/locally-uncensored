@@ -57,11 +57,16 @@ const buildRun = (round: (t: string, n?: number) => Msg[]): Msg[] => [
   ...PLAN_TOOLS.flatMap((t) => round(t)),
 ]
 
+// The notice rides inside user material since the Jinja fix (a mid
+// conversation system message crashed strict chat templates), so it is
+// extracted by its block shape, wherever it sits.
 const noticeOf = (msgs: Msg[]): string => {
-  const n = msgs.find(
-    (m) => m.role === 'system' && typeof m.content === 'string' && m.content.startsWith('['),
-  )
-  return n && typeof n.content === 'string' ? n.content : ''
+  for (const m of msgs) {
+    if (typeof m.content !== 'string') continue
+    const hit = m.content.match(/\[\d+ earlier messages? (?:was|were) trimmed to fit the context window\.[^\]]*\]/)
+    if (hit) return hit[0]
+  }
+  return ''
 }
 
 describe('the trim notice carries the trail of what already ran', () => {

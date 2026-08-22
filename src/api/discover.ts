@@ -1,5 +1,5 @@
 import { backendCall, fetchExternal } from "./backend"
-import { getCheckpoints, getDiffusionModels, getVAEModels, getCLIPModels, filterPartialFiles } from "./comfyui"
+import { getCheckpoints, getDiffusionModels, getVAEModels, getCLIPModels, getGgufUnetModels, filterPartialFiles } from "./comfyui"
 import type { ProviderId } from "./providers/types"
 import { log } from "../lib/logger"
 
@@ -137,16 +137,27 @@ export async function checkBundlesInstalled(bundles: ModelBundle[]): Promise<Rec
   // file check_model_sizes confirms is partial before matching.
   let comfyLists: Record<string, string[]> | null = null
   try {
-    const [rawCheckpoints, rawDiffModels, rawVaes, rawClips] = await Promise.all([
-      getCheckpoints(), getDiffusionModels(), getVAEModels(), getCLIPModels(),
+    // getGgufUnetModels for the same reason the Create probe needs it
+    // (b8531b6): UNETLoader only enumerates .safetensors and .sft, and GGUF
+    // quants are listed by ComfyUI-GGUF's own loader. Both Unfiltered video
+    // bundles are GGUF, so without it this cannot see the one file that makes
+    // them what they are, and the fuzzy fallback below can never confirm them.
+    const [rawCheckpoints, rawDiffModels, rawGgufUnets, rawVaes, rawClips] = await Promise.all([
+      getCheckpoints(), getDiffusionModels(), getGgufUnetModels(), getVAEModels(), getCLIPModels(),
     ])
-    const [checkpoints, diffModels, vaes, clips] = await Promise.all([
+    const [checkpoints, diffModels, ggufUnets, vaes, clips] = await Promise.all([
       filterPartialFiles(rawCheckpoints).then(s => Array.from(s)),
       filterPartialFiles(rawDiffModels).then(s => Array.from(s)),
+      filterPartialFiles(rawGgufUnets).then(s => Array.from(s)),
       filterPartialFiles(rawVaes).then(s => Array.from(s)),
       filterPartialFiles(rawClips).then(s => Array.from(s)),
     ])
-    comfyLists = { checkpoints, diffusion_models: diffModels, vae: vaes, text_encoders: clips }
+    comfyLists = {
+      checkpoints,
+      diffusion_models: [...diffModels, ...ggufUnets],
+      vae: vaes,
+      text_encoders: clips,
+    }
   } catch {
     comfyLists = null // ComfyUI not reachable · size-check verdicts stand
   }
@@ -205,6 +216,35 @@ export function normalizeModelBase(name: string): string {
   const base = name.split(/[\\/]/).pop() ?? name
   return base.replace(/\.[^.]+$/, '').toLowerCase()
     .replace(/[-_](fp4|fp8|fp16|bf16|e4m3fn|scaled|fp8_e4m3fn_scaled)$/g, '')
+}
+
+/** Which of `wanted` the RUNNING ComfyUI does not list yet.
+ *
+ *  One function, because there are two journeys that end in the same place: a
+ *  bundle installed from Create (CreateContext) and a download finished in the
+ *  Model Manager (downloadStore). C8 gave the first one a wait and left the
+ *  second with a single fetch, so the same slow directory scan that froze
+ *  Voxyl AI's card on 2026-08-13 simply left a model out of the Installed tab
+ *  instead. Two probes would have been two chances to drift.
+ *
+ *  getGgufUnetModels belongs here for the same reason getImageModels needs it
+ *  (comfyui.ts:658): UNETLoader only enumerates .safetensors and .sft, GGUF
+ *  quants are listed by ComfyUI-GGUF's own loader. The default Talking
+ *  Character bundle IS a .gguf in diffusion_models, so without it the probe
+ *  can never succeed for that bundle.
+ *
+ *  An engine it cannot reach reports everything as missing: an answer we could
+ *  not get is not a file we have seen. */
+export async function modelsNotVisibleInComfy(wanted: string[]): Promise<string[]> {
+  try {
+    const lists = await Promise.all([
+      getCheckpoints(), getDiffusionModels(), getVAEModels(), getCLIPModels(), getGgufUnetModels(),
+    ])
+    const visible = new Set(lists.flat().map(normalizeModelBase))
+    return wanted.filter((n) => !visible.has(normalizeModelBase(n)))
+  } catch {
+    return wanted // engine unreachable, so it has confirmed nothing
+  }
 }
 
 /** #72: the backend used to resolve a failed `git pull` as

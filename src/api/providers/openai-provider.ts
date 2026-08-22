@@ -18,8 +18,8 @@ import { parseSSEStream } from '../sse'
 import { repairJson } from '../../lib/tool-call-repair'
 import { signalCreditsExhausted } from '../../lib/credits-exhausted'
 import { parseRetryAfter } from '../../lib/http-status'
-import { localFetch, localFetchStream, isPrivateOrLanHost, isDirectFetchAllowed, hostnameOf, ensureProxyAllowsHost } from '../backend'
-import { ensureBuiltinEngineAlive, explainDeadEngine } from '../builtin-ensure'
+import { localFetch, localFetchStream, isPrivateOrLanHost, isDirectFetchAllowed, hostnameOf, ensureProxyAllowsHost, backendCall } from '../backend'
+import { ensureBuiltinEngineAlive, explainDeadEngine, isManagedBuiltinSlot } from '../builtin-ensure'
 
 // Transport routing lives in the `useLocalProxy` getter (below) plus the shared
 // host helpers in backend.ts. A direct webview fetch only works for hosts the
@@ -862,6 +862,20 @@ export class OpenAIProvider implements ProviderClient {
    */
   async loadedContextLength(model: string): Promise<number | null> {
     if (!this.isLanBackend) return null
+    // Managed built-in engine (Z36 finding 2): llama-server has no LM Studio
+    // enhanced API, so this probe used to return null and the run budget fell
+    // back to catalog/name heuristics, happily budgeting 32k against an
+    // engine started with 8192. The engine status carries the true started
+    // ctx; use it, uncached, because ensureBuiltinAgentCtx may have JUST
+    // swapped the engine bigger and a 5-minute-old value would clamp wrong
+    // (or, after a render offload restart, fail to clamp at all).
+    if (isManagedBuiltinSlot()) {
+      try {
+        const s = await backendCall<{ running?: boolean; ctx?: number | null }>('bundled_engine_status')
+        if (s?.running && typeof s.ctx === 'number' && s.ctx > 0) return s.ctx
+      } catch { /* non-Tauri context, fall through to the LM Studio probe */ }
+      return null
+    }
     const cacheKey = `loaded|${this.baseUrl}|${model}`
     const hit = OpenAIProvider.probeCache.get(cacheKey)
     if (hit && Date.now() - hit.at < 300_000) return hit.ctx

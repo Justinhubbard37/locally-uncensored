@@ -3,9 +3,9 @@ import { useCreate } from '../../../hooks/useCreate'
 import { useCloudCreate, hasActiveCloudRun } from '../../../hooks/useCloudCreate'
 import { useCloudSession } from '../../../hooks/useCloudSession'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
-import { getLoraModels, getVAEModels, getCheckpoints, getDiffusionModels, getCLIPModels, getGgufUnetModels, checkComfyConnection, refreshComfyModels, bundleForVideoIntent } from '../../../api/comfyui'
+import { getLoraModels, getVAEModels, checkComfyConnection, refreshComfyModels, bundleForVideoIntent } from '../../../api/comfyui'
 import { getAllNodeInfo, clearNodeCache } from '../../../api/comfyui-nodes'
-import { installCustomNodes, getImageBundles, getVideoBundles, getAudioBundles, getLipsyncBundles, getMotionBundles, startModelDownload, getDownloadProgress, normalizeModelBase, ENUM_SUBFOLDERS } from '../../../api/discover'
+import { installCustomNodes, getImageBundles, getVideoBundles, getAudioBundles, getLipsyncBundles, getMotionBundles, startModelDownload, getDownloadProgress, modelsNotVisibleInComfy, ENUM_SUBFOLDERS } from '../../../api/discover'
 import { backendCall, isMacOS } from '../../../api/backend'
 import { installMlxStack } from '../../../api/mlx-install'
 import { useDownloadStore } from '../../../stores/downloadStore'
@@ -436,25 +436,10 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
     const enumFiles = files.filter((f) => ENUM_SUBFOLDERS.has(f.subfolder!))
     if (enumFiles.length > 0) {
       const wanted = enumFiles.map((f) => f.filename!)
-      const stillMissing = async (): Promise<string[]> => {
-        try {
-          // getGgufUnetModels belongs here for the same reason getImageModels
-          // needs it (comfyui.ts:658): UNETLoader only enumerates .safetensors
-          // and .sft, GGUF quants are listed by ComfyUI-GGUF's own loader. The
-          // default Talking Character bundle IS a .gguf in diffusion_models, so
-          // without this the probe can never succeed: 20 rounds of waiting, an
-          // uncalled-for engine restart in the middle of whatever the user was
-          // rendering, and then an error blaming the model folder for a file
-          // ComfyUI lists perfectly well.
-          const lists = await Promise.all([
-            getCheckpoints(), getDiffusionModels(), getVAEModels(), getCLIPModels(), getGgufUnetModels(),
-          ])
-          const visible = new Set(lists.flat().map(normalizeModelBase))
-          return wanted.filter((n) => !visible.has(normalizeModelBase(n)))
-        } catch {
-          return wanted // engine unreachable, so it has confirmed nothing
-        }
-      }
+      // The probe itself lives in discover.ts, because the Model Manager
+      // download path needs exactly the same one and a second copy would be a
+      // second chance to drift (see modelsNotVisibleInComfy).
+      const stillMissing = () => modelsNotVisibleInComfy(wanted)
       let missing = await waitForModelsVisible({
         missing: stillMissing, refresh: refreshLists, onStatus: onProgress, signal,
       })

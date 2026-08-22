@@ -201,8 +201,12 @@ describe('compactMessages', () => {
     const result = compactMessages(messages, 120)
     // Real system prompt stays first.
     expect(result[0].content).toBe('sys')
-    // A trim notice is present (not a "[Previous conversation summary]").
-    expect(result.some((m) => m.role === 'system' && m.content.includes('trimmed to fit'))).toBe(true)
+    // A trim notice is present (not a "[Previous conversation summary]") and
+    // it rides inside user material: a system message mid conversation makes
+    // strict Jinja templates raise "System message must be at the beginning"
+    // (Discord #bug-reports 2026-08-21).
+    expect(result.some((m) => m.role === 'user' && m.content.includes('trimmed to fit'))).toBe(true)
+    expect(result.some((m, i) => m.role === 'system' && i > 0)).toBe(false)
     // Newest message preserved verbatim.
     expect(result[result.length - 1].content).toBe('latest')
   })
@@ -282,7 +286,8 @@ describe('compactMessages — oversized tool results', () => {
       })),
     ]
     const result = compactMessages(messages, 120)
-    const notice = result.find((m) => m.role === 'system' && m.content.includes('trimmed to fit'))
+    // The notice rides user material since the Jinja fix, never role:system.
+    const notice = result.find((m) => m.role === 'user' && m.content.includes('trimmed to fit'))
     expect(notice).toBeDefined()
     // The old wording ("Re-read any file you still need with file_read.")
     // actively FED the re-read loop.
@@ -322,12 +327,17 @@ describe('message-count ceiling', () => {
     expect(compactMessages(messages, 10_000_000)).toEqual(messages)
   })
 
-  it('count trim announces itself like a token trim', () => {
+  it('count trim announces itself like a token trim, riding user material', () => {
     const out = compactMessages(tiny(450), 10_000_000)
+    // The notice rides inside a user message since the Jinja fix: a system
+    // message mid conversation makes strict chat templates raise "System
+    // message must be at the beginning" (Discord #bug-reports 2026-08-21).
+    // A count-driven trim announces itself exactly like a token-driven one.
     const notice = out.find(
-      (m) => m.role === 'system' && typeof m.content === 'string' && m.content.includes('trimmed'),
+      (m) => m.role === 'user' && typeof m.content === 'string' && m.content.includes('trimmed'),
     )
     expect(notice).toBeTruthy()
+    expect(out.some((m, i) => m.role === 'system' && i > 0)).toBe(false)
   })
 
   it('capMessageCount keeps system prompt and the newest messages', () => {

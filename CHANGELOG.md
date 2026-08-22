@@ -50,6 +50,58 @@ and gives the Code view a mode menu, a plan panel and a real file explorer.
 - **Old images stop riding along.** A follow up in the same conversation no
   longer re-attaches pictures from many messages back on every later step where
   nothing looks at them.
+- **A wiped chat database is restored instead of overwritten.** A hard crash can
+  leave the browser engine discarding the whole chat store while everything else
+  comes back, and the restore only ever looked at the other half. The app now
+  restores the chats from its own backup on the next start, and the backup
+  merges with what it already held rather than writing an empty snapshot over
+  the good copy seconds after every launch.
+- **A hosted chat past the message limit shrinks its request instead of dying.**
+  Plain chat sends the whole conversation every turn, so once a conversation
+  crossed the server's message count limit every further turn was refused and
+  the chat was a permanent dead end. The client now halves the history it sends
+  and retries when the server refuses on count, without touching the stored
+  conversation.
+- **Browser voice recording reaches the transcriber.** The recorded audio was
+  refused as the wrong body type before the handler ever saw it, and both voice
+  requests went out without the header every other call sends. The content type
+  rule now has one carve out for the audio endpoint and stays strict everywhere
+  else.
+- **An invented link is caught by the app.** A URL in an agent answer that
+  appears nowhere in what the model was shown cannot have come from a tool. The
+  bubble labels it as unverified, and after a real tool success the agent gets
+  one steer to look it up properly or take it back.
+- **The trim notice stops planting a system message mid conversation.** Strict
+  chat templates refuse a system message that is not the first one and the run
+  died with "System message must be at the beginning", which is why it only ever
+  happened once a chat had grown long. The notice now rides inside user
+  material, and repeated trims no longer stack notices.
+- **The built in engine grows to the context the run budgets for.** An agent
+  turn carries the tool catalogue and outgrew the engine's 8192 start default,
+  which no per request option can raise. The engine is now restarted at the
+  smaller of the model's trained context and the agent ceiling before the run
+  budget is read.
+- **The engine's KV save follows the tokens, not slot zero.** The save asks the
+  engine which slot really holds the conversation instead of always writing the
+  first one, so the saved state is the history and not a husk.
+- **A render evicts with manners.** The Create, music and video lanes now save
+  the engine state and bring Ollama, LM Studio and the built in engine back warm
+  after the render, instead of killing them and leaving the next chat turn to a
+  cold start.
+- **The LoRA trainer plans for an AMD card.** The trainer decided its
+  environment from nvidia-smi alone and read that probe's silence as no GPU, so
+  an AMD box got CUDA wheels that import fine, see no device and die in step 1.
+  The wheel channel is now planned per vendor: ROCm on Linux, and a refusal
+  before the clone and the 2.5 GB on Windows and macOS, where no such wheel
+  exists.
+- **A bundle card reads its own downloads.** Video bundles share files, so one
+  failed attempt on a shared file put a Retry button on every card and hid
+  bundles that were complete on disk. The disk verdict is asked first now.
+- **A finished download waits for ComfyUI in the Model Manager too.** A large
+  file lands before ComfyUI's own scan has picked it up, so the model was simply
+  absent from the Installed tab and every picker until a manual reload.
+- **Source pin tests read the same bytes on a CRLF checkout**, so a Windows
+  clone can report the suite honestly.
 
 ## [2.6.5] - 2026-08-16
 

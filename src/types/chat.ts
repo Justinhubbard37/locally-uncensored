@@ -84,6 +84,12 @@ export interface Message {
    *  a truncated answer is not shown as if it were complete (parity with the
    *  benchmark screen). Absent or 'stop' on a clean finish. */
   finishReason?: string
+  /** Z36 finding 3: URLs in this agent answer that appear nowhere in what the
+   *  model was shown this run (system prompt, history, tool results), so no
+   *  tool returned them. Set only after the one corrective steer was ignored.
+   *  Drives a labelled notice under the bubble instead of rewriting the
+   *  model's text (G14-2). Absent when every link was backed. */
+  unbackedLinks?: string[]
 }
 
 export interface Conversation {

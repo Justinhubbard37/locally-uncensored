@@ -20,9 +20,17 @@ const handoff = () => readFileSync(resolve(hier, '..', 'vram-handoff.ts'), 'utf8
 const engineRs = () => readFileSync(resolve(hier, '..', '..', '..', 'src-tauri', 'src', 'commands', 'engine.rs'), 'utf8')
 
 describe('#85: KV-Slot ueberlebt den VRAM-Handoff', () => {
-  it('die Rust-Bruecke trifft llama-servers /slots-API und der Start traegt den Slot-Pfad', () => {
+  it('die Rust-Bruecke trifft llamas /slots-API, der Save folgt den Tokens statt Slot 0', () => {
+    // Z36-Gegenprobe 2026-08-22: der Save zielte fest auf Slot 0, waehrend
+    // der Verlauf in Slot 3 lag, und schrieb eine 20-Byte-Huelse. Der Save
+    // fragt jetzt GET /slots und nimmt den Slot mit den meisten Tokens; nur
+    // der Restore laedt weiter in Slot 0, die Prompt-Aehnlichkeits-Wahl des
+    // Servers zieht den naechsten Zug dorthin.
     const src = engineRs()
-    expect(src).toMatch(/\/slots\/0\?action=/)
+    expect(src).toMatch(/\/slots\/\{slot_id\}\?action=/)
+    expect(src).not.toMatch(/\/slots\/0\?action=/)
+    expect(src).toMatch(/pub\(crate\) fn pick_save_slot/)
+    expect(src).toMatch(/n_prompt_tokens/)
     expect(src).toMatch(/--slot-save-path/)
     expect(src).toMatch(/pub async fn kv_slot_action/)
   })
