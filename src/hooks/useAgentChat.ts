@@ -1311,7 +1311,17 @@ export function useAgentChat() {
           // steer to really search or retract; if it insists, the text stands
           // (it is the model's answer, G14-2) and the bubble gets a labelled
           // notice via unbackedLinks instead.
-          if (anyToolSucceeded && turnContent.trim()) {
+          //
+          // The notice is NOT gated on a prior success: the Z36 counter-check
+          // (2026-08-22, persona run) watched Hermes-3-3B write its tool
+          // calls as prose, so no call ever really ran, and the invented
+          // links stood unmarked because the old anyToolSucceeded gate never
+          // armed. On an agent turn any link no tool returned is unverified
+          // by definition, so the label always tells the truth. Only the
+          // corrective STEER stays gated on a real success (the original Z36
+          // trigger), so a run that never used tools is not sent into an
+          // extra round.
+          if (turnContent.trim()) {
             const shownToModel = agentMessages
               .map((m) => {
                 const c = (m as { content?: unknown }).content
@@ -1326,7 +1336,7 @@ export function useAgentChat() {
               .join('\n')
             const invented = findUnbackedLinks(turnContent, shownToModel)
             if (invented.length > 0) {
-              if (!linksSteered) {
+              if (anyToolSucceeded && !linksSteered) {
                 linksSteered = true
                 log.info('agent.unbacked_links_steer', { count: invented.length, links: invented })
                 agentMessages.push({ role: 'assistant', content: turnContent })

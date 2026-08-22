@@ -141,12 +141,17 @@ describe('wiring (source guards)', () => {
     expect(agentSrc).toContain('unbackedLinksSteer(invented)')
   })
 
-  it('the guard only arms after a real success, the Z36 trigger', () => {
+  it('the notice runs on every final turn; the persona run proved a prose-only model never arms a success gate', () => {
+    // Z36 counter-check 2026-08-22: Hermes-3-3B wrote its tool calls as
+    // prose, no call ever ran, and invented links stood unmarked behind the
+    // old `anyToolSucceeded &&` gate. The label must not depend on a success.
     expect(agentSrc).toContain('anyToolSucceeded = true')
-    expect(agentSrc).toContain('if (anyToolSucceeded && turnContent.trim())')
+    expect(agentSrc).not.toContain('if (anyToolSucceeded && turnContent.trim())')
+    expect(agentSrc).toContain('if (turnContent.trim())')
   })
 
-  it('the steer fires once, then the message is flagged instead of looped', () => {
+  it('only the corrective steer stays gated on a real success, fires once, then the message is flagged', () => {
+    expect(agentSrc).toContain('if (anyToolSucceeded && !linksSteered)')
     expect(agentSrc).toContain('linksSteered = true')
     expect(agentSrc).toContain('updateMessageUnbackedLinks(convId!, assistantMessage.id, invented)')
   })
