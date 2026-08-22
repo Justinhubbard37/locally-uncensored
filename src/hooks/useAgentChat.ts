@@ -2225,7 +2225,7 @@ export function extractMediaPrompt(text: string): string {
   return stripped || p
 }
 
-function buildAgentSystemPrompt(basePrompt: string, roster: string): string {
+export function buildAgentSystemPrompt(basePrompt: string, roster: string): string {
   const agentInstructions = `You are an autonomous AI agent inside LU with full access to this computer. You execute tasks end-to-end by using tools, you do NOT just describe what to do.
 
 ${platformPromptLine()}
@@ -2280,7 +2280,7 @@ Other rules:
 // small-model tool-calling (LongFuncEval, arXiv 2505.10570) and small models
 // have a limited instruction-following budget. Keep only what a small model
 // needs to ACT — same tool names + native call format as the full prompt.
-function buildAgentSystemPromptLean(basePrompt: string, alwaysThere: string): string {
+export function buildAgentSystemPromptLean(basePrompt: string, alwaysThere: string): string {
   const lean = `You are an autonomous agent in LU with tools on this computer. Do tasks by CALLING tools, do not just describe them.
 
 ${platformPromptLine()}

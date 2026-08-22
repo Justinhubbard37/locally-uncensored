@@ -16,6 +16,7 @@ import { executeParallel, type ExecutionRequest } from './tool-executor'
 import type { AgentRunContext } from '../agent-context'
 import { AgentBudget } from './budget'
 import { explainError as explainToolError } from './error-hints'
+import { platformPromptLine, hostClockLine } from '../../lib/host-platform'
 
 // NOTE: the toolRegistry import is done LAZILY inside defaultSubAgentRunner
 // to avoid a circular dependency with src/api/mcp/builtin-tools.ts, which
@@ -98,6 +99,32 @@ export type SubAgentRunner = (
 ) => Promise<string>
 
 /**
+ * The sub-agent system prompt, in the same two halves the main loops use
+ * (2.6.6, plan A5 and E3).
+ *
+ * A sub-agent runs the same tool registry on the same machine, so it needs the
+ * same environment block: the platform sentence tells it which shell
+ * shell_execute will open and how to open a file, and the clock line replaces
+ * the retired clock tool. Without them a delegated step spent its tiny budget
+ * probing the machine, or guessed `explorer` on a Mac.
+ *
+ * The order is the point. The role text and the platform sentence read the
+ * same on every delegation, so they stay in front and a prefix cache can match
+ * them. The clock changes every minute and closes the message, where a miss
+ * costs only the last line instead of the whole prompt.
+ */
+export function buildSubAgentSystemPrompt(
+  platformLine: string = platformPromptLine(),
+  clockLine: string = hostClockLine(),
+): string {
+  const stable =
+    'You are a focused sub-agent. Work autonomously toward the goal. '
+    + 'Be concise, return a direct final answer without filler. '
+    + 'Do NOT attempt to call delegate_task; it is not available to you.'
+  return `${stable}\n\n${platformLine}\n\n${clockLine}`
+}
+
+/**
  * Default sub-agent runner. Pulls in the active provider + model via
  * dynamic import to keep this module standalone and testable with a
  * stub runner. The real hook wiring lives in buildDelegateExecutor().
@@ -126,10 +153,7 @@ export async function defaultSubAgentRunner(
   const messages: any[] = [
     {
       role: 'system',
-      content:
-        'You are a focused sub-agent. Work autonomously toward the goal. '
-        + 'Be concise — return a direct final answer without filler. '
-        + 'Do NOT attempt to call delegate_task; it is not available to you.',
+      content: buildSubAgentSystemPrompt(),
     },
     {
       role: 'user',

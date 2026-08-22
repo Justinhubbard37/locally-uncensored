@@ -2032,6 +2032,12 @@ button{-webkit-appearance:none;appearance:none}
   var currentModel = '';
   var dispatchedSystemPrompt = '';
   var availableModels = [];
+  // The DESKTOP's platform sentence, handed over by /remote-api/config.
+  // Never navigator.platform: the tools run on the machine that serves this
+  // page, not on the phone holding it, so the phone's own OS is the one
+  // answer that is always wrong here. Empty until config lands, and an empty
+  // line is simply left out rather than guessed at.
+  var hostPlatformLine = '';
 
   // ── Inline SVG icons (Lucide-style). Replaces the Material Symbols
   //    font download to keep the mobile page free of third-party requests.
@@ -2806,6 +2812,20 @@ button{-webkit-appearance:none;appearance:none}
   // strictness for the LU-mode + Agent-on path.
   var AGENT_PROMPT = 'You are an autonomous AI agent inside LU. You execute tasks end-to-end via tools — you do NOT just describe what to do.\n\n=== HARD RULES ===\n\n1. AFTER EVERY TOOL RESULT, your very next message MUST be EITHER (a) another tool call to continue the work, OR (b) the final user-facing summary. There is no middle ground. Empty messages are a FAILURE.\n\n2. DO NOT stop after the FIRST tool. Real tasks take 3-10 tool calls. If the user said "build X" you write the files. If the user said "use every tool" you keep going through every tool. Stopping after one shell_execute or one web_search without producing a useful artefact = FAILURE.\n\n3. NEVER produce a code block followed by "save this as X". That is FAILURE — call file_write yourself.\n\n4. NEVER say "Now I will create X" / "Next I will write Y" as plain prose and stop. Do the next step right now as a concrete tool call.\n\n5. The ONLY reasons to stop calling tools: (a) the user task is FULLY done with concrete artefacts on disk / web results returned / etc., OR (b) you are stuck in a way that genuinely needs user input. "I have called one tool, that should be enough" is NOT a valid stop reason.\n\n=== WORKFLOW ===\n\n- Build / create tasks: file_write each artefact directly, chain ALL writes, then write a 1-3 sentence final answer.\n- Read / explore tasks: file_list / file_read first, then proceed.\n- Web tasks: web_search → web_fetch on the best URL → summarize.\n- Multi-tool / "use every tool" tasks: plan the order, then call each tool one at a time, recording the partial result in a final summary file before the visible reply.\n\n=== FILE RULES ===\n\n- file_write AUTOMATICALLY creates missing parent directories — do NOT shell out to mkdir / New-Item / md / os.makedirs first. Just file_write the target path.\n- Relative paths resolve to the current chat workspace folder. Use relative paths (e.g. `index.html`, `src/app.py`); do not hard-code absolute drive letters.\n- After 2-3 failures of the same approach, switch strategy — do not repeat the same broken command. Do not introduce yourself again.\n\nBe concise in prose. All real work happens in tool calls. Respond in the same language the user used in their message.';
 
+  // ── Clock line (2.6.6, plan A5) ──
+  // The volatile half of the environment block. Word for word the desktop's
+  // hostClockLine() in src/lib/host-platform.ts, because a relay that phrases
+  // the date differently is a second prompt to keep in your head. Built fresh
+  // on every turn, so a session that runs for hours does not quote the time
+  // the page was opened.
+  function hostClockLine(now){
+    var tz = '';
+    try{ tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; }catch(_){ }
+    var stamp = (now || new Date()).toLocaleString('en-GB', {dateStyle:'full', timeStyle:'short'});
+    return 'Date and time at the start of this run: ' + stamp + (tz ? ' (' + tz + ')' : '') +
+           '. Trust this line; there is no clock tool.';
+  }
+
   // ── System prompt builder ──
   function buildSystemPrompt(){
     var parts = [];
@@ -2835,6 +2855,19 @@ button{-webkit-appearance:none;appearance:none}
       parts.push(CODEX_PROMPT);
     } else if(agentOn){
       parts.push(AGENT_PROMPT);
+    }
+    // ── Environment block, on the two surfaces that own tools ──
+    // Task 215: the relay ran its agent loop without ever saying which machine
+    // it stands on, so a phone run on a Mac guessed `explorer` and burned a
+    // step on `uname`. Plain chat has no tools and gets neither line.
+    //
+    // The split follows plan A5. The platform sentence reads the same on every
+    // turn and rides in front, where a prefix cache can match it. The clock
+    // changes every minute and closes the prompt, so a miss costs the last
+    // line instead of everything above it.
+    if(isCodex || agentOn){
+      if(hostPlatformLine) parts.push(hostPlatformLine);
+      parts.push(hostClockLine());
     }
     return parts.join('\n\n');
   }
@@ -2966,6 +2999,7 @@ button{-webkit-appearance:none;appearance:none}
                  : (cfg.model && availableModels.indexOf(cfg.model) >= 0) ? cfg.model
                  : (cfg.model || availableModels[0] || '');
     dispatchedSystemPrompt = cfg.systemPrompt || '';
+    hostPlatformLine = cfg.platformLine || '';
 
     // Ensure we have a current chat
     if(!currentChatId || !findChat(currentChatId)){
@@ -4679,13 +4713,49 @@ async fn handle_disconnect(
 
 // ─── Dispatch config (model + system prompt for mobile) ───
 
+/// The platform sentence for the relay's agent prompt (task 215).
+///
+/// Word for word `platformPromptLine()` in src/lib/host-platform.ts, and it
+/// has to be: the two are the same sentence on the same machine, and a phone
+/// that phrases it differently is a second prompt nobody remembers to update.
+/// The test below pins them against each other so a change to one fails until
+/// it reaches the other.
+///
+/// This lives in Rust and not in the served JavaScript because the page runs
+/// on the PHONE while every tool it calls runs here. `navigator.platform` in
+/// that page describes an Android or an iPhone, which is the one answer that
+/// is never right, and it was the reason a phone run on a Mac reached for
+/// `explorer`.
+///
+/// There is no `unknown` arm on purpose: this is compiled for the machine it
+/// will answer for, so an unrecognised target is a build that does not exist.
+pub fn host_platform_prompt_line() -> &'static str {
+    if cfg!(target_os = "macos") {
+        r##"This machine runs macOS and shell_execute runs bash. Open a file or folder with `open <path>`, reveal it in Finder with `open -R <path>`, start an application with `open -a "<App Name>"`."##
+    } else if cfg!(target_os = "windows") {
+        r##"This machine runs Windows and shell_execute runs PowerShell. Open a file or folder with `Invoke-Item <path>`, reveal it in Explorer with `explorer "/select,<path>"` (one argument, the comma matters), start an application with `Start-Process "<App Name>"`."##
+    } else {
+        r##"This machine runs Linux and shell_execute runs bash. Open a file or folder with `xdg-open <path>`, start an application with `gtk-launch <name>`. There is no reveal, so open the containing folder instead."##
+    }
+}
+
+/// The body of `/remote-api/config`, split out from the handler so a test can
+/// read it without an AppHandle.
+fn config_payload(model: String, system_prompt: String) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "systemPrompt": system_prompt,
+        // Stable half of the environment block. The volatile half, the clock,
+        // is built in the page on every turn instead of being frozen into the
+        // one config fetch a session makes.
+        "platformLine": host_platform_prompt_line(),
+    })
+}
+
 async fn handle_config(AxumState(state): AxumState<RemoteState>) -> Json<serde_json::Value> {
     let model = state.dispatched_model.lock().await.clone();
     let system_prompt = state.dispatched_system_prompt.lock().await.clone();
-    Json(serde_json::json!({
-        "model": model,
-        "systemPrompt": system_prompt,
-    }))
+    Json(config_payload(model, system_prompt))
 }
 
 // ─── Permissions ───
@@ -6001,5 +6071,114 @@ mod mobile_decay_tests {
         assert_eq!(number_after("var DECAY_RESULT_CHARS = 4000;", "DECAY_RESULT_CHARS"), Some(4000));
         assert_eq!(number_after("export const X = 12 ", "X"), Some(12));
         assert_eq!(number_after("nothing here", "X"), None);
+    }
+}
+/// Task 215: the relay says which machine it stands on, and what time it is.
+///
+/// The desktop coding and agent loops got that environment block in 2.6.6; the
+/// phone relay runs the same tools on the same machine and never had it, so a
+/// run started from the sofa guessed at `explorer` on a Mac and spent a step of
+/// its budget on `uname`.
+///
+/// Two halves, two owners. The platform sentence is Rust's, because the page
+/// executes on the phone and only this side knows the machine the tools land
+/// on. The clock is the page's, because a session runs for hours and a
+/// timestamp frozen into the one config fetch would age into a lie.
+#[cfg(test)]
+mod mobile_environment_tests {
+    /// The page exactly as a phone receives it.
+    fn page() -> String {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { super::mobile_landing().await.0 })
+    }
+
+    /// The desktop module both sides have to agree with.
+    fn desktop_host_platform() -> String {
+        std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("src")
+                .join("lib")
+                .join("host-platform.ts"),
+        )
+        .expect("src/lib/host-platform.ts not found")
+    }
+
+    #[test]
+    fn the_relay_platform_sentence_is_the_desktop_one_word_for_word() {
+        let ts = desktop_host_platform();
+        let mine = super::host_platform_prompt_line();
+        assert!(
+            ts.contains(mine),
+            "the relay platform sentence drifted from platformPromptLine():\n{}",
+            mine
+        );
+    }
+
+    #[test]
+    fn the_reader_would_notice_a_drift() {
+        // A guard on the guard. If host-platform.ts were ever read as an empty
+        // string, or the sentence lost its landmarks, the test above would pass
+        // for free on a `contains` that means nothing.
+        let ts = desktop_host_platform();
+        assert!(ts.contains("export function platformPromptLine"));
+        for needle in ["This machine runs macOS", "This machine runs Windows", "This machine runs Linux"] {
+            assert!(ts.contains(needle), "{} missing from host-platform.ts", needle);
+        }
+        assert!(!super::host_platform_prompt_line().is_empty());
+        assert!(!ts.contains("This machine runs Plan 9"), "contains() is not matching everything");
+    }
+
+    #[test]
+    fn the_config_endpoint_hands_the_platform_line_over() {
+        let body = super::config_payload("qwen3:8b".into(), String::new());
+        assert_eq!(
+            body["platformLine"].as_str().unwrap(),
+            super::host_platform_prompt_line()
+        );
+        // The fields the page already read must survive the split.
+        assert_eq!(body["model"].as_str().unwrap(), "qwen3:8b");
+        assert!(body.get("systemPrompt").is_some());
+        // The clock is deliberately NOT in here: it is fetched once per
+        // session and would be stale within the minute.
+        assert!(body.get("clockLine").is_none(), "the clock must not be frozen into config");
+    }
+
+    #[test]
+    fn the_served_page_builds_both_halves() {
+        let html = page();
+        for needle in [
+            "var hostPlatformLine = '';",
+            "hostPlatformLine = cfg.platformLine || '';",
+            "function hostClockLine(now){",
+            "Date and time at the start of this run: ",
+            "Trust this line; there is no clock tool.",
+        ] {
+            assert!(html.contains(needle), "the relay page lost: {}", needle);
+        }
+    }
+
+    #[test]
+    fn the_clock_closes_the_prompt_and_the_platform_line_rides_in_front() {
+        // Plan A5: an upstream prefix cache matches from byte 0 and stops at
+        // the first difference. The platform sentence reads the same every
+        // turn and may sit anywhere; the clock changes every minute and has to
+        // be last, or every turn re-prices the whole prompt.
+        let html = page();
+        let platform_at = html.find("if(hostPlatformLine) parts.push(hostPlatformLine);").expect("platform push missing");
+        let clock_at = html.find("parts.push(hostClockLine());").expect("clock push missing");
+        let join_at = html[platform_at..].find("return parts.join(").expect("prompt builder lost its return") + platform_at;
+        assert!(clock_at > platform_at, "the clock must come after the platform sentence");
+        assert!(clock_at < join_at, "the clock has to be pushed before the prompt is joined");
+    }
+
+    #[test]
+    fn plain_chat_gets_neither_line() {
+        // Only the two surfaces that own tools pay for the block. A plain chat
+        // has nothing to run, so the sentence would be tokens for nothing.
+        let html = page();
+        let gate = html.find("if(isCodex || agentOn){").expect("the environment block lost its gate");
+        let clock_at = html.find("parts.push(hostClockLine());").expect("clock push missing");
+        assert!(clock_at > gate, "the clock is pushed outside the tool-surface gate");
     }
 }
