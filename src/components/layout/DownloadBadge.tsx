@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
+import { withInstallerOutput } from '../../lib/error-text'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ArrowDownToLine, Pause, Play, X, CheckCircle, RotateCcw } from 'lucide-react'
 import { useModels } from '../../hooks/useModels'
@@ -286,7 +287,7 @@ export function DownloadBadge() {
                     {e.status === 'complete' ? (
                       <div className="flex items-center gap-1.5 text-green-400"><CheckCircle size={11} /><span className="text-[0.65rem]">Complete</span></div>
                     ) : e.status === 'error' ? (
-                      <p className="text-[0.6rem] text-red-400 break-words">{e.error || 'Install failed.'}</p>
+                      <p className="text-[0.6rem] text-red-400 break-words whitespace-pre-line">{withInstallerOutput('The install did not finish.', e.error)}</p>
                     ) : e.total > 0 ? (
                       <>
                         <ProgressBar progress={prog} />

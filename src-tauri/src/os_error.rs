@@ -307,6 +307,19 @@ mod drift_guard {
         OS_CALLS.iter().any(|c| code.contains(c)) && renders_the_error(code)
     }
 
+    /// The other shape: not a map_err at all, but an error FIELD in a payload
+    /// built straight from the value. `start_ollama` answered a failed spawn
+    /// with `json!({"status": "error", "error": e.to_string()})`, which the
+    /// window scan above cannot see, because the spawn is in a match arm
+    /// several lines up.
+    fn is_suspect_field(line: &str) -> bool {
+        let code = strip_comment(line);
+        if code.contains("os_error::") {
+            return false;
+        }
+        code.contains("\"error\"") && code.contains("e.to_string()")
+    }
+
     fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).expect("src is readable").flatten() {
             let path = entry.path();
@@ -347,6 +360,11 @@ mod drift_guard {
                     found.push(format!("{}:{}: {}", file.display(), i + 1, lines[i].trim()));
                 }
             }
+            for (i, line) in lines.iter().enumerate() {
+                if is_suspect_field(line) {
+                    found.push(format!("{}:{}: {}", file.display(), i + 1, line.trim()));
+                }
+            }
         }
         assert!(
             found.is_empty(),
@@ -375,5 +393,11 @@ mod drift_guard {
             r#".send() .await .map_err(|e| format!("proxy: {}", os_error::english(&e)))?"#
         ));
         assert!(!is_suspect(r#"let n = parse(s).map_err(|e| format!("bad number: {e}"))?;"#));
+        // The payload shape, which no window around the failing call can reach.
+        assert!(is_suspect_field(r#"json!({"status": "error", "error": e.to_string()})"#));
+        assert!(!is_suspect_field(
+            r#"json!({"status": "error", "error": os_error::english(&e)})"#
+        ));
+        assert!(!is_suspect_field(r#"json!({"error": "All search tiers failed"})"#));
     }
 }

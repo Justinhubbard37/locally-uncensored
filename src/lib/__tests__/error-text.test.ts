@@ -1,0 +1,84 @@
+/**
+ * The new rule, 2026-08-22: an error a user reads is English, always.
+ *
+ * Two halves. The Rust half is fixed at the source, where the operating
+ * system's own wording is replaced before it ever leaves the backend. This is
+ * the other half: text written by a program that is not ours. A German Windows
+ * runs a German winget, and the last line of its log used to BE our error
+ * message, with no subject and no hint of who said it.
+ */
+import { describe, it, expect } from 'vitest'
+import { detailOf, withDetail, withInstallerOutput } from '../error-text'
+
+describe('detailOf', () => {
+  it('reads a string, an Error and anything else', () => {
+    expect(detailOf('boom')).toBe('boom')
+    expect(detailOf(new Error('boom'))).toBe('boom')
+    expect(detailOf(404)).toBe('404')
+  })
+
+  it('is empty for nothing at all, so a frame stays a clean sentence', () => {
+    expect(detailOf(null)).toBe('')
+    expect(detailOf(undefined)).toBe('')
+    expect(detailOf(new Error(''))).toBe('')
+  })
+})
+
+describe('withDetail', () => {
+  it('our sentence comes first and the foreign text is labelled', () => {
+    const out = withDetail('The update could not be installed.', 'Zugriff verweigert')
+    expect(out.startsWith('The update could not be installed.')).toBe(true)
+    expect(out).toContain('Details:')
+    // The detail is kept. It is the only thing that says what actually failed.
+    expect(out).toContain('Zugriff verweigert')
+  })
+
+  it('with nothing to add it is just the sentence', () => {
+    expect(withDetail('Install failed.', '')).toBe('Install failed.')
+    expect(withDetail('Install failed.', null)).toBe('Install failed.')
+  })
+
+  it('does not frame our own sentence twice on the way up', () => {
+    const once = withDetail('Install failed.', 'pip exploded')
+    expect(withDetail('Install failed.', once)).toBe(once)
+  })
+
+  it('the installer frame names who is talking', () => {
+    const out = withInstallerOutput('Installing Python failed.', 'Fehler beim Installieren')
+    expect(out).toContain('Last output from the installer')
+    expect(out.startsWith('Installing Python failed.')).toBe(true)
+  })
+})
+
+describe('the surfaces that used to set foreign text as the whole message', () => {
+  const read = (p: string) =>
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    require('node:fs').readFileSync(
+      require('node:path').resolve(__dirname, '..', '..', p),
+      'utf8',
+    ) as string
+
+  it('first run frames every installer log tail', () => {
+    // Onboarding is the highest visibility surface in the app and it had four
+    // of these, one per installer. A bare log tail there is the first thing a
+    // new user ever reads from us.
+    const src = read('components/onboarding/Onboarding.tsx')
+    expect(src).toContain('withInstallerOutput')
+    expect(src).not.toMatch(/set\w*Error\(lastLog\)/)
+    expect(src).not.toMatch(/setPythonInstallError\(lastLog\)/)
+  })
+
+  it('Settings frames its installer log tails too', () => {
+    const src = read('components/settings/SettingsPage.tsx')
+    expect(src).toContain('withInstallerOutput')
+    expect(src).not.toMatch(/setInstallErr\(lastLog \|\|/)
+  })
+
+  it('the updater frames what the update plugin reports', () => {
+    // This one is third party Rust we do not own, so it cannot be fixed at the
+    // source the way our own commands were.
+    const src = read('stores/updateStore.ts')
+    expect(src).toContain('withDetail')
+    expect(src).not.toMatch(/errorMessage: e instanceof Error \? e\.message :/)
+  })
+})

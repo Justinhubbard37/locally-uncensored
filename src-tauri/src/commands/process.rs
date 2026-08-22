@@ -1038,7 +1038,7 @@ fn start_ollama_blocking(state: &AppState) -> Result<serde_json::Value, String> 
         Err(e) => {
             println!("[Ollama] Failed to start: {}", e);
             error!(error = %e, "ollama spawn failed");
-            Ok(serde_json::json!({"status": "error", "error": e.to_string()}))
+            Ok(serde_json::json!({"status": "error", "error": os_error::english(&e)}))
         }
     }
 }

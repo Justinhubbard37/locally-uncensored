@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, type ReactNode, type ChangeEvent } from 'react'
+import { withInstallerOutput } from '../../lib/error-text'
 import { ArrowLeft, RotateCcw, Sun, Moon, Volume2, Check, X, Loader2, Shield, ChevronRight, GraduationCap, Lock, Sliders, Plug, Bot, Phone, User, Download, Mic } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { SETTINGS_TAB_RESET_KEYS, type SettingsTab } from '../../lib/settings-reset'
@@ -479,7 +480,7 @@ function ComfyUISettings() {
           } else if (data.status === 'error' || data.status === 'cancelled') {
             clearInterval(poll)
             const lastLog = (data.logs?.length ? data.logs[data.logs.length - 1] : '') as string
-            setInstallErr(lastLog || 'Environment repair failed')
+            setInstallErr(withInstallerOutput('Repairing the environment did not finish.', lastLog))
             setInstallPhase('error')
           }
         } catch { /* keep polling */ }
@@ -708,7 +709,7 @@ function ComfyUISettings() {
                       } else if (data.status === 'error') {
                         clearInterval(poll)
                         const lastLog = (data.logs?.length ? data.logs[data.logs.length - 1] : '') as string
-                        setInstallErr(lastLog || 'Python install failed')
+                        setInstallErr(withInstallerOutput('Installing Python did not finish.', lastLog))
                         resolve(false)
                       }
                     } catch { /* keep polling */ }
@@ -738,7 +739,7 @@ function ComfyUISettings() {
                     } else if (data.status === 'error') {
                       clearInterval(poll)
                       const lastLog = (data.logs?.length ? data.logs[data.logs.length - 1] : '') as string
-                      setInstallErr(lastLog || 'ComfyUI install failed')
+                      setInstallErr(withInstallerOutput('Installing ComfyUI did not finish.', lastLog))
                       setInstallPhase('error')
                     }
                   } catch { /* keep polling */ }
@@ -776,7 +777,7 @@ function ComfyUISettings() {
                     } else if (data.status === 'error') {
                       clearInterval(poll)
                       const lastLog = (data.logs?.length ? data.logs[data.logs.length - 1] : '') as string
-                      setInstallErr(lastLog || 'ComfyUI update failed')
+                      setInstallErr(withInstallerOutput('Updating ComfyUI did not finish.', lastLog))
                       setInstallPhase('error')
                     }
                   } catch { /* keep polling */ }
@@ -1133,7 +1134,7 @@ export function SettingsPage() {
         } catch { /* transient — keep polling */ }
         if (s.status === 'complete') break
         if (s.status === 'error') {
-          setWhisperInstallError(s.error || 'Install failed.')
+          setWhisperInstallError(withInstallerOutput('Installing speech to text did not finish.', s.error))
           break
         }
         if (Date.now() - start > 600_000) {
@@ -1167,7 +1168,7 @@ export function SettingsPage() {
         } catch { /* transient — keep polling */ }
         if (s.status === 'complete') break
         if (s.status === 'error') {
-          setTtsInstallError(s.error || 'Install failed.')
+          setTtsInstallError(withInstallerOutput('Installing read aloud did not finish.', s.error))
           break
         }
         if (Date.now() - start > 600_000) {

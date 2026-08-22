@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { withInstallerOutput } from '../../lib/error-text'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Minus, Square, X as XIcon, ArrowRight, Download, Check, ChevronRight, Loader2, RefreshCw, ExternalLink, FolderOpen, Cpu } from 'lucide-react'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -718,8 +719,8 @@ export function Onboarding() {
             clearInterval(poll)
             setPythonInstalling(false)
             setPythonStartTime(null)
-            const lastLog = status.logs?.[status.logs.length - 1] || 'Python install failed'
-            setPythonInstallError(lastLog)
+            const lastLog = status.logs?.[status.logs.length - 1] || ''
+            setPythonInstallError(withInstallerOutput('Installing Python did not finish.', lastLog))
             resolve(false)
           }
         } catch { /* keep polling */ }
@@ -964,8 +965,8 @@ export function Onboarding() {
                               clearInterval(poll)
                               setOllamaInstalling(false)
                               setOllamaStartTime(null)
-                              const lastLog = s.logs?.[s.logs.length - 1] || 'Installation failed'
-                              setOllamaError(lastLog)
+                              const lastLog = s.logs?.[s.logs.length - 1] || ''
+                              setOllamaError(withInstallerOutput('Installing Ollama did not finish.', lastLog))
                             }
                           } catch { /* keep polling */ }
                         }, 1000)
@@ -1025,7 +1026,7 @@ export function Onboarding() {
 
                 {/* Error */}
                 {ollamaError && (
-                  <p className="text-[0.65rem] text-red-400">{ollamaError}</p>
+                  <p className="text-[0.65rem] text-red-400 whitespace-pre-line">{ollamaError}</p>
                 )}
 
                 {/* LM Studio ready */}
@@ -1083,8 +1084,8 @@ export function Onboarding() {
                               clearInterval(poll)
                               setLmstudioInstalling(false)
                               setLmstudioStartTime(null)
-                              const lastLog = s.logs?.[s.logs.length - 1] || 'Installation failed'
-                              setLmstudioError(lastLog)
+                              const lastLog = s.logs?.[s.logs.length - 1] || ''
+                              setLmstudioError(withInstallerOutput('Installing LM Studio did not finish.', lastLog))
                             }
                           } catch { /* keep polling */ }
                         }, 1000)
@@ -1146,7 +1147,7 @@ export function Onboarding() {
                 )}
 
                 {lmstudioError && (
-                  <p className="text-[0.65rem] text-red-400">
+                  <p className="text-[0.65rem] text-red-400 whitespace-pre-line">
                     {lmstudioError}
                     {lmstudioError.toLowerCase().includes('didn\'t come up') && (
                       <button
@@ -1357,8 +1358,8 @@ export function Onboarding() {
                             clearInterval(poll)
                             setComfyInstalling(false)
                             setInstallStartTime(null)
-                            const lastLog = status.logs?.[status.logs.length - 1] || 'Installation failed'
-                            setComfyInstallError(lastLog)
+                            const lastLog = status.logs?.[status.logs.length - 1] || ''
+                            setComfyInstallError(withInstallerOutput('Installing ComfyUI did not finish.', lastLog))
                           }
                         } catch { /* keep polling */ }
                       }, 2000)
@@ -1517,7 +1518,7 @@ export function Onboarding() {
 
             {/* Error */}
             {comfyInstallError && (
-              <p className="text-[0.65rem] text-red-400">{comfyInstallError}</p>
+              <p className="text-[0.65rem] text-red-400 whitespace-pre-line">{comfyInstallError}</p>
             )}
 
             {/* Ready state */}

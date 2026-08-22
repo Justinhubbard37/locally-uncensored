@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { withDetail } from '../lib/error-text'
 import { persist } from 'zustand/middleware'
 import { version as currentVersion } from '../../package.json'
 import { isTauri, backendCall, openExternal } from '../api/backend'
@@ -221,7 +222,7 @@ export const useUpdateStore = create<UpdateState>()(
         } catch (e) {
           set({
             downloadStatus: 'error',
-            errorMessage: e instanceof Error ? e.message : 'Download failed',
+            errorMessage: withDetail('The update could not be downloaded.', e),
           })
         }
       },
@@ -277,7 +278,7 @@ export const useUpdateStore = create<UpdateState>()(
         } catch (e) {
           set({
             downloadStatus: 'error',
-            errorMessage: e instanceof Error ? e.message : 'Install failed',
+            errorMessage: withDetail('The update could not be installed.', e),
           })
         }
       },
