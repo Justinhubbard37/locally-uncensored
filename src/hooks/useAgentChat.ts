@@ -883,6 +883,12 @@ export function useAgentChat() {
             type: 'function' as const,
             function: { name: t.name, description: t.description, parameters: t.inputSchema },
           }))
+          // Same reason as the coding loop: the catalog rides as its own field
+          // on the wire, so the message estimate the builder reported never saw
+          // it and the meter read low by the whole catalog.
+          if (convId) {
+            useSendSizeStore.getState().reportTools(convId, estimateTokens(JSON.stringify(tools)))
+          }
 
           let turn!: { content: string; toolCalls: ToolCall[]; thinking?: string; promptEvalCount?: number; evalCount?: number }
 

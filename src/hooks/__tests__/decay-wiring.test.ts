@@ -55,6 +55,15 @@ describe.each([
     expect(source).toMatch(/tokens: built\.promptTokens/)
   })
 
+  it('reports the tool catalog too, or the meter reads low by all of it', () => {
+    // The catalog is its own field on the wire, so the message estimate above
+    // cannot see it. It is picked after the build, which is why it arrives as
+    // a second call instead of riding in the report.
+    expect(source).toMatch(
+      /reportTools\(convId, estimateTokens\(JSON\.stringify\(tools\)\)\)/,
+    )
+  })
+
   it('leaves a decay row in the tool audit so support can see it', () => {
     expect(source).toMatch(/toolName: 'context_decay'/)
     expect(source).toMatch(/savedChars: built\.savedChars/)
@@ -104,5 +113,22 @@ describe('the builder runs before the model call, every step', () => {
     const nativeAt = agent.indexOf("if (strategy === 'native') {")
     expect(buildAt).toBeGreaterThan(-1)
     expect(buildAt).toBeLessThan(nativeAt)
+  })
+})
+
+describe('the prompt-transport path does not count its catalog twice', () => {
+  it('useCodex zeroes the catalog where the tools become a message', () => {
+    // buildHermesToolPrompt writes the catalog INTO messages[0], on the working
+    // array as well, so from the next step on the message estimate carries it.
+    const promptAt = codex.indexOf('const hermesSystem = buildHermesToolPrompt(')
+    const zeroAt = codex.indexOf('reportTools(convId, 0)')
+    expect(promptAt).toBeGreaterThan(-1)
+    expect(zeroAt).toBeGreaterThan(promptAt)
+  })
+
+  it('useAgentChat builds its hermes prompt into the system message up front', () => {
+    // Same reason, different shape: there it is already in the first system
+    // message, so that loop never reports a catalog at all.
+    expect(agent).toMatch(/buildHermesToolPrompt\(hermesToolDefs\)/)
   })
 })

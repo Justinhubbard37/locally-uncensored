@@ -31,6 +31,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { toolRegistry, DEFAULT_PERMISSIONS } from '../index'
 import { gateCreateTools } from '../../../lib/tool-selection'
+import { estimateTokens } from '../../../lib/context-compaction'
 
 /** Mirrors CODEX_CATEGORIES in useCodex.ts (same reason as the sibling tests). */
 const CODEX_CATEGORIES = ['filesystem', 'terminal', 'system', 'web', 'image', 'video', 'workflow']
@@ -106,6 +107,17 @@ describe('the coding step carries a catalog the diet actually shrank', () => {
     // The creative turn pays this one, and it is where the shared media
     // settings schema shows up.
     expect(fullWire().length).toBeLessThanOrEqual(FULL_CHAR_CEILING)
+  })
+
+  it('the catalog the meter now adds is the bigger half of a first step', () => {
+    // The token counter adds estimateTokens(JSON.stringify(tools)) on top of
+    // the message estimate (useCodex/useAgentChat reportTools). A fresh coding
+    // step's messages are ~732 tokens on this scale, so leaving the catalog out
+    // showed under a third of the request. Same estimator the meter uses, so
+    // this is the correction itself, not a proxy for it.
+    const catalog = estimateTokens(codingWire())
+    expect(catalog).toBeGreaterThan(1500)
+    expect(catalog).toBeLessThanOrEqual(CODING_CHAR_CEILING / 4 + 1)
   })
 
   it('the mobile catalog went on the same diet, or it drifts from here', () => {

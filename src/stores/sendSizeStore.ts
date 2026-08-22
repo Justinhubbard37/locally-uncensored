@@ -15,8 +15,19 @@ import { create } from 'zustand'
  * worth carrying across a restart.
  */
 export interface SendSizeReport {
-  /** Estimated tokens of the request as it went out. */
+  /** Estimated tokens of the MESSAGES of the request as they went out. */
   tokens: number
+  /**
+   * Estimated tokens of the serialized tool catalog that rode with them.
+   *
+   * The catalog is not a message, it is its own field on the wire, so the
+   * message estimate never saw it and the meter read about 1.700 tokens low on
+   * every coding step (the honest Ollama estimate and the model's own reported
+   * usage both include it, and the built anchor was overwriting both with the
+   * incomplete number). Zero on the prompt-transport path, where the catalog
+   * lives inside the system message and the message estimate already has it.
+   */
+  toolsTokens: number
   /** The effective send window it was built against. */
   window: number
   /** Messages in the conversation when the request was built. */
@@ -27,17 +38,42 @@ export interface SendSizeReport {
   savedChars: number
 }
 
+/**
+ * What the builder can report on its own. The catalog is chosen further down
+ * the step, so it arrives separately through reportTools.
+ */
+export type BuiltSizeReport = Omit<SendSizeReport, 'toolsTokens'>
+
 interface SendSizeState {
   byConv: Record<string, SendSizeReport>
-  report: (convId: string, size: SendSizeReport) => void
+  report: (convId: string, size: BuiltSizeReport) => void
+  /** The catalog this step is sending, once the router has picked it. */
+  reportTools: (convId: string, toolsTokens: number) => void
   get: (convId: string) => SendSizeReport | undefined
   clear: (convId: string) => void
 }
 
 export const useSendSizeStore = create<SendSizeState>((set, get) => ({
   byConv: {},
+  // The catalog of the step before carries over instead of being reset to zero
+  // here. The router runs between the two calls and may await an embedding, so
+  // resetting would make the meter dip by the whole catalog for as long as that
+  // takes, once per step.
   report: (convId, size) =>
-    set((state) => ({ byConv: { ...state.byConv, [convId]: size } })),
+    set((state) => ({
+      byConv: {
+        ...state.byConv,
+        [convId]: { toolsTokens: state.byConv[convId]?.toolsTokens ?? 0, ...size },
+      },
+    })),
+  reportTools: (convId, toolsTokens) =>
+    set((state) => {
+      const prior = state.byConv[convId]
+      // Nothing to attach it to: the build threw and the meter is back on the
+      // model's own usage, which counts the catalog itself.
+      if (!prior) return state
+      return { byConv: { ...state.byConv, [convId]: { ...prior, toolsTokens } } }
+    }),
   get: (convId) => get().byConv[convId],
   clear: (convId) =>
     set((state) => {

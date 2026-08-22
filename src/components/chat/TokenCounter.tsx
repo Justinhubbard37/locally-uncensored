@@ -27,9 +27,15 @@ export function TokenCounter() {
   // forever after one looping cloud reasoner burned its whole 16,384-token
   // completion budget, while the next real prompt cost 65 tokens (David,
   // 2026-07-12). An honest dip after compaction beats a sticky wrong maximum.
+  // Messages PLUS the tool catalog: both are the request, both are billed, and
+  // the catalog is the bigger half of what a fresh coding step costs. Leaving
+  // it out made the meter read about 1.700 tokens low on every step of a
+  // coding run, worst exactly where it is otherwise near zero.
   const fill = computeContextFill(
     messages,
-    sent ? { tokens: sent.tokens, atMessageCount: sent.atMessageCount } : undefined,
+    sent
+      ? { tokens: sent.tokens + sent.toolsTokens, atMessageCount: sent.atMessageCount }
+      : undefined,
   )
   const rawUsed = fill.used
 
@@ -68,7 +74,7 @@ export function TokenCounter() {
     ? `. Capped: a step sends at most ${maxTokens.toLocaleString()} of this model's ${ctx.contextWindow.toLocaleString()} tokens (Settings, send window), and tool results older than the newest step go out shortened`
     : ''
   const title = fill.source === 'built'
-    ? `Last request: ${usedTokens.toLocaleString()} / ${maxTokens.toLocaleString()} tokens, the size of the payload actually built for the last step, decay and compaction included${capNote}`
+    ? `Last request: ${usedTokens.toLocaleString()} / ${maxTokens.toLocaleString()} tokens, the size of the payload actually built for the last step, tool catalog, decay and compaction included${capNote}`
     : isReal
       ? `Context: ${usedTokens.toLocaleString()} / ${maxTokens.toLocaleString()} tokens (${source}), anchored on the model's last reported usage (includes system prompt + tools + RAG); reasoning tokens are not context and aren't counted${capNote}`
       : `Estimated: ${usedTokens.toLocaleString()} / ${maxTokens.toLocaleString()} tokens (${source}), estimate until the model reports real usage${capNote}`

@@ -1149,6 +1149,13 @@ export function useCodex() {
             type: 'function' as const,
             function: { name: t.name, description: t.description, parameters: t.inputSchema },
           }))
+          // The catalog is part of what this step weighs and part of what the
+          // provider bills for it, and it is chosen here, after the request was
+          // built. Without this the meter showed the messages alone: 732 tokens
+          // on the first coding step against 2.400 on the wire.
+          if (convId) {
+            useSendSizeStore.getState().reportTools(convId, estimateTokens(JSON.stringify(tools)))
+          }
           void diagLog('iter-start', {
             iter: i,
             activeModel, modelToUse, strategy, providerId,
@@ -1355,6 +1362,10 @@ export function useCodex() {
             },
           )
           const hermesSystem = buildHermesToolPrompt(hermesTools) + `\n\n${systemPrompt}`
+          // Prompt transport: the catalog IS a message here, so the message
+          // estimate of the next step already carries it. Counting it a second
+          // time as a catalog would be this fix undoing itself.
+          if (convId) useSendSizeStore.getState().reportTools(convId, 0)
           // Both arrays: the working one so the NEXT step's budget still
           // counts the hermes tool prompt, the send one because that is what
           // actually goes out.

@@ -8,7 +8,7 @@
  * budget itself, and the denominator the user sees.
  */
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import { readFileSync } from 'fs'
 import { resolve } from 'path'
 import {
@@ -18,6 +18,7 @@ import {
 } from '../send-window'
 import { computeContextFill } from '../token-usage'
 import { DEFAULT_SETTINGS } from '../constants'
+import { useSendSizeStore } from '../../stores/sendSizeStore'
 
 describe('A2: the paid-provider send cap', () => {
   it('gives a 262k cloud model a 64k budget, not 209k', () => {
@@ -135,5 +136,62 @@ describe('A2: the counter divides by the send window', () => {
   it('explains the cap and the decay in the tooltip', () => {
     expect(src).toMatch(/a step sends at most/)
     expect(src).toMatch(/older than the newest step go out shortened/)
+  })
+})
+
+describe('A2 meter honesty: the tool catalog is part of the request', () => {
+  const step = {
+    tokens: 732,
+    window: 64000,
+    atMessageCount: 2,
+    trimmedResults: 0,
+    savedChars: 0,
+  }
+
+  beforeEach(() => {
+    useSendSizeStore.setState({ byConv: {} })
+  })
+
+  it('the builder reports the messages, the router reports the catalog', () => {
+    const store = useSendSizeStore.getState()
+    store.report('c1', step)
+    expect(useSendSizeStore.getState().get('c1')!.toolsTokens).toBe(0)
+    store.reportTools('c1', 1856)
+    const entry = useSendSizeStore.getState().get('c1')!
+    expect(entry.tokens).toBe(732)
+    expect(entry.toolsTokens).toBe(1856)
+  })
+
+  it('the next step keeps the catalog while its own router is still running', () => {
+    const store = useSendSizeStore.getState()
+    store.report('c1', step)
+    store.reportTools('c1', 1856)
+    store.report('c1', { ...step, tokens: 9000, atMessageCount: 6 })
+    // A reset to zero here would dip the meter by the whole catalog once per
+    // step, for as long as the embedding router takes.
+    expect(useSendSizeStore.getState().get('c1')!.toolsTokens).toBe(1856)
+  })
+
+  it('a catalog for a conversation that never built anything is dropped', () => {
+    useSendSizeStore.getState().reportTools('ghost', 1856)
+    expect(useSendSizeStore.getState().get('ghost')).toBeUndefined()
+  })
+
+  it('the counter adds the catalog to its numerator', () => {
+    const src = readFileSync(
+      resolve(__dirname, '..', '..', 'components', 'chat', 'TokenCounter.tsx'),
+      'utf8',
+    )
+    expect(src).toMatch(/tokens: sent\.tokens \+ sent\.toolsTokens/)
+  })
+
+  it('the numerator really moves by the catalog, it is not a cosmetic field', () => {
+    const msgs = [
+      { role: 'user', content: 'refactor the parser' },
+      { role: 'assistant', content: '' },
+    ]
+    const withoutCatalog = computeContextFill(msgs, { tokens: 732, atMessageCount: 2 })
+    const withCatalog = computeContextFill(msgs, { tokens: 732 + 1856, atMessageCount: 2 })
+    expect(withCatalog.used - withoutCatalog.used).toBe(1856)
   })
 })
