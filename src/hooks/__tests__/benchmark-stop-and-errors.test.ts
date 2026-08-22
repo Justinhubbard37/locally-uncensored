@@ -23,9 +23,12 @@ import { toMarkdownReport } from '../../stores/benchmarkStore'
 import type { BenchmarkResult } from '../../lib/benchmark-prompts'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const hook = readFileSync(resolve(here, '../useBenchmark.ts'), 'utf8')
-const store = readFileSync(resolve(here, '../../stores/benchmarkStore.ts'), 'utf8')
-const view = readFileSync(resolve(here, '../../components/models/BenchmarkView.tsx'), 'utf8')
+// Normalize to LF: a Windows checkout with core.autocrlf=true materializes
+// CRLF, and pins that span a line break would fail on line endings alone.
+const lf = (p: string) => readFileSync(resolve(here, p), 'utf8').replace(/\r\n/g, '\n')
+const hook = lf('../useBenchmark.ts')
+const store = lf('../../stores/benchmarkStore.ts')
+const view = lf('../../components/models/BenchmarkView.tsx')
 
 describe('stop reaches the loop, not just the request', () => {
   it('the loop checks the stop flag before every prompt', () => {
