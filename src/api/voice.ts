@@ -182,7 +182,13 @@ export async function checkWhisperAvailable(): Promise<{
     if (isTauri()) {
       return await backendCall("whisper_status");
     }
-    const res = await fetch("/local-api/transcribe-status");
+    // The /local-api middleware refuses any request without the CSRF header
+    // (403). backendCall sends it on every dev-mode call; these two voice
+    // fetches went out bare, so the browser path never reached whisper
+    // (GitHub #115).
+    const res = await fetch("/local-api/transcribe-status", {
+      headers: { "x-locally-uncensored": "true" },
+    });
     return res.json();
   } catch {
     return { available: false, backend: null, error: "Failed to reach transcribe-status endpoint" };
@@ -213,7 +219,11 @@ export async function transcribeAudio(audioBlob: Blob): Promise<string> {
 
   const res = await fetch("/local-api/transcribe", {
     method: "POST",
-    headers: { "Content-Type": audioBlob.type || "audio/webm" },
+    headers: {
+      "Content-Type": audioBlob.type || "audio/webm",
+      // CSRF header the middleware demands on every /local-api call (#115).
+      "x-locally-uncensored": "true",
+    },
     body: audioBlob,
   });
   const data = await res.json();
