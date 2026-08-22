@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { CODEX_CONFIRM_TOOLS, codexNeedsConfirm, codexConfirmEnabled } from '../codexShellGate'
+import { DEFAULT_SETTINGS } from '../../lib/constants'
 
 // H2: the coding-agent shell/code confirm gate. These tests lock the contract
 // that (a) the autonomous workflow is unchanged when the gate is off, (b) the
@@ -44,39 +45,50 @@ describe('codexShellGate (H2)', () => {
     })
   })
 
-  // 2.5.9 — David 2026-07-24: "auto approve bei cloud modellen setting nicht
-  // funktional". The 2.5.7 review hard-wired providerId === 'lu-cloud' into the
-  // gate, so the confirm toggle silently did nothing on a cloud model. These
-  // lock the new contract: same safe default, but the user can now actually
-  // turn the cloud arm off.
-  describe('codexConfirmEnabled (cloud arm)', () => {
+  // History: the 2.5.7 review hard-wired providerId === 'lu-cloud' into the
+  // gate, so the confirm toggle silently did nothing on a cloud model (David
+  // 2026-07-24, "auto approve bei cloud modellen setting nicht funktional").
+  // 2.5.9 made it a visible setting that still defaulted ON, and G15a
+  // (2026-08-07) carried the same default to the Agent surface.
+  //
+  // David 2026-08-22 replaces that decision: bypass means bypass, on a cloud
+  // model too, and the customer who picks it makes the call. The cloud arm is
+  // an opt-in now and ships OFF. These lock both halves.
+  describe('codexConfirmEnabled (cloud arm, opt-in since 2026-08-22)', () => {
     const LOCALS = ['ollama', 'openai', 'anthropic']
 
-    it('both off on a local model: unattended, the autonomous default', () => {
-      for (const providerId of LOCALS) {
-        expect(codexConfirmEnabled({ confirmShell: false, cloudConfirmShell: true, providerId })).toBe(false)
+    it('THE DECISION: the shipped default leaves a cloud model unattended', () => {
+      expect(DEFAULT_SETTINGS.codexCloudConfirmOptIn).toBe(false)
+      expect(
+        codexConfirmEnabled({
+          confirmShell: false,
+          cloudOptIn: DEFAULT_SETTINGS.codexCloudConfirmOptIn,
+          providerId: 'lu-cloud',
+        })
+      ).toBe(false)
+    })
+
+    it('a cloud model with the opt-in off behaves exactly like a local one', () => {
+      for (const providerId of [...LOCALS, 'lu-cloud']) {
+        expect(codexConfirmEnabled({ confirmShell: false, cloudOptIn: false, providerId })).toBe(false)
       }
+    })
+
+    it('the opt-in is what brings the cloud confirm back', () => {
+      expect(codexConfirmEnabled({ confirmShell: false, cloudOptIn: true, providerId: 'lu-cloud' })).toBe(true)
     })
 
     it('global toggle on: confirms on every provider, cloud arm irrelevant', () => {
       for (const providerId of [...LOCALS, 'lu-cloud']) {
-        expect(codexConfirmEnabled({ confirmShell: true, cloudConfirmShell: false, providerId })).toBe(true)
-        expect(codexConfirmEnabled({ confirmShell: true, cloudConfirmShell: true, providerId })).toBe(true)
+        expect(codexConfirmEnabled({ confirmShell: true, cloudOptIn: false, providerId })).toBe(true)
+        expect(codexConfirmEnabled({ confirmShell: true, cloudOptIn: true, providerId })).toBe(true)
       }
     })
 
-    it('default (cloud arm on): a cloud model still confirms — 2.5.8 behaviour preserved', () => {
-      expect(codexConfirmEnabled({ confirmShell: false, cloudConfirmShell: true, providerId: 'lu-cloud' })).toBe(true)
-    })
-
-    it('THE FIX: cloud arm off means auto-approve finally works on cloud models', () => {
-      expect(codexConfirmEnabled({ confirmShell: false, cloudConfirmShell: false, providerId: 'lu-cloud' })).toBe(false)
-    })
-
-    it('the cloud arm never gates a local provider', () => {
+    it('the cloud arm never gates a local provider, opted in or not', () => {
       for (const providerId of LOCALS) {
-        expect(codexConfirmEnabled({ confirmShell: false, cloudConfirmShell: true, providerId })).toBe(false)
-        expect(codexConfirmEnabled({ confirmShell: false, cloudConfirmShell: false, providerId })).toBe(false)
+        expect(codexConfirmEnabled({ confirmShell: false, cloudOptIn: true, providerId })).toBe(false)
+        expect(codexConfirmEnabled({ confirmShell: false, cloudOptIn: false, providerId })).toBe(false)
       }
     })
   })

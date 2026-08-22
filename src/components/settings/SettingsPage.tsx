@@ -923,15 +923,14 @@ function CodexAgentSettings() {
         enabled={settings.codexConfirmShell}
         onChange={() => updateSettings({ codexConfirmShell: !settings.codexConfirmShell })}
       />
-      {/* Cloud arm of the same gate. Until 2.5.9 this was hard-wired on and
-          invisible, so the toggle above appeared to do nothing whenever the
-          coding agent ran on a cloud model. Always shown since G15a: it also
-          governs Agent mode, which ignores the Codex-only toggle above, so
-          hiding it while that toggle is on would strand the Agent side. */}
+      {/* Cloud arm of the same gate, an opt-in since David's decision of
+          2026-08-22: off by default, a cloud model runs like a local one, and
+          Bypass really bypasses. Always shown, because it governs Agent mode
+          too, which ignores the Codex-only toggle above. */}
       <InlineToggle
-        label="Also confirm when Agent or Coding runs on an LU Cloud model (recommended)"
-        enabled={settings.codexCloudConfirmShell}
-        onChange={() => updateSettings({ codexCloudConfirmShell: !settings.codexCloudConfirmShell })}
+        label="Also confirm shell & code when Agent or Coding runs on an LU Cloud model (off by default, and it asks in Bypass too)"
+        enabled={settings.codexCloudConfirmOptIn}
+        onChange={() => updateSettings({ codexCloudConfirmOptIn: !settings.codexCloudConfirmOptIn })}
       />
     </div>
   )

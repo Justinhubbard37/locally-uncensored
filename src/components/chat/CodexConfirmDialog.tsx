@@ -26,7 +26,7 @@ export function CodexConfirmDialog() {
     // Clear whichever arm is asking. When the cloud arm is the reason, the
     // general confirm is already off, so clearing that one would change nothing
     // and the prompt would return on the very next command.
-    if (pending.cloudReason) updateSettings({ codexCloudConfirmShell: false })
+    if (pending.cloudReason) updateSettings({ codexCloudConfirmOptIn: false })
     else updateSettings({ codexConfirmShell: false })
     answer(true)
   }

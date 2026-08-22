@@ -72,7 +72,20 @@ import { DEFAULT_SETTINGS, BUILT_IN_PERSONAS } from '../lib/constants'
 // version back when the old build writes the store, so this migration runs
 // AGAIN on the next 2.6.6 start. A one-shot reset here would fire on every
 // build switch and quietly wipe a user preference each time.
-const STORE_VERSION = 20
+// v21 (2.6.6): added settings.codexCloudConfirmOptIn (default false) and
+// retired settings.codexCloudConfirmShell (default true). Bypass means bypass
+// on a cloud model too (David 2026-08-22, replacing G15a of 2026-08-07), so
+// the cloud shell confirm is an opt-in now.
+// The key had to be a NEW one, not a flipped default on the old one: this
+// store persists the whole settings object, so every existing profile has
+// `codexCloudConfirmShell: true` written to disk, and a changed default alone
+// would never reach it. Reusing the key would have meant a one-shot reset,
+// which the R1 downgrade contract above rules out while 2.6.5 and 2.6.6 share
+// one WebView profile. A new key rides the additive merge instead: the default
+// fills in for everyone, an opt-in the user makes survives every A/B switch,
+// and the stale old key is simply never read again. STRICTLY ADDITIVE and
+// IDEMPOTENT, like v20 and unlike v10 and v19.
+const STORE_VERSION = 21
 
 interface SettingsState {
   settings: Settings

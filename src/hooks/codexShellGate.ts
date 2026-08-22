@@ -1,4 +1,4 @@
-// H2 security gate — shared, pure, testable.
+// H2 security gate: shared, pure, testable.
 //
 // Consumed by BOTH loops since G15a (2026-08-07): useCodex gates on it
 // directly, and useAgentChat lifts an exec tool to pending_approval when
@@ -7,7 +7,7 @@
 // shell_execute unattended on the Agent surface (R23).
 //
 // The coding agent (useCodex) auto-runs tools unattended by design. These are
-// the arbitrary-code-execution tools — the prompt-injection RCE surface (a tool
+// the arbitrary-code-execution tools, the prompt-injection RCE surface (a tool
 // result or a read file steering the model into running a command). When the
 // user enables `settings.codexConfirmShell`, each of these pauses for an
 // explicit confirm before dispatch.
@@ -27,28 +27,31 @@ export function codexNeedsConfirm(toolName: string, confirmEnabled: boolean): bo
 }
 
 /**
- * Is the confirm gate active for THIS run? (David 2026-07-24: "auto approve bei
- * cloud modellen setting nicht funktional".)
+ * Is the confirm gate active for THIS run?
  *
- * The 2.5.7 security review hard-wired `providerId === 'lu-cloud'` into the gate,
- * so on a cloud model every shell/code call confirmed even with the setting off.
- * The setting was silently overridden with nothing in the UI saying so, which
- * reads as a broken toggle rather than a policy.
+ * David 2026-08-22, replacing G15a (2026-08-07) and the 2.5.9 default:
+ * bypass means bypass, on a cloud model too. The 2.5.7 review hard-wired
+ * `providerId === 'lu-cloud'` into the gate, 2.5.9 turned that into a visible
+ * setting that still defaulted ON, and G15a carried it to the Agent surface.
+ * All three kept asking a user who had just said do not ask, which reads as a
+ * broken switch rather than a policy. Picking Bypass IS the decision, and the
+ * customer who picks it makes it themselves.
  *
- * The policy is still the right default — a remote model reaching unattended
- * local shell is a bigger blast radius than a local model the user deliberately
- * trusts — so it stays ON by default. It is now a real, visible, user-owned
- * switch instead of a hidden override: turn `cloudConfirmShell` off and cloud
- * models follow the same rule as local ones.
+ * What stays is the opt-in: `codexCloudConfirmOptIn` is OFF by default, so a
+ * cloud model behaves exactly like a local one. Turn it on and the cloud
+ * confirm is back in every mode, Bypass included, because that is what opting
+ * in means.
  */
 export function codexConfirmEnabled(opts: {
-  /** settings.codexConfirmShell — confirm for EVERY provider. */
+  /** settings.codexConfirmShell: confirm for EVERY provider. */
   confirmShell: boolean
-  /** settings.codexCloudConfirmShell — also confirm on LU Cloud. Default true. */
-  cloudConfirmShell: boolean
+  /** settings.codexCloudConfirmOptIn: also confirm on LU Cloud. Default false. */
+  cloudOptIn: boolean
   /** Provider driving this run ('lu-cloud' | 'ollama' | 'openai' | ...). */
   providerId: string
 }): boolean {
   if (opts.confirmShell) return true
-  return opts.providerId === 'lu-cloud' && opts.cloudConfirmShell
+  // `=== true` on purpose: a profile the persist merge never touched carries
+  // the key as undefined, and the new policy is what undefined must mean.
+  return opts.providerId === 'lu-cloud' && opts.cloudOptIn === true
 }

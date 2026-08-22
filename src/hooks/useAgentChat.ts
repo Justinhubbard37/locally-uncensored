@@ -1563,17 +1563,19 @@ export function useAgentChat() {
             permissions,
             perToolOverrides
           )
-          // G15a (decided 2026-08-07): the cloud shell rule covers BOTH
-          // surfaces. The Code tab confirms the arbitrary-exec tools on an LU
-          // Cloud model (codexShellGate); Agent mode ran the SAME tools on the
-          // SAME model unattended (R23), so the surface a casual user is more
-          // likely in had the looser rule. Same policy, same visible setting;
-          // rides ON TOP of the per-tool permission level, never loosens it.
+          // One cloud shell rule for BOTH surfaces (G15a, 2026-08-07): the
+          // Code tab and Agent mode read the same helper and the same setting,
+          // so the same cloud model cannot be stricter in one tab than the
+          // other (R23). David's decision of 2026-08-22 made that setting an
+          // opt-in that defaults OFF, so this arm normally does nothing and
+          // permission level auto runs unattended on a cloud model too. For a
+          // user who opted in it rides ON TOP of the per-tool permission
+          // level, never loosens it.
           const cloudShellConfirm =
             CODEX_CONFIRM_TOOLS.has(tc.function.name) &&
             codexConfirmEnabled({
               confirmShell: false,
-              cloudConfirmShell: settings.codexCloudConfirmShell,
+              cloudOptIn: settings.codexCloudConfirmOptIn,
               providerId,
             })
           const needsApproval = permLevel !== 'auto' || cloudShellConfirm

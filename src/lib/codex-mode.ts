@@ -132,7 +132,7 @@ export interface CodexModeKnobInput {
   mode: CodexMode
   settings: {
     codexConfirmShell?: boolean
-    codexCloudConfirmShell?: boolean
+    codexCloudConfirmOptIn?: boolean
     codexStageMode?: boolean
     codexReviewMode?: boolean
   }
@@ -146,9 +146,10 @@ export interface CodexModeKnobInput {
  * Effective knobs = f(mode, settings). Pure, so the gate path and the request
  * path cannot disagree, and so a test can prove no settings write happens.
  *
- * The cloud shell gate is deliberately untouched in all three modes: Bypass
- * turns the LOCAL asking off and leaves codexCloudConfirmShell to decide for
- * lu-cloud, which is the security decision the plan pins down.
+ * The cloud shell gate is not a fourth mode: it is the user's own opt-in and
+ * is off by default, so on a cloud model every mode behaves exactly as it does
+ * on a local one (David 2026-08-22). A user who opts in gets the cloud confirm
+ * in all three modes, Bypass included.
  *
  * Where a mode and Code-Review Mode or a read-only slash command disagree, the
  * more restrictive behaviour wins.
@@ -157,13 +158,13 @@ export function codexModeKnobs(input: CodexModeKnobInput): CodexModeKnobs {
   const { mode, settings, providerId } = input
   const reviewMode = settings.codexReviewMode === true
   const readOnlyTurn = input.readOnlyTurn === true
-  const cloudConfirmShell = settings.codexCloudConfirmShell !== false
+  const cloudOptIn = settings.codexCloudConfirmOptIn === true
   const restrictedRead = reviewMode || readOnlyTurn
 
   if (mode === 'bypass') {
     return {
-      // Local asking off, cloud gate untouched.
-      confirmExec: codexConfirmEnabled({ confirmShell: false, cloudConfirmShell, providerId }),
+      // Local asking off. Nothing else asks unless the user opted in.
+      confirmExec: codexConfirmEnabled({ confirmShell: false, cloudOptIn, providerId }),
       // Restrictive wins: a read-only turn has nothing to stage anyway.
       stageWrites: false,
       readOnly: restrictedRead,
@@ -174,11 +175,10 @@ export function codexModeKnobs(input: CodexModeKnobInput): CodexModeKnobs {
   if (mode === 'plan') {
     return {
       // Nothing mutating survives the read-only chain, so the confirm gate
-      // keeps following the user's own settings here. The cloud arm is what
-      // must never soften, and codexConfirmEnabled carries it.
+      // keeps following the user's own settings here, cloud opt-in included.
       confirmExec: codexConfirmEnabled({
         confirmShell: settings.codexConfirmShell === true,
-        cloudConfirmShell,
+        cloudOptIn,
         providerId,
       }),
       stageWrites: false,

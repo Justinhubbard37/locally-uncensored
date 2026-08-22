@@ -242,19 +242,23 @@ export interface Settings {
    */
   codexConfirmShell: boolean
   /**
-   * Also confirm shell/code on LU Cloud models even when `codexConfirmShell`
-   * is off. Default ON — a remote model reaching unattended local shell is a
-   * bigger blast radius than a local model the user deliberately trusts.
+   * Opt in to confirming shell/code on LU Cloud models even when
+   * `codexConfirmShell` is off. Governs BOTH surfaces (Code tab and Agent
+   * mode), and rides on top of Agent's per-tool permission levels.
    *
-   * Until 2.5.9 this was hard-wired into useCodex, so the confirm toggle above
-   * silently did nothing on a cloud model (David 2026-07-24). Same safe default,
-   * but now it is a real switch the user can see and turn off.
+   * Default OFF (David 2026-08-22, replacing the ON default this carried as
+   * `codexCloudConfirmShell` since 2.5.9 and the G15a decision of 2026-08-07):
+   * a cloud model follows the same rule as a local one, so Bypass really
+   * bypasses and permission level auto really runs unattended. The user who
+   * picks Bypass has made that decision. Turning this on brings the cloud
+   * confirm back everywhere, Bypass included: that is what the opt-in is for.
    *
-   * G15a (2026-08-07): governs BOTH surfaces. Agent mode ran the same exec
-   * tools on the same cloud model unattended while the Code tab confirmed
-   * them; one policy now, riding on top of Agent's per-tool permission levels.
+   * The key is new on purpose. Every profile out there has the old key
+   * materialised as `true`, so reusing it would need a one-shot reset in the
+   * store migration, and R1's downgrade contract forbids one-shot resets while
+   * two builds share a profile. A new key with a new default needs no reset.
    */
-  codexCloudConfirmShell: boolean
+  codexCloudConfirmOptIn: boolean
   /**
    * Shared default workspace for Codex AND Agent (Underlying refactor —
    * workspace unification). When set, both surfaces resolve relative paths

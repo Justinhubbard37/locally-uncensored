@@ -100,7 +100,7 @@ describe('the Agent surface is untouched by the Code tab mode', () => {
     expect(agent).toContain(
       'codexConfirmEnabled({\n'
       + '              confirmShell: false,\n'
-      + '              cloudConfirmShell: settings.codexCloudConfirmShell,\n'
+      + '              cloudOptIn: settings.codexCloudConfirmOptIn,\n'
       + '              providerId,\n'
       + '            })',
     )
@@ -146,7 +146,7 @@ describe('runtime: a pick in one conversation leaves everything else alone', () 
       const s = useSettingsStore.getState().settings
       return JSON.stringify({
         confirmShell: false,
-        cloudConfirmShell: s.codexCloudConfirmShell,
+        cloudOptIn: s.codexCloudConfirmOptIn,
       })
     }
     const before = inputs()
@@ -169,7 +169,7 @@ describe('runtime: a pick in one conversation leaves everything else alone', () 
     useSettingsStore.getState().updateSettings({ codexConfirmShell: true, codexStageMode: true })
     expect(JSON.stringify(useSettingsStore.getState().settings)).not.toBe(before)
     // ... and it would have reached the Agent surface through the same object.
-    useSettingsStore.getState().updateSettings({ codexCloudConfirmShell: false })
-    expect(useSettingsStore.getState().settings.codexCloudConfirmShell).toBe(false)
+    useSettingsStore.getState().updateSettings({ codexCloudConfirmOptIn: true })
+    expect(useSettingsStore.getState().settings.codexCloudConfirmOptIn).toBe(true)
   })
 })

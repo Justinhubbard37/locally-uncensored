@@ -17,7 +17,7 @@ import { MUTATING_TOOLS } from '../mutating-tools'
 
 const SETTINGS = {
   codexConfirmShell: false,
-  codexCloudConfirmShell: true,
+  codexCloudConfirmOptIn: false,
   codexStageMode: false,
   codexReviewMode: false,
 }
@@ -100,17 +100,30 @@ describe('switch point 3: the read-only chain', () => {
   })
 })
 
-describe('the cloud shell gate survives all three modes', () => {
-  it.each(CODEX_MODES)('%s still confirms on lu-cloud', (mode) => {
-    expect(knobs(mode, { codexConfirmShell: false, codexCloudConfirmShell: true }, 'lu-cloud').confirmExec).toBe(true)
+// David 2026-08-22, replacing G15a: the cloud arm is the user's opt-in, not a
+// fourth mode. Off by default, so lu-cloud goes through the same three modes a
+// local provider does.
+describe('the cloud shell gate is an opt-in, not a fourth mode', () => {
+  it('THE DECISION: Bypass on a cloud model runs unattended, like Bypass on a local one', () => {
+    expect(knobs('bypass', { codexConfirmShell: false }, 'lu-cloud').confirmExec).toBe(false)
+    expect(knobs('bypass', { codexConfirmShell: true }, 'lu-cloud').confirmExec).toBe(false)
   })
-  it('negative control: the same three modes on a local provider do not all confirm', () => {
-    expect(knobs('bypass', { codexConfirmShell: false }, 'ollama').confirmExec).toBe(false)
+  it.each(CODEX_MODES)('%s treats lu-cloud exactly like ollama while the opt-in is off', (mode) => {
+    expect(knobs(mode, { codexConfirmShell: false }, 'lu-cloud').confirmExec)
+      .toBe(knobs(mode, { codexConfirmShell: false }, 'ollama').confirmExec)
   })
-  it('the user can still switch the cloud arm off themselves, and that is the ONLY way', () => {
-    expect(knobs('bypass', { codexCloudConfirmShell: false }, 'lu-cloud').confirmExec).toBe(false)
-    // Bypass alone never reaches that state.
-    expect(knobs('bypass', { codexCloudConfirmShell: true }, 'lu-cloud').confirmExec).toBe(true)
+  it('negative control: Ask still asks on a cloud model, because Ask means ask', () => {
+    expect(knobs('ask', { codexConfirmShell: false }, 'lu-cloud').confirmExec).toBe(true)
+  })
+  it.each(CODEX_MODES)('%s confirms on lu-cloud once the user opts in, Bypass included', (mode) => {
+    expect(knobs(mode, { codexConfirmShell: false, codexCloudConfirmOptIn: true }, 'lu-cloud').confirmExec).toBe(true)
+  })
+  it('negative control: opting in never gates a local provider', () => {
+    expect(knobs('bypass', { codexConfirmShell: false, codexCloudConfirmOptIn: true }, 'ollama').confirmExec).toBe(false)
+    expect(knobs('plan', { codexConfirmShell: false, codexCloudConfirmOptIn: true }, 'ollama').confirmExec).toBe(false)
+  })
+  it('an undefined value from an older profile counts as not opted in', () => {
+    expect(codexModeKnobs({ mode: 'bypass', settings: {}, providerId: 'lu-cloud' }).confirmExec).toBe(false)
   })
 })
 

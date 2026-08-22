@@ -520,12 +520,12 @@ export function useCodex() {
     // over the switches that already exist; nothing here is ever written back
     // into the settings, so a Bypass in this conversation cannot reach another
     // conversation or the Agent surface (plan C1 BINDUNG). The cloud shell
-    // gate is inside codexConfirmEnabled and stays armed in all three modes.
+    // gate is inside codexConfirmEnabled and is off unless the user opts in.
     const knobs = codexModeKnobs({
       mode: codexMode,
       settings: {
         codexConfirmShell: settings.codexConfirmShell,
-        codexCloudConfirmShell: settings.codexCloudConfirmShell,
+        codexCloudConfirmOptIn: settings.codexCloudConfirmOptIn,
         codexStageMode: settings.codexStageMode,
         codexReviewMode: settings.codexReviewMode,
       },
@@ -1949,13 +1949,17 @@ export function useCodex() {
           //
           // 2.5.9 (David 2026-07-24 "auto approve bei cloud modellen setting
           // nicht funktional"): that override was invisible, so the confirm
-          // toggle looked broken on cloud models. Same default, but the cloud arm
-          // is now settings.codexCloudConfirmShell — a real switch the user owns.
-          // See codexConfirmEnabled for the whole rule.
+          // toggle looked broken on cloud models. It became the visible
+          // setting the user owns.
+          //
+          // 2026-08-22 (David, replacing G15a): that setting is an opt-in now
+          // and defaults OFF. Bypass means bypass on a cloud model too, and
+          // the customer who picks Bypass makes that call themselves. See
+          // codexConfirmEnabled for the whole rule.
           //
           // 2.6.6 (plan C1): the mode preset decides whether this gate is
-          // armed. Ask forces it on, Bypass turns the LOCAL arm off, and
-          // codexConfirmEnabled keeps the cloud arm alive in every mode.
+          // armed. Ask forces it on, Bypass turns the local arm off, and the
+          // cloud arm only survives Bypass for a user who opted in.
           awaitApproval: knobs.confirmExec
             ? async (req) => {
                 if (!CODEX_CONFIRM_TOOLS.has(req.toolName)) return true

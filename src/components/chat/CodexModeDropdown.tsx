@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ChevronDown, ShieldCheck, Zap, ClipboardList, Cloud } from 'lucide-react'
+import { ChevronDown, ShieldCheck, Zap, ClipboardList } from 'lucide-react'
 import { useChatStore } from '../../stores/chatStore'
 import { useCodexStore } from '../../stores/codexStore'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -138,18 +138,6 @@ export function CodexModeDropdown({ openUpward = false }: { openUpward?: boolean
                       </button>
                     )
                   })}
-                </div>
-                {/* The one thing Bypass deliberately does NOT lift. Said here
-                    because a switch labelled "bypass permissions" that still
-                    asks would otherwise read as a broken toggle. */}
-                <div className="mt-1 pt-1 border-t border-gray-200 dark:border-white/[0.06] px-3">
-                  <p className="flex items-start gap-1 py-1 text-[0.5rem] leading-snug text-gray-400">
-                    <Cloud size={9} className="mt-px shrink-0" />
-                    <span>
-                      Bypass never lifts the cloud shell confirm. A remote model reaching your
-                      local shell unattended stays a decision you make each time.
-                    </span>
-                  </p>
                 </div>
               </>
             )}

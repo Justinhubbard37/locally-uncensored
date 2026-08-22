@@ -13,7 +13,8 @@ and gives the Code view a mode menu, a plan panel and a real file explorer.
 
 - **A mode menu in the Code composer.** Ask permissions, Bypass permissions or
   Plan mode, chosen per conversation with a global default in Settings. Bypass
-  never lifts the cloud shell lock, and the menu says so. Plan mode explores
+  bypasses on a cloud model too, and a setting brings the cloud shell confirm
+  back for anyone who wants it. Plan mode explores
   read only and stops for your yes; Approve and run then carries the whole plan
   out in the same run and never lands in Bypass on its own, showing the mode it
   will run in and the real commands first.
