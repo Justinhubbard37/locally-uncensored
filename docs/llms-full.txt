@@ -141,7 +141,7 @@ A correctness release. Most of it is things that looked like they worked and did
 - Local Create lanes report progress. The lanes themselves shipped in v2.5.8; what v2.5.9 fixes is installing them. Downloading a Motion Control, Music, Talking Character or Extend lane now names the file, counts it up, appears in the Downloads tray and can be cancelled. Interrupted model downloads resume from where they stopped instead of restarting at zero.
 - A failed image is reported as a failure. When ComfyUI returned an error, the chat image tool passed the error text back as a result and told the model the picture was displayed; that no longer happens.
 - Three video models removed (CogVideoX both, Pyramid Flow) because they could never run. Nothing in the catalogue is marked COMING SOON any more, because nothing was.
-- Cloud renders are retained for seven days. Create states this once, with a download reminder. Trained characters on the user shelf are exempt from that clock.
+- Cloud renders are retained for seven days. Create states this once, with a download reminder. Trained characters on the user shelf are exempt from that clock. On the paid service, prompt prefixes can be cached briefly at the inference partner to speed up requests and are not stored permanently.
 - Auto-approve now works on cloud models, read-aloud reaches the selected Piper voice, the image and video tools see GGUF models, and the Edit tab is labelled "Edit / Image to Image".
 
 ## How Locally Uncensored Compares
@@ -169,7 +169,7 @@ A correctness release. Most of it is things that looked like they worked and did
 - 100% local by default
 - No telemetry, no analytics, no model pings home
 - Only outbound traffic without explicit opt-in: GitHub Releases auto-update checks
-- Cloud providers optional, bring your own key (your keys, your data)
+- Cloud optional, two routes: bring your own key (your keys, your data), and the paid LU Labs Cloud service, where inference runs on our infrastructure partners
 - Data lives in %APPDATA%/Locally Uncensored on Windows (or the equivalent on Linux)
 
 ## Links

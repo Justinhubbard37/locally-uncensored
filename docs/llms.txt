@@ -2,7 +2,7 @@
 
 > Plug-and-play local AI studio: uncensored chat, image generation, video generation, and a coding agent in one desktop app. One installer, no command line, no Docker.
 
-Locally Uncensored is a free, open-source (AGPL-3.0) local AI studio for the desktop. It combines AI chat, image generation, video creation, and a coding agent in one interface, and installs like a normal program: no command line, no Docker, no config files. It runs 100% locally on your machine. No telemetry, no analytics, no cloud calls unless you explicitly configure a cloud provider with your own API key.
+Locally Uncensored is a free, open-source (AGPL-3.0) local AI studio for the desktop. It combines AI chat, image generation, video creation, and a coding agent in one interface, and installs like a normal program: no command line, no Docker, no config files. It runs 100% locally on your machine. No telemetry, no analytics, no cloud calls unless you enable a cloud route. There are two: BYOK with your own provider API key, and the paid LU Labs Cloud service, where inference runs on our infrastructure partners.
 
 ## Key Facts
 - Name: Locally Uncensored
@@ -25,7 +25,7 @@ Locally Uncensored is a free, open-source (AGPL-3.0) local AI studio for the des
 - Surgical file_edit tool in the Coding Agent: it changes the lines you asked for instead of rewriting whole files, and num_ctx follows the model instead of being pinned to 8192 (v2.5.9)
 - Remote access works with non-Ollama backends: LM Studio, Lemonade and llama.cpp are translated to and from the phone's request shape, including streaming, tool calls, vision and reasoning (v2.5.9)
 - Command-injection hardening in the Coding Agent: shell quoting follows the shell that actually runs, and PR links are validated against the characters GitHub permits (v2.5.9)
-- Cloud renders are retained for seven days; the limit is stated in-app once with a download reminder, and trained characters on the user shelf are exempt (v2.5.9)
+- Cloud renders are retained for seven days; the limit is stated in-app once with a download reminder, and trained characters on the user shelf are exempt (v2.5.9); on the paid service, prompt prefixes can be cached briefly at the inference partner to speed up requests and are not stored permanently
 - Plug-and-play: install like a normal app, no command line, no Docker, no config files; the setup wizard handles engines and models
 - Uses abliterated/uncensored models by default (no content restrictions)
 - 25+ built-in AI personas plus Caveman Mode (lite/full/ultra terseness levels)
@@ -103,7 +103,7 @@ Locally Uncensored is a free, open-source (AGPL-3.0) local AI studio for the des
 - 100% local by default
 - No telemetry, no analytics, no model pings home
 - Only outbound traffic without explicit opt-in: GitHub Releases auto-update checks
-- Cloud providers optional, BYOK (your API keys, your data)
+- Cloud optional, two routes: BYOK (your own API keys, your data), and the paid LU Labs Cloud service, where inference runs on our infrastructure partners
 - Data lives in %APPDATA%/Locally Uncensored on Windows (or equivalent on Linux/macOS)
 
 ## Key Pages
