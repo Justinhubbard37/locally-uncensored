@@ -16,7 +16,6 @@ import { WorkingAnchor } from './WorkingAnchor'
 import { useCodexConfirmStore } from '../../stores/codexConfirmStore'
 import { PluginsDropdown } from './PluginsDropdown'
 import { CodexModeDropdown } from './CodexModeDropdown'
-import { PlanApprovalBar } from './PlanApprovalBar'
 import { ModelSelector } from '../models/ModelSelector'
 import { GoalBar } from './GoalBar'
 import { LoopBar } from './LoopBar'
@@ -510,7 +509,10 @@ export function CodexView() {
           isGenerating={isRunning || codexGenerating}
           slashCommands
           composerModel={<ModelSelector openUpward surface="code" />}
-          composerAbove={<><LoopBar onStop={stopCodex} /><GoalBar /><PlanApprovalBar onApprove={(text) => sendInstruction(text)} /></>}
+          // No plan lives here. The prompt window is the prompt window
+          // (David, 2026-08-22): the plan and its Approve-and-run card sit
+          // at the bottom of the Explorer column on the right.
+          composerAbove={<><LoopBar onStop={stopCodex} /><GoalBar /></>}
           // Ask / Bypass / Plan sits here, in the CODE composer only (plan
           // C1). ChatInput stays surface-neutral, so the Chat tab inherits
           // nothing from it.
@@ -518,9 +520,12 @@ export function CodexView() {
         />
       </div>
 
-      {/* Right column: plan (C2) + explorer tree + file preview (C3). It
-          owns its own width and collapsed state, both persisted in uiStore. */}
-      <ExplorerPanel />
+      {/* Right column: explorer tree + file preview (C3), and at the bottom
+          the plan plus its Approve-and-run card (C2). It owns its own width
+          and collapsed state, both persisted in uiStore. The approve callback
+          is threaded through because the card left the composer and this view
+          is the only place that holds `sendInstruction`. */}
+      <ExplorerPanel onApprovePlan={(text) => sendInstruction(text)} />
     </div>
   )
 }

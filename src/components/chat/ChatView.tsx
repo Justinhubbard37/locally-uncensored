@@ -239,6 +239,15 @@ export function ChatView() {
                 </div>
               </div>
 
+              {/* The plan, for plain chat and for Agent alike. It belongs with
+                  the standing status controls in the header, not at the prompt
+                  box: the Chat surface has no right-hand column to hand it to,
+                  and this row is where everything that is TRUE OF THE SESSION
+                  rather than of the next message already lives (agent toggle,
+                  workspace, token counter, context window, memory). Collapsed
+                  by default so it costs one line above the transcript. */}
+              <PlanBar />
+
               <MessageList
                 isGenerating={isGenerating}
                 isThisChatGenerating={activeGenerating}
@@ -340,7 +349,10 @@ export function ChatView() {
                 slashCommands={isAgentActive}
                 onAttachDocs={appMode !== 'cloud' ? () => setRagPanelOpen(true) : undefined}
                 composerModel={<ModelSelector openUpward />}
-                composerAbove={<><LoopBar onStop={stopGeneration} /><GoalBar /><GroupCostHint /><PlanBar /></>}
+                // No plan lives here. The prompt window is the prompt window
+                // (David, 2026-08-22): the plan band sits under the header row
+                // above, next to the other standing status controls.
+                composerAbove={<><LoopBar onStop={stopGeneration} /><GoalBar /><GroupCostHint /></>}
                 composerActions={
                   <>
                     {/* Documents (RAG) — local-embeddings only, so hide in

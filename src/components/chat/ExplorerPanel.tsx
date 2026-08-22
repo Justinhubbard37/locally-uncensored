@@ -1,6 +1,13 @@
 /**
- * The right column of the Code tab (2.6.6 C2 + C3): the model's plan on top, a
- * real lazy file tree below it, and the preview of a clicked file underneath.
+ * The right column of the Code tab (2.6.6 C2 + C3): a real lazy file tree, the
+ * preview of a clicked file underneath it, and at the BOTTOM the model's plan
+ * plus the Approve-and-run card that goes with it.
+ *
+ * Both plan pieces are here because the prompt window is the prompt window and
+ * shows nothing about plans (David, 2026-08-22, fifth time of asking). They are
+ * at the BOTTOM of the column rather than the top for the same reading, filed
+ * the same day: opening the Code tab, the eye wants the files first, and a plan
+ * sitting above the folder picker made no sense to him.
  *
  * What changed against the old FileTree:
  *   - Folders EXPAND in place. They used to replace the workspace root, which
@@ -24,6 +31,7 @@ import {
   FileText,
   Folder,
   FolderOpen,
+  ListTodo,
   Loader2,
   PanelRightClose,
   PanelRightOpen,
@@ -44,11 +52,19 @@ import {
   type FsList,
 } from '../../lib/explorer-tree'
 import { PlanBar } from './PlanBar'
+import { PlanApprovalBar } from './PlanApprovalBar'
 import { FilePreview } from './FilePreview'
+import { useChatStore } from '../../stores/chatStore'
+import { useTodoStore } from '../../stores/todoStore'
 
 const fsList: FsList = (args) => backendCall('fs_list', args as unknown as Record<string, unknown>)
 
-export function ExplorerPanel() {
+interface Props {
+  /** Runs the approved plan. Threaded in from CodexView, which owns the send. */
+  onApprovePlan: (instruction: string) => void
+}
+
+export function ExplorerPanel({ onApprovePlan }: Props) {
   const root = useCodexStore((s) => s.workingDirectory)
   const setWorkingDirectory = useCodexStore((s) => s.setWorkingDirectory)
   const fileTreeVersion = useCodexStore((s) => s.fileTreeVersion)
@@ -63,6 +79,17 @@ export function ExplorerPanel() {
   const [busy, setBusy] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<ExplorerNode | null>(null)
+
+  // The plan moved into this column, so a collapsed column would hide it, and
+  // with it the only Approve-and-run button there is. The rail says so instead.
+  const activeConversationId = useChatStore((s) => s.activeConversationId)
+  const planWaiting = useCodexStore((s) =>
+    activeConversationId ? !!s.planApprovalByConversation[activeConversationId] : false,
+  )
+  const planSteps = useTodoStore((s) =>
+    activeConversationId ? (s.byConversation[activeConversationId]?.length ?? 0) : 0,
+  )
+  const planHasSomething = planWaiting || planSteps > 0
 
   const load = async (dir: string) => {
     setBusy((b) => (b.includes(dir) ? b : [...b, dir]))
@@ -158,6 +185,18 @@ export function ExplorerPanel() {
         >
           <PanelRightOpen size={12} />
         </button>
+        {planHasSomething && (
+          <button
+            onClick={() => setExplorerCollapsed(false)}
+            title={planWaiting ? 'A plan is waiting for your approval' : 'Show the plan'}
+            data-testid="explorer-plan-waiting"
+            className={`mt-1 p-1 rounded transition-colors hover:bg-gray-100 dark:hover:bg-white/5 ${
+              planWaiting ? 'text-purple-400' : 'text-blue-400'
+            }`}
+          >
+            <ListTodo size={12} />
+          </button>
+        )}
       </div>
     )
   }
@@ -178,9 +217,6 @@ export function ExplorerPanel() {
         data-testid="explorer-resize-handle"
         className="absolute left-0 top-0 h-full w-1 -ml-0.5 z-10 cursor-col-resize hover:bg-blue-500/40 active:bg-blue-500/60 transition-colors"
       />
-
-      {/* C2: the plan lives here now, not above the prompt. */}
-      <PlanBar variant="panel" />
 
       <div className="flex items-center gap-1 p-1.5 border-b border-gray-200 dark:border-white/[0.04]">
         <button
@@ -279,6 +315,14 @@ export function ExplorerPanel() {
         // per-file script opt-in cannot survive the switch.
         <FilePreview key={selected.path} node={selected} root={root} onClose={() => setSelected(null)} />
       )}
+
+      {/* Bottom of the column, and the only place either of these renders.
+          `shrink-0` so a long file tree can never squeeze the plan, and with
+          it the Approve-and-run button, down to nothing. */}
+      <div className="shrink-0 border-t border-gray-200 dark:border-white/[0.04]">
+        <PlanApprovalBar onApprove={onApprovePlan} />
+        <PlanBar variant="panel" />
+      </div>
     </aside>
   )
 }

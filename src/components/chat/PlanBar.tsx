@@ -5,13 +5,18 @@
 // this list through `todo_write` and keeps it current, so progress is one glance
 // instead of a scroll back through twenty tool calls.
 //
-// Two homes since 2.6.6 C2:
-//   - 'composer' (Agent tab): above the input, inside the composer's 70% width
-//     wrapper. Collapsed to the current step by default, because a ten-item
-//     list would push the input off screen.
-//   - 'panel' (Code tab): the top section of the Explorer column, full column
-//     width and expanded by default. It has vertical room there, and the plan
-//     stops stealing the prompt window it used to sit in.
+// Two homes, and neither one touches the prompt window. David has asked for
+// that five times now, last on 2026-08-22: the prompt window is the prompt
+// window, nothing about plans may be visible there, on any surface, in any
+// state. So there is no composer variant to reach for:
+//   - 'header' (LU tab, plain chat and Agent alike): a status band under the
+//     header row and above the transcript, next to the other standing status
+//     controls. Collapsed to the current step by default, because a ten-item
+//     list would push the conversation down.
+//   - 'panel' (Code tab): the BOTTOM section of the Explorer column, full
+//     column width and expanded by default. Bottom because David read the
+//     column top down on 2026-08-22 and the files are what he wants first;
+//     the plan is the footer of that column, not its headline.
 // Expanded state is per session, not persisted, because a plan is short-lived.
 
 import { useState } from 'react'
@@ -27,13 +32,13 @@ export function planDoneLabel(pendingChanges: number): string {
   return `every step done, ${pendingChanges} change${pendingChanges === 1 ? '' : 's'} still waiting for your approval`
 }
 
-export type PlanBarVariant = 'composer' | 'panel'
+export type PlanBarVariant = 'header' | 'panel'
 
 interface Props {
   variant?: PlanBarVariant
 }
 
-export function PlanBar({ variant = 'composer' }: Props) {
+export function PlanBar({ variant = 'header' }: Props) {
   const panel = variant === 'panel'
   const activeConversationId = useChatStore((s) => s.activeConversationId)
   const todos = useTodoStore((s) =>
@@ -60,8 +65,8 @@ export function PlanBar({ variant = 'composer' }: Props) {
 
   return (
     <div
-      className={panel ? 'w-full p-1.5' : 'w-full max-w-[70%] mx-auto px-3 pb-1 flex justify-center'}
-      data-testid={panel ? 'plan-panel' : 'plan-composer'}
+      className={panel ? 'w-full p-1.5' : 'w-full px-2 pt-1'}
+      data-testid={panel ? 'plan-panel' : 'plan-header'}
     >
       <div className="w-full rounded-md border border-blue-500/20 bg-blue-500/[0.04]">
         <div className="flex items-center gap-1.5 px-2 py-1">
@@ -98,8 +103,9 @@ export function PlanBar({ variant = 'composer' }: Props) {
         </div>
 
         {expanded && (
-          // Capped so a fifteen-step plan cannot push the composer off screen,
-          // and in the panel so it cannot push the file tree out of view.
+          // Capped so a fifteen-step plan cannot push the transcript off
+          // screen, and in the panel so it cannot push the file tree out of
+          // view.
           <ul className={`px-2 pb-1.5 space-y-0.5 overflow-y-auto ${panel ? 'max-h-48 scrollbar-thin' : 'max-h-40'}`}>
             {todos.map((t, i) => (
               <li key={`${i}-${t.content}`} className="flex items-start gap-1.5">
@@ -127,8 +133,8 @@ export function PlanBar({ variant = 'composer' }: Props) {
         )}
 
         {(panel || !expanded) && allDone && (
-          // In the composer this is the collapsed summary line. In the panel the
-          // list is open by default, so the line has to stay: "every step done"
+          // In the header band this is the collapsed summary line. In the panel
+          // the list is open by default, so the line has to stay: "every step done"
           // while six writes sit refused in the queue is exactly the sentence
           // Morgan believed.
           <div className="px-2 pb-1 flex items-center gap-1.5" data-testid="plan-all-done">

@@ -6,8 +6,12 @@
  *
  * Since 2.6.6 C2 the coding tab shows this in the right-hand panel instead of
  * above the prompt, so the same claims are now tested on the panel variant:
- * the staged-changes coupling and the clear button moved with it, and the
- * composer above the input no longer carries a plan at all.
+ * the staged-changes coupling and the clear button moved with it. Since
+ * 2026-08-22 the panel section sits at the BOTTOM of that column, the LU tab
+ * shows its plan in the header band, and no composer anywhere carries a plan.
+ * The invariant behind that lives in
+ * the-prompt-window-is-the-prompt-window.test.ts; what is checked here is that
+ * the Morgan warning survived both moves.
  *
  * Run: npx vitest run src/components/chat/__tests__/plan-done-vs-applied.test.ts
  */
@@ -48,13 +52,14 @@ describe('the bar reads the staging queue', () => {
 })
 
 describe('the plan moved into the panel (C2)', () => {
-  it('PlanBar has a panel variant without the composer width wrapper', () => {
+  it('PlanBar has a panel variant and a header variant, no composer one', () => {
     const src = read('../PlanBar.tsx')
-    expect(src).toMatch(/variant = 'composer'/)
+    expect(src).toMatch(/variant = 'header'/)
     expect(src).toMatch(/panel = variant === 'panel'/)
-    // The 70% wrapper belongs to the composer only; in a 280px column it would
-    // squeeze the plan into a third of the panel.
-    expect(src).toMatch(/panel \? 'w-full p-1\.5' : 'w-full max-w-\[70%\]/)
+    // The old 70% wrapper was the composer's; in a 280px column it squeezed the
+    // plan into a third of the panel, and at the prompt box it had no business
+    // being at all.
+    expect(src).toMatch(/panel \? 'w-full p-1\.5' : 'w-full px-2 pt-1'/)
   })
 
   it('the clear button and the staged count came along, unchanged', () => {
@@ -63,27 +68,30 @@ describe('the plan moved into the panel (C2)', () => {
     expect(src).toMatch(/s\.byChat\[activeConversationId\]\?\.length \?\? 0/)
   })
 
-  it('the coding composer no longer carries a plan', () => {
+  it('the coding composer carries no plan, not even the approval card', () => {
     const src = read('../CodexView.tsx')
-    // C1 added the plan APPROVAL card here (a button plus the plan text the
-    // user is approving); the plan itself still lives only in the panel.
-    expect(src).toMatch(/composerAbove=\{<><LoopBar onStop=\{stopCodex\} \/><GoalBar \/><PlanApprovalBar /)
+    // C1 had put the plan APPROVAL card here (a button plus the plan text the
+    // user is approving). It went down into the panel too on 2026-08-22: the
+    // prompt window is the prompt window.
+    expect(src).toMatch(/composerAbove=\{<><LoopBar onStop=\{stopCodex\} \/><GoalBar \/><\/>\}/)
     expect(src).not.toMatch(/PlanBar/)
+    expect(src).not.toMatch(/PlanApprovalBar/)
   })
 
-  it('the panel renders it, above the tree', () => {
+  it('the panel renders it, below the tree', () => {
     const src = read('../ExplorerPanel.tsx')
     expect(src).toMatch(/<PlanBar variant="panel" \/>/)
     const plan = src.indexOf('<PlanBar variant="panel" />')
     const tree = src.indexOf('{rows.map((row) => {')
     expect(plan).toBeGreaterThan(-1)
-    expect(tree).toBeGreaterThan(plan)
+    expect(plan).toBeGreaterThan(tree)
   })
 
-  it('counter-test: the chat tab keeps the plan above its composer', () => {
-    // Only the Code tab moved. ChatView is not ours to change and must still
-    // render the composer variant.
+  it('and the chat tab shows it in the header band, not at its composer', () => {
+    // The Chat and Agent surface has no right-hand column, so the plan sits
+    // with the standing status controls above the transcript instead.
     const src = read('../ChatView.tsx')
     expect(src).toMatch(/<PlanBar \/>/)
+    expect(src.indexOf('<PlanBar />')).toBeLessThan(src.indexOf('<MessageList'))
   })
 })

@@ -9,6 +9,12 @@
 //   2. The execution never lands in Bypass implicitly. The target mode is
 //      resolved from the user's own visible choices and printed ON the button,
 //      so "Approve and run (Ask)" is a promise about what happens next.
+//
+// It used to sit above the prompt box. It does not any more: the prompt window
+// is the prompt window and shows nothing about plans (David, 2026-08-22, fifth
+// time of asking). The card moved to the plan's home, the bottom of the
+// Explorer column, with the plan itself. Both rules above are untouched by that
+// move; only the wrapper width changed from the composer's 70% to the column.
 
 import { useState } from 'react'
 import { ClipboardCheck, ChevronDown, X } from 'lucide-react'
@@ -49,7 +55,7 @@ export function PlanApprovalBar({ onApprove }: { onApprove: (instruction: string
   }
 
   return (
-    <div className="w-full max-w-[70%] mx-auto px-3 pb-1">
+    <div className="w-full p-1.5" data-testid="plan-approval-panel">
       <div className="w-full rounded-md border border-purple-500/25 bg-purple-500/[0.04]">
         <div className="flex items-center gap-1.5 px-2 py-1">
           <ClipboardCheck size={9} className="text-purple-400 shrink-0" />

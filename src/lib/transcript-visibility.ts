@@ -9,7 +9,8 @@
  * haben."
  *
  * `todo_write` is the agent maintaining its own plan, and the plan already has
- * a home: PlanBar, pinned above the composer, always current, one glance. Every
+ * a home: PlanBar, in the header band on LU and at the bottom of the Explorer
+ * column on Code, always current, one glance. Every
  * card the tool ALSO drops into the transcript repeats that list in full.
  * Captured on the installed build during a 30 step run: the plan text was
  * sitting in the transcript between the steps, and on a run that revises its
