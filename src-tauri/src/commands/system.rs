@@ -1,3 +1,4 @@
+use crate::os_error;
 use base64::Engine;
 use sysinfo::System;
 
@@ -82,7 +83,7 @@ fn screenshot_blocking() -> Result<serde_json::Value, String> {
     // such file"), or a caller simply got the other one's screen.
     let tmp = std::env::temp_dir().join(format!("lu-screenshot-{}.png", uuid::Uuid::new_v4()));
     let captured = capture_screen_to(&tmp)
-        .and_then(|()| std::fs::read(&tmp).map_err(|e| format!("Read screenshot: {}", e)));
+        .and_then(|()| std::fs::read(&tmp).map_err(|e| format!("Read screenshot: {}", os_error::english(&e))));
     // Always — the old code returned early on a read error and left a full
     // picture of the user's screen sitting in the temp directory.
     let _ = std::fs::remove_file(&tmp);
@@ -113,7 +114,7 @@ pub(crate) fn run_capture_bounded(
 ) -> Result<(), String> {
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("Screenshot failed: {}", e))?;
+        .map_err(|e| format!("Screenshot failed: {}", os_error::english(&e)))?;
     let deadline = std::time::Instant::now() + max;
     loop {
         match child.try_wait() {
@@ -332,7 +333,7 @@ pub(crate) fn merged_backup(previous: &str, incoming: &str, lost: &[String]) -> 
 #[tauri::command]
 pub fn backup_stores(data: String) -> Result<(), String> {
     let dir = persistent_dir()?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| os_error::english(&e))?;
     let target = dir.join("store_backup.json");
     let tmp = dir.join("store_backup.tmp");
 
@@ -353,8 +354,8 @@ pub fn backup_stores(data: String) -> Result<(), String> {
         merged_backup(&previous, &data, &lost)
     };
 
-    std::fs::write(&tmp, &payload).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &target).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, &payload).map_err(|e| os_error::english(&e))?;
+    std::fs::rename(&tmp, &target).map_err(|e| os_error::english(&e))?;
     Ok(())
 }
 
@@ -363,7 +364,7 @@ pub fn backup_stores(data: String) -> Result<(), String> {
 pub fn restore_stores() -> Result<Option<String>, String> {
     let path = persistent_dir()?.join("store_backup.json");
     if path.exists() {
-        let data = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let data = std::fs::read_to_string(&path).map_err(|e| os_error::english(&e))?;
         Ok(Some(data))
     } else {
         Ok(None)
@@ -393,11 +394,11 @@ pub fn restore_stores() -> Result<Option<String>, String> {
 #[tauri::command]
 pub fn backup_rag_chunks(data: String) -> Result<(), String> {
     let dir = persistent_dir()?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| os_error::english(&e))?;
     let target = dir.join("rag_chunks_backup.json");
     let tmp = dir.join("rag_chunks_backup.tmp");
-    std::fs::write(&tmp, &data).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &target).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, &data).map_err(|e| os_error::english(&e))?;
+    std::fs::rename(&tmp, &target).map_err(|e| os_error::english(&e))?;
     Ok(())
 }
 
@@ -409,7 +410,7 @@ pub fn backup_rag_chunks(data: String) -> Result<(), String> {
 pub fn restore_rag_chunks() -> Result<Option<String>, String> {
     let path = persistent_dir()?.join("rag_chunks_backup.json");
     if path.exists() {
-        let data = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let data = std::fs::read_to_string(&path).map_err(|e| os_error::english(&e))?;
         Ok(Some(data))
     } else {
         Ok(None)
@@ -429,12 +430,12 @@ pub fn is_onboarding_done() -> bool {
 #[tauri::command]
 pub fn set_onboarding_done(done: Option<bool>) -> Result<(), String> {
     let dir = persistent_dir()?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| os_error::english(&e))?;
     let path = dir.join("onboarding_done");
     if done.unwrap_or(true) {
-        std::fs::write(&path, "1").map_err(|e| e.to_string())?;
+        std::fs::write(&path, "1").map_err(|e| os_error::english(&e))?;
     } else if path.exists() {
-        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+        std::fs::remove_file(&path).map_err(|e| os_error::english(&e))?;
     }
     Ok(())
 }

@@ -1,3 +1,4 @@
+use crate::os_error;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1386,8 +1387,11 @@ fn start_comfyui_blocking(state: &AppState) -> Result<serde_json::Value, String>
     cmd.creation_flags(CREATE_NO_WINDOW);
     let mut child = cmd.spawn()
         .map_err(|e| {
+            // The log keeps whatever the OS wrote, in whatever language: it is
+            // ours to read and the original wording helps support. Only the
+            // line the user sees is rewritten.
             error!(error = %e, python = %python, "comfyui start failed");
-            format!("Failed to start ComfyUI (python={}): {}", python, e)
+            format!("Failed to start ComfyUI (python={}): {}", python, os_error::english(&e))
         })?;
 
     // Assign to Job Object so child dies when parent dies (even via Task Manager)

@@ -9,6 +9,7 @@
 //! `--model-dir` argument passed to `mlx_video.<family>.generate`).
 //! Generated videos land in `~/.config/lu-labs/videos/<job_id>.mp4`.
 
+use crate::os_error;
 use crate::commands::{bad_request, internal, CmdResult};
 use crate::state::AppState;
 use serde::Deserialize;
@@ -356,7 +357,7 @@ pub fn video_delete_model(state: &AppState, args: &Value) -> CmdResult {
     if !dir.is_dir() {
         return Err(crate::commands::not_found(format!("{id} is not installed")));
     }
-    std::fs::remove_dir_all(&dir).map_err(|e| internal(format!("delete {id}: {e}")))?;
+    std::fs::remove_dir_all(&dir).map_err(|e| internal(format!("delete {id}: {}", os_error::english(&e))))?;
     Ok(json!({ "ok": true, "id": id }))
 }
 
@@ -460,7 +461,7 @@ pub fn video_install_model(state: &AppState, args: &Value) -> CmdResult {
 
     let target = model_dir(entry.id);
     if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| internal(e.to_string()))?;
+        std::fs::create_dir_all(parent).map_err(|e| internal(os_error::english(&e)))?;
     }
     slot.start();
     crate::install_state::watch_dir_size(
@@ -605,7 +606,7 @@ pub fn video_generate(state: &AppState, args: &Value) -> CmdResult {
     }
 
     let out_dir = outputs_root();
-    std::fs::create_dir_all(&out_dir).map_err(|e| internal(e.to_string()))?;
+    std::fs::create_dir_all(&out_dir).map_err(|e| internal(os_error::english(&e)))?;
     let job_id = uuid::Uuid::new_v4().simple().to_string();
     let out_path = out_dir.join(format!("{}.mp4", job_id));
 
@@ -671,7 +672,7 @@ pub fn video_generate(state: &AppState, args: &Value) -> CmdResult {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd
         .spawn()
-        .map_err(|e| internal(format!("spawn mlx_video: {e}")))?;
+        .map_err(|e| internal(format!("spawn mlx_video: {}", os_error::english(&e))))?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let pid = child.id();
@@ -785,7 +786,7 @@ pub(crate) fn run_streamed(slot: &crate::install_state::InstallSlot, cmd: &mut C
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(crate::process_util::no_window());
     }
-    let mut child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| format!("spawn: {}", os_error::english(&e)))?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let so = slot.clone();

@@ -1,3 +1,4 @@
+use crate::os_error;
 use std::sync::Arc;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -5347,7 +5348,7 @@ pub async fn start_tunnel(
             let _ = std::fs::remove_file(&cf_path);
         }
         let dir = cf_path.parent().ok_or("Invalid cloudflared install path")?;
-        std::fs::create_dir_all(dir).map_err(|e| format!("mkdir: {}", e))?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("mkdir: {}", os_error::english(&e)))?;
 
         let download_url = if cfg!(windows) {
             "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
@@ -5363,11 +5364,11 @@ pub async fn start_tunnel(
             .build()
             .map_err(|e| e.to_string())?;
 
-        let resp = client.get(download_url).send().await.map_err(|e| format!("Download failed: {}", e))?;
+        let resp = client.get(download_url).send().await.map_err(|e| format!("Download failed: {}", os_error::english(&e)))?;
         if !resp.status().is_success() {
             return Err(format!("Download HTTP {}", resp.status()));
         }
-        let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+        let bytes = resp.bytes().await.map_err(|e| os_error::english(&e))?;
 
         // Integrity gate before we write + chmod +x + spawn a downloaded binary.
         // cloudflared pins to `releases/latest` on purpose (the self-heal design:
@@ -5405,14 +5406,14 @@ pub async fn start_tunnel(
         #[cfg(target_os = "macos")]
         {
             let tgz = dir.join("cloudflared.tgz");
-            std::fs::write(&tgz, &bytes).map_err(|e| format!("write tgz: {}", e))?;
+            std::fs::write(&tgz, &bytes).map_err(|e| format!("write tgz: {}", os_error::english(&e)))?;
             let status = std::process::Command::new("tar")
                 .arg("-xzf")
                 .arg(&tgz)
                 .arg("-C")
                 .arg(dir)
                 .status()
-                .map_err(|e| format!("tar spawn: {}", e))?;
+                .map_err(|e| format!("tar spawn: {}", os_error::english(&e)))?;
             let _ = std::fs::remove_file(&tgz);
             if !status.success() {
                 return Err("Failed to extract cloudflared from its .tgz archive".into());
@@ -5422,7 +5423,7 @@ pub async fn start_tunnel(
             }
         }
         #[cfg(not(target_os = "macos"))]
-        std::fs::write(&cf_path, &bytes).map_err(|e| format!("write: {}", e))?;
+        std::fs::write(&cf_path, &bytes).map_err(|e| format!("write: {}", os_error::english(&e)))?;
 
         // Make executable on Unix
         #[cfg(unix)]
@@ -5446,7 +5447,7 @@ pub async fn start_tunnel(
     let child = cmd.spawn()
         .map_err(|e| {
             error!(error = %e, "cloudflared tunnel spawn failed");
-            format!("Failed to start cloudflared: {}", e)
+            format!("Failed to start cloudflared: {}", os_error::english(&e))
         })?;
 
     let pid = child.id();

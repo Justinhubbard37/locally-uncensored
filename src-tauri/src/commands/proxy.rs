@@ -1,3 +1,4 @@
+use crate::os_error;
 use tauri::Emitter;
 
 /// Validate that an external URL is safe to fetch (no SSRF).
@@ -62,18 +63,18 @@ pub async fn fetch_external(url: String) -> Result<String, String> {
         .timeout(std::time::Duration::from_secs(60))
         .redirect(ssrf_safe_redirect_policy(10))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| os_error::english(&e))?;
 
     let resp = client.get(&url)
         .send()
         .await
-        .map_err(|e| format!("fetch_external: {}", e))?;
+        .map_err(|e| format!("fetch_external: {}", os_error::english(&e)))?;
 
     if !resp.status().is_success() {
         return Err(format!("HTTP {}: {}", resp.status().as_u16(), url));
     }
 
-    resp.text().await.map_err(|e| e.to_string())
+    resp.text().await.map_err(|e| os_error::english(&e))
 }
 
 /// Binary HTTP proxy — fetch any external URL and return bytes.
@@ -87,18 +88,18 @@ pub async fn fetch_external_bytes(url: String) -> Result<Vec<u8>, String> {
         .timeout(std::time::Duration::from_secs(300))
         .redirect(ssrf_safe_redirect_policy(10))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| os_error::english(&e))?;
 
     let resp = client.get(&url)
         .send()
         .await
-        .map_err(|e| format!("fetch_external_bytes: {}", e))?;
+        .map_err(|e| format!("fetch_external_bytes: {}", os_error::english(&e)))?;
 
     if !resp.status().is_success() {
         return Err(format!("HTTP {}: {}", resp.status().as_u16(), url));
     }
 
-    resp.bytes().await.map(|b| b.to_vec()).map_err(|e| e.to_string())
+    resp.bytes().await.map(|b| b.to_vec()).map_err(|e| os_error::english(&e))
 }
 
 /// Extract the host from `ollama_base` + `comfy_host` so we can allow-list
@@ -439,7 +440,7 @@ pub async fn proxy_localhost(
         .user_agent("LocallyUncensored/2.0")
         .timeout(timeout)
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| os_error::english(&e))?;
 
     let http_method = method.unwrap_or_else(|| "GET".to_string());
 
@@ -455,7 +456,7 @@ pub async fn proxy_localhost(
     let resp = request
         .send()
         .await
-        .map_err(|e| format!("proxy_localhost: {}", e))?;
+        .map_err(|e| format!("proxy_localhost: {}", os_error::english(&e)))?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -463,7 +464,7 @@ pub async fn proxy_localhost(
         return Err(format!("HTTP {}: {}", status, text));
     }
 
-    resp.text().await.map_err(|e| e.to_string())
+    resp.text().await.map_err(|e| os_error::english(&e))
 }
 
 /// Streaming localhost proxy — BUFFERS the whole body (no streaming). Kept for
@@ -477,7 +478,7 @@ pub async fn proxy_localhost_stream(url: String, method: Option<String>, body: O
         .user_agent("LocallyUncensored/2.0")
         .timeout(std::time::Duration::from_secs(7200))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| os_error::english(&e))?;
 
     let http_method = method.unwrap_or_else(|| "GET".to_string());
 
@@ -493,7 +494,7 @@ pub async fn proxy_localhost_stream(url: String, method: Option<String>, body: O
     let resp = request
         .send()
         .await
-        .map_err(|e| format!("proxy_localhost_stream: {}", e))?;
+        .map_err(|e| format!("proxy_localhost_stream: {}", os_error::english(&e)))?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -501,7 +502,7 @@ pub async fn proxy_localhost_stream(url: String, method: Option<String>, body: O
         return Err(format!("HTTP {}: {}", status, text));
     }
 
-    resp.bytes().await.map(|b| b.to_vec()).map_err(|e| e.to_string())
+    resp.bytes().await.map(|b| b.to_vec()).map_err(|e| os_error::english(&e))
 }
 
 /// Chunked streaming localhost proxy for Ollama chat (David 2026-06-02).
@@ -546,7 +547,7 @@ pub async fn proxy_localhost_stream_chunked(
             .user_agent("LocallyUncensored/2.0")
             .timeout(std::time::Duration::from_secs(7200))
             .build()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| os_error::english(&e))?;
 
         let http_method = method.unwrap_or_else(|| "GET".to_string());
 
@@ -562,7 +563,7 @@ pub async fn proxy_localhost_stream_chunked(
         // Race the request against cancellation even during connect/headers.
         let resp = tokio::select! {
             _ = token.cancelled() => return Ok(()),
-            r = request.send() => r.map_err(|e| format!("proxy_localhost_stream_chunked: {}", e))?,
+            r = request.send() => r.map_err(|e| format!("proxy_localhost_stream_chunked: {}", os_error::english(&e)))?,
         };
 
         if !resp.status().is_success() {
@@ -580,7 +581,7 @@ pub async fn proxy_localhost_stream_chunked(
                 _ = token.cancelled() => break,
                 item = stream.next() => match item {
                     Some(it) => {
-                        let bytes = it.map_err(|e| e.to_string())?;
+                        let bytes = it.map_err(|e| os_error::english(&e))?;
                         if bytes.is_empty() { continue; }
                         // JS side gone (reader cancelled / window closed) → stop.
                         if on_chunk.send(bytes.to_vec()).is_err() { break; }
@@ -643,16 +644,16 @@ pub async fn comfy_upload_image(
     let part = reqwest::multipart::Part::bytes(file_bytes)
         .file_name(filename)
         .mime_str(&ct)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| os_error::english(&e))?;
     let form = reqwest::multipart::Form::new()
         .part("image", part)
         .text("overwrite", "true");
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| os_error::english(&e))?;
     let resp = client.post(&url).multipart(form).send().await
-        .map_err(|e| format!("comfy_upload_image: {}", e))?;
+        .map_err(|e| format!("comfy_upload_image: {}", os_error::english(&e)))?;
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
@@ -682,7 +683,7 @@ pub async fn pull_model_stream(app: tauri::AppHandle, state: tauri::State<'_, cr
         .user_agent("LocallyUncensored/2.0")
         .timeout(std::time::Duration::from_secs(7200))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| os_error::english(&e))?;
 
     // Route to the configured Ollama base (Issue #31 — was hardcoded
     // http://localhost:11434 so remote Ollama hosts never got the pull).
@@ -697,7 +698,7 @@ pub async fn pull_model_stream(app: tauri::AppHandle, state: tauri::State<'_, cr
         .body(format!(r#"{{"name":"{}","stream":true}}"#, name))
         .send()
         .await
-        .map_err(|e| format!("pull_model_stream: {}", e))?;
+        .map_err(|e| format!("pull_model_stream: {}", os_error::english(&e)))?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -837,15 +838,15 @@ pub async fn ollama_search(query: String) -> Result<serde_json::Value, String> {
         .user_agent("LocallyUncensored/2.0")
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| os_error::english(&e))?;
 
     let resp = client.get(&url)
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| format!("Ollama search: {}", e))?;
+        .map_err(|e| format!("Ollama search: {}", os_error::english(&e)))?;
 
-    let text = resp.text().await.map_err(|e| e.to_string())?;
+    let text = resp.text().await.map_err(|e| os_error::english(&e))?;
 
     // Try to parse as JSON; if it's HTML, return empty results
     match serde_json::from_str::<serde_json::Value>(&text) {

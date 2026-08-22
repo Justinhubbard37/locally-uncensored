@@ -17,6 +17,7 @@
 //! therefore returns 409, which we treat as success so "You're already on
 //! the list" stays clean.
 
+use crate::os_error;
 /// LU's own Supabase project (EU region). The project URL is public — it is
 /// the `NEXT_PUBLIC_SUPABASE_URL` and ships in every Supabase client.
 const SUPABASE_URL: &str = "https://gewbdlmziumhseftxgrr.supabase.co";
@@ -93,7 +94,7 @@ pub async fn waitlist_submit(
         .body(payload.to_string())
         .send()
         .await
-        .map_err(|e| format!("waitlist_submit: {}", e))?;
+        .map_err(|e| format!("waitlist_submit: {}", os_error::english(&e)))?;
 
     let status = resp.status();
     // 2xx = inserted (or duplicate ignored). 409 = duplicate without the

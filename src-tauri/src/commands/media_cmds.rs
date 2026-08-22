@@ -15,6 +15,7 @@
 //! (server.py on 127.0.0.1:47712) directly from `commands::mlx`, exactly
 //! like the existing ComfyUI/whisper sidecars.
 
+use crate::os_error;
 use crate::state::AppState;
 use base64::Engine;
 use serde_json::Value;
@@ -191,6 +192,6 @@ pub fn read_media_file(path: String) -> Result<String, String> {
     }
 
     let bytes = std::fs::read(&canonical)
-        .map_err(|e| format!("read_media_file: {}: {e}", canonical.display()))?;
+        .map_err(|e| format!("read_media_file: {}: {}", canonical.display(), os_error::english(&e)))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }

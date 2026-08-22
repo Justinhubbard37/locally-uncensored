@@ -1,3 +1,4 @@
+use crate::os_error;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
@@ -75,7 +76,7 @@ impl WhisperServer {
         #[cfg(target_os = "windows")]
         cmd.creation_flags(CREATE_NO_WINDOW);
         let mut child = cmd.spawn()
-            .map_err(|e| format!("Failed to start whisper server: {}", e))?;
+            .map_err(|e| format!("Failed to start whisper server: {}", os_error::english(&e)))?;
 
         let stdin = child.stdin.take().ok_or("Failed to get stdin")?;
         let stdout = child.stdout.take().ok_or("Failed to get stdout")?;
@@ -320,7 +321,7 @@ fn transcribe_blocking(
         .unwrap_or(0), ext));
 
     std::fs::write(&tmp_file, &audio_bytes)
-        .map_err(|e| format!("Write temp file: {}", e))?;
+        .map_err(|e| format!("Write temp file: {}", os_error::english(&e)))?;
 
     let audio_path = tmp_file.to_string_lossy().replace('\\', "/");
     println!("[Whisper] Transcribing: {} ({:.1} KB)", audio_path, audio_bytes.len() as f64 / 1024.0);

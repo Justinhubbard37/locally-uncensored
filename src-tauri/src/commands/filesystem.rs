@@ -1,3 +1,4 @@
+use crate::os_error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -229,7 +230,7 @@ pub fn fs_read_bytes(
             size, cap
         ));
     }
-    let bytes = fs::read(&full).map_err(|e| format!("Read error: {}", e))?;
+    let bytes = fs::read(&full).map_err(|e| format!("Read error: {}", os_error::english(&e)))?;
     Ok(serde_json::json!({
         "base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
         "bytes": bytes.len(),
@@ -275,7 +276,7 @@ pub(crate) fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), String> {
         .unwrap_or_else(|| "file".to_string());
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(".{}.tmp{}-{}", base, std::process::id(), seq));
-    fs::write(&tmp, bytes).map_err(|e| format!("Write error: {}", e))?;
+    fs::write(&tmp, bytes).map_err(|e| format!("Write error: {}", os_error::english(&e)))?;
     if let Err(e) = fs::rename(&tmp, target) {
         let _ = fs::remove_file(&tmp);
         return Err(format!("Write error (rename): {}", e));
@@ -288,7 +289,7 @@ pub(crate) fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), String> {
 pub fn fs_write(path: String, content: String, chatId: Option<String>, workingDirectory: Option<String>) -> Result<serde_json::Value, String> {
     let full = resolve_path(&path, chatId.as_deref(), workingDirectory.as_deref())?;
     if let Some(parent) = full.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Create dir: {}", e))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Create dir: {}", os_error::english(&e)))?;
     }
     // Read the current bytes (if any) to preserve the file's EOL/BOM convention
     // and to detect a no-op write.
@@ -385,7 +386,7 @@ pub fn fs_list(
             entries.push(file_meta(entry.path()));
         }
     } else {
-        let read_dir = fs::read_dir(&dir).map_err(|e| format!("Read dir: {}", e))?;
+        let read_dir = fs::read_dir(&dir).map_err(|e| format!("Read dir: {}", os_error::english(&e)))?;
         for entry in read_dir.flatten() {
             if entries.len() >= max_entries {
                 break;
@@ -471,7 +472,7 @@ pub fn fs_info(path: String, chatId: Option<String>, workingDirectory: Option<St
     if !full.exists() {
         return Err(format!("Path not found: {}", full.display()));
     }
-    let meta = fs::metadata(&full).map_err(|e| format!("Metadata error: {}", e))?;
+    let meta = fs::metadata(&full).map_err(|e| format!("Metadata error: {}", os_error::english(&e)))?;
     let modified = meta
         .modified()
         .ok()
@@ -522,7 +523,7 @@ pub async fn save_text_file_dialog(
     match file {
         Some(handle) => {
             let path = handle.path().to_path_buf();
-            std::fs::write(&path, content).map_err(|e| format!("Write failed: {}", e))?;
+            std::fs::write(&path, content).map_err(|e| format!("Write failed: {}", os_error::english(&e)))?;
             Ok(Some(path.to_string_lossy().into_owned()))
         }
         None => Ok(None),
@@ -565,7 +566,7 @@ pub async fn save_binary_file_dialog(
     match file {
         Some(handle) => {
             let path = handle.path().to_path_buf();
-            std::fs::write(&path, &bytes).map_err(|e| format!("Write failed: {}", e))?;
+            std::fs::write(&path, &bytes).map_err(|e| format!("Write failed: {}", os_error::english(&e)))?;
             Ok(Some(path.to_string_lossy().into_owned()))
         }
         None => Ok(None),

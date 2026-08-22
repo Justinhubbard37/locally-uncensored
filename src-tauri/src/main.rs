@@ -3,6 +3,7 @@
 
 mod commands;
 mod install_state;
+mod os_error;
 mod os_paths;
 mod process_util;
 mod python;

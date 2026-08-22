@@ -1,3 +1,4 @@
+use crate::os_error;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -130,7 +131,7 @@ pub fn delete_comfy_model(filename: String, state: State<'_, AppState>) -> Resul
         1 => {
             let f = &hits[0];
             let bytes = fs::metadata(f).map(|m| m.len()).unwrap_or(0);
-            fs::remove_file(f).map_err(|e| format!("Delete failed: {}", e))?;
+            fs::remove_file(f).map_err(|e| format!("Delete failed: {}", os_error::english(&e)))?;
             // Sweep a stale resume-partial next to it (the timeout/abort case
             // leaves both the file and its .download twin behind).
             let _ = fs::remove_file(f.with_extension("download"));
@@ -153,7 +154,7 @@ fn models_dir(comfy_path: &Option<String>, subfolder: &str) -> Result<PathBuf, S
     } else {
         PathBuf::from(base).join("models").join(subfolder)
     };
-    fs::create_dir_all(&dir).map_err(|e| format!("Create models dir: {}", e))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Create models dir: {}", os_error::english(&e)))?;
     Ok(dir)
 }
 
@@ -426,7 +427,7 @@ async fn do_download(
         .connect_timeout(std::time::Duration::from_secs(30))
         .read_timeout(std::time::Duration::from_secs(120))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| os_error::english(&e))?;
 
     let mut request = client.get(url);
 
@@ -439,7 +440,7 @@ async fn do_download(
     let response = request
         .send()
         .await
-        .map_err(|e| format!("Request failed: {}", e))?;
+        .map_err(|e| format!("Request failed: {}", os_error::english(&e)))?;
 
     let status = response.status();
     if !status.is_success() && status.as_u16() != 206 {
@@ -485,11 +486,11 @@ async fn do_download(
             .append(true)
             .open(&tmp_path)
             .await
-            .map_err(|e| format!("Open file for resume: {}", e))?
+            .map_err(|e| format!("Open file for resume: {}", os_error::english(&e)))?
     } else {
         tokio::fs::File::create(&tmp_path)
             .await
-            .map_err(|e| format!("Create file: {}", e))?
+            .map_err(|e| format!("Create file: {}", os_error::english(&e)))?
     };
 
     let mut stream = response.bytes_stream();
@@ -527,7 +528,7 @@ async fn do_download(
             chunk = stream.next() => {
                 match chunk {
                     Some(Ok(bytes)) => {
-                        file.write_all(&bytes).await.map_err(|e| format!("Write: {}", e))?;
+                        file.write_all(&bytes).await.map_err(|e| format!("Write: {}", os_error::english(&e)))?;
                         downloaded += bytes.len() as u64;
 
                         // Update progress every 500ms
@@ -560,7 +561,7 @@ async fn do_download(
         }
     }
 
-    file.flush().await.map_err(|e| format!("Flush: {}", e))?;
+    file.flush().await.map_err(|e| format!("Flush: {}", os_error::english(&e)))?;
     drop(file);
 
     // A body can end early without ever erroring — a CDN cutting the connection,
@@ -578,7 +579,7 @@ async fn do_download(
 
     tokio::fs::rename(&tmp_path, dest)
         .await
-        .map_err(|e| format!("Rename: {}", e))?;
+        .map_err(|e| format!("Rename: {}", os_error::english(&e)))?;
 
     // Final progress update
     if let Ok(mut dl) = downloads.lock() {
@@ -859,12 +860,12 @@ pub fn detect_model_path(provider: String) -> Result<serde_json::Value, String> 
     match provider_lower.as_str() {
         "ollama" => {
             let p = home.join(".ollama").join("models");
-            fs::create_dir_all(&p).map_err(|e| format!("Create Ollama models dir: {}", e))?;
+            fs::create_dir_all(&p).map_err(|e| format!("Create Ollama models dir: {}", os_error::english(&e)))?;
             Ok(serde_json::json!(p.to_string_lossy()))
         }
         "lm studio" | "lmstudio" => {
             let p = home.join(".lmstudio").join("models");
-            fs::create_dir_all(&p).map_err(|e| format!("Create LM Studio models dir: {}", e))?;
+            fs::create_dir_all(&p).map_err(|e| format!("Create LM Studio models dir: {}", os_error::english(&e)))?;
             Ok(serde_json::json!(p.to_string_lossy()))
         }
         _ => Err(format!(
@@ -886,7 +887,7 @@ pub async fn download_model_to_path(
     let dest_dir = destDir;
     let expected_bytes = expectedBytes;
     let dir = PathBuf::from(&dest_dir);
-    fs::create_dir_all(&dir).map_err(|e| format!("Create dest dir: {}", e))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Create dest dir: {}", os_error::english(&e)))?;
     let dest_file = dir.join(sanitize_filename(&filename));
 
     if dest_file.exists() {

@@ -22,6 +22,7 @@
 //! Generate (`mlx_generate`): proxy a JSON request to 127.0.0.1:47712,
 //! return the base64 PNG to the web UI.
 
+use crate::os_error;
 use crate::commands::CmdResult;
 use crate::state::AppState;
 use serde::Deserialize;
@@ -204,11 +205,11 @@ fn install_mlx_steps(slot: &crate::install_state::InstallSlot) -> Result<(), Str
     let venv_dir = mlx_root().join("venv");
     if !venv_dir.exists() {
         slot.log(format!("creating venv at {}", venv_dir.display()));
-        std::fs::create_dir_all(mlx_root()).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(mlx_root()).map_err(|e| os_error::english(&e))?;
         let out = Command::new(&python)
             .args(["-m", "venv", venv_dir.to_str().unwrap()])
             .output()
-            .map_err(|e| format!("venv create failed to spawn: {e}"))?;
+            .map_err(|e| format!("venv create failed to spawn: {}", os_error::english(&e)))?;
         if !out.status.success() {
             return Err(format!(
                 "venv create failed: {}",
@@ -221,13 +222,13 @@ fn install_mlx_steps(slot: &crate::install_state::InstallSlot) -> Result<(), Str
     let server_path = mlx_root().join("server.py");
     std::fs::write(&req_path, REQUIREMENTS_TXT)
         .map_err(|e| format!("write requirements.txt: {e}"))?;
-    std::fs::write(&server_path, SERVER_PY).map_err(|e| format!("write server.py: {e}"))?;
+    std::fs::write(&server_path, SERVER_PY).map_err(|e| format!("write server.py: {}", os_error::english(&e)))?;
 
     slot.log("running pip install (this pulls torch + diffusers, ~3 GB)");
     let out = Command::new(venv_pip())
         .args(["install", "--upgrade", "-r", req_path.to_str().unwrap()])
         .output()
-        .map_err(|e| format!("pip install spawn: {e}"))?;
+        .map_err(|e| format!("pip install spawn: {}", os_error::english(&e)))?;
     if !out.status.success() {
         return Err(format!(
             "pip install failed: {}",
@@ -262,7 +263,7 @@ fn install_mlx_steps(slot: &crate::install_state::InstallSlot) -> Result<(), Str
     apply_hf_token(&mut prefetch_cmd);
     let out = prefetch_cmd
         .output()
-        .map_err(|e| format!("model prefetch spawn: {e}"))?;
+        .map_err(|e| format!("model prefetch spawn: {}", os_error::english(&e)))?;
     if !out.status.success() {
         return Err(format!(
             "model prefetch failed: {}",
@@ -700,7 +701,7 @@ pub fn mlx_image_delete_model(state: &AppState, args: &Value) -> CmdResult {
         return Err(crate::commands::not_found(format!("{id} is not installed")));
     }
     std::fs::remove_dir_all(&dir)
-        .map_err(|e| crate::commands::internal(format!("delete {id}: {e}")))?;
+        .map_err(|e| crate::commands::internal(format!("delete {id}: {}", os_error::english(&e))))?;
     Ok(json!({ "ok": true, "id": id }))
 }
 
@@ -762,7 +763,7 @@ pub async fn mlx_generate(_state: &AppState, args: &Value) -> CmdResult {
         .json(&body)
         .send()
         .await
-        .map_err(|e| crate::commands::internal(format!("mlx unreachable: {e}")))?;
+        .map_err(|e| crate::commands::internal(format!("mlx unreachable: {}", os_error::english(&e))))?;
     if !res.status().is_success() {
         let s = res.status();
         let text = res.text().await.unwrap_or_default();
@@ -813,7 +814,7 @@ fn write_generated_png(b64: &str) -> Result<PathBuf, String> {
         .decode(b64)
         .map_err(|e| format!("decode: {e}"))?;
     let dir = images_root();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {}", dir.display(), os_error::english(&e)))?;
     // Millisecond stamp + the process id: two renders inside the same
     // millisecond (batching, a retry) must not overwrite each other.
     let stamp = std::time::SystemTime::now()
@@ -821,7 +822,7 @@ fn write_generated_png(b64: &str) -> Result<PathBuf, String> {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let path = dir.join(format!("mlx-{stamp}-{}.png", std::process::id()));
-    std::fs::write(&path, bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
+    std::fs::write(&path, bytes).map_err(|e| format!("write {}: {}", path.display(), os_error::english(&e)))?;
     Ok(path)
 }
 
@@ -836,7 +837,7 @@ pub fn mlx_start(_state: &AppState, _args: &Value) -> CmdResult {
     // bridge update keeps spawning whatever install_mlx_diffusion wrote
     // months ago.
     std::fs::write(&server, SERVER_PY)
-        .map_err(|e| crate::commands::internal(format!("write server.py: {e}")))?;
+        .map_err(|e| crate::commands::internal(format!("write server.py: {}", os_error::english(&e))))?;
     let log_path = mlx_root().join("server.log");
     let stdout = std::fs::OpenOptions::new()
         .create(true)
@@ -859,7 +860,7 @@ pub fn mlx_start(_state: &AppState, _args: &Value) -> CmdResult {
     apply_hf_token(&mut server_cmd);
     server_cmd
         .spawn()
-        .map_err(|e| crate::commands::internal(format!("spawn mlx server: {e}")))?;
+        .map_err(|e| crate::commands::internal(format!("spawn mlx server: {}", os_error::english(&e))))?;
 
     Ok(json!({"ok": true, "port": MLX_PORT, "log": log_path.to_string_lossy()}))
 }

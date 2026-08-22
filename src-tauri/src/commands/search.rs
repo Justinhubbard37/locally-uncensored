@@ -1,3 +1,4 @@
+use crate::os_error;
 use std::sync::atomic::Ordering;
 use tauri::State;
 
@@ -24,7 +25,7 @@ async fn try_searxng(query: &str, count: usize) -> Result<Vec<SearchResult>, Str
     let resp = client.get(&url)
         .send()
         .await
-        .map_err(|e| format!("SearXNG: {}", e))?;
+        .map_err(|e| format!("SearXNG: {}", os_error::english(&e)))?;
 
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
 
@@ -58,7 +59,7 @@ async fn try_ddg(query: &str, count: usize) -> Result<Vec<SearchResult>, String>
         .form(&[("q", query)])
         .send()
         .await
-        .map_err(|e| format!("DDG: {}", e))?;
+        .map_err(|e| format!("DDG: {}", os_error::english(&e)))?;
 
     let html = resp.text().await.map_err(|e| e.to_string())?;
 
@@ -152,7 +153,7 @@ async fn try_brave(query: &str, count: usize, api_key: &str) -> Result<Vec<Searc
         .header("X-Subscription-Token", api_key)
         .send()
         .await
-        .map_err(|e| format!("Brave: {}", e))?;
+        .map_err(|e| format!("Brave: {}", os_error::english(&e)))?;
     let status = resp.status();
     if !status.is_success() {
         return Err(format!("Brave: HTTP {} (check the API key)", status.as_u16()));
@@ -206,7 +207,7 @@ async fn try_tavily(query: &str, count: usize, api_key: &str) -> Result<Vec<Sear
         }))
         .send()
         .await
-        .map_err(|e| format!("Tavily: {}", e))?;
+        .map_err(|e| format!("Tavily: {}", os_error::english(&e)))?;
     let status = resp.status();
     if !status.is_success() {
         return Err(format!("Tavily: HTTP {} (check the API key)", status.as_u16()));
@@ -234,7 +235,7 @@ async fn try_wikipedia(query: &str, count: usize) -> Result<Vec<SearchResult>, S
         .get(&url)
         .send()
         .await
-        .map_err(|e| format!("Wikipedia: {}", e))?;
+        .map_err(|e| format!("Wikipedia: {}", os_error::english(&e)))?;
 
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
 
@@ -485,7 +486,7 @@ pub async fn web_fetch(url: String) -> Result<serde_json::Value, String> {
         .header("Accept-Language", "en,de;q=0.8")
         .send()
         .await
-        .map_err(|e| format!("Fetch failed: {}", e))?;
+        .map_err(|e| format!("Fetch failed: {}", os_error::english(&e)))?;
 
     let status = resp.status().as_u16();
     let final_url = resp.url().to_string();

@@ -1,3 +1,4 @@
+use crate::os_error;
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -272,7 +273,7 @@ fn shell_execute_sync(
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    let mut child = cmd.spawn().map_err(|e| format!("Spawn shell: {}", e))?;
+    let mut child = cmd.spawn().map_err(|e| format!("Spawn shell: {}", os_error::english(&e)))?;
 
     // Write on a thread: the child may fill its output pipes before it has
     // consumed stdin, and a blocking write here would deadlock against the

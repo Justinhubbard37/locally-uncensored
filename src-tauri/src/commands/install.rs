@@ -1,3 +1,4 @@
+use crate::os_error;
 use std::fs;
 use std::io::{BufRead, BufReader, Read as IoRead};
 use std::path::{Path, PathBuf};
@@ -200,7 +201,7 @@ pub fn create_comfyui_venv(comfyui_dir: &Path, python_bin: &str) -> Result<PathB
 
     let out = cmd
         .output()
-        .map_err(|e| format!("Could not spawn `python -m venv`: {}", e))?;
+        .map_err(|e| format!("Could not spawn `python -m venv`: {}", os_error::english(&e)))?;
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1383,7 +1384,7 @@ fn download_file_blocking(
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
-    let response = client.get(url).send().map_err(|e| format!("Request failed: {}", e))?;
+    let response = client.get(url).send().map_err(|e| format!("Request failed: {}", os_error::english(&e)))?;
 
     if !response.status().is_success() {
         return Err(format!("HTTP {}", response.status()));
@@ -1395,7 +1396,7 @@ fn download_file_blocking(
         s.status = "downloading".to_string();
     }
 
-    let mut file = fs::File::create(dest).map_err(|e| format!("Create file: {}", e))?;
+    let mut file = fs::File::create(dest).map_err(|e| format!("Create file: {}", os_error::english(&e)))?;
     let mut reader = std::io::BufReader::new(response);
     let mut downloaded: u64 = 0;
     let start = Instant::now();
@@ -2451,7 +2452,7 @@ fn start_lmstudio_server_blocking() -> Result<serde_json::Value, String> {
             #[cfg(target_os = "windows")]
             srv.creation_flags(CREATE_NO_WINDOW);
             srv.spawn()
-                .map_err(|e| format!("spawn lms: {}", e))?;
+                .map_err(|e| format!("spawn lms: {}", os_error::english(&e)))?;
             Ok(serde_json::json!({"status": "starting"}))
         }
         None => Err(
@@ -2601,7 +2602,7 @@ fn lmstudio_load_model_blocking(model: String, contextLength: Option<u32>) -> Re
     cmd.creation_flags(CREATE_NO_WINDOW);
     let output = cmd
         .output()
-        .map_err(|e| format!("spawn lms load: {e}"))?;
+        .map_err(|e| format!("spawn lms load: {}", os_error::english(&e)))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2695,7 +2696,7 @@ fn lmstudio_unload_model_blocking(model: String) -> Result<serde_json::Value, St
     cmd.creation_flags(CREATE_NO_WINDOW);
     let output = cmd
         .output()
-        .map_err(|e| format!("spawn lms unload: {e}"))?;
+        .map_err(|e| format!("spawn lms unload: {}", os_error::english(&e)))?;
     if !output.status.success() {
         return Err(format!(
             "lms unload failed: {}",
@@ -3392,7 +3393,7 @@ fn install_custom_node_blocking(
     // Create custom_nodes dir if it doesn't exist
     if !custom_nodes_dir.exists() {
         fs::create_dir_all(&custom_nodes_dir)
-            .map_err(|e| format!("Failed to create custom_nodes directory: {}", e))?;
+            .map_err(|e| format!("Failed to create custom_nodes directory: {}", os_error::english(&e)))?;
     }
 
     // Bug N — same git probe as install_comfyui. Block on missing git, log
@@ -3431,7 +3432,7 @@ fn install_custom_node_blocking(
             #[cfg(target_os = "windows")]
             cmd.creation_flags(CREATE_NO_WINDOW);
             let output = cmd.output()
-                .map_err(|e| format!("Git pull failed: {}", e))?;
+                .map_err(|e| format!("Git pull failed: {}", os_error::english(&e)))?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 error!(node = %node_name, "custom node git pull failed");
@@ -3461,7 +3462,7 @@ fn install_custom_node_blocking(
         #[cfg(target_os = "windows")]
         cmd.creation_flags(CREATE_NO_WINDOW);
         let output = cmd.output()
-            .map_err(|e| format!("Git clone failed: {}", e))?;
+            .map_err(|e| format!("Git clone failed: {}", os_error::english(&e)))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             error!(node = %node_name, "custom node clone failed");
@@ -3541,7 +3542,7 @@ fn install_node_requirements(
         #[cfg(target_os = "windows")]
         pip.creation_flags(CREATE_NO_WINDOW);
         pip.output()
-            .map_err(|e| format!("Failed to spawn pip for {} requirements: {}", node_name, e))
+            .map_err(|e| format!("Failed to spawn pip for {} requirements: {}", node_name, os_error::english(&e)))
     };
     let pip_out = run_pip(&[])?;
     if !pip_out.status.success() {

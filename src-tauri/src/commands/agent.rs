@@ -1,3 +1,4 @@
+use crate::os_error;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -303,7 +304,7 @@ pub(crate) fn execute_code_blocking(
         .unwrap_or(0)));
 
     fs::write(&script_path, &code)
-        .map_err(|e| format!("Write temp script: {}", e))?;
+        .map_err(|e| format!("Write temp script: {}", os_error::english(&e)))?;
 
     // cwd: prefer the agent's folder workspace (the repo the user picked,
     // threaded from chatCtx as workingDirectory) so a script's relative file
@@ -332,7 +333,7 @@ pub(crate) fn execute_code_blocking(
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
     let mut child = cmd.spawn()
-        .map_err(|e| format!("Spawn Python: {}", e))?;
+        .map_err(|e| format!("Spawn Python: {}", os_error::english(&e)))?;
 
     // Both pipes are drained on their own threads from here on. A script that
     // prints more than a pipe buffer would otherwise block on write and never
@@ -426,7 +427,7 @@ pub fn file_write(
 ) -> Result<serde_json::Value, String> {
     let full_path = resolve_agent_path(&path, chatId.as_deref(), Some(&*state))?;
     if let Some(parent) = full_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Create dir: {}", e))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Create dir: {}", os_error::english(&e)))?;
     }
     // Same treatment the desktop path (fs_write) already gets: keep the file's
     // EOL/BOM convention, skip an identical write, and swap the new bytes in

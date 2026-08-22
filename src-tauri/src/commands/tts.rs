@@ -8,6 +8,7 @@
 //! avoids a long-lived process + version-specific Python API. Voice models are
 //! downloaded on demand into `<app_data>/piper_voices/`.
 
+use crate::os_error;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -196,7 +197,7 @@ fn download_voice_blocking(
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    let output = cmd.output().map_err(|e| format!("could not start voice download: {}", e))?;
+    let output = cmd.output().map_err(|e| format!("could not start voice download: {}", os_error::english(&e)))?;
     if !output.status.success() {
         return Err(format!("voice download failed: {}", String::from_utf8_lossy(&output.stderr)));
     }
@@ -291,7 +292,7 @@ fn synthesize_blocking(
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to start piper: {}", e))?;
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to start piper: {}", os_error::english(&e)))?;
     // Feed stdin from its own thread. Writing the whole text inline and only
     // then draining piper's pipes deadlocks once the text outgrows the pipe
     // buffer: piper blocks writing its log while we block writing the text.
@@ -313,7 +314,7 @@ fn synthesize_blocking(
         ));
     }
 
-    let bytes = std::fs::read(&out_wav).map_err(|e| format!("read wav: {}", e))?;
+    let bytes = std::fs::read(&out_wav).map_err(|e| format!("read wav: {}", os_error::english(&e)))?;
     let _ = std::fs::remove_file(&out_wav);
     if bytes.is_empty() {
         return Err("piper produced an empty WAV".to_string());
@@ -379,7 +380,7 @@ pub async fn synthesize_external(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("external TTS request failed: {}", e))?;
+        .map_err(|e| format!("external TTS request failed: {}", os_error::english(&e)))?;
 
     if !resp.status().is_success() {
         let code = resp.status().as_u16();
@@ -399,7 +400,7 @@ pub async fn synthesize_external(
         .filter(|s| s.starts_with("audio/"))
         .unwrap_or_else(|| "audio/wav".to_string());
 
-    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    let bytes = resp.bytes().await.map_err(|e| os_error::english(&e))?;
     if bytes.is_empty() {
         return Err("external TTS returned no audio".to_string());
     }

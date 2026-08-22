@@ -1,3 +1,5 @@
+use crate::os_error;
+
 // P1 — Built-in inference engine (bundled llama.cpp `llama-server`).
 //
 // The whole point of 2.5.7's "onboarding without external providers" is that
@@ -376,7 +378,7 @@ pub fn builtin_models_dir() -> Result<PathBuf, String> {
     let base = dirs::data_dir().ok_or("Cannot resolve app data directory")?;
     let dir = base.join("Locally Uncensored").join("models");
     std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Create built-in models dir: {e}"))?;
+        .map_err(|e| format!("Create built-in models dir: {}", os_error::english(&e)))?;
     Ok(dir)
 }
 
@@ -490,13 +492,13 @@ pub async fn kv_slot_action(port: u16, action: String) -> Result<serde_json::Val
         // Serializing a multi-GB KV cache to disk takes a while on slow disks.
         .timeout(Duration::from_secs(120))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| os_error::english(&e))?;
     let res = client
         .post(&url)
         .json(&serde_json::json!({ "filename": "lu-handoff.bin" }))
         .send()
         .await
-        .map_err(|e| format!("slot {action} failed: {e}"))?;
+        .map_err(|e| format!("slot {action} failed: {}", os_error::english(&e)))?;
     let ok = res.status().is_success();
     let body: serde_json::Value = res.json().await.unwrap_or_else(|_| serde_json::json!({}));
     Ok(serde_json::json!({ "ok": ok, "body": body }))
@@ -690,7 +692,7 @@ fn start_bundled_engine_blocking(
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("Failed to spawn bundled engine: {e}"))?;
+        .map_err(|e| format!("Failed to spawn bundled engine: {}", os_error::english(&e)))?;
     let diagnostics = child.stderr.take().map(super::shell::drain);
 
     *state.bundled_engine.lock().unwrap() = Some(BundledEngine {
@@ -1230,7 +1232,7 @@ fn start_bundled_embed_blocking(
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("Failed to spawn embeddings server: {e}"))?;
+        .map_err(|e| format!("Failed to spawn embeddings server: {}", os_error::english(&e)))?;
     let diagnostics = child.stderr.take().map(super::shell::drain);
 
     *state.bundled_embed.lock().unwrap() = Some(BundledEngine {

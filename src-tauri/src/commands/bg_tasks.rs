@@ -17,6 +17,7 @@
 //! every body is identical; only the outermost layer is wrapped in
 //! `#[tauri::command]` for the desktop IPC bridge.
 
+use crate::os_error;
 use crate::commands::{bad_request, internal, not_found, CmdResult};
 use crate::state::AppState;
 use once_cell::sync::Lazy;
@@ -200,7 +201,7 @@ pub(crate) async fn shell_task_start_impl(args: &Value) -> CmdResult {
     }
     let mut child = cmd
         .spawn()
-        .map_err(|e| internal(format!("spawn {}: {}", program, e)))?;
+        .map_err(|e| internal(format!("spawn {}: {}", program, os_error::english(&e))))?;
 
     // Orphan-safety: tie the child to a kill-on-close Job Object so a true app
     // Quit (tray Quit / parent death) tears these long-running background tasks

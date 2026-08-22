@@ -1,3 +1,5 @@
+use crate::os_error;
+
 // 2.5.8 — local character trainer (Character Studio, local lane).
 //
 // Trains a character LoRA fully on the user's GPU with kohya's musubi-tuner,
@@ -580,7 +582,7 @@ fn run_streamed(
     cmd.creation_flags(CREATE_NO_WINDOW);
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("{label} could not start: {e}"))?;
+        .map_err(|e| format!("{label} could not start: {}", os_error::english(&e)))?;
     if let Ok(mut slot) = pid_slot.lock() {
         *slot = Some(child.id());
     }
@@ -975,15 +977,15 @@ pub fn stage_training_image(
         return Err("image is empty or larger than 40 MB".to_string());
     }
     let img_dir = trainer_root(&app).join("train").join(&set).join("img");
-    fs::create_dir_all(&img_dir).map_err(|e| format!("could not create the set dir: {e}"))?;
+    fs::create_dir_all(&img_dir).map_err(|e| format!("could not create the set dir: {}", os_error::english(&e)))?;
     let base = if name.is_empty() { format!("photo_{}", fileBytes.len() % 100000) } else { name };
     let stem = free_stem(&img_dir, &base, &ext, &fileBytes);
     fs::write(img_dir.join(format!("{stem}.{ext}")), &fileBytes)
-        .map_err(|e| format!("could not write the photo: {e}"))?;
+        .map_err(|e| format!("could not write the photo: {}", os_error::english(&e)))?;
     // Caption sidecar: trigger word comes first — musubi has no trigger
     // mechanism of its own, the token must live in every caption.
     fs::write(img_dir.join(format!("{stem}.txt")), caption.trim())
-        .map_err(|e| format!("could not write the caption: {e}"))?;
+        .map_err(|e| format!("could not write the caption: {}", os_error::english(&e)))?;
     Ok(serde_json::json!({"staged": format!("{stem}.{ext}")}))
 }
 
@@ -996,7 +998,7 @@ pub fn clear_training_set(app: tauri::AppHandle, setId: String) -> Result<(), St
     }
     let dir = trainer_root(&app).join("train").join(&set);
     if dir.exists() {
-        fs::remove_dir_all(&dir).map_err(|e| format!("could not clear the set: {e}"))?;
+        fs::remove_dir_all(&dir).map_err(|e| format!("could not clear the set: {}", os_error::english(&e)))?;
     }
     Ok(())
 }
