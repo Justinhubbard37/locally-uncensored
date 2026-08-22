@@ -9,6 +9,7 @@ import { useVoiceStore } from "../stores/voiceStore"
 import { autoSpeak } from "../lib/ttsBridge"
 import { retrieveContext } from "../api/rag"
 import { getModelMaxTokens } from "../lib/context-compaction"
+import { isTooManyMessagesError, halveHistory, TOO_MANY_MESSAGES_MAX_HALVINGS } from "../lib/too-many-messages"
 import { getModelContextCached } from "../api/ollama"
 import { requestGenerationCancel } from "../api/vram-handoff"
 import { effectiveContextWindow } from "../lib/context-window"
@@ -552,11 +553,32 @@ export function useChat() {
       }
 
       // Helper: create stream, retrying without the think field if the
-      // provider rejects it (old Ollama builds, edge-case models).
+      // provider rejects it (old Ollama builds, edge-case models), and
+      // retrying with a halved history when the hosted backend refuses the
+      // message COUNT ("HTTP 400 too many messages", yaserrieh 2026-08-21).
+      // Plain chat sends the whole conversation, so without this a long
+      // hosted chat is stuck forever: every further turn only grows the
+      // payload the server just refused. The 400 fires on request
+      // validation, before any token streams, so a retry never duplicates
+      // visible output. The conversation itself is never touched.
       async function* createStreamWithFallback() {
         try {
           yield* provider.chatStream(modelId, messages, chatOpts)
         } catch (err: any) {
+          if (isTooManyMessagesError(err)) {
+            let trimmed = halveHistory(messages)
+            for (let attempt = 0; trimmed; attempt++) {
+              try {
+                log.info('chat.too_many_messages_retry', { sent: trimmed.length, attempt })
+                yield* provider.chatStream(modelId, trimmed, chatOpts)
+                return
+              } catch (retryErr: any) {
+                if (!isTooManyMessagesError(retryErr) || attempt >= TOO_MANY_MESSAGES_MAX_HALVINGS) throw retryErr
+                trimmed = halveHistory(trimmed)
+              }
+            }
+            throw err
+          }
           if (useThinking !== undefined && (err?.message?.includes('does not support thinking') || err?.status === 400 || err?.status === 422)) {
             yield* provider.chatStream(modelId, messages, { ...chatOpts, thinking: undefined })
           } else {
