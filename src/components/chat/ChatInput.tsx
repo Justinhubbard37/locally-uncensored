@@ -374,8 +374,18 @@ export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApp
 
         {/* Action bar, attach · voice · think · view actions · model · send.
             Same in Chat, Code and Remote; each surface passes its own
-            composerActions + composerModel (David 2026-07-11, web parity). */}
-        <div className="flex items-center gap-1 px-2 py-1.5 border-t border-gray-200 dark:border-white/[0.05] flex-wrap">
+            composerActions + composerModel (David 2026-07-11, web parity).
+
+            ONE row, always. It used to be `flex-wrap`, and a run starting was
+            enough to break it: the Code mode trigger grows by a dot or a
+            "then bypass" label the moment a loop is in flight, the row ran out
+            of width and the tail (model picker and the Stop button) dropped
+            onto a second line. So the composer was a different height standing
+            still than it was working, which is what David saw as "der Stop
+            Knopf oeffnet eine weitere Zeile, alles sieht asymmetrisch aus".
+            No wrapping, a fixed-height row, and every control shrink-0 with
+            only the middle spacer giving way. */}
+        <div className="flex flex-nowrap items-center gap-1 px-2 py-1.5 min-h-[38px] border-t border-gray-200 dark:border-white/[0.05]">
           {/* Clip button */}
           <button
             onClick={() => fileInputRef.current?.click()}
@@ -432,33 +442,40 @@ export function ChatInput({ onSend, onStop, isGenerating, pendingApproval, onApp
           </button>
 
           {/* View-specific actions (Docs · Plugins · Tools) */}
-          {composerActions}
+          <div className="flex flex-nowrap items-center gap-1 shrink-0">{composerActions}</div>
 
-          <div className="flex-1" />
+          <div className="flex-1 min-w-0" />
 
           {/* Model picker, opens upward from the composer */}
-          {composerModel}
+          <div className="shrink-0">{composerModel}</div>
 
-          {isGenerating ? (
-            <motion.button
-              onClick={onStop}
-              className="p-1.5 rounded-md bg-red-500/15 text-red-400 hover:bg-red-500/25 transition-all shrink-0"
-              whileTap={{ scale: 0.9 }}
-              aria-label="Stop generation"
-            >
-              <Square size={13} />
-            </motion.button>
-          ) : (
-            <motion.button
-              onClick={handleSend}
-              disabled={(!input.trim() && images.length === 0) || isTranscribing}
-              className="p-1.5 rounded-md bg-white/8 text-gray-300 hover:bg-white/12 disabled:opacity-20 disabled:cursor-not-allowed transition-all shrink-0"
-              whileTap={{ scale: 0.9 }}
-              aria-label="Send message"
-            >
-              <Send size={13} />
-            </motion.button>
-          )}
+          {/* Send and Stop are the SAME slot: one fixed 26x26 box at the end of
+              the row, never two, never one below the other. Stop replaces Send
+              in place while a run is in flight, exactly as the Chat surface has
+              always done, and because the box is sized rather than padded the
+              row height cannot move between the two states. */}
+          <div className="shrink-0 w-[26px] h-[26px]" data-testid="composer-send-slot">
+            {isGenerating ? (
+              <motion.button
+                onClick={onStop}
+                className="w-full h-full flex items-center justify-center rounded-md bg-red-500/15 text-red-400 hover:bg-red-500/25 transition-all"
+                whileTap={{ scale: 0.9 }}
+                aria-label="Stop generation"
+              >
+                <Square size={13} />
+              </motion.button>
+            ) : (
+              <motion.button
+                onClick={handleSend}
+                disabled={(!input.trim() && images.length === 0) || isTranscribing}
+                className="w-full h-full flex items-center justify-center rounded-md bg-white/8 text-gray-300 hover:bg-white/12 disabled:opacity-20 disabled:cursor-not-allowed transition-all"
+                whileTap={{ scale: 0.9 }}
+                aria-label="Send message"
+              >
+                <Send size={13} />
+              </motion.button>
+            )}
+          </div>
         </div>
       </div>
     </div>

@@ -16,7 +16,17 @@ const CAVEMAN_MODES: { value: CavemanMode; label: string; desc: string }[] = [
 
 // `openUpward` opens the panel above the trigger — used when Plugins sits in
 // the composer action bar (bottom of the screen) instead of the top toolbar.
-export function PluginsDropdown({ openUpward = false }: { openUpward?: boolean } = {}) {
+//
+// `iconOnly` is the Code header form (David, 2026-08-22: "das promptfenster ist
+// ueberfuellt"). Same dropdown, same behaviour, but the trigger is a bare icon
+// with the name in the tooltip, so it costs one constant-width slot in the
+// toolbar and nothing in the composer. The active-plugin signal moves from the
+// dot row onto the icon colour, because a row of dots that appears and
+// disappears is exactly the kind of width jump the composer was cured of.
+export function PluginsDropdown({
+  openUpward = false,
+  iconOnly = false,
+}: { openUpward?: boolean; iconOnly?: boolean } = {}) {
   const [open, setOpen] = useState(false)
   const [cavemanOpen, setCavemanOpen] = useState(false)
   const [personaOpen, setPersonaOpen] = useState(false)
@@ -62,24 +72,40 @@ export function PluginsDropdown({ openUpward = false }: { openUpward?: boolean }
   const isPersonaActive = activePersona && activePersona.id !== 'unrestricted' && personaEnabledOnChat
   const currentCaveman = CAVEMAN_MODES.find((m) => m.value === (cavemanMode || 'off'))
 
+  const anyPluginActive = !!(isCavemanActive || isPersonaActive || chatToolsEnabled || isGroupActive)
+
   return (
     <div className="relative">
-      <button
-        onClick={() => setOpen(!open)}
-        className="flex items-center gap-1 px-2 py-0.5 rounded border border-gray-200 dark:border-white/[0.06] hover:border-gray-400 dark:hover:border-white/15 text-gray-500 transition-colors text-[0.55rem]"
-      >
-        <Plug size={10} />
-        <span>Plugins</span>
-        {(isCavemanActive || isPersonaActive || chatToolsEnabled || isGroupActive) && (
-          <div className="flex gap-0.5">
-            {chatToolsEnabled && <div className="w-1 h-1 rounded-full bg-blue-400" />}
-            {isCavemanActive && <div className="w-1 h-1 rounded-full bg-amber-400" />}
-            {isPersonaActive && <div className="w-1 h-1 rounded-full bg-green-400" />}
-            {isGroupActive && <div className="w-1 h-1 rounded-full bg-purple-400" />}
-          </div>
-        )}
-        <ChevronDown size={8} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
-      </button>
+      {iconOnly ? (
+        <button
+          onClick={() => setOpen(!open)}
+          title={anyPluginActive ? 'Plugins (active)' : 'Plugins'}
+          aria-label="Plugins"
+          data-testid="plugins-trigger-icon"
+          className={`shrink-0 w-[22px] h-[22px] flex items-center justify-center rounded transition-colors hover:bg-gray-100 dark:hover:bg-white/5 ${
+            anyPluginActive ? 'text-blue-400' : 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
+          }`}
+        >
+          <Plug size={11} />
+        </button>
+      ) : (
+        <button
+          onClick={() => setOpen(!open)}
+          className="flex items-center gap-1 px-2 py-0.5 rounded border border-gray-200 dark:border-white/[0.06] hover:border-gray-400 dark:hover:border-white/15 text-gray-500 transition-colors text-[0.55rem]"
+        >
+          <Plug size={10} />
+          <span>Plugins</span>
+          {anyPluginActive && (
+            <div className="flex gap-0.5">
+              {chatToolsEnabled && <div className="w-1 h-1 rounded-full bg-blue-400" />}
+              {isCavemanActive && <div className="w-1 h-1 rounded-full bg-amber-400" />}
+              {isPersonaActive && <div className="w-1 h-1 rounded-full bg-green-400" />}
+              {isGroupActive && <div className="w-1 h-1 rounded-full bg-purple-400" />}
+            </div>
+          )}
+          <ChevronDown size={8} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
+        </button>
+      )}
 
       {open && (
         <>

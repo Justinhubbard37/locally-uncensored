@@ -69,7 +69,7 @@ export function CodexModeDropdown({ openUpward = false }: { openUpward?: boolean
   }
 
   return (
-    <div className="relative">
+    <div className="relative shrink-0">
       <button
         onClick={() => setOpen(!open)}
         title={
@@ -77,9 +77,13 @@ export function CodexModeDropdown({ openUpward = false }: { openUpward?: boolean
             ? 'A run is in flight. A change here applies to the next message.'
             : CODEX_MODE_DESCRIPTIONS[current]
         }
-        className="flex items-center gap-1 px-2 py-0.5 rounded border border-gray-200 dark:border-white/[0.06] hover:border-gray-400 dark:hover:border-white/15 text-gray-500 transition-colors text-[0.55rem]"
+        // whitespace-nowrap: this trigger grows when a run starts (the dot, or
+        // a parked "then bypass"), and it sits in the composer row. Letting its
+        // label break would put a second line inside the prompt window, which
+        // is the thing the row was fixed for.
+        className="flex items-center gap-1 whitespace-nowrap px-2 py-0.5 rounded border border-gray-200 dark:border-white/[0.06] hover:border-gray-400 dark:hover:border-white/15 text-gray-500 transition-colors text-[0.55rem]"
       >
-        <CurrentIcon size={10} className={MODE_ACCENT[current]} />
+        <CurrentIcon size={10} className={`shrink-0 ${MODE_ACCENT[current]}`} />
         <span className={MODE_ACCENT[current]}>{CODEX_MODE_SHORT[current]}</span>
         {pending ? (
           <span className="text-[0.5rem] text-amber-500">
@@ -89,9 +93,9 @@ export function CodexModeDropdown({ openUpward = false }: { openUpward?: boolean
           // A run is in flight and nothing is parked yet. Say it on the
           // trigger, not only in the panel, so "applies to the next message" is
           // visible before the user clicks.
-          <span className="w-1 h-1 rounded-full bg-amber-400" />
+          <span className="w-1 h-1 shrink-0 rounded-full bg-amber-400" />
         ) : null}
-        <ChevronDown size={8} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
+        <ChevronDown size={8} className={`shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
 
       {open && (

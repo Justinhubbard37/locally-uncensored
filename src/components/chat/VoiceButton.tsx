@@ -87,7 +87,7 @@ export function VoiceButton({ onTranscript, onInterim, onRecordingChange, disabl
 
   if (!sttSupported) {
     return (
-      <div className="relative group/mic">
+      <div className="relative group/mic shrink-0">
         <button
           disabled
           className="p-1.5 rounded-lg text-gray-300 dark:text-gray-600 cursor-not-allowed shrink-0"

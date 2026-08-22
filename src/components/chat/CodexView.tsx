@@ -112,7 +112,10 @@ export function CodexView() {
       {/* Main panel */}
       <div className="flex-1 flex flex-col min-w-0 relative">
         {/* Codex header */}
-        <div className="flex items-center gap-1.5 px-2 py-0.5 border-b border-gray-200 dark:border-white/[0.04]">
+        <div
+          data-testid="codex-header"
+          className="flex items-center gap-1.5 px-2 py-0.5 border-b border-gray-200 dark:border-white/[0.04]"
+        >
           <Code size={9} className="text-gray-500" />
           <span className="text-[0.55rem] text-gray-600 dark:text-gray-400 font-medium">Coding Agent</span>
           {/* Code-Review Mode badge (B13) — makes it impossible to miss
@@ -151,6 +154,13 @@ export function CodexView() {
             <RotateCcw size={10} />
             <span>New</span>
           </button>
+          {/* Plugins (Chat Tools · Caveman · Persona · Group) lives HERE, next
+              to New, as a bare icon with the name in the tooltip. It used to
+              sit in the composer action bar and was one of the four things
+              crowding the prompt row (David, 2026-08-22: "das promptfenster ist
+              ueberfuellt"). The dropdown itself is untouched, only the place
+              and the trigger changed. */}
+          <PluginsDropdown iconOnly />
           <TokenCounter />
           <ContextDropdown />
           <SmallModelModeToggle />
@@ -515,8 +525,10 @@ export function CodexView() {
           composerAbove={<><LoopBar onStop={stopCodex} /><GoalBar /></>}
           // Ask / Bypass / Plan sits here, in the CODE composer only (plan
           // C1). ChatInput stays surface-neutral, so the Chat tab inherits
-          // nothing from it.
-          composerActions={<><CodexModeDropdown openUpward /><PluginsDropdown openUpward /></>}
+          // nothing from it. Plugins used to ride along here and now lives in
+          // the header next to New, so this row carries ONE view-specific
+          // control and stays a single quiet line in both states.
+          composerActions={<CodexModeDropdown openUpward />}
         />
       </div>
 
