@@ -1,5 +1,5 @@
 import { backendCall, fetchExternal } from "./backend"
-import { getCheckpoints, getDiffusionModels, getVAEModels, getCLIPModels, getGgufUnetModels, filterPartialFiles } from "./comfyui"
+import { getCheckpoints, getDiffusionModels, getVAEModels, getCLIPModels, getGgufUnetModels, filterPartialFiles, refreshComfyModels } from "./comfyui"
 import type { ProviderId } from "./providers/types"
 import { log } from "../lib/logger"
 
@@ -285,6 +285,15 @@ export async function installCustomNodes(nodeKeys: string[]): Promise<void> {
   }
 }
 
+/** How long an install click may wait for ComfyUI to notice a file that is
+ *  already complete on disk. Three rounds of 1.5s against the 20 rounds of 3s
+ *  the Create install and the download poller spend, because this one runs
+ *  inside a click: the common case is an old file that answers on the very
+ *  first lookup, before any waiting happens at all, and the poller keeps
+ *  watching the same file with the full budget afterwards. */
+const INVISIBLE_RECHECK_ATTEMPTS = 3
+const INVISIBLE_RECHECK_DELAY_MS = 1500
+
 export async function installBundleComplete(bundle: ModelBundle): Promise<void> {
   const errors: string[] = []
 
@@ -309,16 +318,41 @@ export async function installBundleComplete(bundle: ModelBundle): Promise<void> 
   // (pnwpdr4519 Discord 2026-07-27) — silently skipping it as installed left
   // the user with no picker entry AND no way to re-download.
   let visibleBases: Set<string> | null | undefined
-  const comfyCanSee = async (filename: string): Promise<boolean | null> => {
-    if (visibleBases === undefined) {
-      try {
-        const lists = await Promise.all([getCheckpoints(), getDiffusionModels(), getVAEModels(), getCLIPModels()])
-        visibleBases = new Set(lists.flat().map(normalizeModelBase))
-      } catch {
-        visibleBases = null // ComfyUI unreachable · cannot judge visibility
-      }
+  const readVisibleBases = async (): Promise<Set<string> | null> => {
+    try {
+      const lists = await Promise.all([getCheckpoints(), getDiffusionModels(), getVAEModels(), getCLIPModels()])
+      return new Set(lists.flat().map(normalizeModelBase))
+    } catch {
+      return null // ComfyUI unreachable · cannot judge visibility
     }
-    return visibleBases ? visibleBases.has(normalizeModelBase(filename)) : null
+  }
+  const comfyCanSee = async (filename: string): Promise<boolean | null> => {
+    if (visibleBases === undefined) visibleBases = await readVisibleBases()
+    if (!visibleBases) return null
+    const base = normalizeModelBase(filename)
+    if (visibleBases.has(base)) return true
+    // C8, third path. A bundle that finished downloading moments ago leaves its
+    // files complete on disk while ComfyUI's own directory scan is still
+    // running, and the video bundles share files, so starting an overlapping
+    // bundle lands exactly in that window. Asking once there turned a file that
+    // was merely not scanned yet into a red row blaming mismatched model
+    // folders, which was simply untrue. Same cure as the Create install and the
+    // download poller, on a much shorter clock. The rescan also refreshes the
+    // set every later file of this bundle is judged against.
+    // waitForModelsVisible is pulled in here rather than at the top because
+    // bundle-install.ts points back at this module.
+    const { waitForModelsVisible } = await import('../lib/bundle-install')
+    const left = await waitForModelsVisible({
+      missing: async () => (visibleBases?.has(base) ? [] : [filename]),
+      refresh: async () => {
+        await refreshComfyModels(1).catch(() => false)
+        visibleBases = await readVisibleBases()
+      },
+      attempts: INVISIBLE_RECHECK_ATTEMPTS,
+      delayMs: INVISIBLE_RECHECK_DELAY_MS,
+    })
+    if (!visibleBases) return null // engine left mid wait · still no verdict
+    return left.length === 0
   }
 
   // Step 1: Start downloads only for files NOT already installed
