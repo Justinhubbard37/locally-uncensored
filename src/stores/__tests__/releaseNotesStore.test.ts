@@ -61,8 +61,9 @@ describe('the notes table', () => {
     // The existence guard above has a blind spot: an entry written early stays
     // green while the branch moves on, so the shipping note is pinned to the
     // headline features of the release it ships with. For 2.6.6 those are the
-    // context and cost work and the reworked Code view, and each anchor below
-    // names one of them, so a note that forgets them fails here.
+    // context and cost work, the reworked Code view, the tool merge, the honest
+    // credits meter and Qwen 3.8, and each anchor below names one of them, so a
+    // note that forgets them fails here.
     const shipping = JSON.parse(
       readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../package.json'), 'utf8'),
     ).version as string
@@ -74,7 +75,12 @@ describe('the notes table', () => {
     ]
       .join('\n')
       .toLowerCase()
-    for (const anchor of ['context', 'credit', 'plan mode', 'explorer', 'prompt caching']) {
+    for (const anchor of [
+      'context', 'credit', 'plan mode', 'explorer', 'prompt caching',
+      // Added once the branch was finished, because the note written before the
+      // merge covered none of these three.
+      '15 tools', 'credits meter', 'qwen 3.8',
+    ]) {
       expect(prose, `${shipping}: nothing about "${anchor}"`).toContain(anchor)
     }
   })

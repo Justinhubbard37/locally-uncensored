@@ -4,10 +4,12 @@ All notable changes to Locally Uncensored are documented here.
 
 ## [Unreleased]
 
-## [2.6.6] - 2026-08-21
+## [2.6.6] - 2026-08-22
 
-The release that makes an agent or coding run cost less to do the same work,
-and gives the Code view a mode menu, a plan panel and a real file explorer.
+The release that makes an agent or coding run cost less to do the same work.
+The agent carries 15 tools instead of 31, sends far less context per step, and
+tells you honestly what a step costs. The Code view got a mode menu, a plan
+panel, a real file explorer and a prompt box that stops moving.
 
 ### Added
 
@@ -23,6 +25,9 @@ and gives the Code view a mode menu, a plan panel and a real file explorer.
   file to preview it: code with highlighting, images inline, HTML in a sandboxed
   frame with scripts off until you ask. node_modules, .git, target and dist stay
   out of the way.
+- **Plugins in the Code header.** The Plugins picker left the prompt box and
+  sits next to New as an icon with its name in the tooltip, so the action bar
+  fits on one row.
 - **Prompt caching for your own Anthropic key.** Requests carry cache markers on
   the system block, the last tool and the last stable message, so a repeated
   request reads from the cache instead of paying for the whole prompt again.
@@ -50,6 +55,25 @@ and gives the Code view a mode menu, a plan panel and a real file explorer.
   noticing. A group round still bills once per model, and the composer says so.
 - **The credits meter counts against the send cap**, not the whole model window,
   so its warning fires before a paid step gets expensive rather than after.
+- **The agent works with 15 tools instead of 31.** Sixteen single purpose tools
+  folded into the terminal tool, which now runs scripts through standard input,
+  runs a job in the background, and summarises a test run, a git status or a
+  commit. The retired names still work: calling one runs the right thing and
+  says what to call next time, so nothing already learned stopped working.
+  Measured on the wire the catalogue per step dropped from 6431 to 5118 tokens,
+  and to 2887 in coding mode.
+- **The Code prompt box is one row and stays one row.** The action bar no longer
+  wraps onto a second line, and Send and Stop share one fixed slot, so starting
+  a run no longer changes the height of the box you are typing in.
+- **Nothing about plans sits at the prompt box any more**, on Chat, Agent or
+  Code. The plan and the Approve and run card live in the panel beside the
+  conversation, and the app checks every composer for itself so a plan cannot
+  creep back in later.
+- **An interrupted run keeps its plan.** The plan lives with the conversation
+  and survives a restart, so the following turn is told how far it got and what
+  the next open step is, instead of being asked to rediscover its own plan in a
+  history that no longer holds it. A new message that clearly points elsewhere
+  still wins.
 
 ### Fixed
 
@@ -103,12 +127,27 @@ and gives the Code view a mode menu, a plan panel and a real file explorer.
   The wheel channel is now planned per vendor: ROCm on Linux, and a refusal
   before the clone and the 2.5 GB on Windows and macOS, where no such wheel
   exists.
-- **A bundle card reads its own downloads.** Video bundles share files, so one
+- **A bundle card reads its own downloads** (#113). Video bundles share files, so one
   failed attempt on a shared file put a Retry button on every card and hid
   bundles that were complete on disk. The disk verdict is asked first now.
 - **A finished download waits for ComfyUI in the Model Manager too.** A large
   file lands before ComfyUI's own scan has picked it up, so the model was simply
   absent from the Installed tab and every picker until a manual reload.
+- **The credits meter counts the tool list it is sending.** That list rides
+  beside the messages rather than inside them, so the estimate never saw it: a
+  first coding step read 732 tokens against about 2.600 actually sent, and the
+  gap was widest exactly where the meter otherwise sits near zero.
+- **The meter stopped counting the run's own tool chain twice.** The hidden
+  chain is written back at the end of a run and spliced in ahead of the
+  assistant message, so everything already measured was added a second time and
+  the first step of a fresh chat read as double its real size.
+- **Agent, coding, delegated and phone runs are told what machine they are on
+  and what the time is**, so none of them spends a step finding out. On a run
+  started from your phone that sentence describes the machine doing the work
+  rather than the phone in your hand.
+- **A model imported from LM Studio brings its vision file along**, so vision
+  survives the import instead of quietly disappearing, and projector files stop
+  being offered as chat models in their own right.
 - **Source pin tests read the same bytes on a CRLF checkout**, so a Windows
   clone can report the suite honestly.
 
