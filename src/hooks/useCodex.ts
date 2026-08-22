@@ -48,6 +48,7 @@ import { budgetFromSettings } from '../api/agents/budget'
 import { finalStripThinkingTags, splitOrphanCloser, splitUnclosedThink } from '../lib/thinking-stripper'
 import { openPlanGap, planReconcileSteer, PLAN_RECONCILE_BUDGET } from '../lib/plan-reconcile'
 import { PlanStaleness, planStalenessSteer } from '../lib/plan-staleness'
+import { planResumeAnchor } from '../lib/plan-resume'
 import { useTodoStore } from '../stores/todoStore'
 import { httpStatusOf } from '../lib/http-status'
 import { CREDITS_EXHAUSTED_MESSAGE } from '../lib/credits-exhausted'
@@ -694,6 +695,21 @@ export function useCodex() {
           return msg
         }),
     ]
+    // G27b: a new turn on a conversation whose plan is still open gets the
+    // plan handed to it instead of being asked to find it again (David,
+    // 2026-08-22: an interrupted run left the plan lying and "continue" was
+    // pure hope). Read from the todoStore, which holds the live plan, never
+    // from a history whose newest todo_write may have aged out or fallen off
+    // the 60-message persist cap below. Last in the array, so the stable head
+    // a prefix cache matches stays byte-identical (plan A5), and BEFORE
+    // messagesStartLen so the anchor is never persisted back into the chat.
+    if (convId) {
+      const resume = planResumeAnchor(useTodoStore.getState().getTodos(convId))
+      if (resume) {
+        void diagLog('plan-resume-anchor', { done: resume.gap.done, total: resume.gap.total })
+        messages.push({ role: 'user', content: resume.text })
+      }
+    }
     const messagesStartLen = messages.length
 
     // Setup

@@ -71,6 +71,7 @@ import { explainError as explainToolError } from '../api/agents/error-hints'
 import { finalStripThinkingTags, splitOrphanCloser, splitUnclosedThink } from '../lib/thinking-stripper'
 import { openPlanGap, planReconcileSteer, PLAN_RECONCILE_BUDGET } from '../lib/plan-reconcile'
 import { PlanStaleness, planStalenessSteer } from '../lib/plan-staleness'
+import { planResumeAnchor } from '../lib/plan-resume'
 import { reasoningOnlyRound, REASONING_CONTINUE_BUDGET, REASONING_CONTINUE_STEER } from '../lib/reasoning-round'
 import { findUnbackedLinks, unbackedLinksSteer } from '../lib/unbacked-links'
 import { useTodoStore } from '../stores/todoStore'
@@ -612,6 +613,21 @@ export function useAgentChat() {
     // skipped. Caps derive from the user's actual request.
     const userPromptText =
       [...agentMessages].reverse().find((m) => m.role === 'user')?.content || ''
+    // G27b, parity with useCodex: a new turn on a conversation whose plan is
+    // still open carries the plan instead of hoping the model digs it back out
+    // of the history. This loop persists NO hidden tool chain at all, so
+    // without the anchor the next request contains no todo_write whatsoever.
+    // The plan state comes from the todoStore, which is what the PlanBar shows.
+    // Pushed LAST, behind the user's own message: volatile tail, stable head
+    // (plan A5). Deliberately after userPromptText above, so the media-intent
+    // regexes keep reading the user's words instead of this line.
+    {
+      const resume = planResumeAnchor(useTodoStore.getState().getTodos(convId))
+      if (resume) {
+        log.info('agent.plan_resume_anchor', { done: resume.gap.done, total: resume.gap.total })
+        agentMessages.push({ role: 'user', content: resume.text })
+      }
+    }
     // Seed the media intent from the router's continuation hint too (David
     // 2026-06-20): "ok generiere jetzt" carries no noun, so detecting wants from
     // the last message alone left wantsVideo=false and the synth fallback never
