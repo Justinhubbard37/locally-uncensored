@@ -145,6 +145,14 @@ panel, a real file explorer and a prompt box that stops moving.
   and what the time is**, so none of them spends a step finding out. On a run
   started from your phone that sentence describes the machine doing the work
   rather than the phone in your hand.
+- **Error messages are English again on a non English Windows.** Windows words
+  its own errors in the system language and we passed that straight through, so
+  a German machine showed a half translated failure in an English app. Every
+  message the app writes now names the problem in English and keeps the error
+  number, across the proxy, file operations, downloads, the engine, the
+  installers and the shell. Output from a program we run keeps its own words but
+  is labelled as that instead of standing in for our message, and a test fails
+  any new code that hands the operating system's wording to the user.
 - **A model imported from LM Studio brings its vision file along**, so vision
   survives the import instead of quietly disappearing, and projector files stop
   being offered as chat models in their own right.
