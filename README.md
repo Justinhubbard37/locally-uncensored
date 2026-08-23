@@ -251,7 +251,7 @@ Join the Discord: **https://locallyuncensored.com/discord** — help channels fo
 
 ## License
 
-AGPL-3.0 — see [LICENSE](LICENSE).
+AGPL-3.0-only. See [LICENSE](LICENSE).
 
 ---
 
